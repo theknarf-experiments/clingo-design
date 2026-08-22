@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Tool caches
+.turbo/
+
+# clingo-wasm: vendored upstream source and Emscripten build outputs
+packages/clingo-wasm/vendor/
+packages/clingo-wasm/.build/
+packages/clingo-wasm/wasm/
+
+# Local tool overrides
+mise.local.toml
+.mise.local.toml
+
+# Environment files — Vite loads these; keep secrets out of the repo
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Activated by `mise run hooks`, which sets git's core.hooksPath to .hooks/
+
+# Scope the checks to packages touched since the last commit. On the very first
+# commit there is no HEAD to diff against, so fall back to the whole workspace.
+if git rev-parse --verify --quiet HEAD >/dev/null; then
+	filter=(--filter="...[HEAD]")
+else
+	filter=()
+fi
+
+pnpm turbo run typecheck "${filter[@]}"

@@ -1,0 +1,16 @@
+[tools]
+node = "26.6.0"
+pnpm = "10.33.0"
+
+# Toolchain for compiling clingo (C++) to WebAssembly.
+emsdk = "6.0.6"
+cmake = "4.1.0"
+ninja = "1.12.1"
+
+[tasks.hooks]
+description = "Point git at .hooks so the tracked hook scripts run"
+run = "git config core.hooksPath .hooks"
+
+[tasks.dev]
+description = "Run the workspace dev processes in mprocs"
+run = "pnpm run dev"

@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "engines": {
+    "node": ">=26.6.0"
+  },
+  "scripts": {
+    "dev": "mprocs",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "mprocs": "^0.9.6",
+    "turbo": "^2.10.11"
+  },
+  "packageManager": "pnpm@10.33.0"
+}
