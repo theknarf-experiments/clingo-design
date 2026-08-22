@@ -219,7 +219,8 @@ export function Editor({
 	function onHandleDown(event: React.PointerEvent, handle: Handle) {
 		event.stopPropagation();
 		if (selected.length !== 1) return;
-		if (managed.has(selected[0].node.id)) return;
+		const id = selected[0].node.id;
+		if (managed.has(id) || universe.solved[id] !== undefined) return;
 		setGesture({
 			kind: "resize",
 			handle,
@@ -506,7 +507,9 @@ export function Editor({
 
 			{shownBounds && tool === "select" && gesture.kind !== "marquee" ? (
 				<div className={styles.handles} style={rectStyle(shownBounds)}>
-					{selected.length === 1 && !managed.has(selected[0].node.id)
+					{selected.length === 1 &&
+					!managed.has(selected[0].node.id) &&
+					universe.solved[selected[0].node.id] === undefined
 						? HANDLES.map((handle) => (
 								<div
 									key={handle}

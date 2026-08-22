@@ -1,6 +1,7 @@
 import {
 	type Align,
 	type Direction,
+	type Sizing,
 	KINDS,
 	PROPS,
 	type Picks,
@@ -36,6 +37,8 @@ export interface InspectorProps {
 	picks: Picks;
 	/** Variable keys the solver reports as unsettled. */
 	varying: ReadonlySet<string>;
+	/** Geometry the solver decided, so the fields it owns can say so. */
+	solved?: Readonly<Record<string, { width?: number; height?: number }>>;
 	/** Per variable, the alternatives that occur in at least one legal design. */
 	reach?: Readonly<Record<string, Set<number>>>;
 	/** Alternatives the user has fixed, by variable. */
@@ -46,6 +49,7 @@ export interface InspectorProps {
 const AXES = ["x", "y", "width", "height"] as const;
 const DIRECTIONS: Direction[] = ["row", "column"];
 const ALIGNMENTS: Align[] = ["start", "center", "end", "stretch"];
+const SIZINGS: Sizing[] = ["hug", "fixed"];
 
 function NumberField({
 	label,
@@ -90,6 +94,7 @@ export function Inspector({
 	onSceneChange,
 	picks,
 	varying,
+	solved,
 	reach,
 	pins,
 	onPin,
@@ -122,6 +127,11 @@ export function Inspector({
 
 	const node = selected[0];
 	const managed = managedNodes(scene.nodes).has(node.id);
+	// A size the solver worked out is not a size the inspector can set.
+	const sizedBySolver = {
+		width: solved?.[node.id]?.width !== undefined,
+		height: solved?.[node.id]?.height !== undefined,
+	};
 	const container = KINDS[node.kind].container && (node.children?.length ?? 0) > 0;
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 	const names = nodeNames(scene.nodes);
@@ -150,7 +160,11 @@ export function Inspector({
 						key={axis}
 						label={axis}
 						value={node.frame[axis]}
-						disabled={managed && (axis === "x" || axis === "y")}
+						disabled={
+							(managed && (axis === "x" || axis === "y")) ||
+							(axis === "width" && sizedBySolver.width) ||
+							(axis === "height" && sizedBySolver.height)
+						}
 						onChange={(next) =>
 							onSceneChange(
 								(prev) => setFrame(prev, node.id, { ...node.frame, [axis]: next }),
@@ -215,6 +229,27 @@ export function Inspector({
 									{DIRECTIONS.map((d) => (
 										<option key={d} value={d}>
 											{d}
+										</option>
+									))}
+								</select>
+							</label>
+							<label className={styles.field}>
+								<span className={styles.fieldLabel}>size</span>
+								<select
+									className={styles.number}
+									data-role="layout-sizing"
+									value={node.layout.sizing}
+									onChange={(e) =>
+										onSceneChange((prev) =>
+											updateLayout(prev, node.id, {
+												sizing: e.target.value as Sizing,
+											}),
+										)
+									}
+								>
+									{SIZINGS.map((z) => (
+										<option key={z} value={z}>
+											{z === "hug" ? "hug contents" : "fixed"}
 										</option>
 									))}
 								</select>

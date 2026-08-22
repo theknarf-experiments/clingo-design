@@ -58,3 +58,26 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+
+.dragging {
+	opacity: 0.45;
+}
+
+/* Where the row would land. Drawn on the row rather than as a floating
+   element so it cannot drift out of sync with what the pointer is over. */
+.dropAbove {
+	box-shadow: inset 0 2px 0 0 var(--dc-accent);
+}
+
+.dropBelow {
+	box-shadow: inset 0 -2px 0 0 var(--dc-accent);
+}
+
+.badge {
+	margin-left: auto;
+	padding: 0 0.25rem;
+	font-size: 0.6rem;
+	letter-spacing: 0.03em;
+	text-transform: uppercase;
+	opacity: 0.5;
+}

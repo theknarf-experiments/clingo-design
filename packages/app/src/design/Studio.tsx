@@ -503,6 +503,14 @@ export function Studio({
 						scene={scene}
 						selection={selection}
 						onSelectionChange={selectionIds}
+						onSceneChange={onSceneChange}
+						onContextMenu={(at, nodeId) => {
+							// Right-clicking a layer outside the selection retargets it,
+							// the way the canvas does.
+							if (!selection.has(nodeId)) setSelection(new Set([nodeId]));
+							const box = host.current?.getBoundingClientRect();
+							setMenu({ x: at.x - (box?.left ?? 0), y: at.y - (box?.top ?? 0) });
+						}}
 					/>
 				</aside>
 
@@ -737,6 +745,7 @@ export function Studio({
 								onSceneChange={onSceneChange}
 								picks={primary?.pick ?? {}}
 								varying={varying}
+								solved={primary?.solved}
 								reach={reach}
 								pins={pins}
 								onPin={pin}

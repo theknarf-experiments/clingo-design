@@ -278,6 +278,36 @@ export function reorderNodes(
 	return { ...scene, nodes: reorder(scene.nodes) };
 }
 
+/**
+ * Moves a node to a position within its own sibling list.
+ *
+ * Reparenting is deliberately not part of this: dragging a layer somewhere its
+ * coordinates would have to be rebased is a different operation, and one the
+ * layers panel has no way to make legible.
+ */
+export function moveWithinParent(
+	scene: Scene,
+	id: string,
+	index: number,
+): Scene {
+	const found = locate(scene.nodes, id);
+	if (!found) return scene;
+	const from = found.index;
+	const target = Math.max(0, Math.min(index, found.siblings.length - 1));
+	if (target === from) return scene;
+
+	const reorder = (list: readonly SceneNode[]): SceneNode[] => {
+		if (list !== found.siblings) {
+			return list.map((n) => (n.children ? { ...n, children: reorder(n.children) } : n));
+		}
+		const next = [...list];
+		const [moved] = next.splice(from, 1);
+		next.splice(target, 0, moved);
+		return next;
+	};
+	return { ...scene, nodes: reorder(scene.nodes) };
+}
+
 function deepCopy(node: SceneNode, offset: number): SceneNode {
 	return {
 		...node,
@@ -496,12 +526,9 @@ export function wrapInLayout(
 					...node,
 					kind: "frame" as const,
 					name: "Layout",
-					// Room for the padding the layout is about to apply.
-					frame: {
-						...(bounds ?? node.frame),
-						width: (bounds?.width ?? 0) + DEFAULT_LAYOUT.padding * 2,
-						height: (bounds?.height ?? 0) + DEFAULT_LAYOUT.padding * 2,
-					},
+					// Only the origin matters: the layout hugs, so the solver
+					// decides how big this ends up.
+					frame: bounds ?? node.frame,
 					props: { ...KINDS.frame.defaults },
 					layout: { ...DEFAULT_LAYOUT },
 				},

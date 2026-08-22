@@ -56,6 +56,8 @@ export const sizeVar = (nodeId: string, axis: "width" | "height"): string =>
 const LAYOUT_RULES = [
 	"#defined layout/2.",
 	"#defined lslot/3.",
+	"#defined lgrow/1.",
+	"#defined lhug/1.",
 	"% Which axis is which, so one set of equations covers both directions.",
 	"lmain(C,x) :- layout(C,row).",
 	"lmain(C,y) :- layout(C,column).",
@@ -65,43 +67,63 @@ const LAYOUT_RULES = [
 	"lmainsz(C,height) :- layout(C,column).",
 	"lcrosssz(C,height) :- layout(C,row).",
 	"lcrosssz(C,width) :- layout(C,column).",
+	"laxis(C,S) :- lmainsz(C,S).",
+	"laxis(C,S) :- lcrosssz(C,S).",
 	"lnext(C,A,B) :- lslot(C,A,I), lslot(C,B,J), J = I+1.",
 	"lcount(C,K) :- layout(C,_), K = #count{ X : lslot(C,X,_) }.",
 	"",
-	"% Main axis: a child keeps its own size unless it grows.",
-	"&sum{ lsz(N,S) } = Z :- lslot(C,N,_), lmainsz(C,S), not lgrow(N), lask(N,S,Z).",
-	"% Growers share equally in whatever is left over.",
+	"% ---- the container's own size ----",
+	"% Fixed: whatever the document says.",
+	"&sum{ lsz(C,S) } = Z :- layout(C,_), not lhug(C), laxis(C,S), lask(C,S,Z).",
+	"% Hugging along the main axis: children, gaps and padding, exactly. The",
+	"% container is in the same sum as its children, so a child that hugs in",
+	"% turn simply contributes its own solved size.",
+	"&sum{ lsz(C,S); -lsz(X,S) : lslot(C,X,_) } = T :- lhug(C), lmainsz(C,S),",
+	"    lgap(C,G), lpad(C,P), lcount(C,K), T = 2*P + (K-1)*G.",
+	"% Hugging across it: the largest child plus padding. A maximum is not",
+	"% something a simplex solver can express, so it is taken here, over the",
+	"% sizes the children ask for.",
+	"lbiggest(C,M) :- lhug(C), lcrosssz(C,S), M = #max{ Z : lslot(C,X,_), lask(X,S,Z) }.",
+	"&sum{ lsz(C,S) } = T :- lhug(C), lcrosssz(C,S), lbiggest(C,M), lpad(C,P),",
+	"    T = M + 2*P.",
+	"",
+	"% ---- children, along the main axis ----",
+	"% A child keeps the size it asks for unless it grows into the leftover",
+	"% space — and a container with nothing to divide has no leftover, so in a",
+	"% hugging parent a grower is just its own size.",
+	"lfixed(C,N) :- lslot(C,N,_), not lgrow(N).",
+	"lfixed(C,N) :- lslot(C,N,_), lgrow(N), lhug(C).",
+	"&sum{ lsz(N,S) } = Z :- lfixed(C,N), lmainsz(C,S), not lhug(N), lask(N,S,Z).",
+	"% Growers share equally.",
 	"&sum{ lsz(A,S); -lsz(B,S) } = 0 :- lgrow(A), lgrow(B), lslot(C,A,_),",
 	"                                   lslot(C,B,_), lmainsz(C,S).",
-	"% Children, gaps and padding fill the container exactly — but only when",
-	"% something is able to take up the slack. With every child a fixed size",
+	"% ...and together take up exactly what the container leaves them. Applied",
+	"% only when something can actually stretch: with every child a fixed size",
 	"% this would be an over-constrained system rather than a layout.",
-	"lhasgrow(C) :- lslot(C,N,_), lgrow(N).",
-	"&sum{ lsz(X,S) : lslot(C,X,_) } = T :- lhasgrow(C), lmainsz(C,S),",
-	"                                       lsize(C,S,W), lgap(C,G),",
-	"                                       lpad(C,P), lcount(C,K),",
-	"                                       T = W - 2*P - (K-1)*G.",
+	"lslack(C) :- lslot(C,N,_), lgrow(N), not lhug(C).",
+	"&sum{ lsz(X,S) : lslot(C,X,_); -lsz(C,S) } = T :- lslack(C), lmainsz(C,S),",
+	"    lgap(C,G), lpad(C,P), lcount(C,K), T = -2*P - (K-1)*G.",
 	"% Laid end to end from the leading padding.",
 	"&sum{ lv(A,M) } = P :- lslot(C,A,1), lmain(C,M), lpad(C,P).",
 	"&sum{ lv(B,M); -lv(A,M); -lsz(A,S) } = G :- lnext(C,A,B), lmain(C,M),",
 	"                                            lmainsz(C,S), lgap(C,G).",
 	"",
-	"% Cross axis: stretch fills, anything else keeps the size it asked for.",
-	"&sum{ lsz(N,S) } = T :- lslot(C,N,_), layout(C,_), lalign(C,stretch),",
-	"                        lcrosssz(C,S), lsize(C,S,H), lpad(C,P), T = H - 2*P.",
+	"% ---- children, across it ----",
+	"&sum{ lsz(N,S); -lsz(C,S) } = T :- lslot(C,N,_), lalign(C,stretch),",
+	"                                   lcrosssz(C,S), lpad(C,P), T = -2*P.",
 	"&sum{ lsz(N,S) } = Z :- lslot(C,N,_), lalign(C,A), A != stretch,",
-	"                        lcrosssz(C,S), lask(N,S,Z).",
+	"                        lcrosssz(C,S), not lhug(N), lask(N,S,Z).",
 	"&sum{ lv(N,X) } = P :- lslot(C,N,_), lalign(C,A), A != center, A != end,",
 	"                       lcross(C,X), lpad(C,P).",
 	"% Centred: twice the offset plus the size spans the container.",
-	"&sum{ 2*lv(N,X); lsz(N,S) } = H :- lslot(C,N,_), lalign(C,center),",
-	"                                   lcross(C,X), lcrosssz(C,S), lsize(C,S,H).",
-	"&sum{ lv(N,X); lsz(N,S) } = T :- lslot(C,N,_), lalign(C,end), lcross(C,X),",
-	"                                 lcrosssz(C,S), lsize(C,S,H), lpad(C,P),",
-	"                                 T = H - P.",
+	"&sum{ 2*lv(N,X); lsz(N,S); -lsz(C,S) } = 0 :- lslot(C,N,_), lalign(C,center),",
+	"                                              lcross(C,X), lcrosssz(C,S).",
+	"&sum{ lv(N,X); lsz(N,S); -lsz(C,S) } = T :- lslot(C,N,_), lalign(C,end),",
+	"                                            lcross(C,X), lcrosssz(C,S),",
+	"                                            lpad(C,P), T = -P.",
 	"#show lv/2.",
 	"#show lsz/2.",
-];
+]
 
 /** Predicates the generated program exposes to user rules. */
 export const CONTRACT = `% Predicates you can rely on:
@@ -261,13 +283,14 @@ export function compile(scene: Scene): CompileResult {
 			layoutLines.push(atom("lgap", node.id, Math.max(0, Math.round(spec.gap))));
 			layoutLines.push(atom("lpad", node.id, Math.max(0, Math.round(spec.padding))));
 			layoutLines.push(atom("lalign", node.id, spec.align));
-			// The container's own box is a fact: it is placed by the canvas or
-			// by its own parent's layout, not by this one.
+			if (spec.sizing === "hug") layoutLines.push(atom("lhug", node.id));
+			// The size the container asks for. Ignored when it hugs, and the
+			// stored frame is then only what it falls back to.
 			layoutLines.push(
-				atom("lsize", node.id, "width", Math.round(node.frame.width)),
+				atom("lask", node.id, "width", Math.round(node.frame.width)),
 			);
 			layoutLines.push(
-				atom("lsize", node.id, "height", Math.round(node.frame.height)),
+				atom("lask", node.id, "height", Math.round(node.frame.height)),
 			);
 			(node.children ?? []).forEach((child, index) => {
 				layoutLines.push(atom("lslot", node.id, child.id, index + 1));

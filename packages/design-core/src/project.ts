@@ -5,6 +5,7 @@
  */
 import {
 	ALIGNMENTS,
+	type AutoLayout,
 	CONSTRAINT_KINDS,
 	type Constraint,
 	DEFAULT_FRAME,
@@ -237,14 +238,23 @@ function isLayout(value: unknown): boolean {
 	return Number.isFinite(Number(value.gap)) && Number.isFinite(Number(value.padding));
 }
 
+/** A layout stored before sizing existed hugs, which is the sane default. */
+function normalizeLayout(value: unknown): AutoLayout {
+	const raw = value as AutoLayout;
+	return { ...raw, sizing: raw.sizing === "fixed" ? "fixed" : "hug" };
+}
+
 /** Keeps only placeable nodes, at every depth. */
 function pruneNodes(list: readonly unknown[]): SceneNode[] {
 	const out: SceneNode[] = [];
 	for (const raw of list) {
 		if (!isPlacedNode(raw)) continue;
 		const node = raw as SceneNode;
+		const fixed = node.layout
+			? { ...node, layout: normalizeLayout(node.layout) }
+			: node;
 		out.push(
-			node.children ? { ...node, children: pruneNodes(node.children) } : node,
+			fixed.children ? { ...fixed, children: pruneNodes(fixed.children) } : fixed,
 		);
 	}
 	return out;

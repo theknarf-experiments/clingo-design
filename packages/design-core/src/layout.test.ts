@@ -45,8 +45,11 @@ function row(
 						gap: 10,
 						padding: 10,
 						align: "start",
+						// These cases pin the container size on purpose; hugging
+						// has its own tests below.
+						sizing: "fixed",
 						...layout,
-					},
+					} as AutoLayout,
 				};
 			}
 			const spec = children.find((c) => c.id === n.id);
@@ -146,4 +149,112 @@ test("a container without a layout solves nothing", async () => {
 	);
 	const solved = await solve(scene);
 	assert.deepEqual(solved, {}, "hand-placed nodes keep their own frames");
+});
+
+/* ------------------------------------------------------------------ */
+/* Hugging                                                             */
+/* ------------------------------------------------------------------ */
+
+test("a hugging container takes its size from its contents", async () => {
+	// Two 140x60 children stacked vertically before wrapping — their bounds say
+	// nothing about what a row of them needs, which is the whole reason the
+	// container cannot keep a stored size.
+	const solved = await solve(
+		row({ sizing: "hug", gap: 16, padding: 16 }, { width: 172, height: 188 }, [
+			{ id: "a", width: 140, height: 60 },
+			{ id: "b", width: 140, height: 60 },
+		]),
+	);
+	assert.equal(solved.box.width, 328, "16 + 140 + 16 + 140 + 16");
+	assert.equal(solved.box.height, 92, "16 + 60 + 16");
+	assert.equal(solved.a.x, 16);
+	assert.equal(solved.b.x, 172);
+});
+
+test("hugging follows the tallest child, not the first", async () => {
+	const solved = await solve(
+		row({ sizing: "hug", gap: 10, padding: 10 }, { width: 10, height: 10 }, [
+			{ id: "a", width: 40, height: 30 },
+			{ id: "b", width: 40, height: 90 },
+		]),
+	);
+	assert.equal(solved.box.height, 110, "90 plus 2 x 10");
+	assert.equal(solved.box.width, 110, "40 + 10 + 40 + 2 x 10");
+});
+
+test("a column hugs the other way round", async () => {
+	const solved = await solve(
+		row(
+			{ sizing: "hug", direction: "column", gap: 8, padding: 4 },
+			{ width: 10, height: 10 },
+			[
+				{ id: "a", width: 50, height: 30 },
+				{ id: "b", width: 90, height: 70 },
+			],
+		),
+	);
+	assert.equal(solved.box.height, 116, "4 + 30 + 8 + 70 + 4");
+	assert.equal(solved.box.width, 98, "widest child plus 2 x 4");
+});
+
+test("growing in a hugging container is just the size asked for", async () => {
+	// There is no leftover space to divide when the container is defined by
+	// its contents, so a grower must not be left unconstrained.
+	const solved = await solve(
+		row({ sizing: "hug", gap: 0, padding: 0 }, { width: 500, height: 100 }, [
+			{ id: "a", width: 40, height: 20 },
+			{ id: "b", width: 60, height: 20, grow: true },
+		]),
+	);
+	assert.equal(solved.b.width, 60);
+	assert.equal(solved.box.width, 100);
+});
+
+test("stretch inside a hugging container gives every child the tallest height", async () => {
+	const solved = await solve(
+		row({ sizing: "hug", align: "stretch", gap: 0, padding: 0 }, { width: 9, height: 9 }, [
+			{ id: "a", width: 40, height: 25 },
+			{ id: "b", width: 40, height: 75 },
+		]),
+	);
+	assert.equal(solved.box.height, 75);
+	assert.equal(solved.a.height, 75, "stretched up to the container");
+	assert.equal(solved.b.height, 75);
+});
+
+test("a hugging container nested in another composes", async () => {
+	// The inner container is in the outer's sum as a solved size rather than a
+	// stored one, so the outer ends up exactly wide enough for it.
+	let scene = emptyScene();
+	scene = { ...scene, nodes: [] };
+	scene = addNode(
+		scene,
+		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "outer" }),
+	);
+	scene = addNodeTo(
+		scene,
+		"outer",
+		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "inner" }),
+	);
+	scene = addNodeTo(
+		scene,
+		"inner",
+		makeNode("rect", { x: 0, y: 0, width: 50, height: 20 }, { id: "leaf" }),
+	);
+	const hug: AutoLayout = {
+		direction: "row",
+		gap: 0,
+		padding: 10,
+		align: "start",
+		sizing: "hug",
+	};
+	scene = {
+		...scene,
+		nodes: mapTree(scene.nodes, (n) =>
+			n.id === "outer" || n.id === "inner" ? { ...n, layout: hug } : n,
+		),
+	};
+	const solved = await solve(scene);
+	assert.equal(solved.inner.width, 70, "50 plus the inner padding");
+	assert.equal(solved.outer.width, 90, "70 plus the outer padding");
 });

@@ -154,7 +154,17 @@ export interface AutoLayout {
 	/** Inside every edge of the container. */
 	padding: number;
 	align: Align;
+	/**
+	 * Whether the container takes its size from its contents.
+	 *
+	 * Hugging is the default because the alternative is a box whose size has
+	 * nothing to do with what it holds: arrange four things in a row and a
+	 * fixed container simply clips them.
+	 */
+	sizing: Sizing;
 }
+
+export type Sizing = "hug" | "fixed";
 
 export const ALIGNMENTS = new Set<string>(["start", "center", "end", "stretch"]);
 
@@ -163,6 +173,7 @@ export const DEFAULT_LAYOUT: AutoLayout = {
 	gap: 16,
 	padding: 16,
 	align: "start",
+	sizing: "hug",
 };
 
 export interface SceneNode {
