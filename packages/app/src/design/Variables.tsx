@@ -22,6 +22,9 @@ export interface VariablesProps {
 	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
 	picks: Picks;
 	varying: ReadonlySet<string>;
+	reach?: Readonly<Record<string, Set<number>>>;
+	pins: Readonly<Record<string, number>>;
+	onPin: (variable: string, index: number | null) => void;
 }
 
 const TYPES = Object.keys(FALLBACK) as ValueType[];
@@ -38,6 +41,9 @@ export function Variables({
 	onSceneChange,
 	picks,
 	varying,
+	reach,
+	pins,
+	onPin,
 }: VariablesProps) {
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 
@@ -113,6 +119,9 @@ export function Variables({
 							fallback={FALLBACK[token.type]}
 							active={picks[variable]}
 							varying={varying.has(variable)}
+							reachable={reach?.[variable]}
+							pinned={pins[variable]}
+							onPin={(index) => onPin(variable, index)}
 							preview={(term: Term) => resolveValue(context, [term], variable)}
 							onChange={(next) =>
 								onSceneChange(

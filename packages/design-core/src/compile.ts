@@ -22,7 +22,6 @@ import {
 	type Term,
 	propVar,
 	tokenVar,
-	varies,
 } from "./values.ts";
 import { flatten, parentMap } from "./tree.ts";
 
@@ -271,16 +270,23 @@ export function compile(scene: Scene): CompileResult {
 	};
 }
 
-/** Variables that actually branch, for the "what varies" annotations. */
-export function varyingVariables(scene: Scene): string[] {
-	const out: string[] = [];
+/** Every variable in the document, and how many alternatives it holds. */
+export function variableCounts(scene: Scene): Record<string, number> {
+	const out: Record<string, number> = {};
 	for (const token of scene.tokens) {
-		if (varies(token.value)) out.push(tokenVar(token.id));
+		if (token.value.length > 0) out[tokenVar(token.id)] = token.value.length;
 	}
 	for (const node of flatten(scene.nodes)) {
 		for (const [prop, value] of Object.entries(node.props)) {
-			if (varies(value)) out.push(propVar(node.id, prop));
+			if (value && value.length > 0) out[propVar(node.id, prop)] = value.length;
 		}
 	}
 	return out;
+}
+
+/** Variables that actually branch, for the "what varies" annotations. */
+export function varyingVariables(scene: Scene): string[] {
+	return Object.entries(variableCounts(scene))
+		.filter(([, count]) => count > 1)
+		.map(([variable]) => variable);
 }

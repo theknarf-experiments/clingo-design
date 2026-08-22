@@ -13,6 +13,7 @@ import {
 	documentBounds,
 	flatten,
 	parseVariable,
+	variableCounts,
 	reorderNodes,
 	ungroupNodes,
 	varyingVariables,
@@ -116,12 +117,48 @@ export function Studio({
 	// than making them click back.
 	const [panel, setPanel] = useState<Panel>("properties");
 	const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-	const { exploration, generated, error, conflict, solving } = useExploration(
-		scene,
-		LIMIT,
-		seed,
-	);
+	/**
+	 * Alternatives the user is holding fixed while they look around.
+	 *
+	 * Deliberately *not* part of the document: a pin is a question ("show me
+	 * the designs where this holds"), not an edit. It reaches the solver as an
+	 * assumption, so it costs a solve rather than a re-grounding, leaves undo
+	 * alone, and is undone by forgetting it.
+	 */
+	const [pins, setPins] = useState<Readonly<Record<string, number>>>({});
+	const { exploration, generated, error, conflict, pinConflict, solving } =
+		useExploration(scene, LIMIT, seed, pins);
 	const blamed = useMemo(() => new Set(conflict), [conflict]);
+	const badPins = useMemo(() => new Set(pinConflict), [pinConflict]);
+	/** Which alternatives are still reachable, per variable. */
+	const reach = exploration?.brave.pick;
+
+	const pin = useCallback((variable: string, index: number | null) => {
+		setPins((prev) => {
+			if (index === null) {
+				if (!(variable in prev)) return prev;
+				const { [variable]: _dropped, ...rest } = prev;
+				return rest;
+			}
+			return prev[variable] === index ? prev : { ...prev, [variable]: index };
+		});
+	}, []);
+
+	const clearPins = useCallback(() => setPins({}), []);
+	const pinCount = Object.keys(pins).length;
+
+	// A pin on a variable the document no longer has — or on an alternative
+	// that has since been deleted — would make every solve unsatisfiable for a
+	// reason the user cannot see.
+	useEffect(() => {
+		const counts = variableCounts(scene);
+		setPins((prev) => {
+			const next = Object.fromEntries(
+				Object.entries(prev).filter(([v, i]) => i < (counts[v] ?? 0)),
+			);
+			return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+		});
+	}, [scene]);
 	const canvas = useRef<CanvasApi | null>(null);
 	const host = useRef<HTMLElement | null>(null);
 
@@ -188,9 +225,25 @@ export function Studio({
 		if (layout.bounds.width > 0) canvas.current?.fit(layout.bounds, 0.06);
 	}, [layout]);
 
-	/** Reduce every varying assignment to the alternative this universe chose. */
-	function collapseTo(universe: Universe) {
-		onSceneChange((prev) => collapseToPicks(prev, universe.pick));
+	/**
+	 * Hold a whole universe still, without writing it into the document.
+	 *
+	 * Clicking a design used to collapse the document onto it, which threw the
+	 * other designs away on what is really just a click to look closer. Pinning
+	 * shows the same thing and is undone by clearing.
+	 */
+	function pinUniverse(universe: Universe) {
+		const varyingOnly = Object.fromEntries(
+			Object.entries(universe.pick).filter(([variable]) => varying.has(variable)),
+		);
+		setPins(varyingOnly);
+		setView("design");
+	}
+
+	/** Write the pinned alternatives into the document, discarding the rest. */
+	function keepPinned() {
+		onSceneChange((prev) => collapseToPicks(prev, pins));
+		setPins({});
 	}
 
 	// Keyboard: tools, delete, nudge, duplicate, z-order, undo/redo.
@@ -467,7 +520,7 @@ export function Studio({
 										view === "multiverse"
 											? (e) => {
 													e.stopPropagation();
-													collapseTo(universe);
+													pinUniverse(universe);
 												}
 											: undefined
 									}
@@ -557,6 +610,31 @@ export function Studio({
 								</button>
 							</div>
 						) : null}
+						{pinCount > 0 ? (
+							<div className={styles.tools} data-role="pins">
+								<span className={cx(styles.pinCount, badPins.size > 0 && styles.pinBad)}>
+									{pinCount} pinned
+								</span>
+								<button
+									type="button"
+									className={styles.tool}
+									data-role="keep-pinned"
+									title="Write the pinned values into the document"
+									onClick={keepPinned}
+								>
+									Keep
+								</button>
+								<button
+									type="button"
+									className={styles.tool}
+									data-role="clear-pins"
+									title="Release every pinned value"
+									onClick={clearPins}
+								>
+									Clear
+								</button>
+							</div>
+						) : null}
 						{exploration?.sampling.sampled && view === "multiverse" ? (
 							<button
 								type="button"
@@ -580,11 +658,13 @@ export function Studio({
 
 					{shown.length === 0 ? (
 						<div className={styles.empty} data-role="empty">
-							{blamed.size > 0
-								? `${blamed.size} rules conflict — see the Rules panel.`
-								: error || exploration
-									? "No universes."
-									: "Solving…"}
+							{badPins.size > 0
+								? "The pinned values cannot hold — clear them to look again."
+								: blamed.size > 0
+									? `${blamed.size} rule${blamed.size === 1 ? "" : "s"} conflict${blamed.size === 1 ? "s" : ""} — see the Rules panel.`
+									: error || exploration
+										? "No universes."
+										: "Solving…"}
 						</div>
 					) : null}
 				</main>
@@ -633,6 +713,9 @@ export function Studio({
 								onSceneChange={onSceneChange}
 								picks={primary?.pick ?? {}}
 								varying={varying}
+								reach={reach}
+								pins={pins}
+								onPin={pin}
 							/>
 						) : panel === "variables" ? (
 							<Variables
@@ -640,6 +723,9 @@ export function Studio({
 								onSceneChange={onSceneChange}
 								picks={primary?.pick ?? {}}
 								varying={varying}
+								reach={reach}
+								pins={pins}
+								onPin={pin}
 							/>
 						) : (
 							<Constraints

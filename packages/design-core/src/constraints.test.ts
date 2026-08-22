@@ -241,3 +241,70 @@ test("a derivation from a missing source resolves to nothing rather than throwin
 	const result = await explore(scene, directSolver, { sample: "first" });
 	assert.equal(result.count, 1);
 });
+
+/* ------------------------------------------------------------------ */
+/* Pins                                                                */
+/* ------------------------------------------------------------------ */
+
+test("a pin narrows the space without touching the document", async () => {
+	const scene = threeBoxes();
+	const pinned = await explore(scene, directSolver, {
+		limit: 200,
+		sample: "first",
+		pins: { [propVar("a", "fill")]: 1 },
+	});
+	// a is fixed, b and c stay free: 1 x 3 x 3.
+	assert.equal(pinned.count, 9);
+	// Every universe agrees with the pin.
+	assert.ok(
+		pinned.universes.every((u) => u.pick[propVar("a", "fill")] === 1),
+		"the pin holds in every design returned",
+	);
+	// And the scene is untouched — pins are not edits.
+	assert.equal(await universes(scene), 27);
+});
+
+test("pins compose with constraints", async () => {
+	const { scene } = addConstraint(threeBoxes(), "differ", ["a", "b"], "fill");
+	const result = await explore(scene, directSolver, {
+		limit: 200,
+		sample: "first",
+		pins: { [propVar("a", "fill")]: 0 },
+	});
+	// a is fixed to 0, b must differ from it (2 left), c is free (3).
+	assert.equal(result.count, 6);
+});
+
+test("a pin the rules forbid is reported as the pin's fault", async () => {
+	// match forces a and b equal; pinning them apart cannot hold.
+	const { scene } = addConstraint(threeBoxes(), "match", ["a", "b"], "fill");
+	const error = await explore(scene, directSolver, {
+		pins: { [propVar("a", "fill")]: 0, [propVar("b", "fill")]: 1 },
+	}).then(
+		() => null,
+		(e: unknown) => e,
+	);
+	assert.ok(error instanceof UnsatisfiableError);
+	assert.deepEqual(
+		[...error.pinned].sort(),
+		[propVar("a", "fill"), propVar("b", "fill")].sort(),
+	);
+	assert.match(error.message, /pinned values/);
+});
+
+test("brave consequences say which alternatives remain reachable", async () => {
+	const { scene } = addConstraint(threeBoxes(), "match", ["a", "b", "c"], "fill");
+	const all = await explore(scene, directSolver, { limit: 200, sample: "first" });
+	// Everything is still reachable: all three may take any colour together.
+	assert.deepEqual([...all.brave.pick[propVar("a", "fill")]].sort(), [0, 1, 2]);
+
+	// Pinning one collapses what the others can be — this is what greys the
+	// impossible alternatives out in the inspector.
+	const pinned = await explore(scene, directSolver, {
+		limit: 200,
+		sample: "first",
+		pins: { [propVar("a", "fill")]: 2 },
+	});
+	assert.deepEqual([...pinned.brave.pick[propVar("b", "fill")]], [2]);
+	assert.deepEqual([...pinned.cautious.pick[propVar("c", "fill")]], [2]);
+});

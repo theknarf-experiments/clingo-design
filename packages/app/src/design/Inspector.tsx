@@ -29,6 +29,11 @@ export interface InspectorProps {
 	picks: Picks;
 	/** Variable keys the solver reports as unsettled. */
 	varying: ReadonlySet<string>;
+	/** Per variable, the alternatives that occur in at least one legal design. */
+	reach?: Readonly<Record<string, Set<number>>>;
+	/** Alternatives the user has fixed, by variable. */
+	pins: Readonly<Record<string, number>>;
+	onPin: (variable: string, index: number | null) => void;
 }
 
 const AXES = ["x", "y", "width", "height"] as const;
@@ -73,6 +78,9 @@ export function Inspector({
 	onSceneChange,
 	picks,
 	varying,
+	reach,
+	pins,
+	onPin,
 }: InspectorProps) {
 	const selected = [...selection]
 		.map((id) => findInTree(scene.nodes, id))
@@ -164,6 +172,9 @@ export function Inspector({
 							names={names}
 							active={picks[variable]}
 							varying={varying.has(variable)}
+							reachable={reach?.[variable]}
+							pinned={pins[variable]}
+							onPin={(index) => onPin(variable, index)}
 							preview={(term: Term) =>
 								resolveValue(context, [term], variable)
 							}

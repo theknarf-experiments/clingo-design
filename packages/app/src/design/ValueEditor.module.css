@@ -161,3 +161,42 @@
 	opacity: 1;
 	background: color-mix(in srgb, currentColor 10%, transparent);
 }
+
+/* An alternative no legal design can use. Kept visible and editable — it is
+   still part of the document — but plainly not a live choice. */
+.impossible {
+	opacity: 0.4;
+}
+
+.impossible .swatch,
+.impossible .dot {
+	filter: saturate(0.2);
+}
+
+.settled {
+	color: var(--dc-accent);
+	opacity: 0.9;
+}
+
+/* Pinning is exploration state, not an edit, so it reads as an annotation
+   rather than as part of the value. */
+.pin {
+	padding: 0 0.15rem;
+	font: inherit;
+	font-size: 0.8rem;
+	line-height: 1;
+	color: inherit;
+	background: none;
+	border: none;
+	opacity: 0.35;
+	cursor: pointer;
+}
+
+.pin:hover {
+	opacity: 0.8;
+}
+
+.pinOn {
+	color: var(--dc-accent);
+	opacity: 1;
+}

@@ -18,6 +18,8 @@ export interface ExplorationState {
 	 * which the solver cannot attribute to anything the UI owns.
 	 */
 	conflict: string[];
+	/** Pinned variables the solver blamed, when the pins are what conflict. */
+	pinConflict: string[];
 	solving: boolean;
 }
 
@@ -33,12 +35,14 @@ export function useExploration(
 	scene: Scene,
 	limit = 24,
 	seed = 1,
+	pins: Readonly<Record<string, number>> = {},
 ): ExplorationState {
 	const [state, setState] = useState<ExplorationState>({
 		exploration: null,
 		generated: "",
 		error: null,
 		conflict: [],
+		pinConflict: [],
 		solving: true,
 	});
 
@@ -66,13 +70,14 @@ export function useExploration(
 				if (!current) return;
 				// `explore` compiles once and hands the generated half back, so
 				// the power panel does not pay for a second compile.
-				const exploration = await current.explore(scene, { limit, seed });
+				const exploration = await current.explore(scene, { limit, seed, pins });
 				if (generation !== run.current) return;
 				setState({
 					exploration,
 					generated: exploration.generated,
 					error: null,
 					conflict: [],
+					pinConflict: [],
 					solving: false,
 				});
 			} catch (err) {
@@ -82,13 +87,14 @@ export function useExploration(
 					generated: s.generated,
 					error: err instanceof Error ? err.message : String(err),
 					conflict: err instanceof UnsatisfiableError ? err.conflict : [],
+					pinConflict: err instanceof UnsatisfiableError ? err.pinned : [],
 					solving: false,
 				}));
 			}
 		}, 150);
 
 		return () => clearTimeout(timer);
-	}, [scene, limit, seed]);
+	}, [scene, limit, seed, pins]);
 
 	return state;
 }

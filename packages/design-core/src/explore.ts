@@ -76,34 +76,53 @@ export interface Exploration {
 /**
  * Thrown when the program admits no universes at all.
  *
- * When constraints are what conflict, `conflict` names the smallest set of
- * them that cannot hold together — the solver's unsat core, translated back
- * from the guard atoms. It is empty when the contradiction is somewhere else,
- * such as a hand-written rule, which the solver cannot attribute.
+ * Everything the user can switch on — a constraint, a pinned value — is
+ * assumed rather than baked in, so an unsatisfiable answer comes back with a
+ * *core*: the smallest subset of those switches that cannot hold together.
+ * `conflict` names the guilty constraints and `pinned` the guilty pins. Both
+ * are empty when the contradiction is somewhere the solver cannot attribute,
+ * such as a hand-written rule.
  */
 export class UnsatisfiableError extends Error {
 	readonly conflict: string[];
+	readonly pinned: string[];
 
-	constructor(conflict: string[] = []) {
-		super(
-			conflict.length > 0
-				? `${conflict.length} constraints cannot hold together.`
-				: "No design satisfies these rules.",
-		);
+	constructor(conflict: string[] = [], pinned: string[] = []) {
+		super(blame(conflict, pinned));
 		this.name = "UnsatisfiableError";
 		this.conflict = conflict;
+		this.pinned = pinned;
 	}
 }
 
-/** Guard atoms back to the constraint ids they stand for. */
-function conflictFrom(core: readonly string[]): string[] {
-	const out: string[] = [];
+function blame(conflict: readonly string[], pinned: readonly string[]): string {
+	const rules = `${conflict.length} rule${conflict.length === 1 ? "" : "s"}`;
+	if (conflict.length > 0 && pinned.length > 0) {
+		return `The pinned values and ${rules} cannot hold together.`;
+	}
+	if (pinned.length > 0) return "The pinned values cannot hold together.";
+	if (conflict.length > 0) return `${rules} cannot hold together.`;
+	return "No design satisfies these rules.";
+}
+
+/** Splits a core back into the constraints and the pins it names. */
+function attribute(core: readonly string[]): {
+	conflict: string[];
+	pinned: string[];
+} {
+	const conflict: string[] = [];
+	const pinned: string[] = [];
 	for (const atom of core) {
 		// The core echoes the assumptions as given, sign prefix and all.
-		const m = /^\+?active\(([^)]+)\)$/.exec(atom);
-		if (m) out.push(m[1]);
+		const guard = /^\+?active\(([^)]+)\)$/.exec(atom);
+		if (guard) {
+			conflict.push(guard[1]);
+			continue;
+		}
+		const pin = /^\+?pick\((.+),(\d+)\)$/.exec(atom);
+		if (pin) pinned.push(pin[1]);
 	}
-	return out;
+	return { conflict, pinned };
 }
 
 /**
@@ -214,6 +233,14 @@ export interface ExploreOptions {
 	poolSize?: number;
 	/** Same seed, same sample. Change it to reshuffle. */
 	seed?: number;
+	/**
+	 * Alternatives the user has fixed, as variable -> index.
+	 *
+	 * These are *assumptions*, not edits: they narrow what the solver returns
+	 * without touching the document, so browsing a space costs a solve and is
+	 * undone by forgetting them rather than by an undo entry.
+	 */
+	pins?: Readonly<Record<string, number>>;
 }
 
 const DEFAULTS = {
@@ -261,10 +288,13 @@ export class Explorer {
 		const started = Date.now();
 
 		const { program, generated, guards, userRulesLine } = compile(scene);
-		// Every constraint is switched on for the whole exploration. Passing
-		// them as assumptions rather than baking them in is what makes an
-		// unsatisfiable answer explainable.
-		const assume = guards.map((atom) => ({ atom }));
+		// Constraints and pins are both assumed rather than baked in: that is
+		// what lets an unsatisfiable answer name which of them is at fault, and
+		// it means a pin costs a solve rather than a re-grounding.
+		const pins = Object.entries(options.pins ?? {}).map(
+			([variable, index]) => `pick(${variable},${index})`,
+		);
+		const assume = [...guards, ...pins].map((atom) => ({ atom }));
 		const reusedGrounding = this.#session !== null && this.#program === program;
 
 		if (!reusedGrounding) await this.#reopen(program, userRulesLine);
@@ -284,7 +314,8 @@ export class Explorer {
 		});
 		solves++;
 		if (enumerated.result === "UNSATISFIABLE") {
-			throw new UnsatisfiableError(conflictFrom(enumerated.core));
+			const { conflict, pinned } = attribute(enumerated.core);
+			throw new UnsatisfiableError(conflict, pinned);
 		}
 
 		const enumeratedUniverses = enumerated.models.map(interpret);

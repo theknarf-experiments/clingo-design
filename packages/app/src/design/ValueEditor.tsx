@@ -28,6 +28,17 @@ export interface ValueEditorProps {
 	active?: number;
 	/** Set when the solver reports this assignment as unsettled. */
 	varying?: boolean;
+	/**
+	 * Alternatives that occur in at least one legal design — the solver's brave
+	 * consequences. Anything outside it cannot happen, however it is written,
+	 * so the row says so instead of offering it as a live choice. Undefined
+	 * while no answer is in hand, when nothing should be marked.
+	 */
+	reachable?: ReadonlySet<number>;
+	/** The alternative the user has fixed, if any. */
+	pinned?: number;
+	/** Fix or release an alternative. Null releases. */
+	onPin?: (index: number | null) => void;
 	fallback: string;
 	/** Layer names, so a derivation from another node reads as its name. */
 	names?: Readonly<Record<string, string>>;
@@ -72,6 +83,9 @@ export function ValueEditor({
 	onChange,
 	active,
 	varying,
+	reachable,
+	pinned,
+	onPin,
 	fallback,
 	names,
 	testId,
@@ -82,6 +96,21 @@ export function ValueEditor({
 	const derivations = (Object.keys(DERIVATIONS) as Derivation[]).filter(
 		(via) => DERIVATIONS[via].type === type,
 	);
+	/**
+	 * An alternative no design in the current space picks.
+	 *
+	 * Two different reasons land here and the wording has to cover both: a rule
+	 * or a pin may forbid it, or another alternative may already resolve to the
+	 * same thing — designs are compared by what they *render*, so a duplicate
+	 * produces nothing new. Either way it is not a live choice, but neither is
+	 * it impossible to write.
+	 */
+	const unused = (index: number) =>
+		reachable !== undefined && value.length > 1 && !reachable.has(index);
+	const usedCount = reachable
+		? [...reachable].filter((i) => i < value.length).length
+		: value.length;
+	const narrowed = reachable !== undefined && usedCount < value.length;
 
 	function replace(index: number, term: Term) {
 		onChange(value.map((t, i) => (i === index ? term : t)));
@@ -105,8 +134,19 @@ export function ValueEditor({
 			<header className={styles.head}>
 				<span className={styles.label}>{label}</span>
 				{value.length > 1 ? (
-					<span className={styles.count} data-role="alt-count">
-						{value.length} values
+					<span
+						className={cx(styles.count, usedCount === 1 && styles.settled)}
+						data-role="alt-count"
+						data-narrowed={narrowed ? "" : undefined}
+						title={
+							narrowed
+								? "The rest are ruled out, or resolve to the same thing as one of these"
+								: undefined
+						}
+					>
+						{narrowed
+							? `${usedCount} of ${value.length} in use`
+							: `${value.length} values`}
 					</span>
 				) : null}
 			</header>
@@ -115,12 +155,26 @@ export function ValueEditor({
 				{value.map((term, index) => {
 					const resolved = preview(term);
 					const isActive = value.length > 1 && index === active;
+					const dead = unused(index);
+					const isPinned = pinned === index;
 					return (
 						<div
 							key={index}
-							className={cx(styles.alt, isActive && styles.active)}
+							className={cx(
+								styles.alt,
+								isActive && styles.active,
+								dead && styles.impossible,
+								isPinned && styles.pinned,
+							)}
 							data-alt={index}
 							data-active={isActive ? "" : undefined}
+							data-impossible={dead ? "" : undefined}
+							data-pinned={isPinned ? "" : undefined}
+							title={
+								dead
+									? "No design uses this value — either a rule rules it out, or another value already produces the same design"
+									: undefined
+							}
 						>
 							{isColour ? (
 								<input
@@ -191,6 +245,23 @@ export function ValueEditor({
 										))
 									: null}
 							</select>
+
+							{onPin && value.length > 1 ? (
+								<button
+									type="button"
+									className={cx(styles.pin, isPinned && styles.pinOn)}
+									data-role="pin-alt"
+									aria-pressed={isPinned}
+									title={
+										isPinned
+											? "Release this value"
+											: "Show only designs that use this value"
+									}
+									onClick={() => onPin(isPinned ? null : index)}
+								>
+									{isPinned ? "◆" : "◇"}
+								</button>
+							) : null}
 
 							<button
 								type="button"

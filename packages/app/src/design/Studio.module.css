@@ -183,3 +183,17 @@
 	color: var(--dc-bad, #fca5a5);
 	background: color-mix(in srgb, var(--dc-bad, #fca5a5) 22%, transparent);
 }
+
+/* Pins are exploration state, so the toolbar reports them rather than the
+   document doing so. */
+.pinCount {
+	align-self: center;
+	padding: 0 0.35rem;
+	font-size: 0.72rem;
+	opacity: 0.7;
+}
+
+.pinBad {
+	color: var(--dc-bad, #fca5a5);
+	opacity: 1;
+}
