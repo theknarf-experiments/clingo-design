@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
+import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import {
 	DRAW_KINDS,
 	KINDS,
+	type ReorderTo,
 	type Scene,
 	type Universe,
 	deleteNodes,
@@ -34,6 +36,7 @@ import { Inspector } from "./Inspector";
 import { LayerList } from "./LayerList";
 import { ProgramPanel } from "./ProgramPanel";
 import { StatusLine } from "./StatusLine";
+import { ToolIcon } from "./ToolIcon";
 import { Variables } from "./Variables";
 import { ViewSwitcher } from "./ViewSwitcher";
 import { cx } from "./cx";
@@ -89,6 +92,31 @@ const TOOLS: Array<{ id: Tool; label: string; key: string }> = [
 		key: TOOL_KEY[kind],
 	})),
 ];
+
+/** Brackets move the selection through its siblings; Shift takes it all the way. */
+const ORDER: Record<string, [near: ReorderTo, far: ReorderTo]> = {
+	"[": ["backward", "back"],
+	"]": ["forward", "front"],
+};
+
+/** Arrows nudge by a pixel, Shift by eight. */
+const NUDGE: Record<string, [x: number, y: number]> = {
+	ArrowLeft: [-1, 0],
+	ArrowRight: [1, 0],
+	ArrowUp: [0, -1],
+	ArrowDown: [0, 1],
+};
+
+/**
+ * The same shortcut under ⌘ and under Ctrl.
+ *
+ * `Mod` would resolve to one or the other by platform, but the studio has
+ * always taken either, so both are registered.
+ */
+const accel = (key: string, callback: () => void, shift = false) =>
+	[{ key, meta: true, shift }, { key, ctrl: true, shift }].map(
+		(hotkey: RawHotkey) => ({ hotkey, callback }),
+	);
 
 export interface StudioProps {
 	scene: Scene;
@@ -247,100 +275,81 @@ export function Studio({
 		setPins({});
 	}
 
-	// Keyboard: tools, delete, nudge, duplicate, z-order, undo/redo.
-	useEffect(() => {
-		function onKey(event: KeyboardEvent) {
-			const target = event.target as HTMLElement | null;
-			// Never steal keys from a field the user is typing in.
-			if (
-				target &&
-				(target.tagName === "INPUT" ||
-					target.tagName === "TEXTAREA" ||
-					target.isContentEditable)
-			) {
-				return;
-			}
+	const hasSelection = selection.size > 0;
 
-			const meta = event.metaKey || event.ctrlKey;
-			if (meta && event.key.toLowerCase() === "z") {
-				event.preventDefault();
-				if (event.shiftKey) redo();
-				else undo();
-				return;
-			}
-			if (meta && event.key.toLowerCase() === "g") {
-				event.preventDefault();
-				if (event.shiftKey) ungroup();
-				else group();
-				return;
-			}
-			if (meta && event.key.toLowerCase() === "d") {
-				event.preventDefault();
-				duplicate();
-				return;
-			}
-			if (meta) return;
+	// Tools, delete, nudge, duplicate, z-order, undo/redo.
+	//
+	// `ignoreInputs` is spelled out for the whole set because the library only
+	// assumes it for unmodified keys: ⌘Z must not undo the document out from
+	// under someone typing in the rules panel. The rows that need a selection
+	// are disabled rather than guarded inside the callback, so that with
+	// nothing selected the key keeps its default meaning.
+	useHotkeys(
+		[
+			...TOOLS.map((t) => ({
+				hotkey: { key: t.key },
+				callback: () => setTool(t.id),
+			})),
+			...accel("Z", undo),
+			...accel("Z", redo, true),
+			...accel("G", group),
+			...accel("G", ungroup, true),
+			...accel("D", duplicate),
+			{ hotkey: { key: "A", shift: true }, callback: autoLayout },
+			{
+				hotkey: { key: "Escape" },
+				callback: () => {
+					setSelection(new Set());
+					setTool("select");
+				},
+			},
+			...["Delete", "Backspace"].map((key) => ({
+				hotkey: { key },
+				callback: remove,
+				options: { enabled: hasSelection },
+			})),
+			...Object.entries(ORDER).flatMap(([key, [near, far]]) => [
+				{
+					hotkey: { key },
+					callback: () => reorder(near),
+					options: { enabled: hasSelection },
+				},
+				{
+					hotkey: { key, shift: true },
+					callback: () => reorder(far),
+					options: { enabled: hasSelection },
+				},
+			]),
+			...Object.entries(NUDGE).flatMap(([key, [x, y]]) => [
+				{
+					hotkey: { key },
+					callback: () => nudge(x, y),
+					options: { enabled: hasSelection },
+				},
+				{
+					hotkey: { key, shift: true },
+					callback: () => nudge(x * 8, y * 8),
+					options: { enabled: hasSelection },
+				},
+			]),
+		],
+		{ ignoreInputs: true },
+	);
 
-			if (event.shiftKey && event.key.toLowerCase() === "a") {
-				event.preventDefault();
-				autoLayout();
-				return;
-			}
-			if (event.key === "Escape") {
-				setSelection(new Set());
-				setTool("select");
-				return;
-			}
-			if (event.key === "Delete" || event.key === "Backspace") {
-				if (selection.size === 0) return;
-				event.preventDefault();
-				onSceneChange((prev) => deleteNodes(prev, [...selection]));
-				setSelection(new Set());
-				return;
-			}
-			if (event.key === "]" || event.key === "[") {
-				if (selection.size === 0) return;
-				event.preventDefault();
-				onSceneChange((prev) =>
-					reorderNodes(
-						prev,
-						[...selection],
-						event.key === "]"
-							? event.shiftKey
-								? "front"
-								: "forward"
-							: event.shiftKey
-								? "back"
-								: "backward",
-					),
-				);
-				return;
-			}
+	function remove() {
+		if (selection.size === 0) return;
+		onSceneChange((prev) => deleteNodes(prev, [...selection]));
+		setSelection(new Set());
+	}
 
-			const arrows: Record<string, [number, number]> = {
-				ArrowLeft: [-1, 0],
-				ArrowRight: [1, 0],
-				ArrowUp: [0, -1],
-				ArrowDown: [0, 1],
-			};
-			const delta = arrows[event.key];
-			if (delta && selection.size > 0) {
-				event.preventDefault();
-				const step = event.shiftKey ? 8 : 1;
-				onSceneChange(
-					(prev) => moveNodes(prev, [...selection], delta[0] * step, delta[1] * step),
-					"nudge",
-				);
-				return;
-			}
+	function reorder(to: ReorderTo) {
+		if (selection.size === 0) return;
+		onSceneChange((prev) => reorderNodes(prev, [...selection], to));
+	}
 
-			const shortcut = TOOLS.find((t) => t.key.toLowerCase() === event.key.toLowerCase());
-			if (shortcut) setTool(shortcut.id);
-		}
-
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, [selection, onSceneChange, undo, redo]);
+	function nudge(x: number, y: number) {
+		onSceneChange((prev) => moveNodes(prev, [...selection], x, y), "nudge");
+	}
 
 	function autoLayout() {
 		if (selection.size < 1) return;
@@ -393,7 +402,6 @@ export function Studio({
 	}
 
 	function menuItems(): Array<MenuItem | "separator"> {
-		const has = selection.size > 0;
 		return [
 			{
 				id: "group",
@@ -421,47 +429,44 @@ export function Studio({
 				id: "front",
 				label: "Bring to front",
 				hint: "⇧]",
-				disabled: !has,
-				run: () => onSceneChange((p) => reorderNodes(p, [...selection], "front")),
+				disabled: !hasSelection,
+				run: () => reorder("front"),
 			},
 			{
 				id: "forward",
 				label: "Bring forward",
 				hint: "]",
-				disabled: !has,
-				run: () => onSceneChange((p) => reorderNodes(p, [...selection], "forward")),
+				disabled: !hasSelection,
+				run: () => reorder("forward"),
 			},
 			{
 				id: "backward",
 				label: "Send backward",
 				hint: "[",
-				disabled: !has,
-				run: () => onSceneChange((p) => reorderNodes(p, [...selection], "backward")),
+				disabled: !hasSelection,
+				run: () => reorder("backward"),
 			},
 			{
 				id: "back",
 				label: "Send to back",
 				hint: "⇧[",
-				disabled: !has,
-				run: () => onSceneChange((p) => reorderNodes(p, [...selection], "back")),
+				disabled: !hasSelection,
+				run: () => reorder("back"),
 			},
 			"separator",
 			{
 				id: "duplicate",
 				label: "Duplicate",
 				hint: "⌘D",
-				disabled: !has,
+				disabled: !hasSelection,
 				run: duplicate,
 			},
 			{
 				id: "delete",
 				label: "Delete",
 				hint: "⌫",
-				disabled: !has,
-				run: () => {
-					onSceneChange((prev) => deleteNodes(prev, [...selection]));
-					setSelection(new Set());
-				},
+				disabled: !hasSelection,
+				run: remove,
 			},
 		];
 	}
@@ -610,11 +615,19 @@ export function Studio({
 										key={t.id}
 										type="button"
 										data-tool={t.id}
-										className={cx(styles.tool, tool === t.id && styles.toolActive)}
-										title={`${t.label} (${t.key})`}
+										aria-label={t.label}
+										className={cx(
+											styles.tool,
+											styles.iconTool,
+											tool === t.id && styles.toolActive,
+										)}
 										onClick={() => setTool(t.id)}
 									>
-										{t.label}
+										<ToolIcon tool={t.id} />
+										<span className={styles.tip} role="tooltip" aria-hidden="true">
+											{t.label}
+											<kbd className={styles.tipKey}>{t.key}</kbd>
+										</span>
 									</button>
 								))}
 							</div>

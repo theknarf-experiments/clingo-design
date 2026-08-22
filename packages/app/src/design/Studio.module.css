@@ -101,7 +101,8 @@
 	opacity: 0.7;
 }
 
-.tool:hover:not(:disabled) {
+.tool:hover:not(:disabled),
+.tool:focus-visible {
 	opacity: 1;
 	background: color-mix(in srgb, currentColor 10%, transparent);
 }
@@ -114,6 +115,55 @@
 .toolActive {
 	opacity: 1;
 	background: color-mix(in srgb, var(--dc-accent) 22%, transparent);
+}
+
+/* Square, because the name has moved into the tooltip and the aria-label. */
+.iconTool {
+	position: relative;
+	display: grid;
+	place-items: center;
+	width: 28px;
+	padding: 0;
+}
+
+/*
+ * The hover label. An element of our own rather than `title`, so it can set
+ * the shortcut as a key cap and appear where the toolbar wants it — the native
+ * tooltip is slow, unstyleable, and puts itself under the pointer.
+ */
+.tip {
+	position: absolute;
+	top: calc(100% + 8px);
+	left: 50%;
+	z-index: 1;
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 3px 7px;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 6px;
+	box-shadow: 0 4px 16px rgb(0 0 0 / 0.18);
+	transform: translateX(-50%);
+	font-size: 11px;
+	white-space: nowrap;
+	opacity: 0;
+	visibility: hidden;
+	pointer-events: none;
+}
+
+/* Delayed, so running the pointer along the strip does not flash four of them. */
+.tool:hover > .tip,
+.tool:focus-visible > .tip {
+	opacity: 1;
+	visibility: visible;
+	transition: opacity 90ms 320ms, visibility 0s 320ms;
+}
+
+.tipKey {
+	font: inherit;
+	font-size: 10px;
+	opacity: 0.55;
 }
 
 /* One copy of the document, positioned in canvas space. */
