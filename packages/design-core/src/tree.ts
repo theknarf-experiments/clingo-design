@@ -10,7 +10,13 @@
  * go through {@link worldOrigin} / {@link placedNodes}.
  */
 import { type Frame, type Point, boundsOf, frameContains } from "./geometry.ts";
-import { type SceneNode, isDrawable, isSurface, wrapsChildren } from "./scene.ts";
+import {
+	type SceneNode,
+	isDrawable,
+	isLaidOut,
+	isSurface,
+	wrapsChildren,
+} from "./scene.ts";
 import { type Value, propVar } from "./values.ts";
 
 /** Depth-first, parents before children — the order nodes are painted in. */
@@ -117,16 +123,28 @@ export interface Placed {
 	world: Frame;
 }
 
-/** Every node with its absolute frame, in paint order. */
-export function placedNodes(nodes: readonly SceneNode[]): Placed[] {
+/**
+ * Every node with its absolute frame, in paint order.
+ *
+ * `solved` overrides whatever the solver worked out for a node under an
+ * automatic layout. Hit testing, snapping and the selection outlines all go
+ * through here, so passing it is what keeps the editor pointing at where
+ * things actually are rather than where they are stored.
+ */
+export function placedNodes(
+	nodes: readonly SceneNode[],
+	solved: Readonly<Record<string, Partial<Frame>>> = {},
+): Placed[] {
 	const out: Placed[] = [];
 	const walk = (list: readonly SceneNode[], ox: number, oy: number) => {
 		for (const node of list) {
+			const fixed = solved[node.id];
+			const frame = fixed ? { ...node.frame, ...fixed } : node.frame;
 			const world = {
-				x: ox + node.frame.x,
-				y: oy + node.frame.y,
-				width: node.frame.width,
-				height: node.frame.height,
+				x: ox + frame.x,
+				y: oy + frame.y,
+				width: frame.width,
+				height: frame.height,
 			};
 			out.push({ node, world });
 			if (node.children) walk(node.children, world.x, world.y);
@@ -146,8 +164,9 @@ export function placedNodes(nodes: readonly SceneNode[]): Placed[] {
 export function hitTestTree(
 	nodes: readonly SceneNode[],
 	point: Point,
+	solved: Readonly<Record<string, Partial<Frame>>> = {},
 ): Placed | undefined {
-	const placed = placedNodes(nodes).filter((p) => isDrawable(p.node));
+	const placed = placedNodes(nodes, solved).filter((p) => isDrawable(p.node));
 	for (let i = placed.length - 1; i >= 0; i--) {
 		if (frameContains(placed[i].world, point)) return placed[i];
 	}
@@ -158,9 +177,10 @@ export function hitTestTree(
 export function frameAt(
 	nodes: readonly SceneNode[],
 	point: Point,
+	solved: Readonly<Record<string, Partial<Frame>>> = {},
 ): Placed | undefined {
 	let found: Placed | undefined;
-	for (const placed of placedNodes(nodes)) {
+	for (const placed of placedNodes(nodes, solved)) {
 		if (!isSurface(placed.node)) continue;
 		if (frameContains(placed.world, point)) found = placed;
 	}
@@ -217,6 +237,21 @@ export function propValues(
 		for (const [prop, value] of Object.entries(node.props)) {
 			if (value) out[propVar(node.id, prop)] = value;
 		}
+	}
+	return out;
+}
+
+/**
+ * Nodes whose position their parent decides.
+ *
+ * They can be selected and styled like anything else, but dragging or resizing
+ * one would be a lie: the next solve puts it straight back.
+ */
+export function managedNodes(nodes: readonly SceneNode[]): Set<string> {
+	const out = new Set<string>();
+	for (const node of flatten(nodes)) {
+		if (!isLaidOut(node)) continue;
+		for (const child of node.children ?? []) out.add(child.id);
 	}
 	return out;
 }

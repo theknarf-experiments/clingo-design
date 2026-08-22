@@ -15,7 +15,12 @@
  * Geometry goes in as plain facts. Four atoms per node costs nothing; a
  * choosable coordinate would ground a domain of thousands.
  */
-import { CONSTRAINT_KINDS, type Scene } from "./scene.ts";
+import {
+	type AutoLayout,
+	CONSTRAINT_KINDS,
+	type Scene,
+	isLaidOut,
+} from "./scene.ts";
 import {
 	DERIVATIONS,
 	type Derivation,
@@ -28,6 +33,75 @@ import { flatten, parentMap } from "./tree.ts";
 /** The switch a constraint is compiled behind — see {@link compile}. */
 export const guardAtom = (constraintId: string): string =>
 	`active(${constraintId})`;
+
+/**
+ * Names of the solver's layout unknowns.
+ *
+ * Unlike everything else in a document these are not facts: they are theory
+ * variables the simplex solver assigns, so a layout can be under-determined
+ * and still have an answer.
+ */
+export const posVar = (nodeId: string, axis: "x" | "y"): string =>
+	`lv(${nodeId},${axis})`;
+export const sizeVar = (nodeId: string, axis: "width" | "height"): string =>
+	`lsz(${nodeId},${axis})`;
+
+/**
+ * The layout system, as rules over the facts a laid-out container emits.
+ *
+ * Written once and generically: `main`/`cross` swap the axes so a column is
+ * the same equations as a row, and the conditional sum is the flexbox
+ * identity — children plus gaps plus padding fill the container exactly.
+ */
+const LAYOUT_RULES = [
+	"#defined layout/2.",
+	"#defined lslot/3.",
+	"% Which axis is which, so one set of equations covers both directions.",
+	"lmain(C,x) :- layout(C,row).",
+	"lmain(C,y) :- layout(C,column).",
+	"lcross(C,y) :- layout(C,row).",
+	"lcross(C,x) :- layout(C,column).",
+	"lmainsz(C,width) :- layout(C,row).",
+	"lmainsz(C,height) :- layout(C,column).",
+	"lcrosssz(C,height) :- layout(C,row).",
+	"lcrosssz(C,width) :- layout(C,column).",
+	"lnext(C,A,B) :- lslot(C,A,I), lslot(C,B,J), J = I+1.",
+	"lcount(C,K) :- layout(C,_), K = #count{ X : lslot(C,X,_) }.",
+	"",
+	"% Main axis: a child keeps its own size unless it grows.",
+	"&sum{ lsz(N,S) } = Z :- lslot(C,N,_), lmainsz(C,S), not lgrow(N), lask(N,S,Z).",
+	"% Growers share equally in whatever is left over.",
+	"&sum{ lsz(A,S); -lsz(B,S) } = 0 :- lgrow(A), lgrow(B), lslot(C,A,_),",
+	"                                   lslot(C,B,_), lmainsz(C,S).",
+	"% Children, gaps and padding fill the container exactly — but only when",
+	"% something is able to take up the slack. With every child a fixed size",
+	"% this would be an over-constrained system rather than a layout.",
+	"lhasgrow(C) :- lslot(C,N,_), lgrow(N).",
+	"&sum{ lsz(X,S) : lslot(C,X,_) } = T :- lhasgrow(C), lmainsz(C,S),",
+	"                                       lsize(C,S,W), lgap(C,G),",
+	"                                       lpad(C,P), lcount(C,K),",
+	"                                       T = W - 2*P - (K-1)*G.",
+	"% Laid end to end from the leading padding.",
+	"&sum{ lv(A,M) } = P :- lslot(C,A,1), lmain(C,M), lpad(C,P).",
+	"&sum{ lv(B,M); -lv(A,M); -lsz(A,S) } = G :- lnext(C,A,B), lmain(C,M),",
+	"                                            lmainsz(C,S), lgap(C,G).",
+	"",
+	"% Cross axis: stretch fills, anything else keeps the size it asked for.",
+	"&sum{ lsz(N,S) } = T :- lslot(C,N,_), layout(C,_), lalign(C,stretch),",
+	"                        lcrosssz(C,S), lsize(C,S,H), lpad(C,P), T = H - 2*P.",
+	"&sum{ lsz(N,S) } = Z :- lslot(C,N,_), lalign(C,A), A != stretch,",
+	"                        lcrosssz(C,S), lask(N,S,Z).",
+	"&sum{ lv(N,X) } = P :- lslot(C,N,_), lalign(C,A), A != center, A != end,",
+	"                       lcross(C,X), lpad(C,P).",
+	"% Centred: twice the offset plus the size spans the container.",
+	"&sum{ 2*lv(N,X); lsz(N,S) } = H :- lslot(C,N,_), lalign(C,center),",
+	"                                   lcross(C,X), lcrosssz(C,S), lsize(C,S,H).",
+	"&sum{ lv(N,X); lsz(N,S) } = T :- lslot(C,N,_), lalign(C,end), lcross(C,X),",
+	"                                 lcrosssz(C,S), lsize(C,S,H), lpad(C,P),",
+	"                                 T = H - P.",
+	"#show lv/2.",
+	"#show lsz/2.",
+];
 
 /** Predicates the generated program exposes to user rules. */
 export const CONTRACT = `% Predicates you can rely on:
@@ -162,6 +236,10 @@ export function compile(scene: Scene): CompileResult {
 	}
 
 	const nodeLines: string[] = [];
+	// Facts describing every automatic layout. The rules that interpret them
+	// are generic, so a document never changes the shape of the program.
+	const layoutLines: string[] = [];
+	let laidOut = false;
 	// One pass for every parent, rather than a tree search per node.
 	const parents = parentMap(scene.nodes);
 	for (const node of flatten(scene.nodes)) {
@@ -175,6 +253,34 @@ export function compile(scene: Scene): CompileResult {
 		);
 		const parent = parents.get(node.id);
 		if (parent) nodeLines.push(atom("child", parent.id, node.id));
+
+		if (isLaidOut(node)) {
+			laidOut = true;
+			const spec = node.layout as AutoLayout;
+			layoutLines.push(atom("layout", node.id, spec.direction));
+			layoutLines.push(atom("lgap", node.id, Math.max(0, Math.round(spec.gap))));
+			layoutLines.push(atom("lpad", node.id, Math.max(0, Math.round(spec.padding))));
+			layoutLines.push(atom("lalign", node.id, spec.align));
+			// The container's own box is a fact: it is placed by the canvas or
+			// by its own parent's layout, not by this one.
+			layoutLines.push(
+				atom("lsize", node.id, "width", Math.round(node.frame.width)),
+			);
+			layoutLines.push(
+				atom("lsize", node.id, "height", Math.round(node.frame.height)),
+			);
+			(node.children ?? []).forEach((child, index) => {
+				layoutLines.push(atom("lslot", node.id, child.id, index + 1));
+				// What the child would like to be, when it is not stretched.
+				layoutLines.push(
+					atom("lask", child.id, "width", Math.round(child.frame.width)),
+				);
+				layoutLines.push(
+					atom("lask", child.id, "height", Math.round(child.frame.height)),
+				);
+				if (child.grow) layoutLines.push(atom("lgrow", child.id));
+			});
+		}
 		for (const [prop, value] of Object.entries(node.props)) {
 			if (value) emitValue(propVar(node.id, prop), value);
 		}
@@ -234,6 +340,8 @@ export function compile(scene: Scene): CompileResult {
 			"rendered(N,P,L) :- resolved(prop(N,P),L).",
 		]),
 		section("derivations", derivedLines),
+		section("layout", layoutLines),
+		laidOut ? section("layout rules", LAYOUT_RULES) : "",
 		section("constraints", constraintLines),
 		constraintLines.length === 0
 			? ""

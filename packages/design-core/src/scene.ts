@@ -132,19 +132,66 @@ export const isSurface = (node: SceneNode): boolean => KINDS[node.kind].surface;
 export const wrapsChildren = (node: SceneNode): boolean =>
 	KINDS[node.kind].wrapsChildren;
 
+/* ------------------------------------------------------------------ */
+/* Automatic layout                                                    */
+/* ------------------------------------------------------------------ */
+
+export type Direction = "row" | "column";
+/** Where children sit on the axis they are *not* stacked along. */
+export type Align = "start" | "center" | "end" | "stretch";
+
+/**
+ * Turns a container into a solved layout rather than a free-form canvas.
+ *
+ * The positions are not stored: they are variables in a system of linear
+ * equations the solver answers, which is why "these three share the leftover
+ * space" is expressible at all. Everything here is an *input* to that system.
+ */
+export interface AutoLayout {
+	direction: Direction;
+	/** Between adjacent children, in pixels. */
+	gap: number;
+	/** Inside every edge of the container. */
+	padding: number;
+	align: Align;
+}
+
+export const ALIGNMENTS = new Set<string>(["start", "center", "end", "stretch"]);
+
+export const DEFAULT_LAYOUT: AutoLayout = {
+	direction: "row",
+	gap: 16,
+	padding: 16,
+	align: "start",
+};
+
 export interface SceneNode {
 	id: string;
 	kind: NodeKind;
 	/** Shown in the layer list; free-form. */
 	name: string;
-	/** Relative to the parent's origin — see the note in `tree.ts`. */
+	/**
+	 * Relative to the parent's origin — see the note in `tree.ts`.
+	 *
+	 * Under an {@link AutoLayout} parent this is not where the node sits: the
+	 * solver decides that. It stays as the size the node asks for, and as
+	 * where it returns to if the layout is removed.
+	 */
 	frame: Frame;
 	/** Literal content for text nodes. */
 	text?: string;
 	props: Partial<Record<PropName, Value>>;
 	/** Present on the container kinds. */
 	children?: SceneNode[];
+	/** Set on a container to lay its children out automatically. */
+	layout?: AutoLayout;
+	/** Under a laid-out parent: take a share of the leftover space. */
+	grow?: boolean;
 }
+
+/** True when this node's children are placed by the solver. */
+export const isLaidOut = (node: SceneNode): boolean =>
+	node.layout !== undefined && (node.children?.length ?? 0) > 0;
 
 /* ------------------------------------------------------------------ */
 /* Constraints                                                         */

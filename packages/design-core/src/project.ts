@@ -4,6 +4,7 @@
  * plain data in, plain data out, so it can be tested without a browser.
  */
 import {
+	ALIGNMENTS,
 	CONSTRAINT_KINDS,
 	type Constraint,
 	DEFAULT_FRAME,
@@ -225,7 +226,15 @@ function isPlacedNode(value: unknown): value is SceneNode {
 		return false;
 	}
 	if (value.children !== undefined && !Array.isArray(value.children)) return false;
+	if (value.layout !== undefined && !isLayout(value.layout)) return false;
 	return true;
+}
+
+function isLayout(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	if (value.direction !== "row" && value.direction !== "column") return false;
+	if (!ALIGNMENTS.has(String(value.align))) return false;
+	return Number.isFinite(Number(value.gap)) && Number.isFinite(Number(value.padding));
 }
 
 /** Keeps only placeable nodes, at every depth. */

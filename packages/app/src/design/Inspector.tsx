@@ -1,14 +1,21 @@
 import {
+	type Align,
+	type Direction,
 	KINDS,
 	PROPS,
 	type Picks,
 	type Scene,
 	type SceneNode,
 	type Term,
+	DEFAULT_LAYOUT,
 	defaultValue,
 	findInTree,
+	managedNodes,
 	nodeNames,
 	propValues,
+	setGrow,
+	setLayout,
+	updateLayout,
 	propVar,
 	renameNode,
 	resolveValue,
@@ -37,15 +44,19 @@ export interface InspectorProps {
 }
 
 const AXES = ["x", "y", "width", "height"] as const;
+const DIRECTIONS: Direction[] = ["row", "column"];
+const ALIGNMENTS: Align[] = ["start", "center", "end", "stretch"];
 
 function NumberField({
 	label,
 	value,
 	onChange,
+	disabled,
 }: {
 	label: string;
 	value: number;
 	onChange: (next: number) => void;
+	disabled?: boolean;
 }) {
 	return (
 		<label className={styles.field}>
@@ -55,6 +66,7 @@ function NumberField({
 				className={styles.number}
 				value={Math.round(value)}
 				data-field={label}
+				disabled={disabled}
 				onChange={(e) => {
 					const next = Number(e.target.value);
 					if (Number.isFinite(next)) onChange(next);
@@ -109,6 +121,8 @@ export function Inspector({
 	}
 
 	const node = selected[0];
+	const managed = managedNodes(scene.nodes).has(node.id);
+	const container = KINDS[node.kind].container && (node.children?.length ?? 0) > 0;
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 	const names = nodeNames(scene.nodes);
 
@@ -124,12 +138,19 @@ export function Inspector({
 			/>
 
 			<h3>Position</h3>
+			{managed ? (
+				<p className={styles.note} data-role="managed-note">
+					Placed by the layout above. Size is what it asks for, not
+					necessarily what it gets.
+				</p>
+			) : null}
 			<div className={styles.grid}>
 				{AXES.map((axis) => (
 					<NumberField
 						key={axis}
 						label={axis}
 						value={node.frame[axis]}
+						disabled={managed && (axis === "x" || axis === "y")}
 						onChange={(next) =>
 							onSceneChange(
 								(prev) => setFrame(prev, node.id, { ...node.frame, [axis]: next }),
@@ -139,6 +160,110 @@ export function Inspector({
 					/>
 				))}
 			</div>
+
+			{managed ? (
+				<label className={styles.check}>
+					<input
+						type="checkbox"
+						data-role="grow"
+						checked={node.grow ?? false}
+						onChange={(e) =>
+							onSceneChange((prev) => setGrow(prev, [node.id], e.target.checked))
+						}
+					/>
+					<span>Fill the leftover space</span>
+				</label>
+			) : null}
+
+			{container ? (
+				<>
+					<h3>Layout</h3>
+					<label className={styles.check}>
+						<input
+							type="checkbox"
+							data-role="auto-layout"
+							checked={node.layout !== undefined}
+							onChange={(e) =>
+								onSceneChange((prev) =>
+									setLayout(
+										prev,
+										node.id,
+										e.target.checked ? { ...DEFAULT_LAYOUT } : undefined,
+									),
+								)
+							}
+						/>
+						<span>Arrange children automatically</span>
+					</label>
+
+					{node.layout ? (
+						<div className={styles.grid}>
+							<label className={styles.field}>
+								<span className={styles.fieldLabel}>flow</span>
+								<select
+									className={styles.number}
+									data-role="layout-direction"
+									value={node.layout.direction}
+									onChange={(e) =>
+										onSceneChange((prev) =>
+											updateLayout(prev, node.id, {
+												direction: e.target.value as Direction,
+											}),
+										)
+									}
+								>
+									{DIRECTIONS.map((d) => (
+										<option key={d} value={d}>
+											{d}
+										</option>
+									))}
+								</select>
+							</label>
+							<label className={styles.field}>
+								<span className={styles.fieldLabel}>align</span>
+								<select
+									className={styles.number}
+									data-role="layout-align"
+									value={node.layout.align}
+									onChange={(e) =>
+										onSceneChange((prev) =>
+											updateLayout(prev, node.id, {
+												align: e.target.value as Align,
+											}),
+										)
+									}
+								>
+									{ALIGNMENTS.map((a) => (
+										<option key={a} value={a}>
+											{a}
+										</option>
+									))}
+								</select>
+							</label>
+							<NumberField
+								label="gap"
+								value={node.layout.gap}
+								onChange={(gap) =>
+									onSceneChange(
+										(prev) => updateLayout(prev, node.id, { gap }),
+										`gap-${node.id}`,
+									)
+								}
+							/>
+							<NumberField
+								label="padding"
+								value={node.layout.padding}
+								onChange={(padding) =>
+									onSceneChange(
+										(prev) => updateLayout(prev, node.id, { padding }),
+										`pad-${node.id}`,
+									)
+								}
+							/>
+						</div>
+					) : null}
+				</>
+			) : null}
 
 			{node.kind === "text" ? (
 				<>

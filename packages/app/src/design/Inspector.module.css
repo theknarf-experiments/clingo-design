@@ -101,3 +101,28 @@
 	flex-direction: column;
 	gap: 0.3rem;
 }
+
+/* Says why a field is inert, rather than leaving it mysteriously disabled. */
+.note {
+	margin: 0;
+	font-size: 0.7rem;
+	line-height: 1.4;
+	opacity: 0.5;
+}
+
+.check {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+	font-size: 0.74rem;
+	cursor: pointer;
+}
+
+.check input {
+	margin: 0;
+	accent-color: var(--dc-accent);
+}
+
+.number:disabled {
+	opacity: 0.45;
+}

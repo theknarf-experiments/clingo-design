@@ -69,7 +69,11 @@ export const Artboard = memo(function Artboard({
 	);
 
 	function render(node: SceneNode) {
-		const frame = preview?.get(node.id) ?? node.frame;
+		// Solved geometry wins over the stored frame; a live drag wins over both.
+		const solved = universe.solved[node.id];
+		const frame =
+			preview?.get(node.id) ??
+			(solved ? { ...node.frame, ...solved } : node.frame);
 		const unsettled =
 			varying !== undefined &&
 			Object.keys(node.props).some((prop) => varying.has(propVar(node.id, prop)));

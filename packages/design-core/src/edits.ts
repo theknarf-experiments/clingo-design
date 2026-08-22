@@ -10,9 +10,11 @@
  */
 import { type Frame, normaliseFrame } from "./geometry.ts";
 import {
+	type AutoLayout,
 	CONSTRAINT_KINDS,
 	type Constraint,
 	type ConstraintKind,
+	DEFAULT_LAYOUT,
 	KINDS,
 	type NodeKind,
 	type PropName,
@@ -423,6 +425,88 @@ export function ungroupNodes(
 
 	const nodes = refreshGroups(walk(scene.nodes));
 	return { scene: { ...scene, nodes }, ids: freed };
+}
+
+/* ------------------------------------------------------------------ */
+/* Automatic layout                                                    */
+/* ------------------------------------------------------------------ */
+
+/** Turns a container's children over to the solver, or takes them back. */
+export function setLayout(
+	scene: Scene,
+	id: string,
+	layout: AutoLayout | undefined,
+): Scene {
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (node) => {
+			if (node.id !== id) return node;
+			if (!layout) {
+				const { layout: _dropped, ...rest } = node;
+				return rest;
+			}
+			return { ...node, layout };
+		}),
+	};
+}
+
+export function updateLayout(
+	scene: Scene,
+	id: string,
+	patch: Partial<AutoLayout>,
+): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (!node?.layout) return scene;
+	return setLayout(scene, id, { ...node.layout, ...patch });
+}
+
+/** Whether a child takes a share of its parent's leftover space. */
+export function setGrow(scene: Scene, ids: readonly string[], grow: boolean): Scene {
+	const touch = new Set(ids);
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (node) => {
+			if (!touch.has(node.id)) return node;
+			if (!grow) {
+				const { grow: _dropped, ...rest } = node;
+				return rest;
+			}
+			return { ...node, grow: true };
+		}),
+	};
+}
+
+/**
+ * Wraps a selection in a frame that lays them out.
+ *
+ * The frame takes the selection's bounds, so the result starts where the
+ * loose objects already were and only then begins arranging them.
+ */
+export function wrapInLayout(
+	scene: Scene,
+	ids: readonly string[],
+): { scene: Scene; id: string | null } {
+	const grouped = groupNodes(scene, ids, "Layout");
+	if (!grouped.id) return { scene, id: null };
+	const bounds = findInTree(grouped.scene.nodes, grouped.id)?.frame;
+	const withLayout = mapTree(grouped.scene.nodes, (node) =>
+		node.id !== grouped.id
+			? node
+			: {
+					...node,
+					kind: "frame" as const,
+					name: "Layout",
+					// Room for the padding the layout is about to apply.
+					frame: {
+						...(bounds ?? node.frame),
+						width: (bounds?.width ?? 0) + DEFAULT_LAYOUT.padding * 2,
+						height: (bounds?.height ?? 0) + DEFAULT_LAYOUT.padding * 2,
+					},
+					props: { ...KINDS.frame.defaults },
+					layout: { ...DEFAULT_LAYOUT },
+				},
+	);
+	return { scene: { ...grouped.scene, nodes: withLayout }, id: grouped.id };
 }
 
 /* ------------------------------------------------------------------ */

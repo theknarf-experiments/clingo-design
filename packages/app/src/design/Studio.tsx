@@ -17,6 +17,7 @@ import {
 	reorderNodes,
 	ungroupNodes,
 	varyingVariables,
+	wrapInLayout,
 	wrapsChildren,
 } from "@clingo-design/design-core";
 import {
@@ -280,6 +281,11 @@ export function Studio({
 			}
 			if (meta) return;
 
+			if (event.shiftKey && event.key.toLowerCase() === "a") {
+				event.preventDefault();
+				autoLayout();
+				return;
+			}
 			if (event.key === "Escape") {
 				setSelection(new Set());
 				setTool("select");
@@ -336,6 +342,17 @@ export function Studio({
 		return () => window.removeEventListener("keydown", onKey);
 	}, [selection, onSceneChange, undo, redo]);
 
+	function autoLayout() {
+		if (selection.size < 1) return;
+		let created: string | null = null;
+		onSceneChange((prev) => {
+			const result = wrapInLayout(prev, [...selection]);
+			created = result.id;
+			return result.scene;
+		});
+		if (created) setSelection(new Set([created]));
+	}
+
 	/** Copy the selection and select the copies. */
 	function duplicate() {
 		if (selection.size === 0) return;
@@ -384,6 +401,13 @@ export function Studio({
 				hint: "⌘G",
 				disabled: selection.size < 1,
 				run: group,
+			},
+			{
+				id: "auto-layout",
+				label: "Wrap in auto layout",
+				hint: "⇧A",
+				disabled: selection.size < 1,
+				run: autoLayout,
 			},
 			{
 				id: "ungroup",

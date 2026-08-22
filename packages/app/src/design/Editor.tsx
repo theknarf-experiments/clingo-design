@@ -22,6 +22,7 @@ import {
 	isDrawable,
 	isSurface,
 	makeNode,
+	managedNodes,
 	normaliseFrame,
 	placedNodes,
 	resizeFrame,
@@ -117,9 +118,12 @@ export function Editor({
 	 * conversion look up nodes by id, which would otherwise be a tree walk each.
 	 */
 	const placed = useMemo(() => {
-		const list = placedNodes(scene.nodes);
+		const list = placedNodes(scene.nodes, universe.solved);
 		return { list, byId: new Map(list.map((p) => [p.node.id, p])) };
-	}, [scene.nodes]);
+	}, [scene.nodes, universe.solved]);
+
+	/** Nodes an automatic layout owns, which the pointer must not move. */
+	const managed = useMemo(() => managedNodes(scene.nodes), [scene.nodes]);
 
 	/** Pointer position in canvas coordinates. */
 	function toCanvas(event: { clientX: number; clientY: number }): Point {
@@ -139,9 +143,13 @@ export function Editor({
 	function beginMove(point: Point, ids: ReadonlySet<string>) {
 		const start = new Map<string, Frame>();
 		for (const id of ids) {
+			// A laid-out node would spring back on the next solve, so dragging
+			// it is not a thing the editor offers.
+			if (managed.has(id)) continue;
 			const world = placed.byId.get(id)?.world;
 			if (world) start.set(id, { ...world });
 		}
+		if (start.size === 0) return;
 		setGesture({ kind: "move", origin: point, start });
 	}
 
@@ -162,7 +170,7 @@ export function Editor({
 			return;
 		}
 
-		const hit = hitTestTree(scene.nodes, point);
+		const hit = hitTestTree(scene.nodes, point, universe.solved);
 		if (!hit) {
 			if (!event.shiftKey) onSelectionChange([]);
 			setGesture({ kind: "marquee", origin: point });
@@ -189,7 +197,7 @@ export function Editor({
 	/** Double-click reaches through a group or into a frame, to the leaf. */
 	function onDoubleClick(event: React.MouseEvent) {
 		if (tool !== "select") return;
-		const hit = hitTestTree(scene.nodes, toCanvas(event));
+		const hit = hitTestTree(scene.nodes, toCanvas(event), universe.solved);
 		if (!hit) return;
 		event.stopPropagation();
 		onSelectionChange([hit.node.id]);
@@ -199,7 +207,7 @@ export function Editor({
 		if (!onContextMenu) return;
 		event.preventDefault();
 		event.stopPropagation();
-		const hit = hitTestTree(scene.nodes, toCanvas(event));
+		const hit = hitTestTree(scene.nodes, toCanvas(event), universe.solved);
 		const targetId = hit ? targetFor(hit.node.id) : null;
 		// Right-clicking outside the selection retargets it, the way every
 		// editor does; right-clicking inside keeps the multi-selection.
@@ -211,6 +219,7 @@ export function Editor({
 	function onHandleDown(event: React.PointerEvent, handle: Handle) {
 		event.stopPropagation();
 		if (selected.length !== 1) return;
+		if (managed.has(selected[0].node.id)) return;
 		setGesture({
 			kind: "resize",
 			handle,
@@ -226,8 +235,8 @@ export function Editor({
 	 * Only `up` needs these, and only once, so keeping them in a ref is what
 	 * lets the effect below depend on the gesture alone.
 	 */
-	const live = useRef({ scene, selection, placed, preview, toCanvas, targetFor });
-	live.current = { scene, selection, placed, preview, toCanvas, targetFor };
+	const live = useRef({ scene, selection, placed, preview, universe, toCanvas, targetFor });
+	live.current = { scene, selection, placed, preview, universe, toCanvas, targetFor };
 
 	// A gesture owns the window until release, so the pointer can leave the
 	// document mid-drag without stranding it.
@@ -374,10 +383,11 @@ export function Editor({
 				// whichever surface it was drawn over.
 				const host = KINDS[gesture.nodeKind].surface
 					? null
-					: (frameAt(now.scene.nodes, {
-							x: frame.x + frame.width / 2,
-							y: frame.y + frame.height / 2,
-						})?.node.id ?? null);
+					: (frameAt(
+							now.scene.nodes,
+							{ x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
+							now.universe.solved,
+						)?.node.id ?? null);
 
 				const node = makeNode(gesture.nodeKind, frame);
 				onSceneChange((prev) => addNodeTo(prev, host, node));
@@ -455,8 +465,8 @@ export function Editor({
 					data-frame-label={node.id}
 					data-selected={selection.has(node.id) ? "" : undefined}
 					style={{
-						left: (preview?.get(node.id) ?? node.frame).x,
-						top: (preview?.get(node.id) ?? node.frame).y,
+						left: (preview?.get(node.id) ?? placed.byId.get(node.id)?.world ?? node.frame).x,
+						top: (preview?.get(node.id) ?? placed.byId.get(node.id)?.world ?? node.frame).y,
 					}}
 					onPointerDown={(e) => {
 						e.stopPropagation();
@@ -496,7 +506,7 @@ export function Editor({
 
 			{shownBounds && tool === "select" && gesture.kind !== "marquee" ? (
 				<div className={styles.handles} style={rectStyle(shownBounds)}>
-					{selected.length === 1
+					{selected.length === 1 && !managed.has(selected[0].node.id)
 						? HANDLES.map((handle) => (
 								<div
 									key={handle}
