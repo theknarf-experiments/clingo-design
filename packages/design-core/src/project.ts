@@ -228,7 +228,22 @@ function isPlacedNode(value: unknown): value is SceneNode {
 	}
 	if (value.children !== undefined && !Array.isArray(value.children)) return false;
 	if (value.layout !== undefined && !isLayout(value.layout)) return false;
+	// A path whose vertices did not survive would render as nothing at all, so
+	// it is dropped rather than left as an invisible layer.
+	if (value.points !== undefined && !isPoints(value.points)) return false;
 	return true;
+}
+
+function isPoints(value: unknown): boolean {
+	return (
+		Array.isArray(value) &&
+		value.every(
+			(p) =>
+				isRecord(p) &&
+				Number.isFinite(Number(p.x)) &&
+				Number.isFinite(Number(p.y)),
+		)
+	);
 }
 
 function isLayout(value: unknown): boolean {

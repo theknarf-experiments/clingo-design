@@ -78,6 +78,36 @@ export function boundsOf(frames: readonly Frame[]): Frame | null {
 	return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+/** Smallest frame containing every point, or null when there are none. */
+export function pointsBounds(points: readonly Point[]): Frame | null {
+	if (points.length === 0) return null;
+	const xs = points.map((p) => p.x);
+	const ys = points.map((p) => p.y);
+	const x = Math.min(...xs);
+	const y = Math.min(...ys);
+	return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+}
+
+/**
+ * Points authored in a box of size `from`, re-expressed in a box of size `to`.
+ *
+ * This is what keeps a path's vertices and its frame describing the same
+ * shape: the frame is the vertices' bounding box, so a resize that left them
+ * alone would make the two disagree. An axis with no extent has nothing to
+ * scale — every point sits on one line — and is carried across untouched
+ * rather than divided by zero.
+ */
+export function scalePoints(
+	points: readonly Point[],
+	from: { width: number; height: number },
+	to: { width: number; height: number },
+): Point[] {
+	const sx = from.width === 0 ? 1 : to.width / from.width;
+	const sy = from.height === 0 ? 1 : to.height / from.height;
+	if (sx === 1 && sy === 1) return [...points];
+	return points.map((p) => ({ x: p.x * sx, y: p.y * sy }));
+}
+
 /** Normalises a drag between two corners into a positive-size frame. */
 export function frameFromPoints(a: Point, b: Point): Frame {
 	return {

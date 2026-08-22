@@ -10,7 +10,7 @@
  * a token reference. One alternative is an ordinary design; two or more is a
  * branch the solver explores.
  */
-import { type Frame, boundsOf } from "./geometry.ts";
+import { type Frame, type Point, boundsOf } from "./geometry.ts";
 import {
 	FALLBACK,
 	type Token,
@@ -53,6 +53,7 @@ export type NodeKind =
 	| "ellipse"
 	| "line"
 	| "arrow"
+	| "path"
 	| "text"
 	| "group";
 
@@ -104,6 +105,15 @@ export interface KindSpec {
 	 * angle is not expressible.
 	 */
 	diagonal: boolean;
+	/**
+	 * Drawn by placing point after point rather than by dragging a box out.
+	 *
+	 * Its real geometry is {@link SceneNode.points}; the frame is only their
+	 * bounding box, which every edit keeps in step. Everything that works on
+	 * frames — hit testing, snapping, grouping, automatic layout — therefore
+	 * works on one unchanged.
+	 */
+	plotted: boolean;
 }
 
 /** Which corner-to-corner run a diagonal kind draws. */
@@ -121,6 +131,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: false,
 		diagonal: false,
+		plotted: false,
 	},
 	rect: {
 		label: "Rectangle",
@@ -133,6 +144,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: true,
 		diagonal: false,
+		plotted: false,
 	},
 	ellipse: {
 		// A corner radius on something with no corners says nothing, so fill is
@@ -147,6 +159,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: true,
 		diagonal: false,
+		plotted: false,
 	},
 	line: {
 		label: "Line",
@@ -162,6 +175,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: true,
 		diagonal: true,
+		plotted: false,
 	},
 	arrow: {
 		label: "Arrow",
@@ -177,6 +191,29 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: true,
 		diagonal: true,
+		plotted: false,
+	},
+	path: {
+		// Not a `shape`: the pen is a mode you stay in for several clicks, and
+		// hiding it behind the shape menu would hide the only tool that needs
+		// explaining.
+		label: "Path",
+		props: ["fill", "stroke", "strokeWidth"],
+		defaults: {
+			fill: [lit(FALLBACK.color)],
+			stroke: [lit(PROPS.stroke.fallback)],
+			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
+		},
+		// Only reached by a caller that has no points to bound; the pen always
+		// has some.
+		defaultSize: { width: 120, height: 120 },
+		drawable: true,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
+		plotted: true,
 	},
 	text: {
 		label: "Text",
@@ -193,6 +230,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: false,
 		diagonal: false,
+		plotted: false,
 	},
 	group: {
 		label: "Group",
@@ -205,6 +243,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: true,
 		shape: false,
 		diagonal: false,
+		plotted: false,
 	},
 };
 
@@ -222,6 +261,8 @@ export const wrapsChildren = (node: SceneNode): boolean =>
 	KINDS[node.kind].wrapsChildren;
 export const isDiagonal = (node: SceneNode): boolean =>
 	KINDS[node.kind].diagonal;
+export const isPlotted = (node: SceneNode): boolean =>
+	KINDS[node.kind].plotted;
 
 /* ------------------------------------------------------------------ */
 /* Automatic layout                                                    */
@@ -288,6 +329,16 @@ export interface SceneNode {
 	 * top-right. Absent on every other kind.
 	 */
 	diagonal?: Diagonal;
+	/**
+	 * A {@link KindSpec.plotted} kind's vertices, relative to its own frame
+	 * origin — so moving the node never touches them.
+	 *
+	 * The frame is exactly their bounding box. Resizing scales them to match;
+	 * see {@link scalePoints}. Absent on every other kind.
+	 */
+	points?: Point[];
+	/** Whether a plotted kind's last point joins back up to its first. */
+	closed?: boolean;
 	props: Partial<Record<PropName, Value>>;
 	/** Present on the container kinds. */
 	children?: SceneNode[];

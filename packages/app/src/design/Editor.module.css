@@ -109,3 +109,29 @@
 .guide[data-guide="y"] {
 	height: 1px;
 }
+
+/* The pen's path so far, plus the segment being placed. Drawn in document
+   coordinates: the svg is a one-pixel anchor at the document origin — zero
+   would switch rendering off — and everything overflows out of it. */
+.pen {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 1px;
+	height: 1px;
+	overflow: visible;
+	pointer-events: none;
+}
+
+.penLine {
+	fill: none;
+	stroke: var(--dc-accent);
+	stroke-width: 1.5;
+	stroke-dasharray: 5 3;
+}
+
+.penPoint {
+	fill: var(--dc-raised);
+	stroke: var(--dc-accent);
+	stroke-width: 1.5;
+}

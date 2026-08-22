@@ -11,6 +11,7 @@ import {
 	propValues,
 	propVar,
 	resolveValue,
+	scalePoints,
 } from "@clingo-design/design-core";
 
 import styles from "./Artboard.module.css";
@@ -36,6 +37,8 @@ const PAINT: Record<PropName, (value: string) => CSSProperties> = {
 interface ShapeSpec {
 	/** Merged into the box before the node's own properties paint over it. */
 	box?: CSSProperties;
+	/** Overrides {@link PAINT} where a kind takes a property somewhere else. */
+	paint?: Partial<Record<PropName, (value: string) => CSSProperties>>;
 	/** Drawn inside the box. */
 	content?: (node: SceneNode, frame: Frame) => ReactNode;
 }
@@ -57,6 +60,13 @@ const SHAPES: Partial<Record<NodeKind, ShapeSpec>> = {
 	line: { content: (node, frame) => <Stroke node={node} frame={frame} /> },
 	arrow: {
 		content: (node, frame) => <Stroke node={node} frame={frame} head />,
+	},
+	path: {
+		// A path's fill belongs to the polygon, not to the box around it: the
+		// box is only the vertices' bounding rectangle and painting it would
+		// show a shape the document does not contain.
+		paint: { fill: (value) => ({ fill: value }) },
+		content: (node, frame) => <Plot node={node} frame={frame} />,
 	},
 };
 
@@ -92,6 +102,37 @@ function Stroke({
 					fill="none"
 				/>
 			) : null}
+		</svg>
+	);
+}
+
+/**
+ * A path's vertices, joined up.
+ *
+ * They are stored against the frame the node was drawn at, but the frame it is
+ * *rendered* at can differ — a live resize, or a stretch under an automatic
+ * layout — so they are scaled into whichever one arrived here.
+ */
+function Plot({ node, frame }: { node: SceneNode; frame: Frame }) {
+	const points = scalePoints(node.points ?? [], node.frame, frame)
+		.map((p) => `${p.x},${p.y}`)
+		.join(" ");
+	if (!points) return null;
+	return (
+		<svg className={styles.stroke} aria-hidden="true">
+			{node.closed ? (
+				<polygon points={points} strokeLinejoin="round" />
+			) : (
+				// An open run of segments is a stroke, not a shape: filling
+				// across the gap between its ends would draw an edge that is
+				// not there. Inline, so it beats the inherited fill.
+				<polyline
+					points={points}
+					style={{ fill: "none" }}
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				/>
+			)}
 		</svg>
 	);
 }
@@ -186,7 +227,8 @@ export const Artboard = memo(function Artboard({
 
 		for (const prop of KINDS[node.kind].props) {
 			const value = resolveValue(context, node.props[prop], propVar(node.id, prop));
-			if (value !== undefined) Object.assign(box, PAINT[prop](value));
+			const paint = shape?.paint?.[prop] ?? PAINT[prop];
+			if (value !== undefined) Object.assign(box, paint(value));
 		}
 
 		return (

@@ -22,9 +22,11 @@ import {
 	isDrawable,
 	isSurface,
 	makeNode,
+	makePath,
 	managedNodes,
 	normaliseFrame,
 	placedNodes,
+	pointsBounds,
 	resizeFrame,
 	resizeSubtree,
 	selectionTargetOf,
@@ -37,6 +39,12 @@ import { Artboard } from "./Artboard";
 import styles from "./Editor.module.css";
 
 export type Tool = "select" | NodeKind;
+
+/**
+ * How near the first point a click must land to close a path, in screen
+ * pixels — divided by the scale, so zooming does not change the target.
+ */
+const CLOSE_RADIUS = 10;
 
 /**
  * What the pointer is currently doing.
@@ -106,9 +114,15 @@ export function Editor({
 	const [gesture, setGesture] = useState<Gesture>({ kind: "none" });
 	/** Absolute frames while a gesture is live. */
 	const [preview, setPreview] = useState<Map<string, Frame> | null>(null);
-	/** Live pointer position, for the marquee and draw rubber bands. */
+	/** Live pointer position, for the marquee, draw and pen rubber bands. */
 	const [current, setCurrent] = useState<Point | null>(null);
 	const [guides, setGuides] = useState<SnapGuide[]>([]);
+	/**
+	 * Points the pen has placed, in canvas coordinates. Null when it is not
+	 * drawing — a path is several clicks, so unlike every other tool it has a
+	 * state that outlives the pointer being down.
+	 */
+	const [pen, setPen] = useState<Point[] | null>(null);
 
 	/**
 	 * Every node's absolute frame, indexed by id.
@@ -157,6 +171,54 @@ export function Editor({
 		return selectionTargetOf(scene.nodes, nodeId)?.id ?? nodeId;
 	}
 
+	/**
+	 * The pen's clicks. Each one extends the run; landing back on the first
+	 * point closes it, which is the only way to get a filled path.
+	 */
+	function placePoint(point: Point) {
+		const points = pen ?? [];
+		const first = points[0];
+		if (
+			points.length > 2 &&
+			Math.hypot(point.x - first.x, point.y - first.y) <
+				CLOSE_RADIUS / getScale()
+		) {
+			finishPath(points, true);
+			return;
+		}
+		setPen([...points, point]);
+		setCurrent(point);
+	}
+
+	/**
+	 * Commits what the pen has, and hands the canvas back to the select tool
+	 * the way every other drawing gesture does.
+	 */
+	function finishPath(points: readonly Point[], closed: boolean) {
+		setPen(null);
+		setCurrent(null);
+		onToolChange("select");
+		// One point is a click, not a path.
+		if (points.length < 2) return;
+
+		const node = makePath(points, closed);
+		const bounds = pointsBounds(points);
+		// Like any other new node: it lands inside whichever surface it was
+		// drawn over, judged by where its middle fell. Read through the ref
+		// because a keypress can end a path several renders after the last one
+		// this closure saw.
+		const now = live.current;
+		const host = bounds
+			? (frameAt(
+					now.scene.nodes,
+					{ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
+					now.universe.solved,
+				)?.node.id ?? null)
+			: null;
+		onSceneChange((prev) => addNodeTo(prev, host, node));
+		onSelectionChange([node.id]);
+	}
+
 	function onPointerDown(event: React.PointerEvent) {
 		if (event.button !== 0) return;
 		// The canvas pans on empty space; anything the editor claims must not
@@ -165,8 +227,11 @@ export function Editor({
 		const point = toCanvas(event);
 
 		if (tool !== "select") {
-			setGesture({ kind: "draw", nodeKind: tool, origin: point });
-			setCurrent(point);
+			if (KINDS[tool].plotted) placePoint(point);
+			else {
+				setGesture({ kind: "draw", nodeKind: tool, origin: point });
+				setCurrent(point);
+			}
 			return;
 		}
 
@@ -229,6 +294,21 @@ export function Editor({
 			id: selected[0].node.id,
 		});
 	}
+
+	// Enter and Escape end an open path. Taken in the capture phase and
+	// stopped there, because the studio's own Escape would otherwise clear the
+	// selection this is about to make.
+	useEffect(() => {
+		if (!pen) return;
+		const key = (event: KeyboardEvent) => {
+			if (event.key !== "Enter" && event.key !== "Escape") return;
+			event.preventDefault();
+			event.stopPropagation();
+			finishPath(pen, false);
+		};
+		window.addEventListener("keydown", key, true);
+		return () => window.removeEventListener("keydown", key, true);
+	}, [pen]);
 
 	/**
 	 * Everything the gesture handlers read but must not re-subscribe for.
@@ -452,6 +532,9 @@ export function Editor({
 			data-role="editor"
 			data-tool={tool}
 			onPointerDown={onPointerDown}
+			// Only while the pen is mid-path: every other tool tracks the
+			// pointer from the window, and only once a button is down.
+			onPointerMove={pen ? (e) => setCurrent(toCanvas(e)) : undefined}
 			onDoubleClick={onDoubleClick}
 			onContextMenu={onContext}
 		>
@@ -529,6 +612,28 @@ export function Editor({
 							))
 						: null}
 				</div>
+			) : null}
+
+			{pen ? (
+				<svg className={styles.pen} aria-hidden="true">
+					<polyline
+						className={styles.penLine}
+						points={[...pen, ...(current ? [current] : [])]
+							.map((p) => `${p.x},${p.y}`)
+							.join(" ")}
+					/>
+					{pen.map((p, i) => (
+						<circle
+							key={`${p.x},${p.y},${i}`}
+							className={styles.penPoint}
+							cx={p.x}
+							cy={p.y}
+							// The first point is the target that closes the path, so it
+							// is the one worth aiming at.
+							r={i === 0 ? 4 : 2.5}
+						/>
+					))}
+				</svg>
 			) : null}
 
 			{marquee ? (

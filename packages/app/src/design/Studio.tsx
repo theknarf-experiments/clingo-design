@@ -61,6 +61,7 @@ const TOOL_KEY: Record<string, string> = {
 	select: "V",
 	frame: "F",
 	shape: "R",
+	path: "P",
 	text: "T",
 };
 

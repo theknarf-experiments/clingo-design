@@ -31,6 +31,7 @@ const GLYPH: Record<SceneNode["kind"], string> = {
 	ellipse: "◯",
 	line: "╱",
 	arrow: "↗",
+	path: "∿",
 	text: "T",
 	group: "▣",
 };

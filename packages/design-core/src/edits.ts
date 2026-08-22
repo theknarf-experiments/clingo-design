@@ -8,7 +8,13 @@
  * Frames are relative to their parent, so an operation on a node needs to say
  * nothing about its descendants: they come along on their own.
  */
-import { type Frame, normaliseFrame } from "./geometry.ts";
+import {
+	type Frame,
+	type Point,
+	normaliseFrame,
+	pointsBounds,
+	scalePoints,
+} from "./geometry.ts";
 import {
 	type AutoLayout,
 	CONSTRAINT_KINDS,
@@ -70,6 +76,8 @@ export function makeNode(
 		name?: string;
 		text?: string;
 		diagonal?: Diagonal;
+		points?: readonly Point[];
+		closed?: boolean;
 	} = {},
 ): SceneNode {
 	const spec = KINDS[kind];
@@ -80,9 +88,33 @@ export function makeNode(
 		frame: normaliseFrame(frame),
 		...(kind === "text" ? { text: options.text ?? "Text" } : {}),
 		...(spec.diagonal ? { diagonal: options.diagonal ?? "down" } : {}),
+		...(spec.plotted
+			? { points: [...(options.points ?? [])], closed: options.closed ?? false }
+			: {}),
 		props: { ...spec.defaults },
 		...(spec.container ? { children: [] } : {}),
 	};
+}
+
+/**
+ * A path through `points`, given in whatever space the pointer produced them.
+ *
+ * The frame becomes their bounding box and the points are stored relative to
+ * it, which is the invariant everything else relies on. They are rounded first
+ * so that frame and points stay on the same whole pixels.
+ */
+export function makePath(
+	points: readonly Point[],
+	closed: boolean,
+	options: { id?: string; name?: string } = {},
+): SceneNode {
+	const whole = points.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+	const bounds = pointsBounds(whole) ?? { x: 0, y: 0, ...KINDS.path.defaultSize };
+	return makeNode("path", bounds, {
+		...options,
+		closed,
+		points: whole.map((p) => ({ x: p.x - bounds.x, y: p.y - bounds.y })),
+	});
 }
 
 /**
@@ -165,6 +197,22 @@ export function moveNodes(
 	};
 }
 
+/**
+ * A node's frame replaced, carrying a plotted kind's points with it.
+ *
+ * The frame *is* the bounding box of those points, so a resize that left them
+ * where they were would leave the two describing different shapes.
+ */
+function refit(node: SceneNode, frame: Frame): SceneNode {
+	const next = normaliseFrame(frame);
+	if (!node.points) return { ...node, frame: next };
+	return {
+		...node,
+		frame: next,
+		points: scalePoints(node.points, node.frame, next),
+	};
+}
+
 /** Replaces frames wholesale — what a drag or resize commits. */
 export function setFrames(
 	scene: Scene,
@@ -175,7 +223,7 @@ export function setFrames(
 		nodes: refreshGroups(
 			mapTree(scene.nodes, (node) => {
 				const next = frames.get(node.id);
-				return next ? { ...node, frame: normaliseFrame(next) } : node;
+				return next ? refit(node, next) : node;
 			}),
 		),
 	};
@@ -372,6 +420,7 @@ function deepCopy(node: SceneNode, offset: number): SceneNode {
 		...node,
 		id: newNodeId(),
 		props: { ...node.props },
+		...(node.points ? { points: node.points.map((p) => ({ ...p })) } : {}),
 		frame: {
 			...node.frame,
 			x: node.frame.x + offset,
