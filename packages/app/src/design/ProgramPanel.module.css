@@ -1,0 +1,74 @@
+.program {
+	display: flex;
+	flex-direction: column;
+	height: 190px;
+}
+
+/* Collapsed: the tab strip alone, so the canvas gets the space back. */
+.program.closed {
+	height: auto;
+}
+
+/* The strip sits below the content, so it needs its own separator — but only
+   when there is content above it; the studio footer already draws the outer
+   border when collapsed. */
+.tabs {
+	align-items: center;
+	padding: 0.35rem 0.75rem;
+}
+
+.program:not(.closed) .tabs {
+	border-top: 1px solid var(--dc-line);
+}
+
+/* Caret on the active tab: down means "click to collapse", up means expand. */
+.caret {
+	display: inline-block;
+	margin-left: 0.4rem;
+	border-left: 4px solid transparent;
+	border-right: 4px solid transparent;
+	border-top: 4px solid currentColor;
+	opacity: 0.55;
+	transform-origin: center;
+	transition: transform 120ms ease;
+}
+
+.program.closed .caret {
+	transform: rotate(180deg);
+}
+
+/* Pushes the status to the right-hand end of the tab strip. */
+.status {
+	margin-left: auto;
+	padding-left: 0.75rem;
+	min-width: 0;
+}
+
+.code {
+	flex: 1;
+	margin: 0;
+	padding: 0.6rem 0.75rem;
+	border: 0;
+	resize: none;
+	overflow: auto;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+	line-height: 1.5;
+	background: var(--dc-sunken);
+	color: inherit;
+	white-space: pre;
+	tab-size: 2;
+}
+
+.readonly {
+	opacity: 0.75;
+}
+
+.error {
+	padding: 0.4rem 0.75rem;
+	background: #dc26261a;
+	color: #dc2626;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+	white-space: pre-wrap;
+}

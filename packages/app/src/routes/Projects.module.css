@@ -1,0 +1,177 @@
+.page {
+	min-height: 100vh;
+	overflow-y: auto;
+	background: var(--dc-sunken);
+}
+
+.inner {
+	max-width: 60rem;
+	margin: 0 auto;
+	padding: 3rem 1.5rem 5rem;
+}
+
+.head h1 {
+	margin: 0;
+	font-size: 1.6rem;
+	letter-spacing: -0.01em;
+}
+
+.tagline {
+	margin: 0.35rem 0 0;
+	opacity: 0.6;
+	font-size: 0.9rem;
+}
+
+.section {
+	margin-top: 2.5rem;
+}
+
+.section h2 {
+	margin: 0 0 0.75rem;
+	font-size: 0.78rem;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	opacity: 0.55;
+}
+
+.count {
+	opacity: 0.5;
+	font-variant-numeric: tabular-nums;
+}
+
+/* ---------- templates ---------- */
+.templates {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+	gap: 0.6rem;
+}
+
+.template {
+	display: flex;
+	flex-direction: column;
+	gap: 0.3rem;
+	padding: 0.9rem;
+	text-align: left;
+	font: inherit;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 10px;
+	cursor: pointer;
+}
+
+.template:hover {
+	border-color: var(--dc-accent);
+}
+
+.templateName {
+	font-weight: 600;
+}
+
+.templateDesc {
+	font-size: 0.82rem;
+	line-height: 1.4;
+	opacity: 0.65;
+}
+
+/* ---------- project list ---------- */
+.list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+}
+
+.row {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.35rem 0.5rem 0.35rem 0.9rem;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 8px;
+}
+
+.row:hover {
+	border-color: var(--dc-accent);
+}
+
+.open {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	align-items: baseline;
+	gap: 0.75rem;
+	padding: 0.4rem 0;
+	background: transparent;
+	border: 0;
+	font: inherit;
+	color: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.name {
+	font-weight: 550;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.when {
+	font-size: 0.76rem;
+	opacity: 0.5;
+	white-space: nowrap;
+}
+
+.renameInput {
+	flex: 1;
+	min-width: 0;
+	padding: 0.4rem 0.5rem;
+	font: inherit;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-accent);
+	border-radius: 5px;
+}
+
+.actions {
+	display: flex;
+	gap: 0.2rem;
+	flex: none;
+}
+
+.action {
+	padding: 0.3rem 0.6rem;
+	font: inherit;
+	font-size: 0.78rem;
+	color: inherit;
+	opacity: 0.6;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 5px;
+	cursor: pointer;
+}
+
+.action:hover {
+	opacity: 1;
+	border-color: var(--dc-line);
+}
+
+.danger {
+	color: #dc2626;
+	opacity: 1;
+	border-color: color-mix(in srgb, #dc2626 40%, transparent);
+}
+
+.empty {
+	margin: 0;
+	padding: 1.5rem;
+	text-align: center;
+	opacity: 0.5;
+	font-size: 0.88rem;
+	border: 1px dashed var(--dc-line);
+	border-radius: 8px;
+}

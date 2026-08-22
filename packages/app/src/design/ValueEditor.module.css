@@ -1,0 +1,163 @@
+.row {
+	padding: 0.4rem 0.5rem 0.3rem;
+	border-radius: 6px;
+	background: var(--dc-sunken);
+}
+
+/* An assignment the solver reports as unsettled earns the accent. */
+.row[data-varying] {
+	outline: 1px solid var(--dc-accent-soft);
+}
+
+.head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 0.5rem;
+}
+
+.label {
+	font-size: 0.72rem;
+	opacity: 0.6;
+}
+
+.count {
+	font-size: 0.66rem;
+	color: var(--dc-accent);
+	font-variant-numeric: tabular-nums;
+}
+
+.alts {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin-top: 0.25rem;
+}
+
+.alt {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px;
+	border: 1px solid transparent;
+	border-radius: 5px;
+}
+
+/* Marks which alternative the artboard on screen is currently showing. */
+.active {
+	border-color: var(--dc-accent);
+	background: color-mix(in srgb, var(--dc-accent) 10%, transparent);
+}
+
+.swatch {
+	flex: none;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	background: transparent;
+	cursor: pointer;
+}
+
+.swatch:disabled {
+	cursor: default;
+	opacity: 0.6;
+}
+
+.dot {
+	flex: none;
+	width: 20px;
+	height: 20px;
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	background: var(--dc-raised);
+}
+
+.text,
+.token {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	align-items: baseline;
+	gap: 0.35rem;
+	padding: 0.15rem 0.35rem;
+	font: inherit;
+	font-size: 0.75rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	box-sizing: border-box;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.resolved {
+	margin-left: auto;
+	opacity: 0.45;
+	font-size: 0.68rem;
+}
+
+.broken {
+	margin-left: auto;
+	color: #dc2626;
+	font-size: 0.68rem;
+}
+
+.link {
+	flex: none;
+	max-width: 5.5rem;
+	padding: 0.15rem 0.2rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.remove {
+	flex: none;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	font: inherit;
+	font-size: 0.9rem;
+	line-height: 1;
+	color: inherit;
+	opacity: 0.5;
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.remove:hover:not(:disabled) {
+	opacity: 1;
+	background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.remove:disabled {
+	opacity: 0.15;
+	cursor: default;
+}
+
+.add {
+	margin-top: 0.2rem;
+	padding: 0.15rem 0.35rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	opacity: 0.55;
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.add:hover {
+	opacity: 1;
+	background: color-mix(in srgb, currentColor 10%, transparent);
+}

@@ -1,0 +1,94 @@
+.variables {
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+}
+
+.head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.5rem;
+}
+
+.hint {
+	font-size: 0.72rem;
+	line-height: 1.4;
+	opacity: 0.5;
+}
+
+.add {
+	padding: 0.15rem 0.25rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.empty {
+	margin: 0;
+	font-size: 0.78rem;
+	opacity: 0.5;
+}
+
+.token {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.tokenHead {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.name {
+	flex: 1;
+	min-width: 0;
+	padding: 0.15rem 0.3rem;
+	font: inherit;
+	font-size: 0.76rem;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+}
+
+.name:focus {
+	background: var(--dc-raised);
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+.type {
+	flex: none;
+	font-size: 0.64rem;
+	opacity: 0.4;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.delete {
+	flex: none;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	font: inherit;
+	line-height: 1;
+	color: inherit;
+	opacity: 0.4;
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.delete:hover {
+	opacity: 1;
+	color: #dc2626;
+}

@@ -1,0 +1,80 @@
+/* Positioned by the studio toolbar; relative only so the menu can anchor. */
+.root {
+	position: relative;
+}
+
+.trigger {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	height: 30px;
+	padding: 0 10px;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 8px;
+	box-shadow: 0 2px 8px rgb(0 0 0 / 0.12);
+	color: inherit;
+	font: inherit;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.trigger:hover {
+	border-color: var(--dc-accent);
+}
+
+.caret {
+	border-left: 4px solid transparent;
+	border-right: 4px solid transparent;
+	border-top: 4px solid currentColor;
+	opacity: 0.55;
+}
+
+.menu {
+	position: absolute;
+	top: calc(100% + 6px);
+	left: 0;
+	display: flex;
+	flex-direction: column;
+	min-width: 180px;
+	padding: 4px;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 8px;
+	box-shadow: 0 4px 16px rgb(0 0 0 / 0.18);
+}
+
+.item {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	width: 100%;
+	padding: 5px 8px;
+	background: transparent;
+	border: 0;
+	border-radius: 5px;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	opacity: 0.8;
+}
+
+.item:hover {
+	background: color-mix(in srgb, currentColor 10%, transparent);
+	opacity: 1;
+}
+
+.itemActive {
+	opacity: 1;
+	background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.itemLabel {
+	font-size: 12px;
+}
+
+.itemHint {
+	font-size: 11px;
+	opacity: 0.55;
+}

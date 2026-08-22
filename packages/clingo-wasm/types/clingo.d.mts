@@ -1,5 +1,5 @@
 /**
- * Hand-written types for the Emscripten glue that clingo's `web` target emits
+ * Hand-written types for the Emscripten glue built from native/CMakeLists.txt
  * (`-sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createClingo`).
  *
  * The `wasm:build` mise task copies this file to `wasm/clingo.d.mts` so that
@@ -15,16 +15,22 @@ export interface ClingoModuleOptions {
 	locateFile?: (path: string, scriptDirectory: string) => string;
 }
 
+export type CType = "number" | "string" | null;
+
 export interface ClingoModule {
 	/**
-	 * Calls the exported `int run(char const *program, char const *options)`.
-	 * Returns clingo's exit code; output arrives via `print`/`printErr`.
+	 * Calls an exported C function. The wasm exports:
+	 *   int  run(char const *program, char const *options)
+	 *   int  cd_open(char const *program, char const *options)
+	 *   int  cd_solve(int id, char const *mode, int models, char const *asms)
+	 *   void cd_close(int id)
+	 *   int  cd_session_count()
 	 */
 	ccall(
-		ident: "run",
-		returnType: "number",
-		argTypes: ["string", "string"],
-		args: [program: string, options: string],
+		ident: string,
+		returnType: CType,
+		argTypes: readonly CType[],
+		args: readonly (string | number)[],
 	): number;
 }
 

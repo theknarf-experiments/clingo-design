@@ -1,0 +1,20 @@
+/* The document lives in canvas space; nodes position themselves within it. */
+.artboard {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	/* Documents define their own colours; never inherit the app's theme. */
+	color: #0f172a;
+	font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.node {
+	box-sizing: border-box;
+}
+
+/* Marks a node whose appearance is not settled across the space. Drawn as an
+   outline so it never shifts the layout it annotates. */
+.varies {
+	outline: 1.5px dashed var(--dc-accent);
+	outline-offset: 1px;
+}

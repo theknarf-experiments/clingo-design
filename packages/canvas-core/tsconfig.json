@@ -5,7 +5,6 @@
 		"module": "ESNext",
 		"moduleResolution": "bundler",
 		"moduleDetection": "force",
-		"types": ["node"],
 
 		"strict": true,
 		"noUnusedLocals": true,
@@ -14,14 +13,7 @@
 
 		"isolatedModules": true,
 		"verbatimModuleSyntax": true,
-		"erasableSyntaxOnly": true,
 		"skipLibCheck": true,
-
-		// Tests import "./index.ts" directly so Node's type stripping can run
-		// them without a build step.
-		"allowImportingTsExtensions": true,
-		// Emit rewrites ./foo.ts -> ./foo.js, so source and output agree.
-		"rewriteRelativeImportExtensions": true,
 		"noEmit": true
 	},
 	"include": ["src"]

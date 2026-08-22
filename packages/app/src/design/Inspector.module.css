@@ -1,0 +1,103 @@
+.inspector {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.inspector h2 {
+	margin: 0;
+	font-size: 0.9rem;
+}
+
+.inspector h3 {
+	margin: 0.6rem 0 0;
+	font-size: 0.7rem;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	opacity: 0.5;
+}
+
+.empty {
+	margin: 0;
+	font-size: 0.8rem;
+	line-height: 1.5;
+	opacity: 0.55;
+}
+
+.empty kbd {
+	padding: 0 4px;
+	border: 1px solid var(--dc-line);
+	border-radius: 3px;
+	font-family: inherit;
+	font-size: 0.75rem;
+}
+
+.name {
+	width: 100%;
+	padding: 0.35rem 0.5rem;
+	font: inherit;
+	font-weight: 600;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid transparent;
+	border-radius: 5px;
+	box-sizing: border-box;
+}
+
+.name:focus {
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+.grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 0.3rem;
+}
+
+.field {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+}
+
+.fieldLabel {
+	font-size: 0.72rem;
+	opacity: 0.55;
+	min-width: 3.2em;
+	text-transform: capitalize;
+}
+
+.number {
+	width: 100%;
+	min-width: 0;
+	padding: 0.25rem 0.4rem;
+	font: inherit;
+	font-size: 0.78rem;
+	font-variant-numeric: tabular-nums;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	box-sizing: border-box;
+}
+
+.text {
+	width: 100%;
+	min-height: 3.5rem;
+	padding: 0.35rem 0.5rem;
+	font: inherit;
+	font-size: 0.8rem;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 5px;
+	box-sizing: border-box;
+	resize: vertical;
+}
+
+.props {
+	display: flex;
+	flex-direction: column;
+	gap: 0.3rem;
+}

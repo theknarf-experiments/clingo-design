@@ -1,0 +1,320 @@
+/**
+ * Rectangle maths for the canvas: hit testing, resize handles and snapping.
+ *
+ * Pure and framework-free, so the tricky parts — which are the ones that make
+ * dragging feel right or wrong — are testable without a browser.
+ */
+export interface Point {
+	x: number;
+	y: number;
+}
+
+/** Position and size, relative to whatever the node is placed in. */
+export interface Frame {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+/** Smallest a node may be dragged down to, in canvas pixels. */
+export const MIN_NODE_SIZE = 4;
+
+/** The eight resize grips, plus the body for moving. */
+export type Handle =
+	| "nw"
+	| "n"
+	| "ne"
+	| "e"
+	| "se"
+	| "s"
+	| "sw"
+	| "w";
+
+export const HANDLES: Handle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+
+export const HANDLE_CURSOR: Record<Handle, string> = {
+	nw: "nwse-resize",
+	n: "ns-resize",
+	ne: "nesw-resize",
+	e: "ew-resize",
+	se: "nwse-resize",
+	s: "ns-resize",
+	sw: "nesw-resize",
+	w: "ew-resize",
+};
+
+export function frameContains(frame: Frame, point: Point): boolean {
+	return (
+		point.x >= frame.x &&
+		point.x <= frame.x + frame.width &&
+		point.y >= frame.y &&
+		point.y <= frame.y + frame.height
+	);
+}
+
+export function framesIntersect(a: Frame, b: Frame): boolean {
+	return (
+		a.x < b.x + b.width &&
+		a.x + a.width > b.x &&
+		a.y < b.y + b.height &&
+		a.y + a.height > b.y
+	);
+}
+
+/** Smallest frame containing all of `frames`, or null when there are none. */
+export function boundsOf(frames: readonly Frame[]): Frame | null {
+	if (frames.length === 0) return null;
+	let minX = Number.POSITIVE_INFINITY;
+	let minY = Number.POSITIVE_INFINITY;
+	let maxX = Number.NEGATIVE_INFINITY;
+	let maxY = Number.NEGATIVE_INFINITY;
+	for (const f of frames) {
+		minX = Math.min(minX, f.x);
+		minY = Math.min(minY, f.y);
+		maxX = Math.max(maxX, f.x + f.width);
+		maxY = Math.max(maxY, f.y + f.height);
+	}
+	return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/** Normalises a drag between two corners into a positive-size frame. */
+export function frameFromPoints(a: Point, b: Point): Frame {
+	return {
+		x: Math.min(a.x, b.x),
+		y: Math.min(a.y, b.y),
+		width: Math.abs(b.x - a.x),
+		height: Math.abs(b.y - a.y),
+	};
+}
+
+/**
+ * Applies a resize by dragging `handle` by (dx, dy).
+ *
+ * Dragging a side past its opposite flips the frame rather than producing a
+ * negative size, which is what every direct-manipulation tool does.
+ */
+export function resizeFrame(
+	start: Frame,
+	handle: Handle,
+	dx: number,
+	dy: number,
+): Frame {
+	let { x, y, width, height } = start;
+
+	if (handle.includes("w")) {
+		x = start.x + dx;
+		width = start.width - dx;
+	}
+	if (handle.includes("e")) {
+		width = start.width + dx;
+	}
+	if (handle.includes("n")) {
+		y = start.y + dy;
+		height = start.height - dy;
+	}
+	if (handle.includes("s")) {
+		height = start.height + dy;
+	}
+
+	if (width < 0) {
+		x += width;
+		width = -width;
+	}
+	if (height < 0) {
+		y += height;
+		height = -height;
+	}
+	return { x, y, width, height };
+}
+
+/** Rounds to whole pixels and enforces a minimum size. */
+export function normaliseFrame(frame: Frame): Frame {
+	return {
+		x: Math.round(frame.x),
+		y: Math.round(frame.y),
+		width: Math.max(MIN_NODE_SIZE, Math.round(frame.width)),
+		height: Math.max(MIN_NODE_SIZE, Math.round(frame.height)),
+	};
+}
+
+/* ------------------------------------------------------------------ */
+/* Snapping                                                            */
+/* ------------------------------------------------------------------ */
+
+export interface SnapGuide {
+	axis: "x" | "y";
+	/** Canvas coordinate the guide sits on. */
+	at: number;
+	/** Span to draw, so the guide reaches both the moved and matched edges. */
+	from: number;
+	to: number;
+}
+
+export interface SnapResult {
+	frame: Frame;
+	guides: SnapGuide[];
+}
+
+export interface SnapOptions {
+	/** Frames to align against — everything except what is being dragged. */
+	targets: readonly Frame[];
+	/**
+	 * The enclosing frame, so its edges and centre attract too. Omitted when
+	 * a node sits directly on the canvas.
+	 */
+	container?: Frame;
+	/** Screen-independent tolerance, in canvas pixels. */
+	threshold?: number;
+	/** Fall back to this grid when nothing else is near. 0 disables. */
+	grid?: number;
+}
+
+function edgesOf(frame: Frame) {
+	return {
+		x: [frame.x, frame.x + frame.width / 2, frame.x + frame.width],
+		y: [frame.y, frame.y + frame.height / 2, frame.y + frame.height],
+	};
+}
+
+/**
+ * Nudges `frame` onto nearby edges and centres.
+ *
+ * Object snapping is tried first and only falls back to the grid when nothing
+ * is in range, so aligning to a neighbour always beats aligning to nothing.
+ * `moving` controls which of the frame's own edges may be snapped: when
+ * resizing, only the dragged side should move.
+ */
+export function snapFrame(
+	frame: Frame,
+	options: SnapOptions,
+	moving: { left?: boolean; right?: boolean; top?: boolean; bottom?: boolean } = {
+		left: true,
+		right: true,
+		top: true,
+		bottom: true,
+	},
+): SnapResult {
+	const threshold = options.threshold ?? 6;
+	const grid = options.grid ?? 8;
+	const guides: SnapGuide[] = [];
+
+	const candidatesX: number[] = [];
+	const candidatesY: number[] = [];
+	if (options.container) {
+		const c = options.container;
+		candidatesX.push(c.x, c.x + c.width / 2, c.x + c.width);
+		candidatesY.push(c.y, c.y + c.height / 2, c.y + c.height);
+	}
+	for (const target of options.targets) {
+		const e = edgesOf(target);
+		candidatesX.push(...e.x);
+		candidatesY.push(...e.y);
+	}
+
+	const own = edgesOf(frame);
+	// Which of our own edges are eligible, as [value, offsetFromFrameOrigin].
+	const ownX: Array<[number, number]> = [];
+	if (moving.left !== false) ownX.push([own.x[0], 0]);
+	if (moving.left !== false && moving.right !== false)
+		ownX.push([own.x[1], frame.width / 2]);
+	if (moving.right !== false) ownX.push([own.x[2], frame.width]);
+
+	const ownY: Array<[number, number]> = [];
+	if (moving.top !== false) ownY.push([own.y[0], 0]);
+	if (moving.top !== false && moving.bottom !== false)
+		ownY.push([own.y[1], frame.height / 2]);
+	if (moving.bottom !== false) ownY.push([own.y[2], frame.height]);
+
+	function best(
+		edges: ReadonlyArray<[number, number]>,
+		candidates: readonly number[],
+	): { delta: number; at: number } | null {
+		let found: { delta: number; at: number } | null = null;
+		for (const [value] of edges) {
+			for (const candidate of candidates) {
+				const delta = candidate - value;
+				if (Math.abs(delta) > threshold) continue;
+				if (!found || Math.abs(delta) < Math.abs(found.delta)) {
+					found = { delta, at: candidate };
+				}
+			}
+		}
+		return found;
+	}
+
+	const next = { ...frame };
+	const snapX = best(ownX, candidatesX);
+	const snapY = best(ownY, candidatesY);
+
+	if (snapX) {
+		applyDelta(next, "x", snapX.delta, moving);
+		const span = options.container;
+		guides.push({
+			axis: "x",
+			at: snapX.at,
+			from: Math.min(next.y, span?.y ?? next.y),
+			to: Math.max(next.y + next.height, span ? span.y + span.height : next.y + next.height),
+		});
+	} else if (grid > 0) {
+		applyDelta(next, "x", roundTo(next.x, grid) - next.x, moving);
+	}
+
+	if (snapY) {
+		applyDelta(next, "y", snapY.delta, moving);
+		const span = options.container;
+		guides.push({
+			axis: "y",
+			at: snapY.at,
+			from: Math.min(next.x, span?.x ?? next.x),
+			to: Math.max(next.x + next.width, span ? span.x + span.width : next.x + next.width),
+		});
+	} else if (grid > 0) {
+		applyDelta(next, "y", roundTo(next.y, grid) - next.y, moving);
+	}
+
+	return { frame: next, guides };
+}
+
+function roundTo(value: number, step: number): number {
+	return Math.round(value / step) * step;
+}
+
+/** Moving both edges translates; moving one edge resizes. */
+function applyDelta(
+	frame: Frame,
+	axis: "x" | "y",
+	delta: number,
+	moving: { left?: boolean; right?: boolean; top?: boolean; bottom?: boolean },
+): void {
+	if (delta === 0) return;
+	if (axis === "x") {
+		const both = moving.left !== false && moving.right !== false;
+		if (both) frame.x += delta;
+		else if (moving.left !== false) {
+			frame.x += delta;
+			frame.width -= delta;
+		} else if (moving.right !== false) {
+			frame.width += delta;
+		}
+	} else {
+		const both = moving.top !== false && moving.bottom !== false;
+		if (both) frame.y += delta;
+		else if (moving.top !== false) {
+			frame.y += delta;
+			frame.height -= delta;
+		} else if (moving.bottom !== false) {
+			frame.height += delta;
+		}
+	}
+}
+
+/** Which frame edges a handle drags, for {@link snapFrame}. */
+export function handleEdges(handle: Handle) {
+	return {
+		left: handle.includes("w"),
+		right: handle.includes("e"),
+		top: handle.includes("n"),
+		bottom: handle.includes("s"),
+	};
+}

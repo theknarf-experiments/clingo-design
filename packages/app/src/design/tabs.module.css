@@ -1,0 +1,24 @@
+/* Shared tab/segmented-button styling: used by the Studio's sidebar tabs and
+   the ProgramPanel's tabs, which look and behave the same. */
+
+.bar {
+	display: flex;
+	gap: 0.25rem;
+}
+
+.button {
+	font: inherit;
+	padding: 0.3rem 0.7rem;
+	border-radius: 5px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: inherit;
+	opacity: 0.6;
+	cursor: pointer;
+}
+
+.button.active {
+	opacity: 1;
+	border-color: var(--dc-line);
+	background: var(--dc-raised);
+}

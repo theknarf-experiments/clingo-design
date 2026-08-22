@@ -1,0 +1,111 @@
+/* Fills the canvas layer; the document positions itself inside it, in the same
+   coordinate space, so pointer maths and rendering cannot drift. */
+.surface {
+	position: absolute;
+	inset: 0;
+	touch-action: none;
+}
+
+/* Holds the document and every overlay, shifted so document coordinates and
+   screen coordinates line up inside it. */
+.content {
+	position: absolute;
+	width: 0;
+	height: 0;
+}
+
+/* An artboard's name tag, above and outside the frame like a design tool. */
+.frameLabel {
+	position: absolute;
+	transform: translateY(-100%);
+	margin-top: -4px;
+	padding: 1px 4px;
+	font: inherit;
+	font-size: 11px;
+	line-height: 1.3;
+	color: inherit;
+	opacity: 0.55;
+	background: transparent;
+	border: 0;
+	border-radius: 3px;
+	white-space: nowrap;
+	cursor: default;
+}
+
+.frameLabel:hover {
+	opacity: 1;
+}
+
+.frameLabel[data-selected] {
+	opacity: 1;
+	color: var(--dc-accent);
+	font-weight: 600;
+}
+
+.outline {
+	position: absolute;
+	pointer-events: none;
+	outline: 1px solid var(--dc-accent);
+	outline-offset: 0;
+}
+
+/* A group reads as one object, so its outline is dashed to distinguish it
+   from a leaf selection. */
+.groupOutline {
+	outline-style: dashed;
+}
+
+.handles {
+	position: absolute;
+	pointer-events: none;
+	outline: 1px solid var(--dc-accent);
+}
+
+.handle {
+	position: absolute;
+	width: 9px;
+	height: 9px;
+	margin: -5px 0 0 -5px;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-accent);
+	border-radius: 2px;
+	pointer-events: auto;
+}
+
+.nw { left: 0; top: 0; }
+.n  { left: 50%; top: 0; }
+.ne { left: 100%; top: 0; }
+.e  { left: 100%; top: 50%; }
+.se { left: 100%; top: 100%; }
+.s  { left: 50%; top: 100%; }
+.sw { left: 0; top: 100%; }
+.w  { left: 0; top: 50%; }
+
+.marquee {
+	position: absolute;
+	pointer-events: none;
+	border: 1px solid var(--dc-accent);
+	background: color-mix(in srgb, var(--dc-accent) 12%, transparent);
+}
+
+.drawing {
+	position: absolute;
+	pointer-events: none;
+	border: 1px dashed var(--dc-accent);
+	background: color-mix(in srgb, var(--dc-accent) 8%, transparent);
+}
+
+/* Alignment guides, drawn only while a snap is active. */
+.guide {
+	position: absolute;
+	pointer-events: none;
+	background: #f43f5e;
+}
+
+.guide[data-guide="x"] {
+	width: 1px;
+}
+
+.guide[data-guide="y"] {
+	height: 1px;
+}

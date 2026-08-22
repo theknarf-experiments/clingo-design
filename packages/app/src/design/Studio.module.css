@@ -1,0 +1,178 @@
+.studio {
+	display: grid;
+	grid-template-rows: minmax(0, 1fr) auto;
+	height: 100vh;
+	font-size: 14px;
+}
+
+.body {
+	display: grid;
+	grid-template-columns: 190px minmax(0, 1fr) 260px;
+	min-height: 0;
+}
+
+.side {
+	overflow-y: auto;
+	padding: 0.6rem;
+}
+
+/* The right sidebar keeps its tabs pinned and scrolls only the panel. */
+.right {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	padding: 0;
+	border-left: 1px solid var(--dc-line);
+}
+
+.sideTabs {
+	flex: none;
+	padding: 0.45rem 0.5rem;
+	border-bottom: 1px solid var(--dc-line);
+}
+
+.sidePanel {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 0.6rem;
+}
+
+.badge {
+	margin-left: 0.35rem;
+	padding: 0 4px;
+	border-radius: 999px;
+	background: color-mix(in srgb, currentColor 16%, transparent);
+	font-size: 10px;
+	font-variant-numeric: tabular-nums;
+}
+
+.left {
+	border-right: 1px solid var(--dc-line);
+}
+
+/* Positioning context for the canvas and the controls floating over it. */
+.main {
+	position: relative;
+	overflow: hidden;
+	min-height: 0;
+}
+
+/* Floating cluster over the canvas: back link + project name + view picker. */
+.toolbar {
+	position: absolute;
+	top: 12px;
+	left: 12px;
+	right: 12px;
+	z-index: 50;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+	pointer-events: none;
+}
+
+/* Only the controls take pointer events; the strip itself must let drags
+   through to the canvas beneath it. */
+.toolbar > * {
+	pointer-events: auto;
+}
+
+.tools {
+	display: flex;
+	gap: 2px;
+	padding: 2px;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 8px;
+	box-shadow: 0 2px 8px rgb(0 0 0 / 0.12);
+}
+
+.tool {
+	height: 26px;
+	padding: 0 9px;
+	font: inherit;
+	font-size: 12px;
+	color: inherit;
+	background: transparent;
+	border: 0;
+	border-radius: 6px;
+	cursor: pointer;
+	opacity: 0.7;
+}
+
+.tool:hover:not(:disabled) {
+	opacity: 1;
+	background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.tool:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+
+.toolActive {
+	opacity: 1;
+	background: color-mix(in srgb, var(--dc-accent) 22%, transparent);
+}
+
+/* One copy of the document, positioned in canvas space. */
+.placed {
+	position: absolute;
+}
+
+.copy {
+	position: absolute;
+	width: 0;
+	height: 0;
+}
+
+.caption {
+	padding-top: 6px;
+	font-size: 12px;
+	opacity: 0.6;
+	white-space: nowrap;
+}
+
+.back {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	height: 30px;
+	padding: 0 10px;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 8px;
+	box-shadow: 0 2px 8px rgb(0 0 0 / 0.12);
+	color: inherit;
+	font-size: 12px;
+	text-decoration: none;
+}
+
+.back:hover {
+	border-color: var(--dc-accent);
+}
+
+.projectName {
+	max-width: 16rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 550;
+}
+
+/* Sits over the canvas rather than replacing it, so the camera survives a
+   transient empty result. */
+.empty {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	opacity: 0.5;
+	pointer-events: none;
+}
+
+.foot {
+	border-top: 1px solid var(--dc-line);
+}

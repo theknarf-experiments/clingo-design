@@ -39,15 +39,16 @@ git clone --recursive --depth 1 --branch "$CLINGO_VERSION" \
 description = "Compile clingo to wasm/clingo.mjs + wasm/clingo.wasm"
 depends = ["wasm:fetch"]
 dir = "{{config_root}}"
-sources = ["mise.toml", "types/clingo.d.mts", "vendor/clingo/CMakeLists.txt"]
+sources = ["mise.toml", "types/clingo.d.mts", "native/*", "vendor/clingo/CMakeLists.txt"]
 outputs = ["wasm/clingo.mjs", "wasm/clingo.wasm", "wasm/clingo.d.mts"]
 run = """
 set -euo pipefail
 
 # Python, Lua and threads are all off: none of them work in this target.
 echo "==> Configuring"
-emcmake cmake -S vendor/clingo -B .build -G Ninja \
-	-DCLINGO_BUILD_WEB=On \
+emcmake cmake -S native -B .build -G Ninja \
+	-DCLINGO_VENDOR_DIR="$PWD/vendor/clingo" \
+	-DCLINGO_BUILD_WEB=Off \
 	-DCLINGO_BUILD_WITH_PYTHON=Off \
 	-DCLINGO_BUILD_WITH_LUA=Off \
 	-DCLINGO_BUILD_SHARED=Off \
@@ -57,10 +58,10 @@ emcmake cmake -S vendor/clingo -B .build -G Ninja \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_CXX_FLAGS="-fexceptions" \
 	-DCMAKE_CXX_FLAGS_RELEASE="-Os -DNDEBUG" \
-	-DCMAKE_EXE_LINKER_FLAGS="-fexceptions -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createClingo -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=web,worker,node -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 --no-entry"
+	-DCMAKE_EXE_LINKER_FLAGS="-fexceptions -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createClingo -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=web,worker,node -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sSTACK_SIZE=16MB --no-entry"
 
 echo "==> Building"
-cmake --build .build --target web
+cmake --build .build --target clingo_design
 
 # Emscripten names the wasm after the JS basename, so the .js -> .mjs rename
 # keeps the internal "clingo.wasm" reference valid.

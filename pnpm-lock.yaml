@@ -17,9 +17,15 @@ importers:
 
   packages/app:
     dependencies:
+      '@clingo-design/canvas':
+        specifier: workspace:*
+        version: link:../canvas
       '@clingo-design/clingo-wasm':
         specifier: workspace:*
         version: link:../clingo-wasm
+      '@clingo-design/design-core':
+        specifier: workspace:*
+        version: link:../design-core
       react:
         specifier: ^19.2.8
         version: 19.2.8
@@ -46,7 +52,45 @@ importers:
         specifier: ^8.2.2
         version: 8.2.2(@types/node@26.2.0)
 
+  packages/canvas:
+    dependencies:
+      '@clingo-design/canvas-core':
+        specifier: workspace:*
+        version: link:../canvas-core
+      react:
+        specifier: ^19.2.0
+        version: 19.2.8
+    devDependencies:
+      '@types/react':
+        specifier: ^19.2.18
+        version: 19.2.18
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vite:
+        specifier: ^8.2.2
+        version: 8.2.2(@types/node@26.2.0)
+
+  packages/canvas-core:
+    devDependencies:
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
   packages/clingo-wasm:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/design-core:
+    dependencies:
+      '@clingo-design/clingo-wasm':
+        specifier: workspace:*
+        version: link:../clingo-wasm
     devDependencies:
       '@types/node':
         specifier: ^26.2.0

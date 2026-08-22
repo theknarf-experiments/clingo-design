@@ -1,0 +1,23 @@
+{
+  "name": "@clingo-design/canvas",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@clingo-design/canvas-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0"
+  }
+}

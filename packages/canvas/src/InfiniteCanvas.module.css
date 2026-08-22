@@ -1,0 +1,121 @@
+/* Colours come from the app's --dc-* theme tokens so the canvas follows
+   light/dark; the upstream copy hardcoded a light palette. */
+
+.viewport {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	background: var(--dc-sunken);
+	/* Two-finger pinch is handled by the canvas; stop the browser turning it
+	   into page zoom / scroll. */
+	touch-action: none;
+}
+.grab {
+	cursor: grab;
+}
+.grabbing {
+	cursor: grabbing;
+}
+
+/* Dot grid — size + position are set inline from the camera so the dots track
+   pan/zoom. Purely visual; events fall through. */
+.grid {
+	position: absolute;
+	inset: 0;
+	background-image: radial-gradient(circle, var(--dc-dot) 1px, transparent 1.5px);
+	pointer-events: none;
+}
+
+/* `will-change` is set inline: `transform` while a gesture is active, `auto`
+   once it settles so content re-rasterizes crisply at the new scale. */
+.transform {
+	position: absolute;
+	top: 0;
+	left: 0;
+	transform-origin: 0 0;
+}
+
+.controls {
+	position: absolute;
+	bottom: 12px;
+	right: calc(12px + var(--canvas-right-inset, 0px));
+	z-index: 50;
+	transition: right 0.12s ease;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 8px;
+	box-shadow: 0 2px 8px rgb(0 0 0 / 0.12);
+}
+
+.ctrlBtn {
+	min-width: 30px;
+	height: 26px;
+	padding: 0 8px;
+	background: transparent;
+	border: 0;
+	border-radius: 5px;
+	color: inherit;
+	opacity: 0.75;
+	font-size: 12px;
+	font-family: inherit;
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+}
+.ctrlBtn:hover {
+	background: color-mix(in srgb, currentColor 10%, transparent);
+	opacity: 1;
+}
+
+.zoomWrap {
+	position: relative;
+}
+
+.zoomMenu {
+	position: absolute;
+	bottom: calc(100% + 6px);
+	left: 50%;
+	transform: translateX(-50%);
+	display: flex;
+	flex-direction: column;
+	min-width: 82px;
+	padding: 4px;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 8px;
+	box-shadow: 0 4px 16px rgb(0 0 0 / 0.18);
+}
+
+.zoomItem {
+	display: block;
+	width: 100%;
+	padding: 4px 10px;
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	color: inherit;
+	opacity: 0.75;
+	font-size: 12px;
+	font-family: inherit;
+	text-align: left;
+	white-space: nowrap;
+	cursor: pointer;
+}
+.zoomItem:hover {
+	background: color-mix(in srgb, currentColor 10%, transparent);
+	opacity: 1;
+}
+.zoomItemActive {
+	composes: zoomItem;
+	opacity: 1;
+	background: color-mix(in srgb, currentColor 14%, transparent);
+}
+/* Separates the actions (fit / zoom in / out) from the zoom presets below. */
+.zoomDivider {
+	height: 1px;
+	margin: 4px 2px;
+	background: var(--dc-line);
+}
