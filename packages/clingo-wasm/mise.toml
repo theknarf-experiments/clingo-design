@@ -16,6 +16,8 @@
 
 [env]
 CLINGO_VERSION = "v5.8.2"
+# clingo-lpx adds linear arithmetic over rationals as a theory propagator.
+CLINGO_LPX_VERSION = "v1.3.0"
 
 [tasks."wasm:fetch"]
 description = "Clone the pinned clingo source into vendor/"
@@ -35,11 +37,37 @@ git clone --recursive --depth 1 --branch "$CLINGO_VERSION" \
 	https://github.com/potassco/clingo.git vendor/clingo
 """
 
+[tasks."wasm:fetch-lpx"]
+description = "Clone the pinned clingo-lpx source into vendor/"
+dir = "{{config_root}}"
+sources = ["mise.toml"]
+outputs = ["vendor/clingo-lpx/libclingo-lpx/clingo-lpx.h"]
+run = """
+set -euo pipefail
+if [ -e vendor/clingo-lpx/libclingo-lpx/clingo-lpx.h ]; then
+	echo "==> Using existing clingo-lpx checkout at vendor/clingo-lpx"
+	exit 0
+fi
+echo "==> Fetching clingo-lpx $CLINGO_LPX_VERSION"
+rm -rf vendor/clingo-lpx
+mkdir -p vendor
+git clone --depth 1 --branch "$CLINGO_LPX_VERSION" \
+	https://github.com/potassco/clingo-lpx.git vendor/clingo-lpx
+# Only imath: the other submodule is Catch2, which we never build.
+git -C vendor/clingo-lpx submodule update --init --depth 1 third_party/imath
+"""
+
 [tasks."wasm:build"]
 description = "Compile clingo to wasm/clingo.mjs + wasm/clingo.wasm"
-depends = ["wasm:fetch"]
+depends = ["wasm:fetch", "wasm:fetch-lpx"]
 dir = "{{config_root}}"
-sources = ["mise.toml", "types/clingo.d.mts", "native/*", "vendor/clingo/CMakeLists.txt"]
+sources = [
+	"mise.toml",
+	"types/clingo.d.mts",
+	"native/*",
+	"vendor/clingo/CMakeLists.txt",
+	"vendor/clingo-lpx/libclingo-lpx/clingo-lpx.h",
+]
 outputs = ["wasm/clingo.mjs", "wasm/clingo.wasm", "wasm/clingo.d.mts"]
 run = """
 set -euo pipefail
@@ -48,6 +76,7 @@ set -euo pipefail
 echo "==> Configuring"
 emcmake cmake -S native -B .build -G Ninja \
 	-DCLINGO_VENDOR_DIR="$PWD/vendor/clingo" \
+	-DCLINGO_LPX_VENDOR_DIR="$PWD/vendor/clingo-lpx" \
 	-DCLINGO_BUILD_WEB=Off \
 	-DCLINGO_BUILD_WITH_PYTHON=Off \
 	-DCLINGO_BUILD_WITH_LUA=Off \

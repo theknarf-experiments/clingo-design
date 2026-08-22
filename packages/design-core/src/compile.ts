@@ -56,6 +56,15 @@ export const CONTRACT = `% Predicates you can rely on:
 %   hidden(N)                   assert to remove a node
 %   visible(N)                  derived: node(N), not hidden(N)
 %
+% Linear arithmetic (clingo-lpx) is available too. Variables here are not
+% atoms: they take values from a simplex solver, reported as __lpx(V,"N").
+% Values are exact rationals, and a constraint may relate any number of them —
+% &sum{ 2*c; -l; -r } = 0 centres c between l and r whatever their width.
+%
+%   &sum{ x; -y } >= 16.        x is at least 16 past y
+%   &dom{ 0..960 } = x.         bound a variable
+%   &minimize{ x }.             rank models by it
+%
 % Examples:
 %   :- resolved(prop(card,fill), C), resolved(prop(badge,fill), C).
 %   :- frame(A,x,X), frame(B,x,X), child(P,A), child(P,B), A != B.`;

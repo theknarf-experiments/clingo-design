@@ -293,3 +293,121 @@ test("a large program grounds and solves without overflowing the stack", async (
 		assert.equal(out.models.length, 3);
 	});
 });
+
+/* ------------------------------------------------------------------ */
+/* clingo-lpx: linear arithmetic over rationals                        */
+/* ------------------------------------------------------------------ */
+
+/** Theory variable values, as `name=value`, from one model's symbols. */
+function values(atoms: readonly string[]): string[] {
+	return atoms
+		.map((a) => /^__lpx\((.+),"(.*)"\)$/.exec(a))
+		.filter((m): m is RegExpExecArray => m !== null)
+		.map((m) => `${m[1]}=${m[2]}`)
+		.sort();
+}
+
+test("registering the theory leaves ordinary programs alone", async () => {
+	await withSession("a. b :- a. #show a/0. #show b/0.", async (session) => {
+		const out = await session.solve({ models: 0 });
+		assert.equal(out.result, "SATISFIABLE");
+		assert.deepEqual(out.models, [["a", "b"]]);
+	});
+});
+
+test("a linear constraint is solved and its values come back with the model", async () => {
+	await withSession(
+		`&sum{ x; -y } >= 16.
+		 &sum{ x } <= 100.
+		 &sum{ y } >= 0.`,
+		async (session) => {
+			const out = await session.solve({ models: 0 });
+			assert.equal(out.result, "SATISFIABLE");
+			const [x, y] = [values(out.models[0])[0], values(out.models[0])[1]];
+			assert.match(x, /^x=/);
+			assert.match(y, /^y=/);
+			const [nx, ny] = [Number(x.slice(2)), Number(y.slice(2))];
+			assert.ok(nx - ny >= 16 && nx <= 100 && ny >= 0, `got ${x} ${y}`);
+		},
+	);
+});
+
+test("three variables in one constraint — beyond difference logic", async () => {
+	// Centring when the width is itself a variable is a *linear* constraint,
+	// not a difference constraint: it relates three unknowns at once.
+	await withSession(
+		`&sum{ l } = 0.
+		 &sum{ r } = 300.
+		 &sum{ 2*c; -l; -r } = 0.`,
+		async (session) => {
+			const out = await session.solve({ models: 0 });
+			assert.equal(out.result, "SATISFIABLE");
+			assert.deepEqual(values(out.models[0]), ["c=150", "l=0", "r=300"]);
+		},
+	);
+});
+
+test("rational answers are exact rather than rounded", async () => {
+	await withSession("&sum{ 3*x } = 1.", async (session) => {
+		const out = await session.solve({ models: 0 });
+		assert.deepEqual(values(out.models[0]), ["x=1/3"]);
+	});
+});
+
+test("an unsatisfiable system is unsatisfiable", async () => {
+	await withSession("&sum{ x } >= 10. &sum{ x } <= 5.", async (session) => {
+		assert.equal((await session.solve()).result, "UNSATISFIABLE");
+	});
+});
+
+test("a choice drives the arithmetic, and values do not leak between models", async () => {
+	// Two answer sets, each with its own solution to the equations. The values
+	// are read from the propagator per model rather than accumulated onto it,
+	// which is the whole reason this assertion can be exact.
+	await withSession(
+		`gap(8). gap(24).
+		 1 { chosen(G) : gap(G) } 1.
+		 &sum{ a } = 0.
+		 &sum{ b; -a } = G :- chosen(G).
+		 #show chosen/1.`,
+		async (session) => {
+			const out = await session.solve({ models: 0 });
+			assert.equal(out.models.length, 2);
+			const byGap = Object.fromEntries(
+				out.models.map((m) => [
+					m.find((a) => a.startsWith("chosen")),
+					values(m),
+				]),
+			);
+			assert.deepEqual(byGap["chosen(8)"], ["a=0", "b=8"]);
+			assert.deepEqual(byGap["chosen(24)"], ["a=0", "b=24"]);
+		},
+	);
+});
+
+test("theory constraints respond to assumptions like anything else", async () => {
+	await withSession(
+		`{ tight }.
+		 &sum{ w } >= 100.
+		 &sum{ w } <= 400.
+		 &sum{ w } <= 120 :- tight.
+		 #show tight/0.`,
+		async (session) => {
+			const loose = await session.solve({
+				models: 1,
+				assumptions: [{ atom: "tight", sign: false }],
+			});
+			assert.equal(loose.result, "SATISFIABLE");
+			const relaxed = Number(values(loose.models[0])[0].slice(2));
+			assert.ok(relaxed >= 100 && relaxed <= 400);
+
+			const tight = await session.solve({
+				models: 1,
+				assumptions: [{ atom: "tight" }],
+			});
+			assert.equal(tight.result, "SATISFIABLE");
+			const bounded = Number(values(tight.models[0])[0].slice(2));
+			assert.ok(bounded >= 100 && bounded <= 120, `got w=${bounded}`);
+		},
+	);
+});

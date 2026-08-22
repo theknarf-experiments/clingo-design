@@ -12,8 +12,20 @@
 //   * an unsatisfiable solve returns its *core*: the subset of the caller's
 //     assumptions that actually conflict.
 //
+// clingo-lpx is registered on every session, adding linear arithmetic over
+// rationals through clingo's theory interface. Its variables are not stable
+// model atoms, so their values cannot appear in an answer set on their own.
+// They are read out of the propagator per model and appended to that model's
+// symbols as `__lpx(Var,"Value")`, so callers see one uniform channel.
+//
+// Deliberately not `clingolpx_on_model`, which is the obvious way to do this:
+// it calls `Model::extend`, whose symbols accumulate across the models of one
+// solve handle, so the second model comes back carrying the first one's values
+// as well. Reading the assignment directly is per-thread and current.
+//
 // Results are printed to stdout as one line of JSON, which the Emscripten
 // runtime routes to Module.print.
+#include <clingo-lpx.h>
 #include <clingo.hh>
 
 #include <cstdio>
@@ -27,10 +39,37 @@ using namespace Clingo;
 
 namespace {
 
+//! Rewrites statements through clingo-lpx before handing them to the builder.
+//!
+//! Theory atoms have to be transformed before grounding, so the program cannot
+//! simply be `add`ed as text the way it was before.
+struct Rewriter {
+    clingolpx_theory_t *theory;
+    clingo_program_builder_t *builder;
+
+    static bool add(clingo_ast_t *stm, void *data) {
+        return clingo_program_builder_add(static_cast<clingo_program_builder_t *>(data), stm);
+    }
+
+    static bool rewrite(clingo_ast_t *stm, void *data) {
+        auto *self = static_cast<Rewriter *>(data);
+        return clingolpx_rewrite_ast(self->theory, stm, add, self->builder);
+    }
+};
+
 struct Session {
     explicit Session(std::vector<char const *> const &args)
-        : ctl{StringSpan{args.data(), args.size()}} {}
+        : ctl{StringSpan{args.data(), args.size()}} {
+        Detail::handle_error(clingolpx_create(&lpx));
+    }
+    ~Session() {
+        if (lpx != nullptr) { clingolpx_destroy(lpx); }
+    }
+    Session(Session const &) = delete;
+    Session &operator=(Session const &) = delete;
+
     Control ctl;
+    clingolpx_theory_t *lpx{nullptr};
 };
 
 std::map<int, std::unique_ptr<Session>> g_sessions;
@@ -109,8 +148,20 @@ int cd_open(char const *program, char const *options) {
         for (auto const &part : parts) { argv.push_back(part.c_str()); }
 
         std::unique_ptr<Session> session(new Session(argv));
-        session->ctl.add("base", {}, program);
-        session->ctl.ground({{"base", {}}});
+        Control &ctl = session->ctl;
+
+        // Registering first: this is what installs the propagator and adds the
+        // `#theory lp` definition the program is then parsed against.
+        Detail::handle_error(clingolpx_register(session->lpx, ctl.to_c()));
+
+        AST::with_builder(ctl, [&](AST::ProgramBuilder &builder) {
+            Rewriter rewriter{session->lpx, builder.to_c()};
+            Detail::handle_error(clingo_ast_parse_string(
+                program, Rewriter::rewrite, &rewriter, ctl.to_c(), nullptr, nullptr, 0));
+        });
+
+        ctl.ground({{"base", {}}});
+        Detail::handle_error(clingolpx_prepare(session->lpx, ctl.to_c()));
 
         int id = g_next_id++;
         g_sessions[id] = std::move(session);
@@ -208,10 +259,29 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
                     first_model = false;
                     models_json += "[";
                     bool first_symbol = true;
-                    for (auto const &sym : model.symbols(ShowType::Shown)) {
+                    auto put = [&](std::string const &text) {
                         if (!first_symbol) { models_json += ","; }
                         first_symbol = false;
-                        quote(sym.to_string(), models_json);
+                        quote(text, models_json);
+                    };
+                    for (auto const &sym : model.symbols(ShowType::Shown)) {
+                        put(sym.to_string());
+                    }
+                    // Theory variables, in the same shape the clingo-lpx
+                    // binary prints them. A String symbol renders with its
+                    // quotes, which is exactly the term we want.
+                    uint32_t thread = model.thread_id();
+                    size_t index = 0;
+                    clingolpx_assignment_begin(session->lpx, thread, &index);
+                    while (clingolpx_assignment_next(session->lpx, thread, &index)) {
+                        clingolpx_value_t value;
+                        clingolpx_assignment_get_value(session->lpx, thread, index, &value);
+                        std::string term = "__lpx(";
+                        term += Symbol{clingolpx_get_symbol(session->lpx, index)}.to_string();
+                        term += ",";
+                        term += Symbol{value.symbol}.to_string();
+                        term += ")";
+                        put(term);
                     }
                     models_json += "]";
                 }
