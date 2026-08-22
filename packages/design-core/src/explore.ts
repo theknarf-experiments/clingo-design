@@ -73,12 +73,37 @@ export interface Exploration {
 	costs: number[];
 }
 
-/** Thrown when the program admits no universes at all. */
+/**
+ * Thrown when the program admits no universes at all.
+ *
+ * When constraints are what conflict, `conflict` names the smallest set of
+ * them that cannot hold together — the solver's unsat core, translated back
+ * from the guard atoms. It is empty when the contradiction is somewhere else,
+ * such as a hand-written rule, which the solver cannot attribute.
+ */
 export class UnsatisfiableError extends Error {
-	constructor() {
-		super("No design satisfies these constraints.");
+	readonly conflict: string[];
+
+	constructor(conflict: string[] = []) {
+		super(
+			conflict.length > 0
+				? `${conflict.length} constraints cannot hold together.`
+				: "No design satisfies these rules.",
+		);
 		this.name = "UnsatisfiableError";
+		this.conflict = conflict;
 	}
+}
+
+/** Guard atoms back to the constraint ids they stand for. */
+function conflictFrom(core: readonly string[]): string[] {
+	const out: string[] = [];
+	for (const atom of core) {
+		// The core echoes the assumptions as given, sign prefix and all.
+		const m = /^\+?active\(([^)]+)\)$/.exec(atom);
+		if (m) out.push(m[1]);
+	}
+	return out;
 }
 
 /**
@@ -235,7 +260,11 @@ export class Explorer {
 		const poolSize = options.poolSize ?? limit * 2;
 		const started = Date.now();
 
-		const { program, generated, userRulesLine } = compile(scene);
+		const { program, generated, guards, userRulesLine } = compile(scene);
+		// Every constraint is switched on for the whole exploration. Passing
+		// them as assumptions rather than baking them in is what makes an
+		// unsatisfiable answer explainable.
+		const assume = guards.map((atom) => ({ atom }));
 		const reusedGrounding = this.#session !== null && this.#program === program;
 
 		if (!reusedGrounding) await this.#reopen(program, userRulesLine);
@@ -251,9 +280,12 @@ export class Explorer {
 		const enumerated = await session.solve({
 			models: limit + 1,
 			mode: optimized ? "optN" : "auto",
+			assumptions: assume,
 		});
 		solves++;
-		if (enumerated.result === "UNSATISFIABLE") throw new UnsatisfiableError();
+		if (enumerated.result === "UNSATISFIABLE") {
+			throw new UnsatisfiableError(conflictFrom(enumerated.core));
+		}
 
 		const enumeratedUniverses = enumerated.models.map(interpret);
 		const truncated = enumeratedUniverses.length > limit;
@@ -285,9 +317,9 @@ export class Explorer {
 			};
 		} else {
 			const [braveOut, cautiousOut, countOut] = await Promise.all([
-				session.solve({ models: 0, mode: "brave" }),
-				session.solve({ models: 0, mode: "cautious" }),
-				session.solve({ models: countLimit, countOnly: true }),
+				session.solve({ models: 0, mode: "brave", assumptions: assume }),
+				session.solve({ models: 0, mode: "cautious", assumptions: assume }),
+				session.solve({ models: countLimit, countOnly: true, assumptions: assume }),
 			]);
 			solves += 3;
 			// Brave and cautious emit progressive witnesses; the last is the answer.
@@ -296,7 +328,7 @@ export class Explorer {
 			total = countOut.exhausted ? countOut.count : null;
 
 			if (strategy === "diverse" && !optimized) {
-				const drawn = await this.#sample(session, brave, poolSize, seed);
+				const drawn = await this.#sample(session, brave, poolSize, seed, assume);
 				solves += drawn.solves;
 				// Enumeration order is biased, but those models are still valid
 				// candidates; the selector decides what actually earns a slot.
@@ -346,6 +378,7 @@ export class Explorer {
 		brave: Consequences,
 		poolSize: number,
 		seed: number,
+		guards: ReadonlyArray<{ atom: string }>,
 	): Promise<{ universes: Universe[]; solves: number }> {
 		const candidates = new Map<string, string[]>();
 		for (const [variable, indices] of Object.entries(brave.pick)) {
@@ -364,7 +397,11 @@ export class Explorer {
 
 		while (universes.length < poolSize && misses < DEFAULTS.maxMisses) {
 			const assumptions = randomAssumptions(candidates, rng, coverage);
-			const outcome = await session.solve({ models: 1, assumptions });
+			// The guards stay on: a sample must be a legal design too.
+			const outcome = await session.solve({
+				models: 1,
+				assumptions: [...guards, ...assumptions],
+			});
 			solves++;
 
 			const first = outcome.models[0];

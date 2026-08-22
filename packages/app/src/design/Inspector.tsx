@@ -7,6 +7,8 @@ import {
 	type Term,
 	defaultValue,
 	findInTree,
+	nodeNames,
+	propValues,
 	propVar,
 	renameNode,
 	resolveValue,
@@ -99,7 +101,8 @@ export function Inspector({
 	}
 
 	const node = selected[0];
-	const context = { tokens: scene.tokens, picks };
+	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
+	const names = nodeNames(scene.nodes);
 
 	return (
 		<div className={styles.inspector} data-role="inspector">
@@ -158,6 +161,7 @@ export function Inspector({
 							value={value}
 							tokens={tokensFor(scene, prop)}
 							fallback={spec.fallback}
+							names={names}
 							active={picks[variable]}
 							varying={varying.has(variable)}
 							preview={(term: Term) =>

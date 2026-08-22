@@ -146,6 +146,71 @@ export interface SceneNode {
 	children?: SceneNode[];
 }
 
+/* ------------------------------------------------------------------ */
+/* Constraints                                                         */
+/* ------------------------------------------------------------------ */
+
+export type ConstraintKind = "differ" | "match" | "atMost";
+
+export interface ConstraintSpec {
+	label: string;
+	/** Phrased for the constraint list, with `{prop}` and `{n}` filled in. */
+	summary: string;
+	/** True when the kind reads {@link Constraint.limit}. */
+	counted: boolean;
+	/** Fewest nodes for the constraint to say anything. */
+	minNodes: number;
+}
+
+/**
+ * What each kind of constraint means.
+ *
+ * The generated program carries one generic rule per kind and the constraints
+ * themselves are plain facts, so a new kind is an entry here plus one rule —
+ * never a change to how a document is compiled.
+ */
+export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
+	differ: {
+		label: "All different",
+		summary: "no two share a {prop}",
+		counted: false,
+		minNodes: 2,
+	},
+	match: {
+		label: "All the same",
+		summary: "share one {prop}",
+		counted: false,
+		minNodes: 2,
+	},
+	atMost: {
+		label: "At most N distinct",
+		summary: "use at most {n} distinct {prop}",
+		counted: true,
+		minNodes: 2,
+	},
+};
+
+/**
+ * A rule the design must obey, expressed over a property of several nodes.
+ *
+ * Constraints are what turn a list of alternatives into a design *space*:
+ * without them the universes are just the cross product of everything the user
+ * typed. Each one is compiled behind its own switch so the solver can report
+ * exactly which of them conflict — see `compile()`.
+ */
+export interface Constraint {
+	id: string;
+	kind: ConstraintKind;
+	/** The property being constrained. */
+	prop: PropName;
+	/** Nodes it ranges over. */
+	nodes: string[];
+	/** Distinct-value budget, for the counted kinds. */
+	limit?: number;
+	/** Off keeps it in the document but out of the program. */
+	enabled: boolean;
+}
+
 export interface Scene {
 	/** Named values, referenced from anywhere. Like CSS custom properties. */
 	tokens: Token[];
@@ -154,6 +219,8 @@ export interface Scene {
 	 * frames — the artboards — but nothing enforces that.
 	 */
 	nodes: SceneNode[];
+	/** Rules the design must obey, authored without writing ASP. */
+	constraints: Constraint[];
 	/**
 	 * Free-form ASP appended after the generated program — the power-user
 	 * escape hatch. Rules here can constrain or vary anything above.
@@ -203,6 +270,7 @@ export function emptyScene(): Scene {
 				children: [],
 			},
 		],
+		constraints: [],
 		rules: RULES_HEADER,
 	};
 }

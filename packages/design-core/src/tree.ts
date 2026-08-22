@@ -11,6 +11,7 @@
  */
 import { type Frame, type Point, boundsOf, frameContains } from "./geometry.ts";
 import { type SceneNode, isDrawable, isSurface, wrapsChildren } from "./scene.ts";
+import { type Value, propVar } from "./values.ts";
 
 /** Depth-first, parents before children — the order nodes are painted in. */
 export function flatten(nodes: readonly SceneNode[]): SceneNode[] {
@@ -199,6 +200,34 @@ export function frameAncestorOf(
 		if (isSurface(trail[i])) return trail[i];
 	}
 	return undefined;
+}
+
+/**
+ * Every node property keyed by its variable name.
+ *
+ * This is what lets a derived term read another node's property rather than
+ * only a token: resolution works over variable keys, and this is the map from
+ * the prop half of that namespace back into the document.
+ */
+export function propValues(
+	nodes: readonly SceneNode[],
+): Record<string, Value> {
+	const out: Record<string, Value> = {};
+	for (const node of flatten(nodes)) {
+		for (const [prop, value] of Object.entries(node.props)) {
+			if (value) out[propVar(node.id, prop)] = value;
+		}
+	}
+	return out;
+}
+
+/** Layer names by id, for anywhere a variable key has to be shown to a human. */
+export function nodeNames(
+	nodes: readonly SceneNode[],
+): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const node of flatten(nodes)) out[node.id] = node.name;
+	return out;
 }
 
 /** A node and everything beneath it. */

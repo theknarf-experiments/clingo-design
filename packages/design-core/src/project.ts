@@ -4,8 +4,11 @@
  * plain data in, plain data out, so it can be tested without a browser.
  */
 import {
+	CONSTRAINT_KINDS,
+	type Constraint,
 	DEFAULT_FRAME,
 	KINDS,
+	PROPS,
 	RULES_HEADER,
 	type Scene,
 	type SceneNode,
@@ -144,8 +147,23 @@ export function normalizeScene(input: unknown): Scene {
 		// no frame, and would render at 0x0. Dropping them is better than
 		// showing an invisible layer list.
 		nodes: migrateNodes(input),
+		// Documents written before constraints existed simply have none.
+		constraints: Array.isArray(input.constraints)
+			? input.constraints.filter(isConstraint)
+			: [],
 		rules: typeof input.rules === "string" ? input.rules : RULES_HEADER,
 	};
+}
+
+function isConstraint(value: unknown): value is Constraint {
+	if (!isRecord(value)) return false;
+	if (typeof value.id !== "string" || !value.id) return false;
+	if (typeof value.kind !== "string" || !(value.kind in CONSTRAINT_KINDS)) {
+		return false;
+	}
+	if (typeof value.prop !== "string" || !(value.prop in PROPS)) return false;
+	if (!Array.isArray(value.nodes)) return false;
+	return value.nodes.every((n) => typeof n === "string");
 }
 
 /** Reads nodes, wrapping a legacy artboard's contents in a real frame. */

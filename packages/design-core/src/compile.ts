@@ -15,9 +15,20 @@
  * Geometry goes in as plain facts. Four atoms per node costs nothing; a
  * choosable coordinate would ground a domain of thousands.
  */
-import type { Scene } from "./scene.ts";
-import { type Term, propVar, tokenVar, varies } from "./values.ts";
+import { CONSTRAINT_KINDS, type Scene } from "./scene.ts";
+import {
+	DERIVATIONS,
+	type Derivation,
+	type Term,
+	propVar,
+	tokenVar,
+	varies,
+} from "./values.ts";
 import { flatten, parentMap } from "./tree.ts";
+
+/** The switch a constraint is compiled behind — see {@link compile}. */
+export const guardAtom = (constraintId: string): string =>
+	`active(${constraintId})`;
 
 /** Predicates the generated program exposes to user rules. */
 export const CONTRACT = `% Predicates you can rely on:
@@ -27,7 +38,12 @@ export const CONTRACT = `% Predicates you can rely on:
 %   pick(V, I)                  the chosen alternative   <- exactly one per var
 %   alt_literal(V, I, Lit)      alternative I is the literal Lit
 %   alt_token(V, I, Token)      alternative I links to a token
-%   resolved(V, Lit)            V's final literal, following token links
+%   alt_derived(V, I, Via, Src) alternative I is computed from Src
+%   derived_of(Via, Src, Lit)   what Via turns Src into
+%   resolved(V, Lit)            V's final literal, following links and
+%                               derivations
+%   viol(C)                     constraint C is violated
+%   active(C)                   C is switched on (assumed while solving)
 %   rendered(Node, Prop, Lit)   what a node actually draws with
 %   literal(Lit, "text")        the text a literal id stands for
 %
@@ -71,6 +87,11 @@ export interface CompileResult {
 	userRulesLine: number;
 	/** Variable key -> how many alternatives it has. */
 	variables: Record<string, number>;
+	/**
+	 * One switch atom per enabled constraint. Assume them all when solving; on
+	 * UNSAT the solver returns the conflicting subset.
+	 */
+	guards: string[];
 }
 
 /**
@@ -88,6 +109,11 @@ class LiteralTable {
 		return id;
 	}
 
+	/** Every literal interned so far. Snapshotted: `id` may extend the table. */
+	texts(): string[] {
+		return [...this.#ids.keys()];
+	}
+
 	facts(): string[] {
 		return [...this.#ids].map(([text, id]) => atom("literal", id, quote(text)));
 	}
@@ -97,6 +123,7 @@ export function compile(scene: Scene): CompileResult {
 	const literals = new LiteralTable();
 	const variables: Record<string, number> = {};
 	const valueLines: string[] = [];
+	const used = new Set<Derivation>();
 
 	/** Emits the alternatives of one variable. */
 	function emitValue(variable: string, terms: readonly Term[]): void {
@@ -108,8 +135,13 @@ export function compile(scene: Scene): CompileResult {
 				valueLines.push(
 					atom("alt_literal", variable, index, literals.id(term.value)),
 				);
-			} else {
+			} else if (term.kind === "token") {
 				valueLines.push(atom("alt_token", variable, index, term.token));
+			} else {
+				used.add(term.via);
+				valueLines.push(
+					atom("alt_derived", variable, index, term.via, term.from),
+				);
 			}
 		});
 	}
@@ -140,6 +172,40 @@ export function compile(scene: Scene): CompileResult {
 		}
 	}
 
+	// Constraints are facts; the rules that interpret them are generic, so a
+	// document never changes the *shape* of the program, only its data.
+	const constraintLines: string[] = [];
+	const guards: string[] = [];
+	for (const c of scene.constraints ?? []) {
+		if (!c.enabled || c.nodes.length < CONSTRAINT_KINDS[c.kind].minNodes) continue;
+		constraintLines.push(atom("constraint", c.id));
+		constraintLines.push(atom("c_kind", c.id, c.kind));
+		constraintLines.push(atom("c_prop", c.id, c.prop));
+		if (CONSTRAINT_KINDS[c.kind].counted) {
+			constraintLines.push(atom("c_limit", c.id, Math.max(1, c.limit ?? 1)));
+		}
+		for (const node of c.nodes) constraintLines.push(atom("c_node", c.id, node));
+		guards.push(guardAtom(c.id));
+	}
+
+	/**
+	 * A derivation becomes a lookup table over the literals actually in the
+	 * document: `derived_of(contrast, l3, l0)`. Computing it here rather than in
+	 * ASP keeps arithmetic out of the program while still letting a rule follow
+	 * it per universe.
+	 */
+	const derivedLines: string[] = [];
+	for (const via of used) {
+		const spec = DERIVATIONS[via];
+		for (const source of literals.texts()) {
+			const result = spec.of(source);
+			if (result === undefined) continue;
+			derivedLines.push(
+				atom("derived_of", via, literals.id(source), literals.id(result)),
+			);
+		}
+	}
+
 	const generated = [
 		section("tokens", tokenLines),
 		section("scene", nodeLines),
@@ -151,9 +217,32 @@ export function compile(scene: Scene): CompileResult {
 			"% reference simply derives nothing, so the renderer falls back.",
 			"resolved(V,L) :- pick(V,I), alt_literal(V,I,L).",
 			"resolved(V,L) :- pick(V,I), alt_token(V,I,T), resolved(tok(T),L).",
+			"% A derived alternative is computed from whatever its source resolved",
+			"% to *in this universe*, so it follows the source everywhere it varies.",
+			"#defined derived_of/3.",
+			"resolved(V,L) :- pick(V,I), alt_derived(V,I,Via,S), resolved(S,Src),",
+			"                 derived_of(Via,Src,L).",
 			"% What a node actually draws with — the only thing an onlooker sees.",
 			"rendered(N,P,L) :- resolved(prop(N,P),L).",
 		]),
+		section("derivations", derivedLines),
+		section("constraints", constraintLines),
+		constraintLines.length === 0
+			? ""
+			: section("constraint rules", [
+					"% Each constraint is compiled behind its own switch. Every switch is",
+					"% assumed true when solving, so an unsatisfiable answer comes back",
+					"% with a *core*: the smallest set of them that cannot hold together.",
+					"{ active(C) } :- constraint(C).",
+					":- viol(C), active(C).",
+					"",
+					"viol(C) :- c_kind(C,differ), c_prop(C,P), c_node(C,A), c_node(C,B), A<B,",
+					"           rendered(A,P,L), rendered(B,P,L).",
+					"viol(C) :- c_kind(C,match), c_prop(C,P), c_node(C,A), c_node(C,B),",
+					"           rendered(A,P,LA), rendered(B,P,LB), LA != LB.",
+					"c_used(C,L) :- c_kind(C,atMost), c_prop(C,P), c_node(C,A), rendered(A,P,L).",
+					"viol(C) :- c_kind(C,atMost), c_limit(C,K), #count{ L : c_used(C,L) } > K.",
+				]),
 		section("visibility", [
 			"#defined hidden/1.",
 			"visible(N) :- node(N), not hidden(N).",
@@ -178,6 +267,7 @@ export function compile(scene: Scene): CompileResult {
 		generated,
 		userRulesLine: prefix.split("\n").length,
 		variables,
+		guards,
 	};
 }
 

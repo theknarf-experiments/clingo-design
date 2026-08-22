@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { type Exploration, Explorer, type Scene } from "@clingo-design/design-core";
+import {
+	type Exploration,
+	Explorer,
+	type Scene,
+	UnsatisfiableError,
+} from "@clingo-design/design-core";
 
 import { workerSolver } from "../solver/workerSolver";
 
@@ -7,6 +12,12 @@ export interface ExplorationState {
 	exploration: Exploration | null;
 	generated: string;
 	error: string | null;
+	/**
+	 * Constraint ids the solver blamed when the document admits no design.
+	 * Empty for every other kind of failure, including a bad hand-written rule,
+	 * which the solver cannot attribute to anything the UI owns.
+	 */
+	conflict: string[];
 	solving: boolean;
 }
 
@@ -27,6 +38,7 @@ export function useExploration(
 		exploration: null,
 		generated: "",
 		error: null,
+		conflict: [],
 		solving: true,
 	});
 
@@ -60,6 +72,7 @@ export function useExploration(
 					exploration,
 					generated: exploration.generated,
 					error: null,
+					conflict: [],
 					solving: false,
 				});
 			} catch (err) {
@@ -68,6 +81,7 @@ export function useExploration(
 					exploration: null,
 					generated: s.generated,
 					error: err instanceof Error ? err.message : String(err),
+					conflict: err instanceof UnsatisfiableError ? err.conflict : [],
 					solving: false,
 				}));
 			}

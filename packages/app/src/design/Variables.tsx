@@ -7,6 +7,7 @@ import {
 	type ValueType,
 	addToken,
 	deleteToken,
+	propValues,
 	renameToken,
 	resolveValue,
 	setTokenValue,
@@ -38,7 +39,7 @@ export function Variables({
 	picks,
 	varying,
 }: VariablesProps) {
-	const context = { tokens: scene.tokens, picks };
+	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 
 	return (
 		<div className={styles.variables} data-role="variables">

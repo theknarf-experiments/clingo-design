@@ -25,6 +25,7 @@ import {
 } from "@clingo-design/canvas";
 
 import { Artboard } from "./Artboard";
+import { Constraints } from "./Constraints";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Editor, type Tool } from "./Editor";
 import { Inspector } from "./Inspector";
@@ -70,6 +71,14 @@ const VIEWS = [
 
 type View = (typeof VIEWS)[number]["id"];
 
+const PANELS = [
+	{ id: "properties", label: "Properties" },
+	{ id: "variables", label: "Variables" },
+	{ id: "constraints", label: "Rules" },
+] as const;
+
+type Panel = (typeof PANELS)[number]["id"];
+
 const TOOLS: Array<{ id: Tool; label: string; key: string }> = [
 	{ id: "select", label: "Select", key: TOOL_KEY.select },
 	...DRAW_KINDS.map((kind) => ({
@@ -105,13 +114,14 @@ export function Studio({
 	// Deliberately not switched automatically by selection: the tab is the
 	// user's choice, and yanking them out of the variables mid-edit is worse
 	// than making them click back.
-	const [panel, setPanel] = useState<"properties" | "variables">("properties");
+	const [panel, setPanel] = useState<Panel>("properties");
 	const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-	const { exploration, generated, error, solving } = useExploration(
+	const { exploration, generated, error, conflict, solving } = useExploration(
 		scene,
 		LIMIT,
 		seed,
 	);
+	const blamed = useMemo(() => new Set(conflict), [conflict]);
 	const canvas = useRef<CanvasApi | null>(null);
 	const host = useRef<HTMLElement | null>(null);
 
@@ -569,40 +579,50 @@ export function Studio({
 					) : null}
 
 					{shown.length === 0 ? (
-						<div className={styles.empty}>
-							{error || exploration ? "No universes." : "Solving…"}
+						<div className={styles.empty} data-role="empty">
+							{blamed.size > 0
+								? `${blamed.size} rules conflict — see the Rules panel.`
+								: error || exploration
+									? "No universes."
+									: "Solving…"}
 						</div>
 					) : null}
 				</main>
 
 				<aside className={cx(styles.side, styles.right)}>
 					<div className={cx(tabStyles.bar, styles.sideTabs)}>
-						<button
-							type="button"
-							data-panel="properties"
-							className={cx(
-								tabStyles.button,
-								panel === "properties" && tabStyles.active,
-							)}
-							onClick={() => setPanel("properties")}
-						>
-							Properties
-							{selection.size > 0 ? (
-								<span className={styles.badge}>{selection.size}</span>
-							) : null}
-						</button>
-						<button
-							type="button"
-							data-panel="variables"
-							className={cx(
-								tabStyles.button,
-								panel === "variables" && tabStyles.active,
-							)}
-							onClick={() => setPanel("variables")}
-						>
-							Variables
-							<span className={styles.badge}>{scene.tokens.length}</span>
-						</button>
+						{PANELS.map((p) => {
+							const count =
+								p.id === "properties"
+									? selection.size
+									: p.id === "variables"
+										? scene.tokens.length
+										: scene.constraints.length;
+							return (
+								<button
+									key={p.id}
+									type="button"
+									data-panel={p.id}
+									className={cx(
+										tabStyles.button,
+										panel === p.id && tabStyles.active,
+									)}
+									onClick={() => setPanel(p.id)}
+								>
+									{p.label}
+									{count > 0 ? (
+										<span
+											className={cx(
+												styles.badge,
+												p.id === "constraints" && blamed.size > 0 && styles.badgeBad,
+											)}
+										>
+											{count}
+										</span>
+									) : null}
+								</button>
+							);
+						})}
 					</div>
 
 					<div className={styles.sidePanel}>
@@ -614,12 +634,20 @@ export function Studio({
 								picks={primary?.pick ?? {}}
 								varying={varying}
 							/>
-						) : (
+						) : panel === "variables" ? (
 							<Variables
 								scene={scene}
 								onSceneChange={onSceneChange}
 								picks={primary?.pick ?? {}}
 								varying={varying}
+							/>
+						) : (
+							<Constraints
+								scene={scene}
+								onSceneChange={onSceneChange}
+								selection={selection}
+								conflict={blamed}
+								onSelectionChange={selectionIds}
 							/>
 						)}
 					</div>

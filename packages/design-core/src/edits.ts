@@ -10,6 +10,9 @@
  */
 import { type Frame, normaliseFrame } from "./geometry.ts";
 import {
+	CONSTRAINT_KINDS,
+	type Constraint,
+	type ConstraintKind,
 	KINDS,
 	type NodeKind,
 	type PropName,
@@ -106,12 +109,12 @@ export function addNode(scene: Scene, node: SceneNode): Scene {
 /** Removes the named nodes and everything beneath them. */
 export function deleteNodes(scene: Scene, ids: readonly string[]): Scene {
 	const drop = new Set(ids);
-	return {
+	return pruneConstraints({
 		...scene,
 		nodes: refreshGroups(
 			mapTree(scene.nodes, (node) => (drop.has(node.id) ? null : node)),
 		),
-	};
+	});
 }
 
 /**
@@ -420,6 +423,90 @@ export function ungroupNodes(
 
 	const nodes = refreshGroups(walk(scene.nodes));
 	return { scene: { ...scene, nodes }, ids: freed };
+}
+
+/* ------------------------------------------------------------------ */
+/* Constraints                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Adds a constraint over the given nodes.
+ *
+ * The property defaults to one the nodes actually have, because a constraint
+ * on a property nothing exposes is silently vacuous — the sort of thing that
+ * looks like a solver bug from the outside.
+ */
+export function addConstraint(
+	scene: Scene,
+	kind: ConstraintKind,
+	nodes: readonly string[],
+	prop?: PropName,
+): { scene: Scene; id: string } {
+	const chosen = prop ?? sharedProps(scene, nodes)[0] ?? "fill";
+	const constraint: Constraint = {
+		id: newNodeId().replace("n_", "k_"),
+		kind,
+		prop: chosen,
+		nodes: [...nodes],
+		...(CONSTRAINT_KINDS[kind].counted ? { limit: 1 } : {}),
+		enabled: true,
+	};
+	return {
+		scene: { ...scene, constraints: [...scene.constraints, constraint] },
+		id: constraint.id,
+	};
+}
+
+export function updateConstraint(
+	scene: Scene,
+	id: string,
+	patch: Partial<Omit<Constraint, "id">>,
+): Scene {
+	return {
+		...scene,
+		constraints: scene.constraints.map((c) =>
+			c.id === id ? { ...c, ...patch } : c,
+		),
+	};
+}
+
+export function deleteConstraint(scene: Scene, id: string): Scene {
+	return { ...scene, constraints: scene.constraints.filter((c) => c.id !== id) };
+}
+
+/** Properties every one of `nodes` exposes — the ones worth constraining. */
+export function sharedProps(
+	scene: Scene,
+	nodes: readonly string[],
+): PropName[] {
+	const found = nodes
+		.map((id) => findInTree(scene.nodes, id))
+		.filter((n): n is SceneNode => n !== undefined);
+	if (found.length === 0) return [];
+	return KINDS[found[0].kind].props.filter((prop) =>
+		found.every((n) => KINDS[n.kind].props.includes(prop)),
+	);
+}
+
+/**
+ * Drops constraints that no longer refer to enough live nodes.
+ *
+ * Deleting a node must not leave a constraint quietly ranging over a ghost:
+ * it would either do nothing or, worse, still be listed as the reason a design
+ * is impossible.
+ */
+export function pruneConstraints(scene: Scene): Scene {
+	const alive = new Set(flatten(scene.nodes).map((n) => n.id));
+	const next: Constraint[] = [];
+	for (const c of scene.constraints) {
+		const nodes = c.nodes.filter((id) => alive.has(id));
+		if (nodes.length < CONSTRAINT_KINDS[c.kind].minNodes) continue;
+		next.push(nodes.length === c.nodes.length ? c : { ...c, nodes });
+	}
+	return next.length === scene.constraints.length &&
+		next.every((c, i) => c === scene.constraints[i])
+		? scene
+		: { ...scene, constraints: next };
 }
 
 /* ------------------------------------------------------------------ */

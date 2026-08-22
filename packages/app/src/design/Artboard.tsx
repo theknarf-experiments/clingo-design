@@ -1,4 +1,4 @@
-import { type CSSProperties, memo } from "react";
+import { type CSSProperties, memo, useMemo } from "react";
 import {
 	type Frame,
 	KINDS,
@@ -7,6 +7,7 @@ import {
 	type SceneNode,
 	type Universe,
 	isSurface,
+	propValues,
 	propVar,
 	resolveValue,
 } from "@clingo-design/design-core";
@@ -56,6 +57,17 @@ export const Artboard = memo(function Artboard({
 	className,
 	style,
 }: ArtboardProps) {
+	// Derived values may read another node's property, so resolution needs the
+	// whole document, not just the tokens.
+	const context = useMemo(
+		() => ({
+			tokens: scene.tokens,
+			picks: universe.pick,
+			props: propValues(scene.nodes),
+		}),
+		[scene.tokens, scene.nodes, universe.pick],
+	);
+
 	function render(node: SceneNode) {
 		const frame = preview?.get(node.id) ?? node.frame;
 		const unsettled =
@@ -84,11 +96,7 @@ export const Artboard = memo(function Artboard({
 		}
 
 		for (const prop of KINDS[node.kind].props) {
-			const value = resolveValue(
-				{ tokens: scene.tokens, picks: universe.pick },
-				node.props[prop],
-				propVar(node.id, prop),
-			);
+			const value = resolveValue(context, node.props[prop], propVar(node.id, prop));
 			if (value !== undefined) Object.assign(box, PAINT[prop](value));
 		}
 

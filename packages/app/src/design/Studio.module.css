@@ -176,3 +176,10 @@
 .foot {
 	border-top: 1px solid var(--dc-line);
 }
+
+/* The rules tab wears the solver's verdict, so an impossible document is
+   visible without opening the panel. */
+.badgeBad {
+	color: var(--dc-bad, #fca5a5);
+	background: color-mix(in srgb, var(--dc-bad, #fca5a5) 22%, transparent);
+}

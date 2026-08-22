@@ -1,10 +1,14 @@
 import {
+	DERIVATIONS,
+	type Derivation,
 	type Term,
 	type Value,
 	type ValueType,
+	derive,
 	lit,
 	ref,
 	termLabel,
+	tokenVar,
 	type Token,
 } from "@clingo-design/design-core";
 
@@ -25,6 +29,8 @@ export interface ValueEditorProps {
 	/** Set when the solver reports this assignment as unsettled. */
 	varying?: boolean;
 	fallback: string;
+	/** Layer names, so a derivation from another node reads as its name. */
+	names?: Readonly<Record<string, string>>;
 	testId?: string;
 }
 
@@ -36,6 +42,27 @@ export interface ValueEditorProps {
  * creates a branch. Each alternative is independently either a typed literal
  * or a link to a token.
  */
+/**
+ * How a term is spelled in the link dropdown.
+ *
+ * One select covers all three kinds because they are alternatives to each
+ * other, not independent settings: a value is typed in, linked, or computed —
+ * never two at once.
+ */
+function optionValue(term: Term): string {
+	if (term.kind === "token") return `ref:${term.token}`;
+	if (term.kind === "derived") return `via:${term.via}:${term.from}`;
+	return "";
+}
+
+function termFor(option: string, fallback: string): Term {
+	const link = /^ref:(.+)$/.exec(option);
+	if (link) return ref(link[1]);
+	const derived = /^via:([^:]+):(.+)$/.exec(option);
+	if (derived) return derive(derived[1] as Derivation, derived[2]);
+	return lit(fallback);
+}
+
 export function ValueEditor({
 	label,
 	type,
@@ -46,9 +73,15 @@ export function ValueEditor({
 	active,
 	varying,
 	fallback,
+	names,
 	testId,
 }: ValueEditorProps) {
 	const isColour = type === "color";
+	// A derivation only makes sense where it reads and writes the same type —
+	// the contrast of a font weight is not a thing.
+	const derivations = (Object.keys(DERIVATIONS) as Derivation[]).filter(
+		(via) => DERIVATIONS[via].type === type,
+	);
 
 	function replace(index: number, term: Term) {
 		onChange(value.map((t, i) => (i === index ? term : t)));
@@ -94,7 +127,7 @@ export function ValueEditor({
 									type="color"
 									className={styles.swatch}
 									data-role="swatch"
-									disabled={term.kind === "token"}
+									disabled={term.kind !== "literal"}
 									value={/^#[0-9a-f]{6}$/i.test(resolved ?? "") ? resolved : "#94a3b8"}
 									onChange={(e) => replace(index, lit(e.target.value))}
 								/>
@@ -114,8 +147,11 @@ export function ValueEditor({
 									onChange={(e) => replace(index, lit(e.target.value))}
 								/>
 							) : (
-								<span className={styles.token} data-role="token-ref">
-									{termLabel(tokens, term)}
+								<span
+									className={styles.token}
+									data-role={term.kind === "derived" ? "derived-ref" : "token-ref"}
+								>
+									{termLabel(tokens, term, names)}
 									{resolved ? (
 										<span className={styles.resolved}>{resolved}</span>
 									) : (
@@ -127,21 +163,33 @@ export function ValueEditor({
 							<select
 								className={styles.link}
 								data-role="link"
-								title="Link to a token"
-								value={term.kind === "token" ? term.token : ""}
+								title="Type a value, link it to a variable, or compute it from one"
+								value={optionValue(term)}
 								onChange={(e) =>
-									replace(
-										index,
-										e.target.value ? ref(e.target.value) : lit(resolved ?? fallback),
-									)
+									replace(index, termFor(e.target.value, resolved ?? fallback))
 								}
 							>
 								<option value="">Custom</option>
-								{tokens.map((t) => (
-									<option key={t.id} value={t.id}>
-										{t.name}
-									</option>
-								))}
+								{tokens.length > 0 ? (
+									<optgroup label="Link to">
+										{tokens.map((t) => (
+											<option key={t.id} value={`ref:${t.id}`}>
+												{t.name}
+											</option>
+										))}
+									</optgroup>
+								) : null}
+								{tokens.length > 0
+									? derivations.map((via) => (
+											<optgroup key={via} label={DERIVATIONS[via].label}>
+												{tokens.map((t) => (
+													<option key={t.id} value={`via:${via}:${tokenVar(t.id)}`}>
+														{t.name}
+													</option>
+												))}
+											</optgroup>
+										))
+									: null}
 							</select>
 
 							<button
