@@ -390,7 +390,15 @@ export function Editor({
 							now.universe.solved,
 						)?.node.id ?? null);
 
-				const node = makeNode(gesture.nodeKind, frame);
+				// A drag up-right or down-left runs along the other diagonal of
+				// the same box: the frame alone cannot say which, so the
+				// direction of the gesture is what settles it.
+				const node = makeNode(gesture.nodeKind, frame, {
+					diagonal:
+						(point.x - gesture.origin.x) * (point.y - gesture.origin.y) < 0
+							? "up"
+							: "down",
+				});
 				onSceneChange((prev) => addNodeTo(prev, host, node));
 				onSelectionChange([node.id]);
 				onToolChange("select");

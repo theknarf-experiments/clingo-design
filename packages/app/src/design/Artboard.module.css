@@ -12,6 +12,16 @@
 	box-sizing: border-box;
 }
 
+/* A line or arrow, drawn across its own box. Overflow is visible so a thick
+   stroke is not clipped in half along the frame's edge. */
+.stroke {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	overflow: visible;
+}
+
 /* Marks a node whose appearance is not settled across the space. Drawn as an
    outline so it never shifts the layout it annotates. */
 .varies {

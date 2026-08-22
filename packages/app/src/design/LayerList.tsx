@@ -28,6 +28,9 @@ export interface LayerListProps {
 const GLYPH: Record<SceneNode["kind"], string> = {
 	frame: "⬚",
 	rect: "▭",
+	ellipse: "◯",
+	line: "╱",
+	arrow: "↗",
 	text: "T",
 	group: "▣",
 };

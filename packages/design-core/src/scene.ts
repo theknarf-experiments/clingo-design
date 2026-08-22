@@ -21,7 +21,14 @@ import {
 	single,
 } from "./values.ts";
 
-export type PropName = "fill" | "radius" | "ink" | "size" | "weight";
+export type PropName =
+	| "fill"
+	| "radius"
+	| "stroke"
+	| "strokeWidth"
+	| "ink"
+	| "size"
+	| "weight";
 
 export interface PropSpec {
 	label: string;
@@ -33,12 +40,21 @@ export interface PropSpec {
 export const PROPS: Record<PropName, PropSpec> = {
 	fill: { label: "Fill", type: "color", fallback: FALLBACK.color },
 	radius: { label: "Corner radius", type: "length", fallback: FALLBACK.length },
+	stroke: { label: "Stroke", type: "color", fallback: "#0f172a" },
+	strokeWidth: { label: "Thickness", type: "length", fallback: "2px" },
 	ink: { label: "Colour", type: "color", fallback: "#0f172a" },
 	size: { label: "Size", type: "length", fallback: "16px" },
 	weight: { label: "Weight", type: "weight", fallback: FALLBACK.weight },
 };
 
-export type NodeKind = "frame" | "rect" | "text" | "group";
+export type NodeKind =
+	| "frame"
+	| "rect"
+	| "ellipse"
+	| "line"
+	| "arrow"
+	| "text"
+	| "group";
 
 /**
  * What a kind of node *is*, in one place.
@@ -73,7 +89,25 @@ export interface KindSpec {
 	 * back into its parent when ungrouped.
 	 */
 	wrapsChildren: boolean;
+	/**
+	 * A plain shape. They share one toolbar slot with a menu behind it: a bar
+	 * with a button per shape is a bar nobody reads.
+	 */
+	shape: boolean;
+	/**
+	 * Drawn as a stroke along a diagonal of its frame rather than as a box.
+	 *
+	 * Geometry in this model is an axis-aligned frame, so a line is stored as
+	 * *its bounding box* plus which way it leans — see {@link SceneNode.diagonal}.
+	 * Every gesture, snap, group and layout rule then works on a line unchanged;
+	 * the price is that a line can only run corner to corner, so an arbitrary
+	 * angle is not expressible.
+	 */
+	diagonal: boolean;
 }
+
+/** Which corner-to-corner run a diagonal kind draws. */
+export type Diagonal = "down" | "up";
 
 export const KINDS: Record<NodeKind, KindSpec> = {
 	frame: {
@@ -85,6 +119,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		container: true,
 		surface: true,
 		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
 	},
 	rect: {
 		label: "Rectangle",
@@ -95,6 +131,52 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		container: false,
 		surface: false,
 		wrapsChildren: false,
+		shape: true,
+		diagonal: false,
+	},
+	ellipse: {
+		// A corner radius on something with no corners says nothing, so fill is
+		// the whole of an ellipse's appearance.
+		label: "Ellipse",
+		props: ["fill"],
+		defaults: { fill: [lit(FALLBACK.color)] },
+		defaultSize: { width: 140, height: 140 },
+		drawable: true,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: true,
+		diagonal: false,
+	},
+	line: {
+		label: "Line",
+		props: ["stroke", "strokeWidth"],
+		defaults: {
+			stroke: [lit(PROPS.stroke.fallback)],
+			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
+		},
+		defaultSize: { width: 160, height: 96 },
+		drawable: true,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: true,
+		diagonal: true,
+	},
+	arrow: {
+		label: "Arrow",
+		props: ["stroke", "strokeWidth"],
+		defaults: {
+			stroke: [lit(PROPS.stroke.fallback)],
+			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
+		},
+		defaultSize: { width: 160, height: 96 },
+		drawable: true,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: true,
+		diagonal: true,
 	},
 	text: {
 		label: "Text",
@@ -109,6 +191,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		container: false,
 		surface: false,
 		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
 	},
 	group: {
 		label: "Group",
@@ -119,6 +203,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		container: true,
 		surface: false,
 		wrapsChildren: true,
+		shape: false,
+		diagonal: false,
 	},
 };
 
@@ -127,10 +213,15 @@ export const NODE_KINDS = Object.keys(KINDS) as NodeKind[];
 /** The kinds a pointer can draw out. A group is only ever made from a selection. */
 export const DRAW_KINDS = NODE_KINDS.filter((k) => KINDS[k].drawable);
 
+/** The shapes, in the order their shared toolbar slot cycles through them. */
+export const SHAPE_KINDS = DRAW_KINDS.filter((k) => KINDS[k].shape);
+
 export const isDrawable = (node: SceneNode): boolean => KINDS[node.kind].drawable;
 export const isSurface = (node: SceneNode): boolean => KINDS[node.kind].surface;
 export const wrapsChildren = (node: SceneNode): boolean =>
 	KINDS[node.kind].wrapsChildren;
+export const isDiagonal = (node: SceneNode): boolean =>
+	KINDS[node.kind].diagonal;
 
 /* ------------------------------------------------------------------ */
 /* Automatic layout                                                    */
@@ -191,6 +282,12 @@ export interface SceneNode {
 	frame: Frame;
 	/** Literal content for text nodes. */
 	text?: string;
+	/**
+	 * Which way a {@link KindSpec.diagonal} kind leans: "down" runs from the
+	 * frame's top-left corner to its bottom-right, "up" from bottom-left to
+	 * top-right. Absent on every other kind.
+	 */
+	diagonal?: Diagonal;
 	props: Partial<Record<PropName, Value>>;
 	/** Present on the container kinds. */
 	children?: SceneNode[];

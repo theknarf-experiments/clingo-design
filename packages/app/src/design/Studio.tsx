@@ -4,6 +4,8 @@ import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import {
 	DRAW_KINDS,
 	KINDS,
+	type NodeKind,
+	SHAPE_KINDS,
 	type ReorderTo,
 	type Scene,
 	type Universe,
@@ -35,6 +37,7 @@ import { Editor, type Tool } from "./Editor";
 import { Inspector } from "./Inspector";
 import { LayerList } from "./LayerList";
 import { ProgramPanel } from "./ProgramPanel";
+import { ShapePicker } from "./ShapePicker";
 import { StatusLine } from "./StatusLine";
 import { ToolIcon } from "./ToolIcon";
 import { Variables } from "./Variables";
@@ -53,11 +56,11 @@ const LIMIT = 24;
  */
 const PAD = 2000;
 
-/** Hotkeys, by the kind each tool draws. */
+/** Hotkeys, by toolbar slot. The shapes share one, which also cycles them. */
 const TOOL_KEY: Record<string, string> = {
 	select: "V",
 	frame: "F",
-	rect: "R",
+	shape: "R",
 	text: "T",
 };
 
@@ -84,13 +87,23 @@ const PANELS = [
 
 type Panel = (typeof PANELS)[number]["id"];
 
-const TOOLS: Array<{ id: Tool; label: string; key: string }> = [
+/**
+ * The toolbar's slots, in the order the kinds are declared.
+ *
+ * Every drawable kind gets one, except that the shapes collapse into a single
+ * slot with a menu — the bar floats over the canvas and cannot grow a button
+ * per shape. The slot takes the place of the first shape, so adding a shape
+ * changes what is in the menu and nothing else.
+ */
+const TOOLS: Array<{ id: Tool; label: string; key: string; shapes?: true }> = [
 	{ id: "select", label: "Select", key: TOOL_KEY.select },
-	...DRAW_KINDS.map((kind) => ({
-		id: kind as Tool,
-		label: KINDS[kind].label,
-		key: TOOL_KEY[kind],
-	})),
+	...DRAW_KINDS.flatMap((kind) =>
+		!KINDS[kind].shape
+			? [{ id: kind as Tool, label: KINDS[kind].label, key: TOOL_KEY[kind] }]
+			: kind === SHAPE_KINDS[0]
+				? [{ id: kind as Tool, label: "Shape", key: TOOL_KEY.shape, shapes: true as const }]
+				: [],
+	),
 ];
 
 /** Brackets move the selection through its siblings; Shift takes it all the way. */
@@ -139,6 +152,8 @@ export function Studio({
 }: StudioProps) {
 	const [view, setView] = useState<View>("design");
 	const [tool, setTool] = useState<Tool>("select");
+	/** Which shape the toolbar's shape slot currently stands for. */
+	const [shape, setShape] = useState<NodeKind>(SHAPE_KINDS[0]);
 	const [seed, setSeed] = useState(1);
 	const [selection, setSelection] = useState<ReadonlySet<string>>(new Set());
 	// Deliberately not switched automatically by selection: the tab is the
@@ -288,7 +303,7 @@ export function Studio({
 		[
 			...TOOLS.map((t) => ({
 				hotkey: { key: t.key },
-				callback: () => setTool(t.id),
+				callback: () => (t.shapes ? cycleShape() : setTool(t.id)),
 			})),
 			...accel("Z", undo),
 			...accel("Z", redo, true),
@@ -335,6 +350,21 @@ export function Studio({
 		],
 		{ ignoreInputs: true },
 	);
+
+	/** Choosing a shape picks up its tool and re-labels the slot with it. */
+	function pickShape(kind: NodeKind) {
+		setShape(kind);
+		setTool(kind);
+	}
+
+	/**
+	 * The shape key reaches for the slot; pressing it again walks to the next
+	 * shape, so one key covers all of them without opening the menu.
+	 */
+	function cycleShape() {
+		const at = SHAPE_KINDS.indexOf(shape);
+		pickShape(tool === shape ? SHAPE_KINDS[(at + 1) % SHAPE_KINDS.length] : shape);
+	}
 
 	function remove() {
 		if (selection.size === 0) return;
@@ -610,26 +640,37 @@ export function Studio({
 						<ViewSwitcher options={VIEWS} value={view} onChange={setView} />
 						{view === "design" ? (
 							<div className={styles.tools}>
-								{TOOLS.map((t) => (
-									<button
-										key={t.id}
-										type="button"
-										data-tool={t.id}
-										aria-label={t.label}
-										className={cx(
-											styles.tool,
-											styles.iconTool,
-											tool === t.id && styles.toolActive,
-										)}
-										onClick={() => setTool(t.id)}
-									>
-										<ToolIcon tool={t.id} />
-										<span className={styles.tip} role="tooltip" aria-hidden="true">
-											{t.label}
-											<kbd className={styles.tipKey}>{t.key}</kbd>
-										</span>
-									</button>
-								))}
+								{TOOLS.map((t) =>
+									t.shapes ? (
+										<ShapePicker
+											key={t.id}
+											shapes={SHAPE_KINDS}
+											value={shape}
+											active={tool === shape}
+											shortcut={t.key}
+											onPick={pickShape}
+										/>
+									) : (
+										<button
+											key={t.id}
+											type="button"
+											data-tool={t.id}
+											aria-label={t.label}
+											className={cx(
+												styles.tool,
+												styles.iconTool,
+												tool === t.id && styles.toolActive,
+											)}
+											onClick={() => setTool(t.id)}
+										>
+											<ToolIcon tool={t.id} />
+											<span className={styles.tip} role="tooltip" aria-hidden="true">
+												{t.label}
+												<kbd className={styles.tipKey}>{t.key}</kbd>
+											</span>
+										</button>
+									),
+								)}
 							</div>
 						) : null}
 						{view === "design" ? (

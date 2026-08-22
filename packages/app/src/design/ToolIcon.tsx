@@ -21,6 +21,9 @@ const GLYPHS: Partial<Record<Tool, ReactNode>> = {
 	),
 	frame: <path d="M5.6 1.9v12.2M10.4 1.9v12.2M1.9 5.6h12.2M1.9 10.4h12.2" />,
 	rect: <rect x="2.7" y="3.7" width="10.6" height="8.6" rx="1.6" />,
+	ellipse: <ellipse cx="8" cy="8" rx="5.6" ry="4.4" />,
+	line: <path d="M2.8 13.2 13.2 2.8" />,
+	arrow: <path d="M2.8 13.2 13.2 2.8M8.4 2.8h4.8v4.8" />,
 	text: <path d="M3.4 4.7V3.3h9.2v1.4M8 3.3v9.4M6.1 12.7h3.8" />,
 };
 

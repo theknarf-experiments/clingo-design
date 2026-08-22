@@ -15,6 +15,7 @@ import {
 	type Constraint,
 	type ConstraintKind,
 	DEFAULT_LAYOUT,
+	type Diagonal,
 	KINDS,
 	type NodeKind,
 	type PropName,
@@ -55,11 +56,21 @@ export function newNodeId(): string {
 	return random ? `n_${random}` : `n_${counter}`;
 }
 
-/** A fresh node of `kind` occupying `frame`. */
+/**
+ * A fresh node of `kind` occupying `frame`.
+ *
+ * Options that only some kinds carry are dropped for the rest, so a caller can
+ * pass whatever the gesture happened to know without asking what it is drawing.
+ */
 export function makeNode(
 	kind: NodeKind,
 	frame: Frame,
-	options: { id?: string; name?: string; text?: string } = {},
+	options: {
+		id?: string;
+		name?: string;
+		text?: string;
+		diagonal?: Diagonal;
+	} = {},
 ): SceneNode {
 	const spec = KINDS[kind];
 	return {
@@ -68,6 +79,7 @@ export function makeNode(
 		name: options.name ?? spec.label,
 		frame: normaliseFrame(frame),
 		...(kind === "text" ? { text: options.text ?? "Text" } : {}),
+		...(spec.diagonal ? { diagonal: options.diagonal ?? "down" } : {}),
 		props: { ...spec.defaults },
 		...(spec.container ? { children: [] } : {}),
 	};

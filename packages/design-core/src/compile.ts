@@ -18,6 +18,7 @@
 import {
 	type AutoLayout,
 	CONSTRAINT_KINDS,
+	NODE_KINDS,
 	type Scene,
 	isLaidOut,
 } from "./scene.ts";
@@ -147,7 +148,7 @@ export const CONTRACT = `% Predicates you can rely on:
 %   tok(Token)                  a token's own definition
 %
 % Scene:
-%   node(N)  kind(N, frame|rect|text|group)  child(Parent, Child)
+%   node(N)  kind(N, ${NODE_KINDS.join("|")})  child(Parent, Child)
 %   frame(N, x|y|width|height, Pixels)   <- relative to the parent, if any
 %   hidden(N)                   assert to remove a node
 %   visible(N)                  derived: node(N), not hidden(N)
