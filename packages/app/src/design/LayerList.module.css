@@ -81,3 +81,9 @@
 	text-transform: uppercase;
 	opacity: 0.5;
 }
+
+/* Dropping *into* a container outlines the whole row, so it reads differently
+   from the line that means "beside this one". */
+.dropInside {
+	box-shadow: inset 0 0 0 2px var(--dc-accent);
+}

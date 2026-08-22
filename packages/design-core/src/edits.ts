@@ -40,7 +40,9 @@ import {
 	groupFrame,
 	locate,
 	mapTree,
+	placedNodes,
 	refreshGroups,
+	subtreeIds,
 	worldOrigin,
 } from "./tree.ts";
 
@@ -279,12 +281,70 @@ export function reorderNodes(
 }
 
 /**
- * Moves a node to a position within its own sibling list.
+ * Moves a node anywhere in the tree.
  *
- * Reparenting is deliberately not part of this: dragging a layer somewhere its
- * coordinates would have to be rebased is a different operation, and one the
- * layers panel has no way to make legible.
+ * The node keeps the place it visibly occupies: its frame is snapshotted from
+ * where it actually *is* — which under an automatic layout is where the solver
+ * put it, not what the document stored — and rebased into the new parent. So
+ * dragging something out of a layout leaves it exactly where it looked, and
+ * dragging it in hands its position over to the container, which was going to
+ * decide it anyway.
+ *
+ * `solved` is the geometry from the current universe. Without it a node leaving
+ * a layout would jump back to whatever stale frame it was carrying.
  */
+export function reparent(
+	scene: Scene,
+	id: string,
+	parentId: string | null,
+	index: number,
+	solved: Readonly<Record<string, Partial<Frame>>> = {},
+): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (!node || parentId === id) return scene;
+	// A node cannot be moved inside itself.
+	if (parentId && subtreeIds(node).includes(parentId)) return scene;
+
+	const placed = placedNodes(scene.nodes, solved);
+	const self = placed.find((p) => p.node.id === id);
+	if (!self) return scene;
+
+	let originX = 0;
+	let originY = 0;
+	if (parentId) {
+		const parent = placed.find((p) => p.node.id === parentId);
+		if (!parent || !KINDS[parent.node.kind].container) return scene;
+		originX = parent.world.x;
+		originY = parent.world.y;
+	}
+
+	const moved: SceneNode = {
+		...node,
+		frame: {
+			x: self.world.x - originX,
+			y: self.world.y - originY,
+			width: self.world.width,
+			height: self.world.height,
+		},
+	};
+
+	const insert = (list: readonly SceneNode[]): SceneNode[] => {
+		const out = [...list];
+		out.splice(Math.max(0, Math.min(index, out.length)), 0, moved);
+		return out;
+	};
+
+	const without = mapTree(scene.nodes, (n) => (n.id === id ? null : n));
+	const nodes = parentId
+		? mapTree(without, (n) =>
+				n.id === parentId ? { ...n, children: insert(n.children ?? []) } : n,
+			)
+		: insert(without);
+
+	return pruneConstraints({ ...scene, nodes: refreshGroups(nodes) });
+}
+
+/** Reorders within a node's own sibling list — a {@link reparent} that stays put. */
 export function moveWithinParent(
 	scene: Scene,
 	id: string,
@@ -292,20 +352,7 @@ export function moveWithinParent(
 ): Scene {
 	const found = locate(scene.nodes, id);
 	if (!found) return scene;
-	const from = found.index;
-	const target = Math.max(0, Math.min(index, found.siblings.length - 1));
-	if (target === from) return scene;
-
-	const reorder = (list: readonly SceneNode[]): SceneNode[] => {
-		if (list !== found.siblings) {
-			return list.map((n) => (n.children ? { ...n, children: reorder(n.children) } : n));
-		}
-		const next = [...list];
-		const [moved] = next.splice(from, 1);
-		next.splice(target, 0, moved);
-		return next;
-	};
-	return { ...scene, nodes: reorder(scene.nodes) };
+	return reparent(scene, id, found.parent?.id ?? null, index);
 }
 
 function deepCopy(node: SceneNode, offset: number): SceneNode {

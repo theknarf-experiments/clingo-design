@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { directSolver } from "./directSolver.ts";
-import { addNode, addNodeTo, makeNode } from "./edits.ts";
+import { addNode, addNodeTo, makeNode, reparent } from "./edits.ts";
 import { explore } from "./explore.ts";
 import { type AutoLayout, type Scene, emptyScene } from "./scene.ts";
-import { mapTree } from "./tree.ts";
+import { findInTree, mapTree } from "./tree.ts";
 
 /** A frame of the given size with `n` children, laid out. */
 function row(
@@ -257,4 +257,97 @@ test("a hugging container nested in another composes", async () => {
 	const solved = await solve(scene);
 	assert.equal(solved.inner.width, 70, "50 plus the inner padding");
 	assert.equal(solved.outer.width, 90, "70 plus the outer padding");
+});
+
+/* ------------------------------------------------------------------ */
+/* Moving in and out of a layout                                       */
+/* ------------------------------------------------------------------ */
+
+/** A hugging row at (100,100) holding two children, plus one loose rect. */
+async function withLayout() {
+	let scene = emptyScene();
+	scene = { ...scene, nodes: [] };
+	scene = addNode(
+		scene,
+		makeNode("frame", { x: 100, y: 100, width: 10, height: 10 }, { id: "box" }),
+	);
+	for (const id of ["a", "b"]) {
+		scene = addNodeTo(
+			scene,
+			"box",
+			makeNode("rect", { x: 0, y: 0, width: 40, height: 20 }, { id }),
+		);
+	}
+	scene = addNode(
+		scene,
+		makeNode("rect", { x: 500, y: 300, width: 30, height: 30 }, { id: "loose" }),
+	);
+	scene = {
+		...scene,
+		nodes: mapTree(scene.nodes, (n) =>
+			n.id === "box"
+				? {
+						...n,
+						layout: {
+							direction: "row",
+							gap: 10,
+							padding: 10,
+							align: "start",
+							sizing: "hug",
+						} as AutoLayout,
+					}
+				: n,
+		),
+	};
+	return { scene, solved: await solve(scene) };
+}
+
+test("leaving a layout keeps the node where the solver had put it", async () => {
+	const { scene, solved } = await withLayout();
+	// b sits at x=60 inside a container at x=100, so its canvas x is 160.
+	assert.equal(solved.b.x, 60);
+
+	const moved = reparent(scene, "b", null, 2, solved);
+	const b = findInTree(moved.nodes, "b");
+	assert.deepEqual(
+		b?.frame,
+		{ x: 160, y: 110, width: 40, height: 20 },
+		"snapshotted in canvas coordinates, not the stale stored frame",
+	);
+	// And the container closes up around the one child that is left.
+	const after = await solve(moved);
+	assert.equal(after.box.width, 60, "10 + 40 + 10");
+});
+
+test("joining a layout hands its position over to the container", async () => {
+	const { scene, solved } = await withLayout();
+	const moved = reparent(scene, "loose", "box", 2, solved);
+
+	// The stored frame is rebased into the container, but what it will *be* is
+	// the layout's business.
+	const loose = findInTree(moved.nodes, "loose");
+	assert.deepEqual(loose?.frame, { x: 400, y: 200, width: 30, height: 30 });
+
+	const after = await solve(moved);
+	assert.equal(after.loose.x, 110, "third in the row: 10 + 40 + 10 + 40 + 10");
+	assert.equal(after.loose.y, 10, "the padding, not where it used to be");
+	assert.equal(after.box.width, 150, "the container grew to take it");
+});
+
+test("dropping at an index decides where in the arrangement it lands", async () => {
+	const { scene, solved } = await withLayout();
+	const first = await solve(reparent(scene, "loose", "box", 0, solved));
+	assert.equal(first.loose.x, 10, "inserted before both");
+	assert.equal(first.a.x, 50);
+});
+
+test("a node cannot be moved inside itself", async () => {
+	const { scene, solved } = await withLayout();
+	assert.equal(reparent(scene, "box", "a", 0, solved), scene);
+	assert.equal(reparent(scene, "box", "box", 0, solved), scene);
+});
+
+test("only a container can take children", async () => {
+	const { scene, solved } = await withLayout();
+	assert.equal(reparent(scene, "loose", "a", 0, solved), scene);
 });

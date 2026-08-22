@@ -504,6 +504,7 @@ export function Studio({
 						selection={selection}
 						onSelectionChange={selectionIds}
 						onSceneChange={onSceneChange}
+						solved={primary?.solved}
 						onContextMenu={(at, nodeId) => {
 							// Right-clicking a layer outside the selection retargets it,
 							// the way the canvas does.
