@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { compile } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
-import { addNode, addNodeTo, makeNode, setSizing } from "./edits.ts";
+import { addNode, addNodeTo, makeNode, setLayout, setProp, setSizing } from "./edits.ts";
 import { explore } from "./explore.ts";
 import {
 	askedSize,
@@ -15,7 +15,7 @@ import {
 	toMeasure,
 } from "./measure.ts";
 import { type Scene, emptyScene } from "./scene.ts";
-import { findInTree, mapTree } from "./tree.ts";
+import { findInTree, mapTree, propValues } from "./tree.ts";
 
 /** A hugging row holding one text node and one plain rectangle. */
 function row(): Scene {
@@ -53,6 +53,7 @@ function row(): Scene {
 		),
 	};
 }
+import { lit, propVar, resolveValue } from "./values.ts";
 
 test("only the measured kinds size themselves, and by default they do", () => {
 	const text = makeNode("text", { x: 0, y: 0, width: 160, height: 28 });
@@ -65,7 +66,7 @@ test("only the measured kinds size themselves, and by default they do", () => {
 
 test("a measurement wins over the frame, but only where it applies", () => {
 	const scene = row();
-	const measurements = { t: { width: 231, height: 22 }, r: { width: 9, height: 9 } };
+	const measurements = { t: [{ width: 231, height: 22 }], r: [{ width: 9, height: 9 }] };
 	const text = findInTree(scene.nodes, "t");
 	const rect = findInTree(scene.nodes, "r");
 	assert.ok(text && rect);
@@ -88,7 +89,7 @@ test("fixing a text node's size takes it out of the measuring", () => {
 	const text = findInTree(scene.nodes, "t");
 	assert.ok(text);
 	assert.equal(sizingOf(text), "fixed");
-	assert.deepEqual(askedSize(text, { t: { width: 231, height: 22 } }), {
+	assert.deepEqual(askedSize(text, { t: [{ width: 231, height: 22 }] }), {
 		width: 160,
 		height: 28,
 	});
@@ -108,7 +109,7 @@ test("the measured size is what reaches the layout facts", () => {
 	const scene = row();
 	assert.ok(compile(scene).program.includes("lask(t,width,160)."));
 	const measured = compile(scene, {
-		measurements: { t: { width: 231.4, height: 21.6 } },
+		measurements: { t: [{ width: 231.4, height: 21.6 }] },
 	});
 	assert.ok(measured.program.includes("lask(t,width,231)."));
 	assert.ok(measured.program.includes("lask(t,height,22)."));
@@ -120,7 +121,7 @@ test("the measured size is what reaches the layout facts", () => {
 
 test("a hugging container grows to the text it actually holds", async () => {
 	const scene = row();
-	const solved = async (measurements?: Record<string, { width: number; height: number }>) => {
+	const solved = async (measurements?: Record<string, { width: number; height: number }[]>) => {
 		const result = await explore(scene, directSolver, {
 			sample: "first",
 			measurements,
@@ -132,7 +133,7 @@ test("a hugging container grows to the text it actually holds", async () => {
 	const dragged = await solved();
 	assert.equal(dragged.box.width, 230, "10 + 160 + 10 + 40 + 10");
 
-	const fitted = await solved({ t: { width: 231, height: 22 } });
+	const fitted = await solved({ t: [{ width: 231, height: 22 }] });
 	assert.equal(fitted.box.width, 301, "10 + 231 + 10 + 40 + 10");
 	assert.equal(fitted.t.width, 231);
 	assert.equal(fitted.r.x, 251, "the sibling moves along with it");
@@ -148,7 +149,7 @@ test("a hugging container asks for what its contents come to, not its frame", ()
 	);
 	assert.deepEqual(naturalSize(box), { width: 230, height: 60 });
 	assert.deepEqual(
-		naturalSize(box, { t: { width: 231, height: 22 } }),
+		naturalSize(box, { t: [{ width: 231, height: 22 }] }),
 		{ width: 301, height: 60 },
 		"measurements reach all the way down",
 	);
@@ -175,4 +176,68 @@ test("line height is a multiple of the font size unless it carries a unit", () =
 	assert.equal(lineHeightPx("20px", "24px"), 24);
 	// Nothing said: the document's own default ratio, against the default size.
 	assert.equal(lineHeightPx(undefined, undefined), 16 * 1.35);
+});
+
+test("copy is a value, so a headline can branch the space", async () => {
+	let scene = emptyScene();
+	scene = addNodeTo(
+		scene,
+		"frame1",
+		makeNode("text", { x: 0, y: 0, width: 100, height: 20 }, { id: "t" }),
+	);
+	scene = setProp(scene, ["t"], "text", [lit("Sign up"), lit("Get started")]);
+
+	const result = await explore(scene, directSolver, { sample: "first" });
+	assert.equal(result.count, 2, "two wordings are two designs");
+
+	const context = { tokens: scene.tokens, picks: {}, props: propValues(scene.nodes) };
+	const said = result.universes
+		.map((u) =>
+			resolveValue(
+				{ ...context, picks: u.pick },
+				findInTree(scene.nodes, "t")?.props.text,
+				propVar("t", "text"),
+			),
+		)
+		.sort();
+	assert.deepEqual(said, ["Get started", "Sign up"]);
+});
+
+test("a hugging row follows whichever wording won", async () => {
+	// The two strings are measured separately, so the container is not the
+	// same width in both universes — which is the whole reason the measurement
+	// is per alternative rather than per node.
+	let scene = emptyScene();
+	scene = addNodeTo(
+		scene,
+		"frame1",
+		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "row" }),
+	);
+	scene = addNodeTo(
+		scene,
+		"row",
+		makeNode("text", { x: 0, y: 0, width: 10, height: 10 }, { id: "t" }),
+	);
+	scene = setProp(scene, ["t"], "text", [lit("short"), lit("much longer")]);
+	scene = setLayout(scene, "row", {
+		direction: "row",
+		gap: 0,
+		padding: 10,
+		align: "start",
+		justify: "start",
+		sizing: "hug",
+	});
+
+	const widths = await Promise.all(
+		[0, 1].map(async (i) => {
+			const r = await explore(scene, directSolver, {
+				sample: "first",
+				pins: { [propVar("t", "text")]: i },
+				// One measurement per alternative, as the host supplies them.
+				measurements: { t: [{ width: 50, height: 20 }, { width: 130, height: 20 }] },
+			});
+			return r.universes[0].solved.row?.width;
+		}),
+	);
+	assert.deepEqual(widths, [70, 150], "50 + 20 padding, then 130 + 20");
 });

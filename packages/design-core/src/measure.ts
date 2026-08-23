@@ -15,7 +15,14 @@ export interface Size {
 }
 
 /** Natural sizes the host measured, by node id. */
-export type Measurements = Readonly<Record<string, Size>>;
+/**
+ * Measured sizes, per node, **per alternative of its content**.
+ *
+ * Copy is a value like any other now, so a text node may say one thing in one
+ * universe and another somewhere else, and the two do not occupy the same
+ * space. One size per node would silently be the first alternative's.
+ */
+export type Measurements = Readonly<Record<string, readonly Size[]>>;
 
 /** Has content whose size can be measured. */
 export const isMeasured = (node: SceneNode): boolean =>
@@ -45,9 +52,24 @@ export function sizingOf(node: SceneNode): Sizing {
  * happens before anything has been measured, and a headless solve has no
  * canvas at all — so the frame is always there to fall back to.
  */
-export function askedSize(node: SceneNode, measured?: Measurements): Size {
-	const size = autoSizes(node) ? measured?.[node.id] : undefined;
+export function askedSize(
+	node: SceneNode,
+	measured?: Measurements,
+	alternative = 0,
+): Size {
+	const sizes = autoSizes(node) ? measured?.[node.id] : undefined;
+	// Out of range falls back to the first: an alternative can be deleted
+	// between a measurement and the solve that reads it.
+	const size = sizes?.[alternative] ?? sizes?.[0];
 	return size ?? { width: node.frame.width, height: node.frame.height };
+}
+
+/** How many measured sizes a node has — one per alternative of its content. */
+export function measuredCount(
+	node: SceneNode,
+	measured?: Measurements,
+): number {
+	return measured?.[node.id]?.length ?? 0;
 }
 
 /**

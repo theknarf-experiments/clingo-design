@@ -48,6 +48,7 @@ import {
 	lit,
 	propVar,
 	resolveValue,
+	single,
 	tokenVar,
 	wouldCycle,
 } from "./values.ts";
@@ -97,12 +98,14 @@ export function makeNode(
 		kind,
 		name: options.name ?? spec.label,
 		frame: normaliseFrame(frame),
-		...(kind === "text" ? { text: options.text ?? "Text" } : {}),
 		...(spec.diagonal ? { diagonal: options.diagonal ?? "down" } : {}),
 		...(spec.plotted
 			? { points: [...(options.points ?? [])], closed: options.closed ?? false }
 			: {}),
-		props: { ...spec.defaults },
+		props:
+			options.text === undefined
+				? { ...spec.defaults }
+				: { ...spec.defaults, text: single(options.text) },
 		...(spec.container ? { children: [] } : {}),
 	};
 }
@@ -440,8 +443,16 @@ export function setProp(
 	});
 }
 
+/**
+ * Rewrites a text node's first alternative.
+ *
+ * Content is an ordinary property now, so the general editor handles the rest —
+ * this only exists for the callers that type into one box and mean one string.
+ */
 export function setText(scene: Scene, id: string, text: string): Scene {
-	return mapSelected(scene, [id], (node) => ({ ...node, text }));
+	const node = findInTree(scene.nodes, id);
+	const rest = node?.props.text?.slice(1) ?? [];
+	return setProp(scene, [id], "text", [lit(text), ...rest]);
 }
 
 export function renameNode(scene: Scene, id: string, name: string): Scene {

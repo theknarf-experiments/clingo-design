@@ -44,8 +44,9 @@ test("makeNode gives a rect sensible defaults", () => {
 test("makeNode gives a text node content", () => {
 	const node = makeNode("text", { x: 0, y: 0, width: 100, height: 20 });
 	assert.equal(node.kind, "text");
-	assert.equal(typeof node.text, "string");
-	assert.ok((node.text ?? "").length > 0);
+	// Content is a property now, so a new text node arrives with one alternative.
+	assert.equal(node.props.text?.length, 1);
+	assert.equal(node.props.text?.[0].kind, "literal");
 });
 
 test("new node ids are unique", () => {
@@ -126,7 +127,7 @@ test("setText and renameNode", () => {
 		makeNode("text", { x: 0, y: 0, width: 80, height: 20 }, { id: "t" }),
 	);
 	scene = setText(scene, "t", "Hello");
-	assert.equal(scene.nodes[0].text, "Hello");
+	assert.deepEqual(scene.nodes[0].props.text, [{ kind: "literal", value: "Hello" }]);
 	scene = renameNode(scene, "t", "  Heading  ");
 	assert.equal(scene.nodes[0].name, "Heading");
 	// A blank name is rejected rather than leaving an unlabelled layer.

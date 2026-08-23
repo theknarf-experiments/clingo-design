@@ -93,6 +93,7 @@ export function ValueEditor({
 	testId,
 }: ValueEditorProps) {
 	const isColour = type === "color";
+	const multiline = VALUE_TYPES[type].multiline === true;
 	// A closed set of choices is a menu. Typing a font stack or a box-shadow by
 	// hand is not editing, it is remembering.
 	const options = VALUE_TYPES[type].options;
@@ -218,12 +219,22 @@ export function ValueEditor({
 									))}
 								</select>
 							) : term.kind === "literal" ? (
-								<input
-									className={styles.text}
-									data-role="literal"
-									value={term.value}
-									onChange={(e) => replace(index, lit(e.target.value))}
-								/>
+								multiline ? (
+									<textarea
+										className={cx(styles.text, styles.prose)}
+										data-role="literal"
+										rows={2}
+										value={term.value}
+										onChange={(e) => replace(index, lit(e.target.value))}
+									/>
+								) : (
+									<input
+										className={styles.text}
+										data-role="literal"
+										value={term.value}
+										onChange={(e) => replace(index, lit(e.target.value))}
+									/>
+								)
 							) : (
 								<span
 									className={styles.token}

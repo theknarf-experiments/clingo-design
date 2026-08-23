@@ -18,7 +18,8 @@ export type ValueType =
 	| "weight"
 	| "font"
 	| "align"
-	| "shadow";
+	| "shadow"
+	| "text";
 
 /** One entry of a closed menu — see {@link ValueTypeSpec.options}. */
 export interface ValueOption {
@@ -40,6 +41,12 @@ export interface ValueTypeSpec {
 	 * other side, and a value typed before the list existed still paints.
 	 */
 	options?: readonly ValueOption[];
+	/**
+	 * Edited in a box that takes more than a line. Copy is the only value here
+	 * that is prose rather than a token-sized quantity, and typing a paragraph
+	 * into a one-line field is the difference between an editor and a form.
+	 */
+	multiline?: boolean;
 }
 
 /**
@@ -100,6 +107,7 @@ export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
 	font: { label: "Font", fallback: FONTS[0].value, options: FONTS },
 	align: { label: "Alignment", fallback: ALIGNS[0].value, options: ALIGNS },
 	shadow: { label: "Shadow", fallback: SHADOWS[1].value, options: SHADOWS },
+	text: { label: "Text", fallback: "Text", multiline: true },
 };
 
 export const VALUE_TYPE_NAMES = Object.keys(VALUE_TYPES) as ValueType[];

@@ -125,6 +125,8 @@ test("sharedProps only offers what every selected node exposes", () => {
 		"opacity",
 	]);
 	assert.deepEqual(sharedProps(scene, ["t"]), [
+		// Content leads, because it is what the node is before it is a colour.
+		"text",
 		"ink",
 		"fontFamily",
 		"size",

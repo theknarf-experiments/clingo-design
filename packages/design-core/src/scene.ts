@@ -26,6 +26,7 @@ import {
 } from "./values.ts";
 
 export type PropName =
+	| "text"
 	| "fill"
 	| "radius"
 	| "stroke"
@@ -47,6 +48,10 @@ export interface PropSpec {
 }
 
 export const PROPS: Record<PropName, PropSpec> = {
+	// Content is a property like any other: a headline that reads one way or
+	// another is a design decision, and the machinery for "one of these" is
+	// already here. Nothing about a string made it special except history.
+	text: { label: "Text", type: "text", fallback: VALUE_TYPES.text.fallback },
 	fill: { label: "Fill", type: "color", fallback: VALUE_TYPES.color.fallback },
 	radius: {
 		label: "Corner radius",
@@ -279,6 +284,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	text: {
 		label: "Text",
 		props: [
+			"text",
 			"ink",
 			"fontFamily",
 			"size",
@@ -288,6 +294,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 			"opacity",
 		],
 		defaults: {
+			text: [lit(PROPS.text.fallback)],
 			ink: [lit(PROPS.ink.fallback)],
 			size: [lit(PROPS.size.fallback)],
 			weight: [lit(PROPS.weight.fallback)],
@@ -410,7 +417,6 @@ export interface SceneNode {
 	 */
 	frame: Frame;
 	/** Literal content for text nodes. */
-	text?: string;
 	/**
 	 * Which way a {@link KindSpec.diagonal} kind leans: "down" runs from the
 	 * frame's top-left corner to its bottom-right, "up" from bottom-left to

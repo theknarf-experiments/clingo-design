@@ -23,7 +23,7 @@ import styles from "./Artboard.module.css";
  * Keyed by property rather than by node kind, so the renderer follows
  * `KINDS[kind].props` and a new kind needs no change here at all.
  */
-const PAINT: Record<PropName, (value: string) => CSSProperties> = {
+const PAINT: Partial<Record<PropName, (value: string) => CSSProperties>> = {
 	fill: (value) => ({ background: value }),
 	radius: (value) => ({ borderRadius: value }),
 	// A stroke on a box is a border. The stroked kinds draw an SVG instead and
@@ -58,7 +58,11 @@ interface ShapeSpec {
 	/** Overrides {@link PAINT} where a kind takes a property somewhere else. */
 	paint?: Partial<Record<PropName, (value: string) => CSSProperties>>;
 	/** Drawn inside the box. */
-	content?: (node: SceneNode, frame: Frame) => ReactNode;
+	content?: (
+		node: SceneNode,
+		frame: Frame,
+		resolved: Partial<Record<PropName, string>>,
+	) => ReactNode;
 }
 
 /**
@@ -70,7 +74,9 @@ interface ShapeSpec {
 const SHAPES: Partial<Record<NodeKind, ShapeSpec>> = {
 	text: {
 		box: { lineHeight: 1.35, overflow: "hidden", whiteSpace: "pre-wrap" },
-		content: (node) => node.text,
+		// Content arrives with everything else, already resolved for this
+		// universe — which is what lets a headline differ between them.
+		content: (_node, _frame, resolved) => resolved.text,
 	},
 	// Fully rounded corners *are* an ellipse; an SVG for it would only add a
 	// second way to size the same box.
@@ -244,10 +250,14 @@ export const Artboard = memo(function Artboard({
 		const shape = SHAPES[node.kind];
 		if (shape?.box) Object.assign(box, shape.box);
 
+		const resolved: Partial<Record<PropName, string>> = {};
 		for (const prop of KINDS[node.kind].props) {
 			const value = resolveValue(context, node.props[prop], propVar(node.id, prop));
+			if (value === undefined) continue;
+			resolved[prop] = value;
+			// Content is not something CSS paints; it is what goes inside.
 			const paint = shape?.paint?.[prop] ?? PAINT[prop];
-			if (value !== undefined) Object.assign(box, paint(value));
+			if (paint) Object.assign(box, paint(value));
 		}
 
 		return (
@@ -260,7 +270,7 @@ export const Artboard = memo(function Artboard({
 				style={box}
 				title={unsettled ? "This property has more than one value" : undefined}
 			>
-				{shape?.content?.(node, frame)}
+				{shape?.content?.(node, frame, resolved)}
 				{node.children?.map((child) =>
 					universe.visible.has(child.id) ? render(child) : null,
 				)}

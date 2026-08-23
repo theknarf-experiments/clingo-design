@@ -30,7 +30,6 @@ import {
 	resolveValue,
 	setFrame,
 	setProp,
-	setText,
 	tokensFor,
 } from "@clingo-design/design-core";
 
@@ -405,20 +404,6 @@ export function Inspector({
 							/>
 						</div>
 					) : null}
-				</>
-			) : null}
-
-			{node.kind === "text" ? (
-				<>
-					<h3>Content</h3>
-					<textarea
-						className={styles.text}
-						value={node.text ?? ""}
-						data-role="node-text"
-						onChange={(e) =>
-							onSceneChange((prev) => setText(prev, node.id, e.target.value), "text")
-						}
-					/>
 				</>
 			) : null}
 

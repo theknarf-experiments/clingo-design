@@ -207,3 +207,13 @@
 	color: var(--dc-accent);
 	opacity: 1;
 }
+
+/* Copy is prose, so its box is a box rather than a slot. Resizable vertically
+   only: horizontal would fight the panel's own width. */
+.prose {
+	min-height: 2.6rem;
+	resize: vertical;
+	font: inherit;
+	font-size: 0.78rem;
+	line-height: 1.4;
+}

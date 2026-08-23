@@ -6,6 +6,7 @@
  * A project used to be an entry in one JSON blob, which is why the reader for
  * that blob still lives at the bottom of this file.
  */
+import { single } from "./values.ts";
 import {
 	ALIGNMENTS,
 	type AutoLayout,
@@ -256,9 +257,22 @@ function pruneNodes(list: readonly unknown[]): SceneNode[] {
 	for (const raw of list) {
 		if (!isPlacedNode(raw)) continue;
 		const node = raw as SceneNode;
-		const fixed = node.layout
-			? { ...node, layout: normalizeLayout(node.layout) }
-			: node;
+		// Content used to be a bare string beside the properties. Nothing is
+		// published, so this is not a migration to maintain — it is the same
+		// shape-normalisation everything else on the way in gets.
+		const carried =
+			typeof (node as { text?: unknown }).text === "string"
+				? {
+						...node,
+						props: {
+							...node.props,
+							text: single((node as unknown as { text: string }).text),
+						},
+					}
+				: node;
+		const fixed = carried.layout
+			? { ...carried, layout: normalizeLayout(carried.layout) }
+			: carried;
 		out.push(
 			fixed.children ? { ...fixed, children: pruneNodes(fixed.children) } : fixed,
 		);

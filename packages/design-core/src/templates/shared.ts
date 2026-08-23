@@ -9,7 +9,7 @@
  */
 import { makeNode } from "../edits.ts";
 import type { SceneNode } from "../scene.ts";
-import type { Token, Value } from "../values.ts";
+import { type Token, type Value, single } from "../values.ts";
 
 export type Box = [x: number, y: number, width: number, height: number];
 
@@ -46,7 +46,12 @@ export function text(
 	content: string,
 	props: SceneNode["props"],
 ): SceneNode {
-	return { ...makeNode("text", at(box), { id, name, text: content }), props };
+	// Content joins the other properties rather than sitting beside them, so a
+	// template can give a headline two wordings the way it gives it two colours.
+	return {
+		...makeNode("text", at(box), { id, name }),
+		props: { text: single(content), ...props },
+	};
 }
 
 /** Replace one starter token's value. */

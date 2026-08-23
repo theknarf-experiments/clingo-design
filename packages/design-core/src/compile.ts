@@ -17,17 +17,18 @@
  * genuinely has to be worked out it is not a choice either — it is a variable
  * of the simplex solver, which costs one unknown rather than a domain.
  */
-import { type Measurements, naturalSize } from "./measure.ts";
+import { askedSize, measuredCount, naturalSize, type Measurements } from "./measure.ts";
 import {
-	type AutoLayout,
 	CONSTRAINT_KINDS,
 	CONSTRAINT_NAMES,
 	EDGES,
 	EDGE_NAMES,
 	NODE_KINDS,
-	type Scene,
 	dimension,
 	isLaidOut,
+	type AutoLayout,
+	type Scene,
+	type SceneNode,
 } from "./scene.ts";
 import {
 	DERIVATIONS,
@@ -92,6 +93,11 @@ export const probeAtom = (
  */
 const LAYOUT_RULES = [
 	"#defined layout/2.",
+	"#defined ltsize/4.",
+	"% What a node asks to be, when what it says can vary. The host measures",
+	"% every alternative because they are not the same width; which one applies",
+	"% is the solver's own choice, so the fact cannot be picked in advance.",
+	"lask(N,S,V) :- ltsize(N,I,S,V), pick(prop(N,text),I).",
 	"#defined lslot/3.",
 	"#defined lgrow/1.",
 	"#defined lhug/1.",
@@ -303,6 +309,11 @@ const FREEDOM_RULES = [
 	"",
 	"% ---- what is still free ----",
 	"#defined layout/2.",
+	"#defined ltsize/4.",
+	"% What a node asks to be, when what it says can vary. The host measures",
+	"% every alternative because they are not the same width; which one applies",
+	"% is the solver's own choice, so the fact cannot be picked in advance.",
+	"lask(N,S,V) :- ltsize(N,I,S,V), pick(prop(N,text),I).",
 	"% Every coordinate the solver decides rather than reads off the document.",
 	"gcoord(N,A) :- gpos(N,A).",
 	"gcoord(N,S) :- gsize(N,S).",
@@ -541,6 +552,30 @@ export interface CompileOptions {
 	measurements?: Measurements;
 }
 
+/**
+ * A node's asked size, as either one fact or a table the pick selects from.
+ *
+ * Both would be two equations for one unknown, so it is one or the other.
+ */
+function emitAsked(
+	lines: string[],
+	node: SceneNode,
+	measurements: Measurements | undefined,
+): void {
+	const alternatives = measuredCount(node, measurements);
+	if (alternatives > 1) {
+		for (let i = 0; i < alternatives; i++) {
+			const size = askedSize(node, measurements, i);
+			lines.push(atom("ltsize", node.id, i, "width", Math.round(size.width)));
+			lines.push(atom("ltsize", node.id, i, "height", Math.round(size.height)));
+		}
+		return;
+	}
+	const want = naturalSize(node, measurements);
+	lines.push(atom("lask", node.id, "width", Math.round(want.width)));
+	lines.push(atom("lask", node.id, "height", Math.round(want.height)));
+}
+
 export function compile(
 	scene: Scene,
 	options: CompileOptions = {},
@@ -608,19 +643,13 @@ export function compile(
 			if (spec.sizing === "hug") layoutLines.push(atom("lhug", node.id));
 			// The size the container asks for. Ignored when it hugs, and the
 			// stored frame is then only what it falls back to.
-			const own = naturalSize(node, options.measurements);
-			layoutLines.push(atom("lask", node.id, "width", Math.round(own.width)));
-			layoutLines.push(atom("lask", node.id, "height", Math.round(own.height)));
+			emitAsked(layoutLines, node, options.measurements);
 			(node.children ?? []).forEach((child, index) => {
 				layoutLines.push(atom("lslot", node.id, child.id, index + 1));
 				// What the child would like to be, when it is not stretched — its
 				// content's size for a node that sizes itself, its frame otherwise,
 				// and for a hugging container of its own, whatever it hugs to.
-				const want = naturalSize(child, options.measurements);
-				layoutLines.push(atom("lask", child.id, "width", Math.round(want.width)));
-				layoutLines.push(
-					atom("lask", child.id, "height", Math.round(want.height)),
-				);
+				emitAsked(layoutLines, child, options.measurements);
 				if (child.grow) layoutLines.push(atom("lgrow", child.id));
 				if (child.alignSelf) {
 					layoutLines.push(atom("lalignself", child.id, child.alignSelf));
