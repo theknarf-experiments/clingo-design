@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
 	type Exploration,
 	Explorer,
+	type Measurements,
 	type Scene,
 	UnsatisfiableError,
 } from "@clingo-design/design-core";
@@ -27,15 +28,20 @@ export interface ExplorationState {
  * Re-explores whenever the document changes.
  *
  * One {@link Explorer} lives for the life of the editor, so an edit that does
- * not change the compiled program — a rename, a text tweak — costs a solve
- * rather than a re-grounding. Solves run in a worker, so a slow one does not
- * freeze the canvas.
+ * not change the compiled program — a rename, a text tweak outside a layout —
+ * costs a solve rather than a re-grounding. Solves run in a worker, so a slow
+ * one does not freeze the canvas.
+ *
+ * `measurements` must be referentially stable across renders that do not
+ * change it: it is an effect dependency, and a fresh object every render would
+ * re-solve forever.
  */
 export function useExploration(
 	scene: Scene,
 	limit = 24,
 	seed = 1,
 	pins: Readonly<Record<string, number>> = {},
+	measurements: Measurements = {},
 ): ExplorationState {
 	const [state, setState] = useState<ExplorationState>({
 		exploration: null,
@@ -70,7 +76,12 @@ export function useExploration(
 				if (!current) return;
 				// `explore` compiles once and hands the generated half back, so
 				// the power panel does not pay for a second compile.
-				const exploration = await current.explore(scene, { limit, seed, pins });
+				const exploration = await current.explore(scene, {
+					limit,
+					seed,
+					pins,
+					measurements,
+				});
 				if (generation !== run.current) return;
 				setState({
 					exploration,
@@ -94,7 +105,7 @@ export function useExploration(
 		}, 150);
 
 		return () => clearTimeout(timer);
-	}, [scene, limit, seed, pins]);
+	}, [scene, limit, seed, pins, measurements]);
 
 	return state;
 }

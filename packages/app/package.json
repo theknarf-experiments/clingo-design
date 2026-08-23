@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@chenglou/pretext": "^0.0.8",
     "@clingo-design/canvas": "workspace:*",
     "@clingo-design/clingo-wasm": "workspace:*",
     "@clingo-design/design-core": "workspace:*",

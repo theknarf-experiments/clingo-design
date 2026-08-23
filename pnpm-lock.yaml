@@ -17,6 +17,9 @@ importers:
 
   packages/app:
     dependencies:
+      '@chenglou/pretext':
+        specifier: ^0.0.8
+        version: 0.0.8
       '@clingo-design/canvas':
         specifier: workspace:*
         version: link:../canvas
@@ -103,6 +106,9 @@ importers:
         version: 7.0.2
 
 packages:
+
+  '@chenglou/pretext@0.0.8':
+    resolution: {integrity: sha512-yqm2GMxnPI7VHcHwe84P8ZF0JK/2d2DMKPqMN+s95jQhwDMYYXKVFVJUMEaVWckQStdsjdLav/0Vu+d9YbtGxA==}
 
   '@oxc-project/types@0.146.0':
     resolution: {integrity: sha512-XC0QsnnhVe7sLIWmYmdPw7x5P0h4W8vUU3Nv1ySgWXtvCz8NizoAEpGXA0sOYoJQV2Rl13LgURAHQ5cI5ILCSA==}
@@ -618,6 +624,8 @@ packages:
         optional: true
 
 snapshots:
+
+  '@chenglou/pretext@0.0.8': {}
 
   '@oxc-project/types@0.146.0': {}
 

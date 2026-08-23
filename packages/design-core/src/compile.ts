@@ -15,6 +15,7 @@
  * Geometry goes in as plain facts. Four atoms per node costs nothing; a
  * choosable coordinate would ground a domain of thousands.
  */
+import { type Measurements, askedSize } from "./measure.ts";
 import {
 	type AutoLayout,
 	CONSTRAINT_KINDS,
@@ -224,7 +225,19 @@ class LiteralTable {
 	}
 }
 
-export function compile(scene: Scene): CompileResult {
+export interface CompileOptions {
+	/**
+	 * Natural sizes for the nodes that size themselves to their content. They
+	 * arrive from outside because measuring text needs a canvas; see
+	 * `measure.ts`. Absent, every node asks for the frame it was drawn at.
+	 */
+	measurements?: Measurements;
+}
+
+export function compile(
+	scene: Scene,
+	options: CompileOptions = {},
+): CompileResult {
 	const literals = new LiteralTable();
 	const variables: Record<string, number> = {};
 	const valueLines: string[] = [];
@@ -287,20 +300,17 @@ export function compile(scene: Scene): CompileResult {
 			if (spec.sizing === "hug") layoutLines.push(atom("lhug", node.id));
 			// The size the container asks for. Ignored when it hugs, and the
 			// stored frame is then only what it falls back to.
-			layoutLines.push(
-				atom("lask", node.id, "width", Math.round(node.frame.width)),
-			);
-			layoutLines.push(
-				atom("lask", node.id, "height", Math.round(node.frame.height)),
-			);
+			const own = askedSize(node, options.measurements);
+			layoutLines.push(atom("lask", node.id, "width", Math.round(own.width)));
+			layoutLines.push(atom("lask", node.id, "height", Math.round(own.height)));
 			(node.children ?? []).forEach((child, index) => {
 				layoutLines.push(atom("lslot", node.id, child.id, index + 1));
-				// What the child would like to be, when it is not stretched.
+				// What the child would like to be, when it is not stretched — its
+				// content's size for a node that sizes itself, its frame otherwise.
+				const want = askedSize(child, options.measurements);
+				layoutLines.push(atom("lask", child.id, "width", Math.round(want.width)));
 				layoutLines.push(
-					atom("lask", child.id, "width", Math.round(child.frame.width)),
-				);
-				layoutLines.push(
-					atom("lask", child.id, "height", Math.round(child.frame.height)),
+					atom("lask", child.id, "height", Math.round(want.height)),
 				);
 				if (child.grow) layoutLines.push(atom("lgrow", child.id));
 			});

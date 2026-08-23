@@ -142,6 +142,15 @@ export interface KindSpec {
 	 */
 	diagonal: boolean;
 	/**
+	 * Has content with a size of its own, so the box it was dragged out at is
+	 * only a starting point.
+	 *
+	 * The measuring is not done here: it needs a font engine, and the only one
+	 * available is the browser's canvas. The host measures and hands the
+	 * numbers in — see `measure.ts`.
+	 */
+	measured: boolean;
+	/**
 	 * Drawn by placing point after point rather than by dragging a box out.
 	 *
 	 * Its real geometry is {@link SceneNode.points}; the frame is only their
@@ -167,6 +176,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: false,
 		diagonal: false,
+		measured: false,
 		plotted: false,
 	},
 	rect: {
@@ -183,6 +193,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: true,
 		diagonal: false,
+		measured: false,
 		plotted: false,
 	},
 	ellipse: {
@@ -198,6 +209,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: true,
 		diagonal: false,
+		measured: false,
 		plotted: false,
 	},
 	line: {
@@ -217,6 +229,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: true,
 		diagonal: true,
+		measured: false,
 		plotted: false,
 	},
 	arrow: {
@@ -233,6 +246,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: true,
 		diagonal: true,
+		measured: false,
 		plotted: false,
 	},
 	path: {
@@ -255,6 +269,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: false,
 		diagonal: false,
+		measured: false,
 		plotted: true,
 	},
 	text: {
@@ -280,6 +295,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: false,
 		shape: false,
 		diagonal: false,
+		measured: true,
 		plotted: false,
 	},
 	group: {
@@ -293,6 +309,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		wrapsChildren: true,
 		shape: false,
 		diagonal: false,
+		measured: false,
 		plotted: false,
 	},
 };
@@ -389,6 +406,12 @@ export interface SceneNode {
 	points?: Point[];
 	/** Whether a plotted kind's last point joins back up to its first. */
 	closed?: boolean;
+	/**
+	 * On a {@link KindSpec.measured} kind: whether its size comes from its
+	 * content or from the frame above. Absent means automatic — see
+	 * `measure.ts`. Meaningless on every other kind.
+	 */
+	sizing?: Sizing;
 	props: Partial<Record<PropName, Value>>;
 	/** Present on the container kinds. */
 	children?: SceneNode[];

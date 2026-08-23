@@ -11,11 +11,14 @@ import {
 	DEFAULT_LAYOUT,
 	defaultValue,
 	findInTree,
+	isMeasured,
 	managedNodes,
 	nodeNames,
 	propValues,
 	setGrow,
 	setLayout,
+	setSizing,
+	sizingOf,
 	updateLayout,
 	propVar,
 	renameNode,
@@ -174,6 +177,30 @@ export function Inspector({
 					/>
 				))}
 			</div>
+
+			{isMeasured(node) ? (
+				<div className={styles.grid}>
+					<label className={styles.field}>
+						<span className={styles.fieldLabel}>sizing</span>
+						<select
+							className={styles.number}
+							data-role="text-sizing"
+							value={sizingOf(node)}
+							onChange={(e) =>
+								onSceneChange((prev) =>
+									setSizing(prev, [node.id], e.target.value as Sizing),
+								)
+							}
+						>
+							{SIZINGS.map((z) => (
+								<option key={z} value={z}>
+									{z === "hug" ? "auto" : "fixed"}
+								</option>
+							))}
+						</select>
+					</label>
+				</div>
+			) : null}
 
 			{managed ? (
 				<label className={styles.check}>

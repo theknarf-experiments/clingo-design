@@ -27,6 +27,7 @@ import {
 	type PropName,
 	type Scene,
 	type SceneNode,
+	type Sizing,
 	uniqueName,
 	wrapsChildren,
 } from "./scene.ts";
@@ -610,6 +611,31 @@ export function setGrow(scene: Scene, ids: readonly string[], grow: boolean): Sc
 				return rest;
 			}
 			return { ...node, grow: true };
+		}),
+	};
+}
+
+/**
+ * Whether a node sizes itself to its content — see `measure.ts`.
+ *
+ * Automatic is the default and is stored as nothing at all, so a document only
+ * carries the boxes somebody deliberately pinned.
+ */
+export function setSizing(
+	scene: Scene,
+	ids: readonly string[],
+	sizing: Sizing,
+): Scene {
+	const touch = new Set(ids);
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (node) => {
+			if (!touch.has(node.id)) return node;
+			if (sizing !== "fixed") {
+				const { sizing: _dropped, ...rest } = node;
+				return rest;
+			}
+			return { ...node, sizing };
 		}),
 	};
 }

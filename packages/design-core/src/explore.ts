@@ -13,6 +13,7 @@
 import { compile } from "./compile.ts";
 import { formatDiagnostics, parseAtom } from "./atoms.ts";
 import type { Frame } from "./geometry.ts";
+import type { Measurements } from "./measure.ts";
 import type { Scene } from "./scene.ts";
 import type { Solver, SolverSession } from "./solver.ts";
 import {
@@ -284,6 +285,12 @@ export interface ExploreOptions {
 	 * undone by forgetting them rather than by an undo entry.
 	 */
 	pins?: Readonly<Record<string, number>>;
+	/**
+	 * Natural sizes for the nodes that size themselves to their content, from
+	 * whoever has a canvas to measure with — see `measure.ts`. They are part of
+	 * the program, so changing one re-grounds.
+	 */
+	measurements?: Measurements;
 }
 
 const DEFAULTS = {
@@ -330,7 +337,9 @@ export class Explorer {
 		const poolSize = options.poolSize ?? limit * 2;
 		const started = Date.now();
 
-		const { program, generated, guards, userRulesLine } = compile(scene);
+		const { program, generated, guards, userRulesLine } = compile(scene, {
+			measurements: options.measurements,
+		});
 		// Constraints and pins are both assumed rather than baked in: that is
 		// what lets an unsatisfiable answer name which of them is at fault, and
 		// it means a pin costs a solve rather than a re-grounding.

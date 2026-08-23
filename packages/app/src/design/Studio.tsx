@@ -44,6 +44,7 @@ import { Variables } from "./Variables";
 import { ViewSwitcher } from "./ViewSwitcher";
 import { cx } from "./cx";
 import { layoutArtboards } from "./layout";
+import { measureScene } from "./measureText";
 import { useExploration } from "./useExploration";
 import styles from "./Studio.module.css";
 import tabStyles from "./tabs.module.css";
@@ -171,8 +172,12 @@ export function Studio({
 	 * alone, and is undone by forgetting it.
 	 */
 	const [pins, setPins] = useState<Readonly<Record<string, number>>>({});
+	// Text sizes itself, and only something with a canvas can say how big it
+	// is. Measuring here rather than in the compiler is what keeps design-core
+	// runnable outside a browser.
+	const measurements = useMemo(() => measureScene(scene), [scene]);
 	const { exploration, generated, error, conflict, pinConflict, solving } =
-		useExploration(scene, LIMIT, seed, pins);
+		useExploration(scene, LIMIT, seed, pins, measurements);
 	const blamed = useMemo(() => new Set(conflict), [conflict]);
 	const badPins = useMemo(() => new Set(pinConflict), [pinConflict]);
 	/** Which alternatives are still reachable, per variable. */

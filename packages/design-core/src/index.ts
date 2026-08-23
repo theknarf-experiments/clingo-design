@@ -1,6 +1,7 @@
 export * from "./values.ts";
 export * from "./scene.ts";
 export * from "./geometry.ts";
+export * from "./measure.ts";
 export * from "./tree.ts";
 export * from "./edits.ts";
 export * from "./compile.ts";
