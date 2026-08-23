@@ -14,6 +14,7 @@ export * from "./solver.ts";
 export * from "./directSolver.ts";
 export * from "./atoms.ts";
 export * from "./model.ts";
+export * from "./derived.ts";
 export * from "./sampling.ts";
 export * from "./freedom.ts";
 export * from "./explore.ts";

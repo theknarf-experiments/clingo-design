@@ -1,11 +1,13 @@
 import {
 	CHILD_PROPS,
+	type DerivedNode,
 	CONTAINER_PROPS,
 	LAYOUT_PROPS,
 	type LayoutProp,
 	type Sizing,
 	KINDS,
 	PROPS,
+	type ModelNode,
 	type Picks,
 	type Scene,
 	type SceneNode,
@@ -62,6 +64,12 @@ export interface InspectorProps {
 	/** Alternatives the user has fixed, by variable. */
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
+	/** Nodes the answer set has that the document does not — see `derived.ts`. */
+	derived?: readonly DerivedNode[];
+	/** Derived ids some universe has, whether or not the one on screen does. */
+	known?: ReadonlySet<string>;
+	/** Derived ids every universe has. */
+	everywhere?: ReadonlySet<string>;
 }
 
 const AXES = ["x", "y", "width", "height"] as const;
@@ -104,6 +112,108 @@ function NumberField({
 }
 
 /**
+ * What a node a rule derived amounts to — read-only, and saying why.
+ *
+ * The analogy that makes this bearable is a spreadsheet: a typed cell and a
+ * formula cell sit side by side and behave completely differently, and the
+ * whole of what keeps that usable is that you can always tell which is which.
+ * So this panel looks like the inspector and is inert everywhere the inspector
+ * is live: the name is the ASP term, the geometry is what the answer set said,
+ * and every property is the text the node actually drew with.
+ *
+ * Writing an edit back into the rule that produced the node is a research
+ * problem and is deliberately not attempted. The rule is the place to change
+ * it, and the Rules panel is where the rule is.
+ */
+function DerivedPanel({
+	id,
+	node,
+	parent,
+	everywhere,
+}: {
+	id: string;
+	/** Absent when the universe on screen does not have this node. */
+	node: ModelNode | undefined;
+	parent: string | null;
+	everywhere: boolean;
+}) {
+	return (
+		<div className={styles.inspector} data-role="inspector" data-derived={id}>
+			<div className={styles.derivedName} data-role="node-name">
+				{id}
+			</div>
+			<p className={styles.note} data-role="derived-note">
+				Derived by a rule. The document does not hold this node, so there is
+				nothing here to drag, rename or type into — change the rule that
+				produces it in the Rules panel.
+			</p>
+
+			{node === undefined ? (
+				<p className={styles.empty} data-role="derived-absent">
+					Not in the design on screen. Another one has it.
+				</p>
+			) : (
+				<>
+					{everywhere ? null : (
+						<p className={styles.note} data-role="derived-sometimes">
+							Present in some designs and not others.
+						</p>
+					)}
+					<h3>Position</h3>
+					<p className={styles.note}>
+						{parent === null
+							? "On the canvas, from the answer set."
+							: `Inside ${parent}, from the answer set.`}
+					</p>
+					<div className={styles.grid}>
+						{AXES.map((axis) => (
+							<label
+								key={axis}
+								className={`${styles.field} ${styles.pinned}`}
+								data-pinned=""
+							>
+								<span className={styles.fieldLabel}>{axis}</span>
+								<input
+									type="number"
+									className={styles.number}
+									data-field={axis}
+									value={Math.round(node.frame[axis])}
+									disabled
+									readOnly
+								/>
+							</label>
+						))}
+					</div>
+
+					<h3>Kind</h3>
+					<p className={styles.note} data-role="derived-kind">
+						{KINDS[node.kind].label}
+					</p>
+
+					{Object.keys(node.rendered).length > 0 ? <h3>Resolved</h3> : null}
+					<div className={styles.props}>
+						{KINDS[node.kind].props.map((prop) => {
+							const value = node.rendered[prop];
+							if (value === undefined) return null;
+							return (
+								<div
+									key={prop}
+									className={styles.resolved}
+									data-resolved={prop}
+								>
+									<span className={styles.fieldLabel}>{PROPS[prop].label}</span>
+									<span className={styles.resolvedValue}>{value}</span>
+								</div>
+							);
+						})}
+					</div>
+				</>
+			)}
+		</div>
+	);
+}
+
+/**
  * Properties of the current selection, in the shape a designer expects:
  * position, then content, then appearance.
  *
@@ -122,10 +232,31 @@ export function Inspector({
 	freedom = {},
 	pins,
 	onPin,
+	derived = [],
+	known,
+	everywhere,
 }: InspectorProps) {
 	const selected = [...selection]
 		.map((id) => findInTree(scene.nodes, id))
 		.filter((n): n is SceneNode => n !== undefined);
+
+	// A single selected id the document does not hold is a node some rule
+	// derived. There is nothing to edit, so what it gets is an account of
+	// itself rather than a form.
+	const lone = selection.size === 1 ? [...selection][0] : undefined;
+	if (lone !== undefined && selected.length === 0) {
+		const found = derived.find((d) => d.node.id === lone);
+		if (found || known?.has(lone)) {
+			return (
+				<DerivedPanel
+					id={lone}
+					node={found?.node}
+					parent={found?.parent ?? null}
+					everywhere={everywhere === undefined || everywhere.has(lone)}
+				/>
+			);
+		}
+	}
 
 	if (selected.length === 0) {
 		return (

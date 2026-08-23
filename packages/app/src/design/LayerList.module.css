@@ -87,3 +87,15 @@
 .dropInside {
 	box-shadow: inset 0 0 0 2px var(--dc-accent);
 }
+
+/* A row for a node only a rule says exists. Italic and quieter, because what
+   it names is an ASP term rather than a name anyone typed, and because
+   nothing about it can be dragged, renamed or reordered from here. */
+.derived {
+	font-style: italic;
+	cursor: default;
+}
+
+.derived .label {
+	opacity: 0.75;
+}

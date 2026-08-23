@@ -157,3 +157,31 @@
 .follow:hover {
 	opacity: 1;
 }
+
+/* A derived node's name is an ASP term the solver produced, not a name anyone
+   typed, so it is shown rather than offered for editing. */
+.derivedName {
+	padding: 0.35rem 0.5rem;
+	font-weight: 600;
+	font-family: var(--dc-mono, ui-monospace, monospace);
+	font-size: 0.78rem;
+	background: var(--dc-sunken);
+	border: 1px dashed var(--dc-line);
+	border-radius: 5px;
+	overflow-wrap: anywhere;
+}
+
+/* One resolved property: what the node actually drew with, in this design. */
+.resolved {
+	display: flex;
+	align-items: baseline;
+	gap: 0.35rem;
+	font-size: 0.78rem;
+}
+
+.resolvedValue {
+	font-family: var(--dc-mono, ui-monospace, monospace);
+	font-size: 0.74rem;
+	overflow-wrap: anywhere;
+	opacity: 0.85;
+}

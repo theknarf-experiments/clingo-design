@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
 	type Annotation,
+	type DerivedNode,
 	type Frame,
 	type Freedom,
 	HANDLES,
@@ -18,7 +19,9 @@ import {
 	annotate,
 	boundsOf,
 	clampTo,
+	derivedAt,
 	dropTargetAt,
+	encloses,
 	frameAncestorOf,
 	frameAt,
 	frameFromPoints,
@@ -129,6 +132,13 @@ export interface EditorProps {
 	 * the document's own number and free by construction.
 	 */
 	freedom?: Freedom;
+	/**
+	 * Nodes the answer set has that the document does not — see `derived.ts`.
+	 *
+	 * The canvas draws them like anything else, so the pointer has to be able to
+	 * reach them; what it may then do with one is select it and nothing more.
+	 */
+	derived?: readonly DerivedNode[];
 	/** Right-click, in client coordinates. */
 	onContextMenu?: (at: { x: number; y: number }) => void;
 }
@@ -153,6 +163,7 @@ export function Editor({
 	origin,
 	varying,
 	freedom = {},
+	derived = [],
 	onContextMenu,
 }: EditorProps) {
 	const surface = useRef<HTMLDivElement>(null);
@@ -295,6 +306,23 @@ export function Editor({
 	}
 
 	/**
+	 * The derived node a click should go to, if any.
+	 *
+	 * Only when the document's own answer is the node the derived one hangs
+	 * from, or when the document has no answer at all: a document node painted
+	 * over a derived one is still the thing you clicked.
+	 */
+	function derivedUnder(point: Point, documentHit: string | null): string | null {
+		if (derived.length === 0) return null;
+		const found = derivedAt(derived, point);
+		if (!found) return null;
+		if (documentHit !== null && !encloses(derived, documentHit, found.node.id)) {
+			return null;
+		}
+		return found.node.id;
+	}
+
+	/**
 	 * The pen's clicks. Each one extends the run; landing back on the first
 	 * point closes it, which is the only way to get a filled path.
 	 */
@@ -365,6 +393,17 @@ export function Editor({
 		}
 
 		const hit = hitTestTree(scene.nodes, point, universe.solved);
+		// A derived node is drawn but is not in the document, so the document's
+		// own hit testing cannot see it and the click lands on whatever encloses
+		// it instead. Handing it to the derived node exactly in that case leaves
+		// every existing gesture untouched — and the gesture stops there, because
+		// there is nothing in the document to move. Same rule a fully constrained
+		// node already follows: selectable, immovable.
+		const under = derivedUnder(point, hit?.node.id ?? null);
+		if (under) {
+			onSelectionChange([under]);
+			return;
+		}
 		if (!hit) {
 			if (!event.shiftKey) onSelectionChange([]);
 			setGesture({ kind: "marquee", origin: point });
@@ -401,8 +440,16 @@ export function Editor({
 		if (!onContextMenu) return;
 		event.preventDefault();
 		event.stopPropagation();
-		const hit = hitTestTree(scene.nodes, toCanvas(event), universe.solved);
+		const point = toCanvas(event);
+		const hit = hitTestTree(scene.nodes, point, universe.solved);
 		const targetId = hit ? targetFor(hit.node.id) : null;
+		// A derived node is not something the menu's edits can act on, but
+		// clearing the selection out from under one because the document cannot
+		// see it would be a lie about what is selected.
+		if (derivedUnder(point, hit?.node.id ?? null)) {
+			onContextMenu({ x: event.clientX, y: event.clientY });
+			return;
+		}
 		// Right-clicking outside the selection retargets it, the way every
 		// editor does; right-clicking inside keeps the multi-selection.
 		if (targetId && !selection.has(targetId)) onSelectionChange([targetId]);
@@ -1006,6 +1053,20 @@ export function Editor({
 					/>
 				);
 			})}
+
+			{/* A selected derived node gets an outline too, dashed: the same
+			    statement the grey outline makes about a fully constrained node,
+			    made about a node with nothing in the document behind it. */}
+			{derived
+				.filter((d) => selection.has(d.node.id))
+				.map((d) => (
+					<div
+						key={`derived-${d.node.id}`}
+						className={cx(styles.outline, styles.derivedOutline)}
+						data-derived-outline={d.node.id}
+						style={rectStyle(d.world)}
+					/>
+				))}
 
 			{shownBounds && tool === "select" && gesture.kind !== "marquee" ? (
 				<div className={styles.handles} style={rectStyle(shownBounds)}>

@@ -56,18 +56,28 @@ function rational(text: string): number | undefined {
 
 const AXIS = { x: "x", y: "y", width: "width", height: "height" } as const;
 
-/** Pulls `__lpx(lv(n,x),"12")` and `__lpx(lsz(n,width),"80")` out of a model. */
+/**
+ * Pulls `__lpx(lv(n,x),"12")` and `__lpx(lsz(n,width),"80")` out of a model.
+ *
+ * Parsed rather than matched, because a node id is no longer always a plain
+ * constant: a rule that brings nodes into being names them with terms, and
+ * `lv(cell(1,1),x)` has two commas that are not argument separators.
+ */
 export function readSolved(
 	atoms: readonly string[],
 ): Record<string, Partial<Frame>> {
 	const out: Record<string, Partial<Frame>> = {};
 	for (const text of atoms) {
-		const m = /^__lpx\((lv|lsz)\(([^,]+),([a-z]+)\),"([^"]*)"\)$/.exec(text);
-		if (!m) continue;
-		const axis = AXIS[m[3] as keyof typeof AXIS];
-		const value = rational(m[4]);
+		if (!text.startsWith("__lpx(")) continue;
+		const outer = parseAtom(text);
+		if (!outer || outer.name !== "__lpx" || outer.args.length !== 2) continue;
+		const variable = parseAtom(outer.args[0]);
+		if (!variable || variable.args.length !== 2) continue;
+		if (variable.name !== "lv" && variable.name !== "lsz") continue;
+		const axis = AXIS[variable.args[1] as keyof typeof AXIS];
+		const value = rational(unquote(outer.args[1]));
 		if (axis === undefined || value === undefined) continue;
-		(out[m[2]] ??= {})[axis] = value;
+		(out[variable.args[0]] ??= {})[axis] = value;
 	}
 	return out;
 }
@@ -187,7 +197,13 @@ export function readModel(atoms: readonly string[]): ModelScene {
 		if (!kind) continue;
 		const rendered: Partial<Record<PropName, string>> = {};
 		for (const [prop, literal] of facts.rendered.get(id) ?? []) {
-			const text = facts.literal.get(literal);
+			// The generated program always names an interned literal, so the id
+			// is a constant and the table has it. A hand-written rule may spell
+			// the text out instead — `rendered(cell(1,1),fill,"#38bdf8")` — and a
+			// quoted term can never be an id, so there is no ambiguity to resolve.
+			const text = literal.startsWith('"')
+				? unquote(literal)
+				: facts.literal.get(literal);
 			// A literal with no text is a dangling id, not an empty string.
 			if (text !== undefined) rendered[prop] = text;
 		}

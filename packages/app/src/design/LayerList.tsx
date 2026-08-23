@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import {
+	type DerivedNode,
 	type Frame,
 	KINDS,
 	type Scene,
@@ -21,6 +22,20 @@ export interface LayerListProps {
 	 * layout keeps where the solver put it, which is only knowable from here.
 	 */
 	solved?: Readonly<Record<string, Partial<Frame>>>;
+	/**
+	 * Nodes the answer set has that the document does not — see `derived.ts`.
+	 *
+	 * They are listed because a picture with things in it that no layer accounts
+	 * for is a picture you cannot read. They are not draggable, not reorderable
+	 * and not drop targets, because there is nothing in the document to move.
+	 */
+	derived?: readonly DerivedNode[];
+	/**
+	 * Derived ids that every universe has. One that is absent is marked, since
+	 * a node that comes and goes with the design is a different thing from one
+	 * that is simply there.
+	 */
+	everywhere?: ReadonlySet<string>;
 	/** Right-click, in client coordinates, on the node under the pointer. */
 	onContextMenu?: (at: { x: number; y: number }, nodeId: string) => void;
 }
@@ -36,7 +51,8 @@ const GLYPH: Record<SceneNode["kind"], string> = {
 	group: "▣",
 };
 
-interface Row {
+interface DocRow {
+	kind: "doc";
 	node: SceneNode;
 	depth: number;
 	/** Null at the top level. */
@@ -44,6 +60,15 @@ interface Row {
 	/** Position among its siblings, in paint order. */
 	index: number;
 }
+
+/** A row for something only a rule says exists. */
+interface DerivedRow {
+	kind: "derived";
+	derived: DerivedNode;
+	depth: number;
+}
+
+type Row = DocRow | DerivedRow;
 
 /**
  * Where a drop would land.
@@ -72,6 +97,8 @@ export function LayerList({
 	onSelectionChange,
 	onSceneChange,
 	solved,
+	derived = [],
+	everywhere,
 	onContextMenu,
 }: LayerListProps) {
 	const [dragging, setDragging] = useState<string | null>(null);
@@ -86,20 +113,48 @@ export function LayerList({
 	const target = useRef<Drop | null>(null);
 	const list = useRef<HTMLUListElement>(null);
 
+	/**
+	 * Derived nodes by the parent they hang from, so each one appears under
+	 * whatever `child/2` put it in rather than in a heap at the bottom.
+	 */
+	const derivedUnder = new Map<string | null, DerivedNode[]>();
+	for (const node of derived) {
+		const siblings = derivedUnder.get(node.parent);
+		if (siblings) siblings.push(node);
+		else derivedUnder.set(node.parent, [node]);
+	}
+
 	const rows: Row[] = [];
+	/**
+	 * A derived subtree, under whatever it hangs from.
+	 *
+	 * Not reversed the way the document rows are: paint order among derived
+	 * siblings is `order/2`, which nothing in this panel can change, so
+	 * presenting them in the order the rule produced them reads better than
+	 * presenting them upside down.
+	 */
+	const collectDerived = (parent: string | null, depth: number) => {
+		for (const node of derivedUnder.get(parent) ?? []) {
+			rows.push({ kind: "derived", derived: node, depth });
+			collectDerived(node.node.id, depth + 1);
+		}
+	};
 	const collect = (
 		nodes: readonly SceneNode[],
 		depth: number,
 		parent: string | null,
 	) => {
 		[...nodes].reverse().forEach((node) => {
-			rows.push({ node, depth, parent, index: nodes.indexOf(node) });
+			rows.push({ kind: "doc", node, depth, parent, index: nodes.indexOf(node) });
 			if (node.children?.length) collect(node.children, depth + 1, node.id);
+			collectDerived(node.id, depth + 1);
 		});
 	};
 	collect(scene.nodes, 0, null);
+	collectDerived(null, 0);
 
-	const rowOf = (id: string) => rows.find((r) => r.node.id === id);
+	const rowOf = (id: string): DocRow | undefined =>
+		rows.find((r): r is DocRow => r.kind === "doc" && r.node.id === id);
 
 	/** Ids the dragged node contains, which it cannot be dropped into. */
 	function subtreeOf(id: string): Set<string> {
@@ -189,64 +244,112 @@ export function LayerList({
 		window.addEventListener("pointerup", up);
 	}
 
+	/**
+	 * A row for a node only a rule says exists.
+	 *
+	 * Selectable, so the inspector can show what it resolved to, and nothing
+	 * else: no pointerdown drag, and no `data-layer`, which is what keeps it out
+	 * of the drop search above without that search having to know about it.
+	 */
+	function derivedRow({ derived: node, depth }: DerivedRow) {
+		const id = node.node.id;
+		const sometimes = everywhere !== undefined && !everywhere.has(id);
+		return (
+			<li key={id}>
+				<button
+					type="button"
+					data-derived-layer={id}
+					data-depth={depth}
+					className={cx(
+						styles.layer,
+						styles.derived,
+						selection.has(id) && styles.selected,
+					)}
+					style={{ paddingLeft: `${0.4 + depth * 0.75}rem` }}
+					title={`Derived by a rule — ${id}`}
+					onClick={() => onSelectionChange([id])}
+				>
+					<span className={styles.kind} aria-hidden="true">
+						{GLYPH[node.node.kind]}
+					</span>
+					<span className={styles.label}>{id}</span>
+					<span
+						className={styles.badge}
+						title={
+							sometimes
+								? "A rule derives this node, and not in every design"
+								: "A rule derives this node; the document does not hold it"
+						}
+					>
+						{sometimes ? "sometimes" : "derived"}
+					</span>
+				</button>
+			</li>
+		);
+	}
+
 	return (
 		<div className={styles.layers} data-role="layers">
 			<h2>Layers</h2>
-			{scene.nodes.length === 0 ? (
+			{rows.length === 0 ? (
 				<p className={styles.empty}>Nothing yet.</p>
 			) : (
 				<ul className={styles.list} ref={list}>
-					{rows.map(({ node, depth }) => (
-						<li key={node.id}>
-							<button
-								type="button"
-								data-layer={node.id}
-								data-depth={depth}
-								data-dragging={dragging === node.id ? "" : undefined}
-								data-drop={
-									drop?.rowId === node.id ? drop.edge : undefined
-								}
-								className={cx(
-									styles.layer,
-									selection.has(node.id) && styles.selected,
-									dragging === node.id && styles.dragging,
-									drop?.rowId === node.id && drop.edge === "above" && styles.dropAbove,
-									drop?.rowId === node.id && drop.edge === "below" && styles.dropBelow,
-									drop?.rowId === node.id && drop.edge === "inside" && styles.dropInside,
-								)}
-								style={{ paddingLeft: `${0.4 + depth * 0.75}rem` }}
-								onPointerDown={(e) => onPointerDown(e, node.id)}
-								onContextMenu={(e) => {
-									if (!onContextMenu) return;
-									e.preventDefault();
-									onContextMenu({ x: e.clientX, y: e.clientY }, node.id);
-								}}
-								onClick={(e) => {
-									if (e.shiftKey) {
-										const next = new Set(selection);
-										if (next.has(node.id)) next.delete(node.id);
-										else next.add(node.id);
-										onSelectionChange([...next]);
-									} else {
-										onSelectionChange([node.id]);
+					{rows.map((row) => {
+						if (row.kind === "derived") return derivedRow(row);
+						const { node, depth } = row;
+						return (
+							<li key={node.id}>
+								<button
+									type="button"
+									data-layer={node.id}
+									data-depth={depth}
+									data-dragging={dragging === node.id ? "" : undefined}
+									data-drop={
+										drop?.rowId === node.id ? drop.edge : undefined
 									}
-								}}
-							>
-								<span className={styles.kind} aria-hidden="true">
-									{GLYPH[node.kind]}
-								</span>
-								<span className={styles.label}>{node.name}</span>
-								{isLaidOut(node) ? (
-									<span
-										className={styles.badge}
-										title="Children are arranged automatically"
-									>
-										auto
+									className={cx(
+										styles.layer,
+										selection.has(node.id) && styles.selected,
+										dragging === node.id && styles.dragging,
+										drop?.rowId === node.id && drop.edge === "above" && styles.dropAbove,
+										drop?.rowId === node.id && drop.edge === "below" && styles.dropBelow,
+										drop?.rowId === node.id && drop.edge === "inside" && styles.dropInside,
+									)}
+									style={{ paddingLeft: `${0.4 + depth * 0.75}rem` }}
+									onPointerDown={(e) => onPointerDown(e, node.id)}
+									onContextMenu={(e) => {
+										if (!onContextMenu) return;
+										e.preventDefault();
+										onContextMenu({ x: e.clientX, y: e.clientY }, node.id);
+									}}
+									onClick={(e) => {
+										if (e.shiftKey) {
+											const next = new Set(selection);
+											if (next.has(node.id)) next.delete(node.id);
+											else next.add(node.id);
+											onSelectionChange([...next]);
+										} else {
+											onSelectionChange([node.id]);
+										}
+									}}
+								>
+									<span className={styles.kind} aria-hidden="true">
+										{GLYPH[node.kind]}
 									</span>
-								) : null}
-							</button>
-						</li>
-					))}
+									<span className={styles.label}>{node.name}</span>
+									{isLaidOut(node) ? (
+										<span
+											className={styles.badge}
+											title="Children are arranged automatically"
+										>
+											auto
+										</span>
+									) : null}
+								</button>
+							</li>
+						);
+					})}
 				</ul>
 			)}
 		</div>

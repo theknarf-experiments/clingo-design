@@ -371,6 +371,41 @@ const FREEDOM_RULES = [
 ]
 
 /**
+ * What a node that no fact describes still amounts to.
+ *
+ * `node/1` is no longer only a fact: a rule may bring nodes into being, and
+ * `node(cell(R,C)) :- pos(R), pos(C).` is a grid the document does not contain.
+ * A node so derived has exactly what its rule said and nothing else, and the
+ * renderer needs a kind before it will draw anything at all — so rather than
+ * demanding all five predicates of anyone who writes such a rule, each one the
+ * picture needs defaults here.
+ *
+ * The defaults matter beyond the renderer: the geometry rules read `frame/3`
+ * for the pull toward the stored frame and for the world-coordinate chain, so
+ * without one a derived node handed to `gsolved` would land on an arbitrary
+ * legal point rather than on the origin.
+ *
+ * Each is written so that it cannot unsay itself. `kinded/1` deliberately does
+ * not count `frame`, the default kind: were it to, supplying the default would
+ * be the reason the default no longer applies, and the pair would have no
+ * stable model at all rather than the obvious one. Same for `order` and 1, and
+ * for `frame` and 0.
+ */
+const SCENE_DEFAULT_RULES = [
+	"#defined node/1.",
+	"#defined kind/2.",
+	"#defined order/2.",
+	"#defined frame/3.",
+	"kinded(N) :- kind(N,K), K != frame.",
+	"kind(N,frame) :- node(N), not kinded(N).",
+	"ordered(N) :- order(N,I), I != 1.",
+	"order(N,1) :- node(N), not ordered(N).",
+	"framed(N,A) :- frame(N,A,V), V != 0.",
+	"frame(N,A,0) :- node(N), gaxis(A), not framed(N,A).",
+	"frame(N,S,0) :- node(N), gspan(S), not framed(N,S).",
+]
+
+/**
  * The geometric vocabulary, as facts. Written out of the one table that says
  * what an edge is, so no rule ever names an edge.
  */
@@ -486,13 +521,45 @@ export const CONTRACT = `% Predicates you can rely on:
 %   cval(C)                     the dimension a geometric constraint holds to
 %   lval(Node, Setting)         one input to an automatic layout
 %
-% Scene:
+% Scene. These are ordinary predicates, not a fixed table: the document
+% supplies facts for them and your rules may derive more. A node the document
+% does not hold is a *derived* node — it draws, it lists in Layers marked as
+% such, and it has nothing to drag or type into, the way a fully constrained
+% node has nowhere left to be dragged to.
+%
 %   node(N)  kind(N, ${NODE_KINDS.join("|")})  child(Parent, Child)
 %   order(N, I)                 where N sits among its siblings, 1-based —
 %                               child/2 is a set, so this is the paint order
 %   frame(N, x|y|width|height, Pixels)   <- relative to the parent, if any
+%   rendered(N, Prop, Lit)      what it draws with — an interned literal id, or
+%                               the text itself in quotes
 %   hidden(N)                   assert to remove a node
 %   visible(N)                  derived: node(N), not hidden(N)
+%
+% Only node/1 has to be said. The rest default, so a rule need state just the
+% parts it cares about:
+%
+%   kind(N,_)      frame            order(N,_)   1
+%   frame(N,_,_)   0                child(_,N)   nothing: it is a root
+%   rendered(N,_)  nothing: an unpainted box
+%
+% A node id may be any term, so a family of them can be indexed. Worked
+% example — a three-by-three grid inside the frame 'board', in one universe or
+% in several:
+%
+%   pos(1..3).
+%   node(cell(R,C)) :- pos(R), pos(C).
+%   kind(cell(R,C),rect) :- pos(R), pos(C).
+%   child(board,cell(R,C)) :- pos(R), pos(C).
+%   frame(cell(R,C),x,X) :- pos(R), pos(C), X = 20 + (C-1)*70.
+%   frame(cell(R,C),y,Y) :- pos(R), pos(C), Y = 20 + (R-1)*70.
+%   frame(cell(R,C),width,50) :- pos(R), pos(C).
+%   frame(cell(R,C),height,50) :- pos(R), pos(C).
+%   rendered(cell(R,C),fill,"#38bdf8") :- pos(R), pos(C).
+%
+% Universes may now differ in *structure*, not only in values — hide a cell on
+% the diagonal in some designs and not others and the two are different
+% pictures. visible/1 is projected, so that really is two universes.
 %
 % Constraints, as facts. The geometric ones speak of edges rather than
 % properties, and their dimension is resolved per universe, not stored:
@@ -557,7 +624,8 @@ export const CONTRACT = `% Predicates you can rely on:
 % Examples:
 %   :- resolved(prop(card,fill), C), resolved(prop(badge,fill), C).
 %   :- frame(A,x,X), frame(B,x,X), child(P,A), child(P,B), A != B.
-%   gsolved(badge).  &sum{ wv(badge,x); -wv(card,x) } >= 24.`;
+%   gsolved(badge).  &sum{ wv(badge,x); -wv(card,x) } >= 24.
+%   node(shadow). child(card,shadow). frame(shadow,width,120).`;
 
 function atom(name: string, ...args: Array<string | number>): string {
 	return `${name}(${args.join(",")}).`;
@@ -869,6 +937,8 @@ export function compile(
 			...GEOMETRY_RULES,
 			...FREEDOM_RULES,
 		]),
+		// After the geometry rules, which is where `gaxis` and `gspan` are said.
+		section("scene defaults", SCENE_DEFAULT_RULES),
 		section("constraints", constraintLines),
 		constraintLines.length === 0
 			? ""

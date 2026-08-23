@@ -21,6 +21,7 @@ import {
 	groupNodes,
 	moveNodes,
 	collapseToPicks,
+	derivedNodes,
 	documentBounds,
 	flatten,
 	parseVariable,
@@ -308,14 +309,51 @@ export function Studio({
 		[scene.nodes],
 	);
 
+	/**
+	 * Nodes the answer set has that the document does not.
+	 *
+	 * A rule may derive `node/1`, so the picture can hold things no layer
+	 * accounts for. These are what the layers panel lists as derived, what the
+	 * inspector explains, and what the canvas lets you select but not move.
+	 *
+	 * Derived means "on the canvas and not in the document", which is exactly
+	 * what it says even in the ~200ms after a delete, while the canvas is still
+	 * drawing the last answer set: the node really is still on screen and really
+	 * is no longer in the document. It stops being listed the moment the solver
+	 * answers for the edit.
+	 */
+	const derived = useMemo(
+		() => (primary ? derivedNodes(primary.model, new Set(byId.keys())) : []),
+		[primary, byId],
+	);
+	/**
+	 * The rule for a multiverse whose members differ in *structure*.
+	 *
+	 * `visible/1` is projected, so a node one design has and another does not
+	 * makes two universes rather than one. The panels then need a stance, and
+	 * this is it: what is *listed* is the universe on screen, and what the
+	 * selection is held against is the union over every universe — so stepping
+	 * between designs, or a re-solve that drops a node from the one in front,
+	 * does not silently throw the selection away. A derived node the design on
+	 * screen lacks stays selected and says so; only one no universe has at all
+	 * is dropped. `everywhere` is the intersection, which is what marks a node
+	 * as coming and going.
+	 */
+	const known = exploration?.brave.visible;
+	const everywhere = exploration?.cautious.visible;
+
 	// Selection must never point at a node that has been deleted. Nested nodes
-	// count, so this walks the whole tree rather than the roots.
+	// count, so this walks the whole tree rather than the roots. Held until an
+	// exploration is in hand: while the first solve is out nothing is known
+	// about the derived half, and dropping a selection on every keystroke is
+	// worse than holding a stale one for a beat.
 	useEffect(() => {
+		if (!known) return;
 		setSelection((prev) => {
-			const next = [...prev].filter((id) => byId.has(id));
+			const next = [...prev].filter((id) => byId.has(id) || known.has(id));
 			return next.length === prev.size ? prev : new Set(next);
 		});
-	}, [byId]);
+	}, [byId, known]);
 
 	const fit = useCallback(() => {
 		if (layout.bounds.width > 0) canvas.current?.fit(layout.bounds, 0.06);
@@ -625,6 +663,8 @@ export function Studio({
 						onSelectionChange={selectionIds}
 						onSceneChange={onSceneChange}
 						solved={primary?.solved}
+						derived={derived}
+						everywhere={everywhere}
 						onContextMenu={(at, nodeId) => {
 							// Right-clicking a layer outside the selection retargets it,
 							// the way the canvas does.
@@ -691,6 +731,7 @@ export function Studio({
 											origin={{ x: region.x, y: region.y }}
 											varying={varying}
 											freedom={freedom}
+											derived={derived}
 											onContextMenu={(at) => {
 												const box = host.current?.getBoundingClientRect();
 												setMenu({
@@ -905,6 +946,9 @@ export function Studio({
 								freedom={freedom}
 								pins={pins}
 								onPin={pin}
+								derived={derived}
+								known={known}
+								everywhere={everywhere}
 							/>
 						) : panel === "variables" ? (
 							<Variables

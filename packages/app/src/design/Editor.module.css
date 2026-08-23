@@ -62,6 +62,14 @@
 	outline-color: color-mix(in srgb, var(--dc-accent) 35%, var(--dc-line));
 }
 
+/* A node a rule derived. Dashed and grey together, because both statements
+   apply: it is not one object the document holds, and there is nothing about
+   it left to decide by hand. */
+.derivedOutline {
+	outline-style: dashed;
+	outline-color: color-mix(in srgb, var(--dc-accent) 45%, var(--dc-line));
+}
+
 /* The travel marks: the same one-pixel anchor at the document origin that the
    annotations use, with everything drawn in document coordinates. */
 .travel {
