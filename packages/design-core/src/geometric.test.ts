@@ -22,8 +22,14 @@ import {
 	updateConstraint,
 } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
-import { type Scene, emptyScene } from "./scene.ts";
+import { type Scene, constraintValue, dimension, emptyScene } from "./scene.ts";
 import { lit } from "./values.ts";
+
+/** The number a constraint holds to, the way the editor reads it back. */
+const valueOf = (scene: Scene, id: string): number | undefined => {
+	const c = scene.constraints.find((k) => k.id === id);
+	return c && constraintValue(scene, c);
+};
 
 const empty = (): Scene => ({ ...emptyScene(), nodes: [] });
 
@@ -166,7 +172,7 @@ test("align ranges over more than two", async () => {
 test("gap is measured edge to edge", async () => {
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 400, 0, 60, 20]);
 	const added = addConstraint(scene, "gap", ["a", "b"], undefined, "x");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: 24 }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(24) }));
 	assert.equal(
 		(solved.b.x ?? 0) - right(solved, "a"),
 		24,
@@ -188,11 +194,11 @@ test("which member is the near side is the order they were named in", async () =
 	scene = addConstraint(scene, "pin", ["b"], undefined, "width").scene;
 
 	const forward = addConstraint(scene, "gap", ["a", "b"], undefined, "x");
-	const ahead = await solve(updateConstraint(forward.scene, forward.id, { value: 10 }));
+	const ahead = await solve(updateConstraint(forward.scene, forward.id, { value: dimension(10) }));
 	assert.equal((ahead.b.x ?? 0) - right(ahead, "a"), 10);
 
 	const backward = addConstraint(scene, "gap", ["b", "a"], undefined, "x");
-	const behind = await solve(updateConstraint(backward.scene, backward.id, { value: 10 }));
+	const behind = await solve(updateConstraint(backward.scene, backward.id, { value: dimension(10) }));
 	assert.equal(
 		(behind.a.x ?? 0) - right(behind, "b"),
 		10,
@@ -205,7 +211,7 @@ test("a fresh gap measures what is already there and changes nothing", async () 
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 400, 0, 60, 20]);
 	const { scene: constrained, id } = addConstraint(scene, "gap", ["a", "b"], undefined, "x");
 	assert.equal(
-		constrained.constraints.find((c) => c.id === id)?.value,
+		valueOf(constrained, id),
 		360,
 		"400 less a's right edge at 40",
 	);
@@ -217,7 +223,7 @@ test("a fresh gap measures what is already there and changes nothing", async () 
 test("a vertical gap is the same rule down the other axis", async () => {
 	const scene = loose(["a", 0, 0, 20, 30], ["b", 0, 200, 20, 30]);
 	const added = addConstraint(scene, "gap", ["a", "b"], undefined, "y");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: 10 }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(10) }));
 	assert.equal((solved.b.y ?? 0) - bottom(solved, "a"), 10);
 	assert.equal(solved.a.x, 0, "the horizontal axis was not touched");
 });
@@ -225,7 +231,7 @@ test("a vertical gap is the same rule down the other axis", async () => {
 test("a negative gap is an overlap, not a swap", async () => {
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 100, 0, 40, 20]);
 	const added = addConstraint(scene, "gap", ["a", "b"], undefined, "x");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: -10 }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(-10) }));
 	assert.equal((solved.b.x ?? 0) - right(solved, "a"), -10);
 });
 
@@ -279,7 +285,7 @@ test("symmetric about a third node balances the two around its centre", async ()
 	// Then insist a sits somewhere new, and watch b follow.
 	const pinned = addConstraint(added.scene, "pin", ["a"], undefined, "centerX");
 	const solved = await solve(
-		updateConstraint(pinned.scene, pinned.id, { value: 50 }),
+		updateConstraint(pinned.scene, pinned.id, { value: dimension(50) }),
 	);
 	assert.equal(cx(solved, "a"), 50);
 	assert.equal(cx(solved, "b"), 250, "as far past 150 as a is short of it");
@@ -291,10 +297,10 @@ test("symmetric about a line needs no third node", async () => {
 	const added = addConstraint(scene, "symmetric", ["a", "b"], undefined, "x");
 	// Seeded at the line already between them: 20 and 330 average to 175.
 	assert.equal(
-		added.scene.constraints.find((c) => c.id === added.id)?.value,
+		valueOf(added.scene, added.id),
 		175,
 	);
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: 100 }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(100) }));
 	const centreA = cx(solved, "a");
 	const centreB = cx(solved, "b");
 	assert.equal(centreA + centreB, 200, "equidistant either side of 100");
@@ -304,7 +310,7 @@ test("symmetric about a line needs no third node", async () => {
 test("a mirror down the y axis reflects vertically", async () => {
 	const scene = loose(["a", 0, 0, 20, 40], ["b", 0, 300, 20, 40]);
 	const added = addConstraint(scene, "symmetric", ["a", "b"], undefined, "y");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: 50 }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(50) }));
 	assert.equal(cy(solved, "a") + cy(solved, "b"), 100);
 	assert.equal(solved.a.x, 0, "the horizontal axis is nobody's business here");
 });
@@ -316,7 +322,7 @@ test("a mirror down the y axis reflects vertically", async () => {
 test("pin fixes one coordinate outright", async () => {
 	const scene = loose(["a", 0, 0, 40, 20]);
 	const added = addConstraint(scene, "pin", ["a"], undefined, "left");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: 250 }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(250) }));
 	assert.equal(solved.a.x, 250);
 	assert.equal(solved.a.y, 0);
 	assert.equal(solved.a.width, 40);
@@ -326,11 +332,11 @@ test("pin reaches a size and a centre as readily as an edge", async () => {
 	const scene = loose(["a", 0, 0, 40, 20]);
 	const wide = addConstraint(scene, "pin", ["a"], undefined, "width");
 	assert.equal(
-		(await solve(updateConstraint(wide.scene, wide.id, { value: 300 }))).a.width,
+		(await solve(updateConstraint(wide.scene, wide.id, { value: dimension(300) }))).a.width,
 		300,
 	);
 	const centred = addConstraint(scene, "pin", ["a"], undefined, "centerY");
-	const solved = await solve(updateConstraint(centred.scene, centred.id, { value: 60 }));
+	const solved = await solve(updateConstraint(centred.scene, centred.id, { value: dimension(60) }));
 	assert.equal(cy(solved, "a"), 60);
 });
 
@@ -346,11 +352,11 @@ test("a pin on a child is a canvas coordinate, not a parent-relative one", async
 	);
 	const added = addConstraint(scene, "pin", ["kid"], undefined, "left");
 	assert.equal(
-		added.scene.constraints.find((c) => c.id === added.id)?.value,
+		valueOf(added.scene, added.id),
 		120,
 		"seeded from where it sits on the canvas",
 	);
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: 200 }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(200) }));
 	assert.equal(solved.kid.x, 100, "200 on the canvas is 100 inside a card at 100");
 });
 
@@ -361,9 +367,9 @@ test("a pin on a child is a canvas coordinate, not a parent-relative one", async
 test("two pins on one quantity come back as a core naming both", async () => {
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 300, 0, 40, 20]);
 	const first = addConstraint(scene, "pin", ["a"], undefined, "left");
-	const one = updateConstraint(first.scene, first.id, { value: 0 });
+	const one = updateConstraint(first.scene, first.id, { value: dimension(0) });
 	const second = addConstraint(one, "pin", ["a"], undefined, "left");
-	const both = updateConstraint(second.scene, second.id, { value: 100 });
+	const both = updateConstraint(second.scene, second.id, { value: dimension(100) });
 	// A third rule that is perfectly satisfiable must not be blamed.
 	const innocent = addConstraint(both, "equalSize", ["a", "b"], undefined, "width");
 
@@ -382,7 +388,7 @@ test("an alignment and a gap that cannot both hold name each other", async () =>
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 300, 0, 40, 20]);
 	const aligned = addConstraint(scene, "align", ["a", "b"], undefined, "left");
 	const gapped = addConstraint(aligned.scene, "gap", ["a", "b"], undefined, "x");
-	const scene2 = updateConstraint(gapped.scene, gapped.id, { value: 10 });
+	const scene2 = updateConstraint(gapped.scene, gapped.id, { value: dimension(10) });
 
 	const error = await fails(scene2);
 	assert.deepEqual([...error.conflict].sort(), [aligned.id, gapped.id].sort());
@@ -392,9 +398,9 @@ test("a geometric rule and a property rule are attributed separately", async () 
 	// The geometric conflict is real; the colour rule is fine and stays unnamed.
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 300, 0, 40, 20]);
 	const first = addConstraint(scene, "pin", ["a"], undefined, "width");
-	const one = updateConstraint(first.scene, first.id, { value: 10 });
+	const one = updateConstraint(first.scene, first.id, { value: dimension(10) });
 	const second = addConstraint(one, "pin", ["a"], undefined, "width");
-	const both = updateConstraint(second.scene, second.id, { value: 20 });
+	const both = updateConstraint(second.scene, second.id, { value: dimension(20) });
 	const colours = addConstraint(both, "match", ["a", "b"], "fill");
 
 	const error = await fails(colours.scene);
@@ -404,7 +410,7 @@ test("a geometric rule and a property rule are attributed separately", async () 
 test("switching a geometric rule off takes it out of the program", async () => {
 	const scene = loose(["a", 0, 0, 40, 20]);
 	const added = addConstraint(scene, "pin", ["a"], undefined, "left");
-	const moved = updateConstraint(added.scene, added.id, { value: 250 });
+	const moved = updateConstraint(added.scene, added.id, { value: dimension(250) });
 	assert.equal((await solve(moved)).a.x, 250);
 	const off = updateConstraint(moved, added.id, { enabled: false });
 	assert.deepEqual(await solve(off), {}, "nothing is handed to the solver at all");
@@ -469,7 +475,7 @@ test("distributing states a gap per neighbouring pair, at the average", async ()
 	const { scene: even, ids } = distributeNodes(scene, ["c", "a", "b"]);
 	assert.equal(ids.length, 2, "three in a row is two gaps");
 	assert.deepEqual(
-		even.constraints.map((c) => [c.kind, c.edge, c.nodes, c.value]),
+		even.constraints.map((c) => [c.kind, c.edge, c.nodes, valueOf(even, c.id)]),
 		[
 			["gap", "x", ["a", "b"], 40],
 			["gap", "x", ["b", "c"], 40],
@@ -510,15 +516,15 @@ test("changing what a rule is about re-seeds the fields the new kind reads", () 
 	assert.equal(pin.kind, "pin");
 	assert.deepEqual(pin.nodes, ["a"], "a pin has one subject");
 	assert.equal(pin.edge, "left");
-	assert.equal(pin.value, 10, "where a's left edge already is");
+	assert.equal(valueOf(pinned, id), 10, "where a's left edge already is");
 
 	// And a change of axis re-measures: 24px of horizontal gap says nothing
 	// about a vertical one.
 	const { scene: withGap, id: gapId } = addConstraint(scene, "gap", ["a", "b"], undefined, "x");
-	assert.equal(withGap.constraints[0].value, 150, "200 less a's right edge at 50");
+	assert.equal(valueOf(withGap, gapId), 150, "200 less a's right edge at 50");
 	const vertical = retargetConstraint(withGap, gapId, { edge: "y" });
 	assert.equal(vertical.constraints[0].edge, "y");
-	assert.equal(vertical.constraints[0].value, -20, "b's top is 20 below a's bottom");
+	assert.equal(valueOf(vertical, gapId), -20, "b's top is 20 below a's bottom");
 });
 
 test("deleting a node drops the geometric constraints that named it", () => {

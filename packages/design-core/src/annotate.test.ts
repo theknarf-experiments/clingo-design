@@ -13,7 +13,7 @@ import { annotate } from "./annotate.ts";
 import { directSolver } from "./directSolver.ts";
 import { addConstraint, addNode, makeNode, updateConstraint } from "./edits.ts";
 import { explore } from "./explore.ts";
-import { type Scene, emptyScene } from "./scene.ts";
+import { type Scene, dimension, emptyScene } from "./scene.ts";
 
 const loose = (...boxes: Array<[string, number, number, number, number]>): Scene => {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
@@ -96,7 +96,7 @@ test("a mirror is drawn where the members balance, not where the number says", (
 	const added = addConstraint(scene, "symmetric", ["a", "b"], undefined, "x");
 	// Move the line without solving: the mark still reports the design as it
 	// stands, which is what stops it lying about an unsolved document.
-	const moved = updateConstraint(added.scene, added.id, { value: 500 });
+	const moved = updateConstraint(added.scene, added.id, { value: dimension(500) });
 	const marks = annotate(moved, on(["a"]));
 	assert.equal(marks[0].shape, "line");
 	assert.equal(marks[0].at, 175, "halfway between the two centres");
@@ -122,7 +122,7 @@ test("the mark follows the solved geometry, not the stored frame", async () => {
 	// Pinned so there is one answer rather than a whole face of them: both
 	// left edges end up at 55, which is neither node's stored x.
 	const pinned = addConstraint(scene, "pin", ["a"], undefined, "left");
-	const held = updateConstraint(pinned.scene, pinned.id, { value: 55 });
+	const held = updateConstraint(pinned.scene, pinned.id, { value: dimension(55) });
 	const constrained = addConstraint(held, "align", ["a", "b"], undefined, "left").scene;
 
 	const result = await explore(constrained, directSolver, { sample: "first" });

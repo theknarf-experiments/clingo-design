@@ -34,6 +34,7 @@ import {
 	type Scene,
 	type SceneNode,
 	type Sizing,
+	dimension,
 	edgeOn,
 	uniqueName,
 	wrapsChildren,
@@ -43,6 +44,7 @@ import {
 	VALUE_TYPES,
 	type Value,
 	type ValueType,
+	constraintVar,
 	lit,
 	propVar,
 	resolveValue,
@@ -916,7 +918,7 @@ export function distributeNodes(
 			undefined,
 			on,
 		);
-		next = updateConstraint(added.scene, added.id, { value });
+		next = updateConstraint(added.scene, added.id, { value: dimension(value) });
 		ids.push(added.id);
 	}
 	return { scene: next, ids };
@@ -975,8 +977,8 @@ function shapeFor(
 		nodes: [...members],
 		...(spec.counted ? { limit: from.limit ?? 1 } : {}),
 		...(spec.geometric ? { edge } : {}),
-		...(spec.valued
-			? { value: Math.round(currentValue(scene, spec, members, edge)) }
+		...(spec.valueType
+			? { value: dimension(currentValue(scene, spec, members, edge)) }
 			: {}),
 	};
 }
@@ -1208,5 +1210,10 @@ export function collapseToPicks(
 			}
 			return { ...node, props };
 		}),
+		// A dimension is an assignment too, so collapsing has to reach it or the
+		// document would keep alternatives this universe already decided between.
+		constraints: scene.constraints.map((c) =>
+			c.value ? { ...c, value: pickOne(c.value, constraintVar(c.id)) } : c,
+		),
 	};
 }

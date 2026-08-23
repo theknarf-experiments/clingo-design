@@ -137,6 +137,19 @@ export const derive = (via: Derivation, from: string): Term => ({
 
 export const single = (value: string): Value => [lit(value)];
 
+/**
+ * The number a literal reads as: `"24px"` is 24, `"1.5"` is 1.5.
+ *
+ * The unit is optional and ignored, because a length in this document is
+ * always pixels — but anything else (a percentage, a calc, a colour) reads as
+ * nothing rather than as its leading digits, so a dimension driven by it
+ * simply says nothing instead of quietly meaning something else.
+ */
+export function numeralOf(text: string): number | undefined {
+	const m = /^\s*(-?\d+(?:\.\d+)?)\s*(?:px)?\s*$/i.exec(text);
+	return m ? Number(m[1]) : undefined;
+}
+
 /** True when this assignment contributes a choice to the solver. */
 export const varies = (value: Value | undefined): boolean =>
 	(value?.length ?? 0) > 1;
@@ -210,17 +223,29 @@ export interface Token {
 export const tokenVar = (tokenId: string): string => `tok(${tokenId})`;
 export const propVar = (nodeId: string, prop: string): string =>
 	`prop(${nodeId},${prop})`;
+/**
+ * A dimension a geometric constraint holds to — the number in "24 apart".
+ *
+ * It is a variable like any other, which is the whole of what makes a
+ * dimension parametric: point it at a token and the token's alternatives drive
+ * the geometry, with no second kind of parameter anywhere in the system.
+ */
+export const constraintVar = (constraintId: string): string =>
+	`cval(${constraintId})`;
 
-/** The inverse of {@link tokenVar} / {@link propVar}. */
+/** The inverse of {@link tokenVar} / {@link propVar} / {@link constraintVar}. */
 export type Variable =
 	| { kind: "token"; token: string }
-	| { kind: "prop"; node: string; prop: string };
+	| { kind: "prop"; node: string; prop: string }
+	| { kind: "constraint"; constraint: string };
 
 export function parseVariable(key: string): Variable | null {
 	const prop = /^prop\(([^,]+),([^)]+)\)$/.exec(key);
 	if (prop) return { kind: "prop", node: prop[1], prop: prop[2] };
 	const token = /^tok\(([^)]+)\)$/.exec(key);
 	if (token) return { kind: "token", token: token[1] };
+	const constraint = /^cval\(([^)]+)\)$/.exec(key);
+	if (constraint) return { kind: "constraint", constraint: constraint[1] };
 	return null;
 }
 

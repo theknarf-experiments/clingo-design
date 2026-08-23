@@ -8,7 +8,7 @@ import {
 	sortProjects,
 	uniqueProjectName,
 } from "./project.ts";
-import { DEFAULT_FRAME, emptyScene } from "./scene.ts";
+import { DEFAULT_FRAME, dimension, emptyScene } from "./scene.ts";
 
 const at = (n: number) => ({ now: n });
 
@@ -98,5 +98,7 @@ test("a stored geometric constraint survives a round trip, garbage does not", ()
 		["k1"],
 	);
 	assert.equal(scene.constraints[0].edge, "centerX");
-	assert.equal(scene.constraints[0].value, 120);
+	// Stored as a bare number before a dimension could name a token; read back
+	// as the value it now is, so nothing downstream has two shapes to handle.
+	assert.deepEqual(scene.constraints[0].value, dimension(120));
 });

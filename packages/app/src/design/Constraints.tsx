@@ -3,16 +3,22 @@ import {
 	CONSTRAINT_NAMES,
 	type Constraint,
 	type ConstraintKind,
+	type ConstraintSpec,
 	EDGES,
 	type Edge,
 	PROPS,
 	type PropName,
 	type Scene,
 	addConstraint,
+	constraintValue,
 	deleteConstraint,
+	dimension,
 	findInTree,
+	ref,
 	retargetConstraint,
 	sharedProps,
+	termLabel,
+	tokensOfType,
 	updateConstraint,
 } from "@clingo-design/design-core";
 
@@ -27,6 +33,95 @@ export interface ConstraintsProps {
 	conflict: ReadonlySet<string>;
 	/** Select the nodes a constraint ranges over, so it can be seen. */
 	onSelectionChange: (ids: string[]) => void;
+}
+
+/**
+ * The number a `gap`, a `pin` or a mirror line holds to — typed in, or driven
+ * by a variable.
+ *
+ * Driving it is the whole of what makes a dimension parametric: there is no
+ * second kind of parameter, only the same token a fill could have named. Point
+ * three lengths at it and the multiverse becomes a configuration table.
+ *
+ * The row edits one alternative, deliberately: the branching that is worth
+ * having lives on the *token*, where every place that references it moves
+ * together. The document can hold more, and the solver would pick between
+ * them, but a rule with private alternatives is a rule nobody can find.
+ */
+function Dimension({
+	scene,
+	constraint,
+	spec,
+	onSceneChange,
+}: {
+	scene: Scene;
+	constraint: Constraint;
+	spec: ConstraintSpec;
+	onSceneChange: ConstraintsProps["onSceneChange"];
+}) {
+	if (!spec.valueType) return null;
+	const term = constraint.value?.[0];
+	// What it comes to right now. Without a universe in hand this is the
+	// token's first alternative, which is what the canvas would show anyway.
+	const resolved = constraintValue(scene, constraint);
+	const driven = term !== undefined && term.kind !== "literal";
+
+	return (
+		<>
+			{driven ? (
+				<span
+					className={styles.driven}
+					data-role="constraint-driver"
+					title="Driven by a variable"
+				>
+					{termLabel(scene.tokens, term)}
+					<span className={styles.resolved}>
+						{resolved === undefined ? "?" : resolved}
+					</span>
+				</span>
+			) : (
+				<input
+					type="number"
+					className={styles.limit}
+					data-role="constraint-value"
+					value={resolved ?? 0}
+					title="Pixels"
+					onChange={(e) =>
+						onSceneChange(
+							(prev) =>
+								updateConstraint(prev, constraint.id, {
+									value: dimension(Number(e.target.value) || 0),
+								}),
+							`constraint-value:${constraint.id}`,
+						)
+					}
+				/>
+			)}
+			<select
+				className={styles.link}
+				data-role="constraint-value-link"
+				title="Hold a number, or let a variable drive it"
+				value={driven && term.kind === "token" ? `ref:${term.token}` : ""}
+				onChange={(e) => {
+					const link = /^ref:(.+)$/.exec(e.target.value);
+					onSceneChange((prev) =>
+						updateConstraint(prev, constraint.id, {
+							// Dropping a link keeps the number it was resolving to, so
+							// nothing jumps at the moment of unlinking.
+							value: link ? [ref(link[1])] : dimension(resolved ?? 0),
+						}),
+					);
+				}}
+			>
+				<option value="">px</option>
+				{tokensOfType(scene, spec.valueType).map((t) => (
+					<option key={t.id} value={`ref:${t.id}`}>
+						{t.name}
+					</option>
+				))}
+			</select>
+		</>
+	);
 }
 
 /**
@@ -66,13 +161,20 @@ export function Constraints({
 
 	const nameOf = (id: string) => findInTree(scene.nodes, id)?.name ?? id;
 
+	/** A driven dimension reads as the variable's name, not as today's number. */
+	function dimensionOf(c: Constraint): string {
+		const term = c.value?.[0];
+		if (term && term.kind !== "literal") return termLabel(scene.tokens, term);
+		return `${constraintValue(scene, c) ?? 0}px`;
+	}
+
 	function describe(c: Constraint): string {
 		const spec = CONSTRAINT_KINDS[c.kind];
 		return spec.summary
 			.replace("{prop}", PROPS[c.prop].label.toLowerCase())
 			.replace("{n}", String(c.limit ?? 1))
 			.replace("{edge}", (EDGES[c.edge ?? "left"].label ?? "").toLowerCase())
-			.replace("{v}", `${c.value ?? 0}px`);
+			.replace("{v}", dimensionOf(c));
 	}
 
 	return (
@@ -226,24 +328,12 @@ export function Constraints({
 								</select>
 							)}
 
-							{spec.valued ? (
-								<input
-									type="number"
-									className={styles.limit}
-									data-role="constraint-value"
-									value={c.value ?? 0}
-									title="Pixels"
-									onChange={(e) =>
-										onSceneChange(
-											(prev) =>
-												updateConstraint(prev, c.id, {
-													value: Math.round(Number(e.target.value) || 0),
-												}),
-											`constraint-value:${c.id}`,
-										)
-									}
-								/>
-							) : null}
+							<Dimension
+								scene={scene}
+								constraint={c}
+								spec={spec}
+								onSceneChange={onSceneChange}
+							/>
 
 							<button
 								type="button"

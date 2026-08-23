@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import {
+	CONSTRAINT_KINDS,
 	DRAW_KINDS,
 	type Edge,
 	KINDS,
@@ -593,13 +594,16 @@ export function Studio({
 			if (!parsed) out.set(key, key);
 			else if (parsed.kind === "prop") {
 				out.set(key, `${byId.get(parsed.node)?.name ?? parsed.node} ${parsed.prop}`);
+			} else if (parsed.kind === "constraint") {
+				const c = scene.constraints.find((k) => k.id === parsed.constraint);
+				out.set(key, c ? `${CONSTRAINT_KINDS[c.kind].label} value` : key);
 			} else {
 				const token = scene.tokens.find((t) => t.id === parsed.token);
 				out.set(key, token?.name ?? parsed.token);
 			}
 		}
 		return out;
-	}, [varying, byId, scene.tokens]);
+	}, [varying, byId, scene.tokens, scene.constraints]);
 
 	return (
 		<div className={styles.studio}>

@@ -21,16 +21,20 @@ import { type Measurements, naturalSize } from "./measure.ts";
 import {
 	type AutoLayout,
 	CONSTRAINT_KINDS,
+	CONSTRAINT_NAMES,
 	EDGES,
 	EDGE_NAMES,
 	NODE_KINDS,
 	type Scene,
+	dimension,
 	isLaidOut,
 } from "./scene.ts";
 import {
 	DERIVATIONS,
 	type Derivation,
 	type Term,
+	constraintVar,
+	numeralOf,
 	propVar,
 	tokenVar,
 } from "./values.ts";
@@ -338,9 +342,15 @@ const EDGE_FACTS = EDGE_NAMES.flatMap((edge) => {
  */
 const GEOMETRIC_CONSTRAINT_RULES = [
 	"#defined c_edge/2.",
-	"#defined c_value/2.",
 	"#defined c_slot/3.",
+	"#defined numeral/2.",
 	"gcon(C) :- constraint(C), c_kind(C,K), gkind(K).",
+	"% The dimension, per universe. It is not a fact: a constraint's value is a",
+	"% variable like any other, so pointing it at a token makes the token's",
+	"% alternatives drive the geometry. A value that reads as no number at all —",
+	"% a dangling reference, a percentage — derives nothing, and the relation",
+	"% below then simply goes unstated rather than meaning zero.",
+	"c_value(C,V) :- resolved(cval(C),L), numeral(L,V).",
 	"% Which edges the members actually need a variable for. Deriving it rather",
 	"% than giving every solved node all eight keeps the simplex tableau to the",
 	"% quantities the document mentions.",
@@ -398,10 +408,12 @@ export const CONTRACT = `% Predicates you can rely on:
 %   active(C)                   C is switched on (assumed while solving)
 %   rendered(Node, Prop, Lit)   what a node actually draws with
 %   literal(Lit, "text")        the text a literal id stands for
+%   numeral(Lit, N)             the number a literal reads as: "24px" is 24
 %
 % Variables are named after where they live:
 %   prop(Node, Property)        a node's property
 %   tok(Token)                  a token's own definition
+%   cval(C)                     the dimension a geometric constraint holds to
 %
 % Scene:
 %   node(N)  kind(N, ${NODE_KINDS.join("|")})  child(Parent, Child)
@@ -409,12 +421,27 @@ export const CONTRACT = `% Predicates you can rely on:
 %   hidden(N)                   assert to remove a node
 %   visible(N)                  derived: node(N), not hidden(N)
 %
+% Constraints, as facts. The geometric ones speak of edges rather than
+% properties, and their dimension is resolved per universe, not stored:
+%
+%   constraint(C)  c_kind(C, ${CONSTRAINT_NAMES.join("|")})
+%   c_node(C, N)                a member    c_slot(C, N, I)  which one
+%   c_prop(C, Prop)             what a property rule is about
+%   c_edge(C, E)                what a geometric one is about
+%   c_value(C, Pixels)          derived: numeral(resolved(cval(C)))
+%   gkind(K)                    K places its nodes rather than colours them
+%   gedge(E, x|y, pos|span|axis)   what an edge is
+%   gplace(E, lead|mid|trail)      and where on the node it sits
+%
 % Geometry the solver decides, rather than the document:
 %
 %   gsolved(N)                  assert to hand N's frame to the solver
 %   lv(N, x|y)                  its offset inside its parent
 %   lsz(N, width|height)        its size
-%   wv(N, x|y)                  where it lands on the canvas
+%   wv(N, x|y)                  where it lands on the canvas — the parent's
+%                               world coordinate plus this node's own offset,
+%                               chained to the root, so two nodes under
+%                               different parents are finally comparable
 %   ge(N, ${EDGE_NAMES.filter((e) => EDGES[e].role !== "axis").join("|")})
 %                               twice one of its edges, in world coordinates
 %                               — assert gedgeof(N,E) to bring one into being
@@ -422,6 +449,9 @@ export const CONTRACT = `% Predicates you can rely on:
 % Those are theory variables, not atoms. A solved node with nothing said
 % about it lands exactly on its stored frame; say something, and it moves as
 % little as it can to satisfy you. Edges are doubled so a centre is whole.
+% Being theory variables, they can never make two answer sets differ: what
+% makes one geometry a *different design* from another is the dimension the
+% document names, which is why c_value/2 is projected alongside rendered/3.
 %
 % Linear arithmetic (clingo-lpx) is available too. Variables here are not
 % atoms: they take values from a simplex solver, reported as __lpx(V,"N").
@@ -622,10 +652,10 @@ export function compile(
 		if (spec.geometric) {
 			geometric = true;
 			constraintLines.push(atom("c_edge", c.id, c.edge ?? spec.edges[0]));
-			// The one place a value reaches the program — the seam the parametric
-			// phase widens to a token reference.
-			if (spec.valued) {
-				constraintLines.push(atom("c_value", c.id, Math.round(c.value ?? 0)));
+			// The dimension goes in as a variable, not a fact — the same
+			// machinery a fill uses, so it can name a token and vary with it.
+			if (spec.valueType) {
+				emitValue(constraintVar(c.id), c.value ?? dimension(0));
 			}
 		}
 		// Order matters to the kinds that read one member differently from
@@ -655,10 +685,27 @@ export function compile(
 		}
 	}
 
+	/**
+	 * What each literal reads as, where it reads as a number at all.
+	 *
+	 * The bridge between the value system, which is all strings, and the
+	 * geometry, which is all arithmetic: `"24px"` is text to a fill and 24 to a
+	 * gap. Emitted for every literal rather than only the ones a dimension uses,
+	 * because which literal a dimension resolves to is the solver's answer, not
+	 * something known here.
+	 */
+	const numeralLines: string[] = [];
+	for (const text of literals.texts()) {
+		const n = numeralOf(text);
+		if (n !== undefined) {
+			numeralLines.push(atom("numeral", literals.id(text), Math.round(n)));
+		}
+	}
+
 	const generated = [
 		section("tokens", tokenLines),
 		section("scene", nodeLines),
-		section("values", [...literals.facts(), ...valueLines]),
+		section("values", [...literals.facts(), ...valueLines, ...numeralLines]),
 		section("choices", [
 			"var(V) :- alt(V,_).",
 			"1 { pick(V,I) : alt(V,I) } 1 :- var(V).",
@@ -722,6 +769,15 @@ export function compile(
 			"% token nothing references does not create designs at all.",
 			"#project rendered/3.",
 			"#project visible/1.",
+			"% Geometry is not in that list and cannot be: coordinates are theory",
+			"% variables, not atoms, so no answer set differs by them. Projecting",
+			"% the *dimensions the document names* instead is what makes a token",
+			"% with three lengths show as three designs, while the arbitrarily many",
+			"% points simplex could return for one layout stay one design — which",
+			"% is the right side of that trade, because a difference nobody asked",
+			"% for is not a design decision.",
+			"#defined c_value/2.",
+			"#project c_value/2.",
 		]),
 	]
 		.filter(Boolean)
@@ -747,6 +803,12 @@ export function variableCounts(scene: Scene): Record<string, number> {
 	for (const node of flatten(scene.nodes)) {
 		for (const [prop, value] of Object.entries(node.props)) {
 			if (value && value.length > 0) out[propVar(node.id, prop)] = value.length;
+		}
+	}
+	for (const c of scene.constraints ?? []) {
+		const value = c.value;
+		if (CONSTRAINT_KINDS[c.kind].valueType && value && value.length > 0) {
+			out[constraintVar(c.id)] = value.length;
 		}
 	}
 	return out;

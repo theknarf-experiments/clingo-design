@@ -12,12 +12,16 @@
  */
 import { type Frame, type PathPoint, boundsOf } from "./geometry.ts";
 import {
+	type Picks,
 	type Token,
 	VALUE_TYPES,
 	type Value,
 	type ValueType,
+	constraintVar,
 	lit,
+	numeralOf,
 	ref,
+	resolveValue,
 	single,
 } from "./values.ts";
 
@@ -572,8 +576,13 @@ export interface ConstraintSpec {
 	geometric: boolean;
 	/** Which quantities it may be about; empty for the property kinds. */
 	edges: Edge[];
-	/** True when the kind reads {@link Constraint.value}. */
-	valued: boolean;
+	/**
+	 * What {@link Constraint.value} is, for the kinds that read one; absent for
+	 * the kinds that do not. A type rather than a flag because the value is an
+	 * ordinary {@link Value} and so has the same choice of tokens to link to as
+	 * any property of that type does.
+	 */
+	valueType?: ValueType;
 	/**
 	 * What that value measures in the design as it stands, so a new constraint
 	 * starts out already true rather than yanking the layout somewhere. Read
@@ -600,7 +609,6 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
 		edges: [],
-		valued: false,
 		seed: [],
 		annotation: "none",
 	},
@@ -612,7 +620,6 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
 		edges: [],
-		valued: false,
 		seed: [],
 		annotation: "none",
 	},
@@ -624,7 +631,6 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
 		edges: [],
-		valued: false,
 		seed: [],
 		annotation: "none",
 	},
@@ -636,7 +642,6 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: true,
 		edges: PLACES,
-		valued: false,
 		seed: [],
 		annotation: "edges",
 	},
@@ -650,7 +655,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		maxNodes: 2,
 		geometric: true,
 		edges: AXES,
-		valued: true,
+		valueType: "length",
 		// From the near side of the first member to the far side of the second.
 		seed: [
 			{ slot: 1, place: "trail", weight: -1 },
@@ -666,7 +671,6 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: true,
 		edges: SPANS,
-		valued: false,
 		seed: [],
 		annotation: "edges",
 	},
@@ -681,7 +685,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		maxNodes: 3,
 		geometric: true,
 		edges: AXES,
-		valued: true,
+		valueType: "length",
 		// The line already halfway between the two centres.
 		seed: [
 			{ slot: 1, place: "mid", weight: 0.5 },
@@ -697,7 +701,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		maxNodes: 1,
 		geometric: true,
 		edges: [...PLACES, ...SPANS],
-		valued: true,
+		valueType: "length",
 		seed: [{ slot: 1, place: "self", weight: 1 }],
 		annotation: "edges",
 	},
@@ -725,16 +729,15 @@ export interface Constraint {
 	/** Which quantity, for the geometric kinds. */
 	edge?: Edge;
 	/**
-	 * The number a `gap`, a `pin` or a mirror line holds to, in pixels.
+	 * What a `gap`, a `pin` or a mirror line holds to, in pixels.
 	 *
-	 * Deliberately a plain number rather than a {@link Value}: making it able to
-	 * name a token is the parametric phase's job, and the seam is small —
-	 * widen this to `Value`, resolve it wherever the picked alternative is
-	 * known, and hand the result to the single `c_value(C,V)` fact `compile()`
-	 * emits. The ASP side already takes it as a bound term and does its own
-	 * arithmetic, so no rule changes.
+	 * A {@link Value} like any other, so it can be a number typed in or a link
+	 * to a `length` token — and a token with three alternatives driving it is a
+	 * design table: the same drawing at three sizes. It reaches ASP as the
+	 * variable {@link constraintVar} names, and `c_value(C,V)` is then derived
+	 * per universe rather than being a fact.
 	 */
-	value?: number;
+	value?: Value;
 	/** Off keeps it in the document but out of the program. */
 	enabled: boolean;
 }
@@ -835,10 +838,39 @@ export function uniqueName(
 /* Lookups                                                             */
 /* ------------------------------------------------------------------ */
 
+/** Tokens of one type — the legal things to link a value of it to. */
+export function tokensOfType(scene: Scene, type: ValueType): Token[] {
+	return scene.tokens.filter((t) => t.type === type);
+}
+
 /** Tokens whose type matches a property — the legal things to link it to. */
 export function tokensFor(scene: Scene, prop: PropName): Token[] {
-	const type = PROPS[prop].type;
-	return scene.tokens.filter((t) => t.type === type);
+	return tokensOfType(scene, PROPS[prop].type);
+}
+
+/** A whole number of pixels, as the {@link Value} a dimension is stored as. */
+export const dimension = (n: number): Value => single(`${Math.round(n)}px`);
+
+/**
+ * The number a constraint's dimension comes to, following whatever token it
+ * names.
+ *
+ * The same walk the generated program does through `resolved/2` and
+ * `numeral/2`, done here for the editor: the row has to show a number, and a
+ * seeded constraint has to be measured before there is any answer to read it
+ * out of. `picks` is the universe being looked at, if there is one.
+ */
+export function constraintValue(
+	scene: Scene,
+	constraint: Constraint,
+	picks: Picks = {},
+): number | undefined {
+	const resolved = resolveValue(
+		{ tokens: scene.tokens, picks },
+		constraint.value,
+		constraintVar(constraint.id),
+	);
+	return resolved === undefined ? undefined : numeralOf(resolved);
 }
 
 /** A default value for a property that has none yet. */

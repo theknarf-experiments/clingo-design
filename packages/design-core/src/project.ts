@@ -19,6 +19,7 @@ import {
 	RULES_HEADER,
 	type Scene,
 	type SceneNode,
+	dimension,
 	emptyScene,
 	starterTokens,
 	uniqueName,
@@ -114,7 +115,7 @@ export function normalizeScene(input: unknown): Scene {
 		nodes: migrateNodes(input),
 		// Documents written before constraints existed simply have none.
 		constraints: Array.isArray(input.constraints)
-			? input.constraints.filter(isConstraint)
+			? input.constraints.filter(isConstraint).map(migrateConstraint)
 			: [],
 		rules: typeof input.rules === "string" ? input.rules : RULES_HEADER,
 	};
@@ -130,9 +131,25 @@ function isConstraint(value: unknown): value is Constraint {
 	// The geometric fields are optional, but a bogus one would compile into a
 	// fact no rule matches — a rule that silently does nothing.
 	if (value.edge !== undefined && !(String(value.edge) in EDGES)) return false;
-	if (value.value !== undefined && !Number.isFinite(value.value)) return false;
+	if (
+		value.value !== undefined &&
+		!Number.isFinite(value.value) &&
+		!Array.isArray(value.value)
+	) {
+		return false;
+	}
 	if (!Array.isArray(value.nodes)) return false;
 	return value.nodes.every((n) => typeof n === "string");
+}
+
+/**
+ * A dimension written before it could name a token is a bare number of pixels.
+ * Widening it here rather than at every read keeps the rest of the code with
+ * one shape to think about.
+ */
+function migrateConstraint(c: Constraint): Constraint {
+	const stored = c.value as unknown;
+	return typeof stored === "number" ? { ...c, value: dimension(stored) } : c;
 }
 
 /** Reads nodes, wrapping a legacy artboard's contents in a real frame. */

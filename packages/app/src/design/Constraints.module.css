@@ -142,3 +142,38 @@
 	opacity: 1;
 	text-decoration: underline;
 }
+
+/* A dimension driven by a variable. It shows the name rather than a field:
+   the number is the token's to say, and editing it here would edit the token
+   for every other place that references it. */
+.driven {
+	display: flex;
+	align-items: baseline;
+	gap: 0.25rem;
+	min-width: 0;
+	padding: 0.1rem 0.25rem;
+	font-size: 0.72rem;
+	color: var(--dc-accent);
+	background: color-mix(in srgb, var(--dc-accent) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--dc-accent) 35%, transparent);
+	border-radius: 4px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.resolved {
+	font-variant-numeric: tabular-nums;
+	opacity: 0.65;
+}
+
+.link {
+	width: 3.4rem;
+	padding: 0.1rem 0.1rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}

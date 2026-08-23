@@ -177,7 +177,7 @@ function marksFor(c: Constraint, frames: readonly Frame[]): Annotation[] {
 			...band(),
 			// Only where the number is the point: an alignment is about the
 			// edges meeting, not about which coordinate they met at.
-			...(spec.valued ? { label: `${at}` } : {}),
+			...(spec.valueType ? { label: `${at}` } : {}),
 		},
 	];
 }
