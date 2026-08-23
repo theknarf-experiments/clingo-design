@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { directSolver } from "./directSolver.ts";
 import { explore, varyingVars } from "./explore.ts";
 import { flatten } from "./tree.ts";
-import { TEMPLATES, findTemplate } from "./templates.ts";
+import { TEMPLATES, findTemplate } from "./templates/index.ts";
 
 test("every template has a unique id and a findable entry", () => {
 	const ids = TEMPLATES.map((t) => t.id);

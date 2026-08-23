@@ -14,7 +14,7 @@ import {
 	setTokenValue,
 } from "./edits.ts";
 import { Explorer, explore, varyingVars } from "./explore.ts";
-import { findTemplate } from "./templates.ts";
+import { findTemplate } from "./templates/index.ts";
 import { type Scene, emptyScene } from "./scene.ts";
 import { lit, propVar, ref, resolveValue, single, tokenVar } from "./values.ts";
 

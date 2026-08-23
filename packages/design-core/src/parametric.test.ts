@@ -14,7 +14,7 @@ import { directSolver } from "./directSolver.ts";
 import { addConstraint, addNode, makeNode, updateConstraint } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
 import { type Scene, dimension, emptyScene } from "./scene.ts";
-import { findTemplate } from "./templates.ts";
+import { findTemplate } from "./templates/index.ts";
 import { type Value, lit, ref, single, tokenVar } from "./values.ts";
 
 /** Two loose rects and one `length` token, which is the whole apparatus. */
