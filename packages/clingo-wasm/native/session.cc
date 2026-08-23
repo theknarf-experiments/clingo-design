@@ -15,13 +15,17 @@
 // clingo-lpx is registered on every session, adding linear arithmetic over
 // rationals through clingo's theory interface. Its variables are not stable
 // model atoms, so their values cannot appear in an answer set on their own.
-// They are read out of the propagator per model and appended to that model's
-// symbols as `__lpx(Var,"Value")`, so callers see one uniform channel.
+// `clingolpx_on_model` puts them there as `__lpx(Var,"Value")` — plus
+// `__lpx_objective("Value",Bounded)` when the program has a `&minimize` — so
+// callers see one uniform channel.
 //
-// Deliberately not `clingolpx_on_model`, which is the obvious way to do this:
-// it calls `Model::extend`, whose symbols accumulate across the models of one
-// solve handle, so the second model comes back carrying the first one's values
-// as well. Reading the assignment directly is per-thread and current.
+// That call is only safe because the solve is given an event handler. It works
+// through `Model::extend`, which appends to a table clingo clears in its own
+// `onModel` — and clingo only gets there when a handler was registered.
+// Iterating a bare solve handle skips the clear, and the second model then
+// comes back carrying the first one's values as well. The values also arrive
+// under `ShowType::Theory` rather than `Shown`, which keeps them off the same
+// list as the program's own atoms.
 //
 // Results are printed to stdout as one line of JSON, which the Emscripten
 // runtime routes to Module.print.
@@ -55,6 +59,16 @@ struct Rewriter {
         auto *self = static_cast<Rewriter *>(data);
         return clingolpx_rewrite_ast(self->theory, stm, add, self->builder);
     }
+};
+
+//! Hands each model to clingo-lpx so it can attach its theory values.
+struct LpxValues : SolveEventHandler {
+    explicit LpxValues(clingolpx_theory_t *theory) : lpx{theory} {}
+    bool on_model(Model &model) override {
+        Detail::handle_error(clingolpx_on_model(lpx, model.to_c()));
+        return true;
+    }
+    clingolpx_theory_t *lpx;
 };
 
 struct Session {
@@ -244,7 +258,8 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
         std::vector<std::string> core;
 
         {
-            auto handle = ctl.solve(LiteralSpan{lits.data(), lits.size()});
+            LpxValues on_model{session->lpx};
+            auto handle = ctl.solve(LiteralSpan{lits.data(), lits.size()}, &on_model);
             for (auto &model : handle) {
                 // In optN clingo first *finds* the optimum and then enumerates
                 // the optimal models, so the finding step would otherwise show
@@ -267,21 +282,10 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
                     for (auto const &sym : model.symbols(ShowType::Shown)) {
                         put(sym.to_string());
                     }
-                    // Theory variables, in the same shape the clingo-lpx
-                    // binary prints them. A String symbol renders with its
-                    // quotes, which is exactly the term we want.
-                    uint32_t thread = model.thread_id();
-                    size_t index = 0;
-                    clingolpx_assignment_begin(session->lpx, thread, &index);
-                    while (clingolpx_assignment_next(session->lpx, thread, &index)) {
-                        clingolpx_value_t value;
-                        clingolpx_assignment_get_value(session->lpx, thread, index, &value);
-                        std::string term = "__lpx(";
-                        term += Symbol{clingolpx_get_symbol(session->lpx, index)}.to_string();
-                        term += ",";
-                        term += Symbol{value.symbol}.to_string();
-                        term += ")";
-                        put(term);
+                    // The theory values clingo-lpx attached above, in the same
+                    // shape its own binary prints them.
+                    for (auto const &sym : model.symbols(ShowType::Theory)) {
+                        put(sym.to_string());
                     }
                     models_json += "]";
                 }

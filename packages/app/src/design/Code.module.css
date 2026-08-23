@@ -1,0 +1,37 @@
+/* One class per LexemeKind — the component indexes this file by the kind it
+   got back, so a new kind means a rule here and nothing else. */
+
+.comment {
+	color: var(--dc-syn-comment);
+	font-style: italic;
+}
+
+.string {
+	color: var(--dc-syn-string);
+}
+
+.number {
+	color: var(--dc-syn-number);
+}
+
+.variable {
+	color: var(--dc-syn-variable);
+}
+
+.directive {
+	color: var(--dc-syn-keyword);
+}
+
+.theory {
+	color: var(--dc-syn-theory);
+}
+
+.keyword {
+	color: var(--dc-syn-keyword);
+}
+
+/* Muted rather than coloured: punctuation is dense in ASP, and colouring it
+   turns a rule into confetti. Dimming it is what makes the atoms legible. */
+.operator {
+	color: var(--dc-syn-operator);
+}

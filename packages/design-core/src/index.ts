@@ -5,6 +5,7 @@ export * from "./measure.ts";
 export * from "./tree.ts";
 export * from "./edits.ts";
 export * from "./compile.ts";
+export * from "./highlight.ts";
 export * from "./project.ts";
 export * from "./templates.ts";
 export * from "./solver.ts";

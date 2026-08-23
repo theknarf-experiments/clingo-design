@@ -16,6 +16,19 @@
 	--dc-accent: #6366f1;
 	--dc-accent-soft: #6366f155;
 	--dc-dot: #cbd1da;
+
+	/* Syntax colours for the rules panel. Deliberately quiet: the panel is a
+	   reference as often as it is an editor, and a full rainbow over ASP's
+	   dense punctuation reads as noise. Variables get the loudest hue because
+	   telling one from a constant is the thing you actually squint at. */
+	--dc-syn-plain: #1f2430;
+	--dc-syn-comment: #78828f;
+	--dc-syn-string: #0f766e;
+	--dc-syn-number: #b45309;
+	--dc-syn-variable: #7c3aed;
+	--dc-syn-theory: #0369a1;
+	--dc-syn-keyword: #be123c;
+	--dc-syn-operator: #9aa3b0;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -26,6 +39,15 @@
 		--dc-accent: #818cf8;
 		--dc-accent-soft: #818cf855;
 		--dc-dot: #2a2f38;
+
+		--dc-syn-plain: #d5dbe5;
+		--dc-syn-comment: #69727f;
+		--dc-syn-string: #5eead4;
+		--dc-syn-number: #fbbf24;
+		--dc-syn-variable: #c4b5fd;
+		--dc-syn-theory: #7dd3fc;
+		--dc-syn-keyword: #fda4af;
+		--dc-syn-operator: #6d7684;
 	}
 }
 

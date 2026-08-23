@@ -193,7 +193,8 @@ export const CONTRACT = `% Predicates you can rely on:
 %
 %   &sum{ x; -y } >= 16.        x is at least 16 past y
 %   &dom{ 0..960 } = x.         bound a variable
-%   &minimize{ x }.             rank models by it
+%   &minimize{ x }.             rank models by it; each model then also
+%                               reports __lpx_objective("N",Bounded)
 %
 % Examples:
 %   :- resolved(prop(card,fill), C), resolved(prop(badge,fill), C).

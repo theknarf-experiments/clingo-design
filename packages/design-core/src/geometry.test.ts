@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
 	type Frame,
 	boundsOf,
+	expandFrame,
 	frameContains,
 	frameFromPoints,
 	framesIntersect,
@@ -33,6 +34,21 @@ test("framesIntersect ignores mere touching", () => {
 	assert.equal(framesIntersect(f(0, 0, 10, 10), f(5, 5, 10, 10)), true);
 	assert.equal(framesIntersect(f(0, 0, 10, 10), f(10, 0, 10, 10)), false);
 	assert.equal(framesIntersect(f(0, 0, 10, 10), f(20, 20, 5, 5)), false);
+});
+
+test("expandFrame grows on every side and never inverts", () => {
+	assert.deepEqual(expandFrame(f(10, 20, 30, 40), 5), f(5, 15, 40, 50));
+	assert.deepEqual(expandFrame(f(10, 20, 30, 40), 0), f(10, 20, 30, 40));
+	// Shrinking past the middle would otherwise give a negative size, which
+	// framesIntersect reads as a rectangle turned inside out.
+	assert.deepEqual(expandFrame(f(10, 20, 30, 40), -100), f(110, 120, 0, 0));
+});
+
+test("a margin is what keeps a frame just off screen in play", () => {
+	const view = f(0, 0, 100, 100);
+	const offscreen = f(140, 0, 20, 20);
+	assert.equal(framesIntersect(view, offscreen), false);
+	assert.equal(framesIntersect(expandFrame(view, 50), offscreen), true);
 });
 
 test("boundsOf covers every frame", () => {

@@ -307,6 +307,11 @@ function values(atoms: readonly string[]): string[] {
 		.sort();
 }
 
+/** The `&minimize`/`&maximize` optimum of one model, if the program has one. */
+function objective(atoms: readonly string[]): string | undefined {
+	return atoms.find((a) => a.startsWith("__lpx_objective("));
+}
+
 test("registering the theory leaves ordinary programs alone", async () => {
 	await withSession("a. b :- a. #show a/0. #show b/0.", async (session) => {
 		const out = await session.solve({ models: 0 });
@@ -410,4 +415,47 @@ test("theory constraints respond to assumptions like anything else", async () =>
 			assert.ok(bounded >= 100 && bounded <= 120, `got w=${bounded}`);
 		},
 	);
+});
+
+test("an lpx objective reports its optimum per model", async () => {
+	// The objective is the one theory value with no variable of its own, so it
+	// is also the one that would be most obviously wrong if the extension table
+	// leaked between models: both answer sets here optimise the same variable.
+	await withSession(
+		`cap(8). cap(24).
+		 1 { chosen(C) : cap(C) } 1.
+		 &sum{ x } >= 0.
+		 &sum{ x } <= C :- chosen(C).
+		 &maximize{ x }.
+		 #show chosen/1.`,
+		async (session) => {
+			const out = await session.solve({ models: 0 });
+			assert.equal(out.models.length, 2);
+			const byCap = Object.fromEntries(
+				out.models.map((m) => [
+					m.find((a) => a.startsWith("chosen")),
+					objective(m),
+				]),
+			);
+			assert.deepEqual(byCap, {
+				"chosen(8)": '__lpx_objective("8",1)',
+				"chosen(24)": '__lpx_objective("24",1)',
+			});
+		},
+	);
+});
+
+test("an unbounded objective says so rather than reporting a value", async () => {
+	await withSession("&sum{ x } >= 0. &maximize{ x }.", async (session) => {
+		const out = await session.solve({ models: 1 });
+		assert.equal(out.result, "SATISFIABLE");
+		assert.match(objective(out.models[0]) ?? "", /,0\)$/);
+	});
+});
+
+test("a program without an objective reports none", async () => {
+	await withSession("&sum{ x } = 3.", async (session) => {
+		const out = await session.solve({ models: 1 });
+		assert.equal(objective(out.models[0]), undefined);
+	});
 });

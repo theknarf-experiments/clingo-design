@@ -6,6 +6,7 @@ import {
 	KINDS,
 	type NodeKind,
 	SHAPE_KINDS,
+	type Frame,
 	type ReorderTo,
 	type Scene,
 	type Universe,
@@ -45,6 +46,7 @@ import { ViewSwitcher } from "./ViewSwitcher";
 import { cx } from "./cx";
 import { layoutArtboards } from "./layout";
 import { measureScene } from "./measureText";
+import { useCulling } from "./useCulling";
 import { useExploration } from "./useExploration";
 import styles from "./Studio.module.css";
 import tabStyles from "./tabs.module.css";
@@ -249,6 +251,28 @@ export function Studio({
 		() => layoutArtboards(shown.length, bounds),
 		[shown.length, bounds],
 	);
+	/**
+	 * Where each copy sits on the canvas. The one being edited gets the whole
+	 * padded surface, so that drawing a frame beside the document still has
+	 * somewhere to land.
+	 */
+	const boxes = useMemo<Frame[]>(
+		() =>
+			Array.from({ length: shown.length }, (_, i) =>
+				view === "design" && i === 0
+					? region
+					: {
+							x: layout.placements[i]?.x ?? 0,
+							y: layout.placements[i]?.y ?? 0,
+							width: bounds.width,
+							height: bounds.height,
+						},
+			),
+		[shown.length, view, region, layout, bounds],
+	);
+	// Two dozen artboards is two dozen full copies of the document; the ones
+	// nowhere near the viewport get no DOM at all.
+	const onscreen = useCulling(camera, host, boxes);
 
 	const selectionIds = useCallback((ids: string[]) => setSelection(new Set(ids)), []);
 
@@ -569,16 +593,9 @@ export function Studio({
 						}}
 					>
 						{shown.map((universe, i) => {
-							const place = layout.placements[i] ?? { x: 0, y: 0 };
+							if (onscreen && !onscreen.has(i)) return null;
 							const editable = view === "design" && i === 0;
-							const box = editable
-								? region
-								: {
-										x: place.x,
-										y: place.y,
-										width: bounds.width,
-										height: bounds.height,
-									};
+							const box = boxes[i];
 							return (
 								<div
 									key={i}

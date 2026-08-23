@@ -1,6 +1,7 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { CONTRACT, type Scene } from "@clingo-design/design-core";
 
+import { Code } from "./Code";
 import styles from "./ProgramPanel.module.css";
 import tabStyles from "./tabs.module.css";
 import { cx } from "./cx";
@@ -40,6 +41,7 @@ export function ProgramPanel({
 }: ProgramPanelProps) {
 	const [tab, setTab] = useState<Tab>("rules");
 	const [open, setOpen] = useState(true);
+	const paint = useRef<HTMLPreElement | null>(null);
 
 	function select(id: Tab) {
 		if (id === tab) {
@@ -59,15 +61,32 @@ export function ProgramPanel({
 			{open ? (
 				<>
 					{tab === "rules" ? (
-						<textarea
-							className={styles.code}
-							spellCheck={false}
-							value={scene.rules}
-							onChange={(e) => onChange({ ...scene, rules: e.target.value })}
-						/>
+						<div className={styles.editor}>
+							<pre
+								ref={paint}
+								className={cx(styles.code, styles.paint)}
+								aria-hidden="true"
+							>
+								<Code text={scene.rules} />
+							</pre>
+							<textarea
+								className={cx(styles.code, styles.input)}
+								spellCheck={false}
+								value={scene.rules}
+								onChange={(e) => onChange({ ...scene, rules: e.target.value })}
+								onScroll={(e) => {
+									// The copy below has no scrollbars of its own; it is
+									// dragged along by the one box the user can reach.
+									const under = paint.current;
+									if (!under) return;
+									under.scrollTop = e.currentTarget.scrollTop;
+									under.scrollLeft = e.currentTarget.scrollLeft;
+								}}
+							/>
+						</div>
 					) : (
 						<pre className={cx(styles.code, styles.readonly)}>
-							{tab === "generated" ? generated : CONTRACT}
+							<Code text={tab === "generated" ? generated : CONTRACT} />
 						</pre>
 					)}
 

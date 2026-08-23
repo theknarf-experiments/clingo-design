@@ -62,6 +62,16 @@ export function framesIntersect(a: Frame, b: Frame): boolean {
 	);
 }
 
+/** The frame grown by `by` on every side. Negative shrinks, never past zero. */
+export function expandFrame(frame: Frame, by: number): Frame {
+	return {
+		x: frame.x - by,
+		y: frame.y - by,
+		width: Math.max(0, frame.width + by * 2),
+		height: Math.max(0, frame.height + by * 2),
+	};
+}
+
 /** Smallest frame containing all of `frames`, or null when there are none. */
 export function boundsOf(frames: readonly Frame[]): Frame | null {
 	if (frames.length === 0) return null;

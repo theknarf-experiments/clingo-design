@@ -55,13 +55,45 @@
 	font-size: 12px;
 	line-height: 1.5;
 	background: var(--dc-sunken);
-	color: inherit;
+	color: var(--dc-syn-plain);
 	white-space: pre;
 	tab-size: 2;
 }
 
 .readonly {
-	opacity: 0.75;
+	opacity: 0.85;
+}
+
+/*
+ * Editable rules: a coloured copy of the text with a transparent textarea over
+ * it. The textarea has to stay the real editor — nothing else gets the caret,
+ * the undo stack, autocorrect and IME right — so highlighting is a matter of
+ * lining a second box up with it exactly. Both take their metrics from `.code`
+ * and share one scroll position; anything that differs shows up as glyphs
+ * sliding out from under the caret.
+ */
+.editor {
+	position: relative;
+	flex: 1;
+	min-height: 0;
+	background: var(--dc-sunken);
+}
+
+.editor .code {
+	position: absolute;
+	inset: 0;
+	box-sizing: border-box;
+}
+
+.paint {
+	pointer-events: none;
+	overflow: hidden;
+}
+
+.input {
+	background: transparent;
+	color: transparent;
+	caret-color: var(--dc-syn-plain);
 }
 
 .error {
