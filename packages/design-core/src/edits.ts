@@ -18,13 +18,12 @@ import {
 	scalePoints,
 } from "./geometry.ts";
 import {
-	type Align,
 	type AutoLayout,
+	type ChildProp,
 	CONSTRAINT_KINDS,
 	type Constraint,
 	type ConstraintKind,
 	type ConstraintSpec,
-	DEFAULT_LAYOUT,
 	type Diagonal,
 	EDGES,
 	type Edge,
@@ -36,6 +35,7 @@ import {
 	type Sizing,
 	dimension,
 	edgeOn,
+	makeLayout,
 	uniqueName,
 	wrapsChildren,
 } from "./scene.ts";
@@ -756,43 +756,30 @@ export function updateLayout(
 	return setLayout(scene, id, { ...node.layout, ...patch });
 }
 
-/** Whether a child takes a share of its parent's leftover space. */
-export function setGrow(scene: Scene, ids: readonly string[], grow: boolean): Scene {
-	const touch = new Set(ids);
-	return {
-		...scene,
-		nodes: mapTree(scene.nodes, (node) => {
-			if (!touch.has(node.id)) return node;
-			if (!grow) {
-				const { grow: _dropped, ...rest } = node;
-				return rest;
-			}
-			return { ...node, grow: true };
-		}),
-	};
-}
-
 /**
- * A child's own say on the cross axis, or `undefined` to follow the container.
+ * A child's own say in the layout above it — whether it grows, and where it
+ * sits on the cross axis — or `undefined` to follow the container.
  *
  * Stored as nothing at all when it follows, so a document only carries the
- * children somebody deliberately singled out.
+ * children somebody deliberately singled out. One function for both because
+ * they differ only by which entry of `LAYOUT_PROPS` they are.
  */
-export function setAlignSelf(
+export function setChildLayout(
 	scene: Scene,
 	ids: readonly string[],
-	align: Align | undefined,
+	prop: ChildProp,
+	value: Value | undefined,
 ): Scene {
 	const touch = new Set(ids);
 	return {
 		...scene,
 		nodes: mapTree(scene.nodes, (node) => {
 			if (!touch.has(node.id)) return node;
-			if (!align) {
-				const { alignSelf: _dropped, ...rest } = node;
+			if (!value || value.length === 0) {
+				const { [prop]: _dropped, ...rest } = node;
 				return rest;
 			}
-			return { ...node, alignSelf: align };
+			return { ...node, [prop]: value };
 		}),
 	};
 }
@@ -846,7 +833,7 @@ export function wrapInLayout(
 					// decides how big this ends up.
 					frame: bounds ?? node.frame,
 					props: { ...KINDS.frame.defaults },
-					layout: { ...DEFAULT_LAYOUT },
+					layout: makeLayout(),
 				},
 	);
 	return { scene: { ...grouped.scene, nodes: withLayout }, id: grouped.id };

@@ -14,7 +14,7 @@ import {
 	sizingOf,
 	toMeasure,
 } from "./measure.ts";
-import { type Scene, emptyScene } from "./scene.ts";
+import { type Scene, emptyScene, makeLayout } from "./scene.ts";
 import { findInTree, mapTree, propValues } from "./tree.ts";
 
 /** A hugging row holding one text node and one plain rectangle. */
@@ -40,20 +40,13 @@ function row(): Scene {
 			n.id === "box"
 				? {
 						...n,
-						layout: {
-							direction: "row" as const,
-							gap: 10,
-							padding: 10,
-							align: "start" as const,
-							justify: "start" as const,
-							sizing: "hug" as const,
-						},
+						layout: makeLayout({ gap: 10, padding: 10 }),
 					}
 				: n,
 		),
 	};
 }
-import { lit, propVar, resolveValue } from "./values.ts";
+import { lit, propVar, resolveValue, single } from "./values.ts";
 
 test("only the measured kinds size themselves, and by default they do", () => {
 	const text = makeNode("text", { x: 0, y: 0, width: 160, height: 28 });
@@ -157,7 +150,7 @@ test("a hugging container asks for what its contents come to, not its frame", ()
 
 test("a natural size stops at a container that is not hugging", () => {
 	const fixed = mapTree(row().nodes, (n) =>
-		n.layout ? { ...n, layout: { ...n.layout, sizing: "fixed" as const } } : n,
+		n.layout ? { ...n, layout: { ...n.layout, sizing: single("fixed") } } : n,
 	);
 	const box = findInTree(fixed, "box");
 	assert.ok(box);
@@ -219,14 +212,7 @@ test("a hugging row follows whichever wording won", async () => {
 		makeNode("text", { x: 0, y: 0, width: 10, height: 10 }, { id: "t" }),
 	);
 	scene = setProp(scene, ["t"], "text", [lit("short"), lit("much longer")]);
-	scene = setLayout(scene, "row", {
-		direction: "row",
-		gap: 0,
-		padding: 10,
-		align: "start",
-		justify: "start",
-		sizing: "hug",
-	});
+	scene = setLayout(scene, "row", makeLayout({ gap: 0, padding: 10 }));
 
 	const widths = await Promise.all(
 		[0, 1].map(async (i) => {

@@ -6,11 +6,12 @@
  * A project used to be an entry in one JSON blob, which is why the reader for
  * that blob still lives at the bottom of this file.
  */
-import { single } from "./values.ts";
+import { type Value, single } from "./values.ts";
 import {
-	ALIGNMENTS,
 	type AutoLayout,
-	JUSTIFICATIONS,
+	CHILD_PROPS,
+	CONTAINER_PROPS,
+	LAYOUT_PROPS,
 	CONSTRAINT_KINDS,
 	EDGES,
 	type Constraint,
@@ -232,23 +233,35 @@ function isPoints(value: unknown): boolean {
 }
 
 function isLayout(value: unknown): boolean {
-	if (!isRecord(value)) return false;
-	if (value.direction !== "row" && value.direction !== "column") return false;
-	if (!ALIGNMENTS.has(String(value.align))) return false;
-	return Number.isFinite(Number(value.gap)) && Number.isFinite(Number(value.padding));
+	return isRecord(value);
 }
 
 /**
- * A layout stored before a field existed takes the default for it — hugging,
- * and slack at the end — so an older document reads back looking the same.
+ * One layout setting as it is stored now: a {@link Value}.
+ *
+ * A setting stored before it was one is a bare word, a number or a boolean, and
+ * comes back as a single-alternative value; a setting stored before it existed
+ * takes the table's default. Not a migration to maintain — the same
+ * shape-normalisation everything else on the way in gets.
  */
+function settingValue(raw: unknown): Value | undefined {
+	if (Array.isArray(raw)) return raw.length > 0 ? (raw as Value) : undefined;
+	if (typeof raw === "number") return single(`${Math.round(raw)}px`);
+	if (typeof raw === "string") return single(raw);
+	// `grow` was a checkbox before it was two named options.
+	if (typeof raw === "boolean") return raw ? single("grow") : undefined;
+	return undefined;
+}
+
+/** Every setting a container holds, defaulted where it holds none. */
 function normalizeLayout(value: unknown): AutoLayout {
-	const raw = value as AutoLayout;
-	return {
-		...raw,
-		sizing: raw.sizing === "fixed" ? "fixed" : "hug",
-		justify: raw.justify in JUSTIFICATIONS ? raw.justify : "start",
-	};
+	const raw = isRecord(value) ? value : {};
+	const out = {} as AutoLayout;
+	for (const prop of CONTAINER_PROPS) {
+		out[prop] =
+			settingValue(raw[prop]) ?? single(LAYOUT_PROPS[prop].fallback);
+	}
+	return out;
 }
 
 /** Keeps only placeable nodes, at every depth. */
@@ -270,9 +283,15 @@ function pruneNodes(list: readonly unknown[]): SceneNode[] {
 						},
 					}
 				: node;
-		const fixed = carried.layout
+		let fixed = carried.layout
 			? { ...carried, layout: normalizeLayout(carried.layout) }
 			: carried;
+		for (const prop of CHILD_PROPS) {
+			const setting = settingValue(fixed[prop]);
+			if (setting === fixed[prop]) continue;
+			const { [prop]: _old, ...rest } = fixed;
+			fixed = setting ? { ...rest, [prop]: setting } : (rest as SceneNode);
+		}
 		out.push(
 			fixed.children ? { ...fixed, children: pruneNodes(fixed.children) } : fixed,
 		);

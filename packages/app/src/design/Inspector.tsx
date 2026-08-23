@@ -1,29 +1,35 @@
 import {
-	type Align,
-	type Direction,
-	type Justify,
+	CHILD_PROPS,
+	CONTAINER_PROPS,
+	LAYOUT_PROPS,
+	type LayoutProp,
 	type Sizing,
-	JUSTIFICATIONS,
 	KINDS,
 	PROPS,
 	type Picks,
 	type Scene,
 	type SceneNode,
 	type Term,
-	DEFAULT_LAYOUT,
+	type Value,
 	type Freedom,
 	defaultValue,
 	findInTree,
 	isPinned,
 	isMeasured,
+	layoutValueOf,
+	layoutVar,
+	layoutWord,
+	makeLayout,
 	managedNodes,
 	nodeNames,
+	parentOf,
 	propValues,
-	setAlignSelf,
-	setGrow,
+	setChildLayout,
 	setLayout,
 	setSizing,
+	single,
 	sizingOf,
+	tokensOfType,
 	updateLayout,
 	propVar,
 	renameNode,
@@ -59,10 +65,7 @@ export interface InspectorProps {
 }
 
 const AXES = ["x", "y", "width", "height"] as const;
-const DIRECTIONS: Direction[] = ["row", "column"];
-const ALIGNMENTS: Align[] = ["start", "center", "end", "stretch"];
 const SIZINGS: Sizing[] = ["hug", "fixed"];
-const JUSTIFY = Object.keys(JUSTIFICATIONS) as Justify[];
 
 function NumberField({
 	label,
@@ -157,6 +160,55 @@ export function Inspector({
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 	const names = nodeNames(scene.nodes);
 
+	/**
+	 * One layout setting, as an ordinary value row.
+	 *
+	 * A layout's inputs are values like a fill is, so they get the same editor:
+	 * two alternatives here is "a row at one breakpoint and a column at
+	 * another", and a link is a gap that follows a spacing token. Which entry of
+	 * `LAYOUT_PROPS` it is decides everything, including where it is written
+	 * back to — the container, or this child.
+	 */
+	function layoutRow(prop: LayoutProp) {
+		const spec = LAYOUT_PROPS[prop];
+		const variable = layoutVar(node.id, prop);
+		// A child says nothing until it is singled out, so its row starts at
+		// what it is actually getting: the container's own answer.
+		const parent = parentOf(scene.nodes, node.id);
+		const seed =
+			spec.on === "child" && prop === "alignSelf" && parent
+				? layoutWord(parent, "align", context)
+				: spec.fallback;
+		const value: Value = layoutValueOf(node, prop) ?? single(seed);
+		return (
+			<ValueEditor
+				key={prop}
+				testId={`layout-${prop}`}
+				label={spec.label}
+				type={spec.type}
+				value={value}
+				tokens={tokensOfType(scene, spec.type)}
+				fallback={spec.fallback}
+				names={names}
+				active={picks[variable]}
+				varying={varying.has(variable)}
+				reachable={reach?.[variable]}
+				pinned={pins[variable]}
+				onPin={(index) => onPin(variable, index)}
+				preview={(term: Term) => resolveValue(context, [term], variable)}
+				onChange={(next) =>
+					onSceneChange(
+						(prev) =>
+							spec.on === "child"
+								? setChildLayout(prev, [node.id], prop as "grow" | "alignSelf", next)
+								: updateLayout(prev, node.id, { [prop]: next }),
+						`layout-${node.id}-${prop}`,
+					)
+				}
+			/>
+		);
+	}
+
 	return (
 		<div className={styles.inspector} data-role="inspector">
 			<input
@@ -234,45 +286,29 @@ export function Inspector({
 			) : null}
 
 			{managed ? (
-				<>
-					<label className={styles.check}>
-						<input
-							type="checkbox"
-							data-role="grow"
-							checked={node.grow ?? false}
-							onChange={(e) =>
-								onSceneChange((prev) => setGrow(prev, [node.id], e.target.checked))
-							}
-						/>
-						<span>Fill the leftover space</span>
-					</label>
-					<div className={styles.grid}>
-						<label className={`${styles.field} ${styles.wide}`}>
-							<span className={styles.fieldLabel}>align self</span>
-							<select
-								className={styles.number}
-								data-role="align-self"
-								value={node.alignSelf ?? ""}
-								onChange={(e) =>
-									onSceneChange((prev) =>
-										setAlignSelf(
-											prev,
-											[node.id],
-											(e.target.value || undefined) as Align | undefined,
-										),
-									)
-								}
-							>
-								<option value="">as the layout says</option>
-								{ALIGNMENTS.map((a) => (
-									<option key={a} value={a}>
-										{a}
-									</option>
-								))}
-							</select>
-						</label>
-					</div>
-				</>
+				<div className={styles.props}>
+					{CHILD_PROPS.map((prop) => (
+						<div key={prop}>
+							{layoutRow(prop)}
+							{/* A child's own say can be given up again; every other
+							    value only ever has one. */}
+							{layoutValueOf(node, prop) ? (
+								<button
+									type="button"
+									className={styles.follow}
+									data-role={`clear-layout-${prop}`}
+									onClick={() =>
+										onSceneChange((prev) =>
+											setChildLayout(prev, [node.id], prop, undefined),
+										)
+									}
+								>
+									Follow the layout
+								</button>
+							) : null}
+						</div>
+					))}
+				</div>
 			) : null}
 
 			{container ? (
@@ -288,7 +324,7 @@ export function Inspector({
 									setLayout(
 										prev,
 										node.id,
-										e.target.checked ? { ...DEFAULT_LAYOUT } : undefined,
+										e.target.checked ? makeLayout() : undefined,
 									),
 								)
 							}
@@ -297,111 +333,8 @@ export function Inspector({
 					</label>
 
 					{node.layout ? (
-						<div className={styles.grid}>
-							<label className={styles.field}>
-								<span className={styles.fieldLabel}>flow</span>
-								<select
-									className={styles.number}
-									data-role="layout-direction"
-									value={node.layout.direction}
-									onChange={(e) =>
-										onSceneChange((prev) =>
-											updateLayout(prev, node.id, {
-												direction: e.target.value as Direction,
-											}),
-										)
-									}
-								>
-									{DIRECTIONS.map((d) => (
-										<option key={d} value={d}>
-											{d}
-										</option>
-									))}
-								</select>
-							</label>
-							<label className={styles.field}>
-								<span className={styles.fieldLabel}>size</span>
-								<select
-									className={styles.number}
-									data-role="layout-sizing"
-									value={node.layout.sizing}
-									onChange={(e) =>
-										onSceneChange((prev) =>
-											updateLayout(prev, node.id, {
-												sizing: e.target.value as Sizing,
-											}),
-										)
-									}
-								>
-									{SIZINGS.map((z) => (
-										<option key={z} value={z}>
-											{z === "hug" ? "hug contents" : "fixed"}
-										</option>
-									))}
-								</select>
-							</label>
-							<label className={styles.field}>
-								<span className={styles.fieldLabel}>align</span>
-								<select
-									className={styles.number}
-									data-role="layout-align"
-									value={node.layout.align}
-									onChange={(e) =>
-										onSceneChange((prev) =>
-											updateLayout(prev, node.id, {
-												align: e.target.value as Align,
-											}),
-										)
-									}
-								>
-									{ALIGNMENTS.map((a) => (
-										<option key={a} value={a}>
-											{a}
-										</option>
-									))}
-								</select>
-							</label>
-							<label className={styles.field}>
-								<span className={styles.fieldLabel}>justify</span>
-								<select
-									className={styles.number}
-									data-role="layout-justify"
-									value={node.layout.justify}
-									onChange={(e) =>
-										onSceneChange((prev) =>
-											updateLayout(prev, node.id, {
-												justify: e.target.value as Justify,
-											}),
-										)
-									}
-								>
-									{JUSTIFY.map((j) => (
-										<option key={j} value={j}>
-											{JUSTIFICATIONS[j]}
-										</option>
-									))}
-								</select>
-							</label>
-							<NumberField
-								label="gap"
-								value={node.layout.gap}
-								onChange={(gap) =>
-									onSceneChange(
-										(prev) => updateLayout(prev, node.id, { gap }),
-										`gap-${node.id}`,
-									)
-								}
-							/>
-							<NumberField
-								label="padding"
-								value={node.layout.padding}
-								onChange={(padding) =>
-									onSceneChange(
-										(prev) => updateLayout(prev, node.id, { padding }),
-										`pad-${node.id}`,
-									)
-								}
-							/>
+						<div className={styles.props}>
+							{CONTAINER_PROPS.map((prop) => layoutRow(prop))}
 						</div>
 					) : null}
 				</>

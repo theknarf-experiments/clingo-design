@@ -490,6 +490,12 @@ export function Editor({
 				point,
 				moving,
 				live.current.universe.solved,
+				// Which way a layout runs is a value, so where a drop lands is a
+				// question about the universe on screen.
+				{
+					tokens: live.current.scene.tokens,
+					picks: live.current.universe.pick,
+				},
 			);
 		/**
 		 * What the constraints leave this gesture, per axis. Fixed for the whole

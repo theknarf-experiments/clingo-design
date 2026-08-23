@@ -138,3 +138,22 @@
 .number:disabled {
 	opacity: 0.45;
 }
+
+/* Gives a child's own say back to the container it sits in. */
+.follow {
+	margin: 0.1rem 0 0 auto;
+	display: block;
+	padding: 0.1rem 0.3rem;
+	font: inherit;
+	font-size: 0.66rem;
+	color: inherit;
+	background: none;
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	opacity: 0.6;
+	cursor: pointer;
+}
+
+.follow:hover {
+	opacity: 1;
+}

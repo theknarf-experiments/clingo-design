@@ -4,20 +4,30 @@ import { test } from "node:test";
 import { directSolver } from "./directSolver.ts";
 import { addNode, addNodeTo, makeNode, reparent } from "./edits.ts";
 import { explore } from "./explore.ts";
-import { type Align, type AutoLayout, type Scene, emptyScene } from "./scene.ts";
+import {
+	type ContainerProp,
+	type Scene,
+	emptyScene,
+	makeLayout,
+} from "./scene.ts";
+import { single } from "./values.ts";
+
 import { dropTargetAt, findInTree, mapTree } from "./tree.ts";
+
+/** A layout in plain words and numbers — the tests fix one arrangement. */
+type LayoutSpec = Partial<Record<ContainerProp, string | number>>;
 
 interface Child {
 	id: string;
 	width: number;
 	height: number;
 	grow?: boolean;
-	alignSelf?: Align;
+	alignSelf?: string;
 }
 
 /** A frame of the given size with `n` children, laid out. */
 function row(
-	layout: Partial<AutoLayout>,
+	layout: LayoutSpec,
 	container: { width: number; height: number },
 	children: Child[],
 ): Scene {
@@ -48,25 +58,22 @@ function row(
 			if (n.id === "box") {
 				return {
 					...n,
-					layout: {
-						direction: "row",
+					layout: makeLayout({
 						gap: 10,
 						padding: 10,
-						align: "start",
-						justify: "start",
 						// These cases pin the container size on purpose; hugging
 						// has its own tests below.
 						sizing: "fixed",
 						...layout,
-					} as AutoLayout,
+					}),
 				};
 			}
 			const spec = children.find((c) => c.id === n.id);
 			if (!spec) return n;
 			return {
 				...n,
-				...(spec.grow ? { grow: true } : {}),
-				...(spec.alignSelf ? { alignSelf: spec.alignSelf } : {}),
+				...(spec.grow ? { grow: single("grow") } : {}),
+				...(spec.alignSelf ? { alignSelf: single(spec.alignSelf) } : {}),
 			};
 		}),
 	};
@@ -170,7 +177,7 @@ test("a container without a layout solves nothing", async () => {
 /* ------------------------------------------------------------------ */
 
 /** 400 wide, padding 10, gap 10, two children of 100 and 60: 210 to spare. */
-const spare = (justify: AutoLayout["justify"]) =>
+const spare = (justify: string) =>
 	solve(
 		row({ justify }, { width: 400, height: 100 }, [
 			{ id: "a", width: 100, height: 40 },
@@ -396,14 +403,7 @@ test("a hugging container nested in another composes", async () => {
 		"inner",
 		makeNode("rect", { x: 0, y: 0, width: 50, height: 20 }, { id: "leaf" }),
 	);
-	const hug: AutoLayout = {
-		direction: "row",
-		gap: 0,
-		padding: 10,
-		align: "start",
-		justify: "start",
-		sizing: "hug",
-	};
+	const hug = makeLayout({ gap: 0, padding: 10 });
 	scene = {
 		...scene,
 		nodes: mapTree(scene.nodes, (n) =>
@@ -419,7 +419,7 @@ test("a hugging container nested in another composes", async () => {
  * A hugging row holding one rect and one hugging column, whose stored frame is
  * deliberately nothing like what it will hug to.
  */
-function nested(outer: Partial<AutoLayout>): Scene {
+function nested(outer: LayoutSpec): Scene {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
@@ -442,22 +442,15 @@ function nested(outer: Partial<AutoLayout>): Scene {
 			makeNode("rect", { x: 0, y: 0, width: 30, height: 25 }, { id }),
 		);
 	}
-	const base: AutoLayout = {
-		direction: "row",
-		gap: 0,
-		padding: 10,
-		align: "start",
-		justify: "start",
-		sizing: "hug",
-	};
+	const base: LayoutSpec = { gap: 0, padding: 10 };
 	return {
 		...scene,
 		nodes: mapTree(scene.nodes, (n) => {
-			if (n.id === "outer") return { ...n, layout: { ...base, ...outer } };
+			if (n.id === "outer") return { ...n, layout: makeLayout({ ...base, ...outer }) };
 			if (n.id === "inner") {
 				return {
 					...n,
-					layout: { ...base, direction: "column" as const, padding: 5 },
+					layout: makeLayout({ ...base, direction: "column", padding: 5 }),
 				};
 			}
 			return n;
@@ -515,14 +508,7 @@ async function withLayout() {
 			n.id === "box"
 				? {
 						...n,
-						layout: {
-							direction: "row",
-							gap: 10,
-							padding: 10,
-							align: "start",
-							justify: "start",
-							sizing: "hug",
-						} as AutoLayout,
+						layout: makeLayout({ gap: 10, padding: 10 }),
 					}
 				: n,
 		),

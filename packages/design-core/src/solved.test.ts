@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { directSolver } from "./directSolver.ts";
 import { addNode, addNodeTo, makeNode } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
-import { type AutoLayout, type Scene, emptyScene } from "./scene.ts";
+import { type Scene, emptyScene, makeLayout } from "./scene.ts";
 import { mapTree } from "./tree.ts";
 import { lit } from "./values.ts";
 
@@ -197,14 +197,7 @@ function laidOut(): Scene {
 			n.id === "row"
 				? {
 						...n,
-						layout: {
-							direction: "row",
-							gap: 10,
-							padding: 10,
-							align: "start",
-							justify: "start",
-							sizing: "fixed",
-						} as AutoLayout,
+						layout: makeLayout({ gap: 10, padding: 10, sizing: "fixed" }),
 					}
 				: n,
 		),

@@ -19,25 +19,33 @@
  */
 import { askedSize, measuredCount, naturalSize, type Measurements } from "./measure.ts";
 import {
+	CHILD_PROPS,
 	CONSTRAINT_KINDS,
 	CONSTRAINT_NAMES,
+	CONTAINER_PROPS,
 	EDGES,
 	EDGE_NAMES,
+	LAYOUT_PROPS,
+	LAYOUT_PROP_NAMES,
 	NODE_KINDS,
 	dimension,
 	isLaidOut,
-	type AutoLayout,
+	layoutValueOf,
 	type Scene,
 	type SceneNode,
 } from "./scene.ts";
 import {
 	DERIVATIONS,
 	type Derivation,
+	type ResolveContext,
 	type Term,
+	VALUE_TYPES,
 	constraintVar,
+	layoutVar,
 	numeralOf,
 	propVar,
 	tokenVar,
+	wordOf,
 } from "./values.ts";
 import { flatten, parentMap } from "./tree.ts";
 
@@ -92,16 +100,47 @@ export const probeAtom = (
  * identity — children plus gaps plus padding fill the container exactly.
  */
 const LAYOUT_RULES = [
-	"#defined layout/2.",
 	"#defined ltsize/4.",
+	"#defined word/2.",
+	"#defined numeral/2.",
+	"% ---- the settings, per universe ----",
+	"% A layout's inputs are values like any other: picked per universe, and",
+	"% free to name a token. So the facts the equations read are *derived* from",
+	"% the pick rather than written down, exactly as c_value/2 is — which is what",
+	"% makes a row at one breakpoint and a column at another one document.",
+	"l_value(N,F,L) :- resolved(lval(N,F),L).",
+	"lcontainer(C) :- lslot(C,_,_).",
+	"% A word only counts where the setting offers it: point a direction at a",
+	"% colour and nothing is derived.",
+	"l_word(N,F,W) :- l_value(N,F,L), word(L,W), lopt(F,W).",
+	"% What the container then goes by. A setting that resolves to nothing usable",
+	"% takes the table's default rather than falling silent, because silence here",
+	"% is not a relation left unstated — it is a container with no equations at",
+	"% all, whose children come back at nothing by nothing. The editor's own",
+	"% reading of a layout falls back the same way; see `layoutWord`.",
+	"lword(C,F,W) :- lcontainer(C), l_word(C,F,W).",
+	"lword(C,F,W) :- lcontainer(C), ldefword(F,W), not l_word(C,F,_).",
+	"lnumber(C,F,V) :- lcontainer(C), l_value(C,F,L), numeral(L,V), V >= 0.",
+	"% A negative gap or padding is not an arrangement, it is a typo.",
+	"lnumber(C,F,0) :- lcontainer(C), l_value(C,F,L), numeral(L,V), V < 0.",
+	"lreads(C,F) :- lcontainer(C), l_value(C,F,L), numeral(L,_).",
+	"lnumber(C,F,V) :- lcontainer(C), ldefnum(F,V), not lreads(C,F).",
+	"layout(C,D) :- lword(C,direction,D).",
+	"lalign(C,A) :- lword(C,align,A).",
+	"ljustify(C,J) :- lword(C,justify,J).",
+	"lhug(C) :- lword(C,sizing,hug).",
+	"lgap(C,V) :- lnumber(C,gap,V).",
+	"lpad(C,V) :- lnumber(C,padding,V).",
+	"% A child's own say does not default: saying nothing is what following the",
+	"% container is, and not growing is what not growing is.",
+	"lgrow(N) :- l_word(N,grow,grow).",
+	"lalignself(N,A) :- l_word(N,alignSelf,A).",
+	"",
+	"#defined lslot/3.",
 	"% What a node asks to be, when what it says can vary. The host measures",
 	"% every alternative because they are not the same width; which one applies",
 	"% is the solver's own choice, so the fact cannot be picked in advance.",
 	"lask(N,S,V) :- ltsize(N,I,S,V), pick(prop(N,text),I).",
-	"#defined lslot/3.",
-	"#defined lgrow/1.",
-	"#defined lhug/1.",
-	"#defined lalignself/2.",
 	"% Which axis is which, so one set of equations covers both directions.",
 	"lmain(C,x) :- layout(C,row).",
 	"lmain(C,y) :- layout(C,column).",
@@ -403,6 +442,25 @@ const GEOMETRIC_KINDS = Object.entries(CONSTRAINT_KINDS)
 	.filter(([, spec]) => spec.geometric)
 	.map(([kind]) => `gkind(${kind}).`)
 
+/**
+ * What each layout setting may say, as facts — written out of the one table
+ * that says what a setting is, so no rule ever spells a menu out.
+ *
+ * It is the guard on the derivation: a direction that resolves to something
+ * that is not `row` or `column` says nothing, rather than laying the container
+ * out along an axis that does not exist.
+ */
+const LAYOUT_OPTIONS = LAYOUT_PROP_NAMES.flatMap((prop) => {
+	const spec = LAYOUT_PROPS[prop]
+	const options = VALUE_TYPES[spec.type].options
+	const facts = (options ?? []).map((o) => atom("lopt", prop, o.value))
+	// Only the container's settings default; a child's absence is a statement.
+	if (spec.on !== "container") return facts
+	if (options) return [...facts, atom("ldefword", prop, spec.fallback)]
+	const n = numeralOf(spec.fallback)
+	return n === undefined ? facts : [atom("ldefnum", prop, Math.round(n))]
+})
+
 /** Predicates the generated program exposes to user rules. */
 export const CONTRACT = `% Predicates you can rely on:
 %
@@ -420,11 +478,13 @@ export const CONTRACT = `% Predicates you can rely on:
 %   rendered(Node, Prop, Lit)   what a node actually draws with
 %   literal(Lit, "text")        the text a literal id stands for
 %   numeral(Lit, N)             the number a literal reads as: "24px" is 24
+%   word(Lit, W)                the constant one reads as: "row" is row
 %
 % Variables are named after where they live:
 %   prop(Node, Property)        a node's property
 %   tok(Token)                  a token's own definition
 %   cval(C)                     the dimension a geometric constraint holds to
+%   lval(Node, Setting)         one input to an automatic layout
 %
 % Scene:
 %   node(N)  kind(N, ${NODE_KINDS.join("|")})  child(Parent, Child)
@@ -444,6 +504,17 @@ export const CONTRACT = `% Predicates you can rely on:
 %   gedge(E, x|y, pos|span|axis)   what an edge is
 %   gplace(E, lead|mid|trail)      and where on the node it sits
 %
+% Automatic layout. The settings are values, so the predicates the equations
+% read are derived per universe rather than stated:
+%
+%   lslot(C, N, I)              N is the Ith child C arranges
+%   lopt(Setting, Word)         what a setting may say; Setting is one of
+%                               ${LAYOUT_PROP_NAMES.join(", ")}
+%   l_value(N, Setting, Lit)    derived: resolved(lval(N,Setting))
+%   layout(C, row|column)  lgap(C, Px)  lpad(C, Px)  lhug(C)
+%   lalign(C, A)  ljustify(C, J)  lgrow(N)  lalignself(N, A)
+%                               derived from those, and what the equations use
+%
 % Geometry the solver decides, rather than the document:
 %
 %   gsolved(N)                  assert to hand N's frame to the solver
@@ -461,8 +532,9 @@ export const CONTRACT = `% Predicates you can rely on:
 % about it lands exactly on its stored frame; say something, and it moves as
 % little as it can to satisfy you. Edges are doubled so a centre is whole.
 % Being theory variables, they can never make two answer sets differ: what
-% makes one geometry a *different design* from another is the dimension the
-% document names, which is why c_value/2 is projected alongside rendered/3.
+% makes one geometry a *different design* from another is what the document
+% names — a constraint's dimension, a layout's settings — which is why
+% c_value/2 and l_value/3 are projected alongside rendered/3.
 %
 % Linear arithmetic (clingo-lpx) is available too. Variables here are not
 % atoms: they take values from a simplex solver, reported as __lpx(V,"N").
@@ -560,6 +632,7 @@ export interface CompileOptions {
 function emitAsked(
 	lines: string[],
 	node: SceneNode,
+	context: ResolveContext,
 	measurements: Measurements | undefined,
 ): void {
 	const alternatives = measuredCount(node, measurements);
@@ -571,7 +644,7 @@ function emitAsked(
 		}
 		return;
 	}
-	const want = naturalSize(node, measurements);
+	const want = naturalSize(node, measurements, context);
 	lines.push(atom("lask", node.id, "width", Math.round(want.width)));
 	lines.push(atom("lask", node.id, "height", Math.round(want.height)));
 }
@@ -618,6 +691,15 @@ export function compile(
 	// are generic, so a document never changes the shape of the program.
 	const layoutLines: string[] = [];
 	let laidOut = false;
+	/**
+	 * What a hugging container comes to has to be worked out on this side —
+	 * a maximum over its children is not a linear constraint — and that
+	 * arithmetic now reads values rather than numbers, so it needs the tokens.
+	 * Picks it cannot have: which universe this is has not been decided yet, so
+	 * a *varying* gap is measured at its first alternative. See `naturalSize`,
+	 * which was already approximate here for the same reason.
+	 */
+	const measureContext = { tokens: scene.tokens, picks: {} };
 	// One pass for every parent, rather than a tree search per node.
 	const parents = parentMap(scene.nodes);
 	for (const node of flatten(scene.nodes)) {
@@ -634,25 +716,25 @@ export function compile(
 
 		if (isLaidOut(node)) {
 			laidOut = true;
-			const spec = node.layout as AutoLayout;
-			layoutLines.push(atom("layout", node.id, spec.direction));
-			layoutLines.push(atom("lgap", node.id, Math.max(0, Math.round(spec.gap))));
-			layoutLines.push(atom("lpad", node.id, Math.max(0, Math.round(spec.padding))));
-			layoutLines.push(atom("lalign", node.id, spec.align));
-			layoutLines.push(atom("ljustify", node.id, spec.justify));
-			if (spec.sizing === "hug") layoutLines.push(atom("lhug", node.id));
+			// Every setting goes in as a variable, not a fact — the same
+			// machinery a fill uses, so a direction or a gap can hold two
+			// alternatives or name a token, and `layout/2` and friends are then
+			// derived per universe. See LAYOUT_RULES.
+			for (const prop of CONTAINER_PROPS) {
+				emitValue(layoutVar(node.id, prop), layoutValueOf(node, prop) ?? []);
+			}
 			// The size the container asks for. Ignored when it hugs, and the
 			// stored frame is then only what it falls back to.
-			emitAsked(layoutLines, node, options.measurements);
+			emitAsked(layoutLines, node, measureContext, options.measurements);
 			(node.children ?? []).forEach((child, index) => {
 				layoutLines.push(atom("lslot", node.id, child.id, index + 1));
 				// What the child would like to be, when it is not stretched — its
 				// content's size for a node that sizes itself, its frame otherwise,
 				// and for a hugging container of its own, whatever it hugs to.
-				emitAsked(layoutLines, child, options.measurements);
-				if (child.grow) layoutLines.push(atom("lgrow", child.id));
-				if (child.alignSelf) {
-					layoutLines.push(atom("lalignself", child.id, child.alignSelf));
+				emitAsked(layoutLines, child, measureContext, options.measurements);
+				for (const prop of CHILD_PROPS) {
+					const value = layoutValueOf(child, prop);
+					if (value) emitValue(layoutVar(child.id, prop), value);
 				}
 			});
 		}
@@ -729,6 +811,12 @@ export function compile(
 		if (n !== undefined) {
 			numeralLines.push(atom("numeral", literals.id(text), Math.round(n)));
 		}
+		// The same bridge for the words: a layout is described in `row` and
+		// `hug`, and a rule can only read one of those as a constant.
+		const word = wordOf(text);
+		if (word !== undefined) {
+			numeralLines.push(atom("word", literals.id(text), word));
+		}
 	}
 
 	const generated = [
@@ -751,7 +839,7 @@ export function compile(
 			"rendered(N,P,L) :- resolved(prop(N,P),L).",
 		]),
 		section("derivations", derivedLines),
-		section("layout", layoutLines),
+		section("layout", laidOut ? [...LAYOUT_OPTIONS, ...layoutLines] : layoutLines),
 		laidOut ? section("layout rules", LAYOUT_RULES) : "",
 		// Always emitted, unlike the layout rules: `gsolved(N)` is something a
 		// hand-written rule may assert, and a contract that quietly does nothing
@@ -807,6 +895,12 @@ export function compile(
 			"% for is not a design decision.",
 			"#defined c_value/2.",
 			"#project c_value/2.",
+			"% A layout's settings for the same reason, and it is the sharper case:",
+			"% a row and a column differ in nothing *but* geometry, so without this",
+			"% the two collapse into one universe and the multiverse shows a single",
+			"% arrangement for a document that plainly holds two.",
+			"#defined l_value/3.",
+			"#project l_value/3.",
 		]),
 	]
 		.filter(Boolean)
@@ -832,6 +926,24 @@ export function variableCounts(scene: Scene): Record<string, number> {
 	for (const node of flatten(scene.nodes)) {
 		for (const [prop, value] of Object.entries(node.props)) {
 			if (value && value.length > 0) out[propVar(node.id, prop)] = value.length;
+		}
+		// A layout's settings only branch anything while the layout is on and
+		// has something to arrange, so an abandoned one is not a variable.
+		if (isLaidOut(node)) {
+			for (const prop of CONTAINER_PROPS) {
+				const value = layoutValueOf(node, prop);
+				if (value && value.length > 0) {
+					out[layoutVar(node.id, prop)] = value.length;
+				}
+			}
+			for (const child of node.children ?? []) {
+				for (const prop of CHILD_PROPS) {
+					const value = layoutValueOf(child, prop);
+					if (value && value.length > 0) {
+						out[layoutVar(child.id, prop)] = value.length;
+					}
+				}
+			}
 		}
 	}
 	for (const c of scene.constraints ?? []) {

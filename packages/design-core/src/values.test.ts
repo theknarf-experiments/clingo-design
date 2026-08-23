@@ -3,7 +3,9 @@ import { test } from "node:test";
 
 import {
 	activeTerm,
+	layoutVar,
 	lit,
+	parseVariable,
 	propVar,
 	ref,
 	referencedTokens,
@@ -13,6 +15,7 @@ import {
 	termLabel,
 	tokenVar,
 	varies,
+	wordOf,
 	wouldCycle,
 	type Token,
 } from "./values.ts";
@@ -104,4 +107,22 @@ test("termLabel shows a token's name, not its id", () => {
 test("variable keys are stable ASP terms", () => {
 	assert.equal(tokenVar("accent"), "tok(accent)");
 	assert.equal(propVar("n1", "fill"), "prop(n1,fill)");
+});
+
+test("wordOf reads the constant a literal stands for", () => {
+	assert.equal(wordOf("row"), "row");
+	assert.equal(wordOf("spaceBetween"), "spaceBetween");
+	assert.equal(wordOf("#3b82f6"), undefined, "a colour is not a constant");
+	assert.equal(wordOf("16px"), undefined, "nor is a length");
+	assert.equal(wordOf("Row"), undefined, "an ASP constant starts lower case");
+	assert.equal(wordOf("a b"), undefined);
+});
+
+test("a layout setting is a variable like any other", () => {
+	assert.equal(layoutVar("box", "gap"), "lval(box,gap)");
+	assert.deepEqual(parseVariable("lval(box,gap)"), {
+		kind: "layout",
+		node: "box",
+		field: "gap",
+	});
 });

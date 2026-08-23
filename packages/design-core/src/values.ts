@@ -19,7 +19,12 @@ export type ValueType =
 	| "font"
 	| "align"
 	| "shadow"
-	| "text";
+	| "text"
+	| "direction"
+	| "placement"
+	| "justify"
+	| "sizing"
+	| "growth";
 
 /** One entry of a closed menu — see {@link ValueTypeSpec.options}. */
 export interface ValueOption {
@@ -95,6 +100,52 @@ const ALIGNS: ValueOption[] = [
 	{ value: "right", label: "Right" },
 ];
 
+/*
+ * The layout vocabulary. These reach ASP as bare constants rather than as CSS
+ * — nothing renders them, the solver reads them — so each stored value is
+ * already the word the generated program wants; see {@link wordOf}.
+ */
+
+const DIRECTIONS: ValueOption[] = [
+	{ value: "row", label: "Row" },
+	{ value: "column", label: "Column" },
+];
+
+/** Where a child sits on the axis it is not stacked along. */
+const PLACEMENTS: ValueOption[] = [
+	{ value: "start", label: "Start" },
+	{ value: "center", label: "Centre" },
+	{ value: "end", label: "End" },
+	{ value: "stretch", label: "Stretch" },
+];
+
+const JUSTIFICATIONS: ValueOption[] = [
+	{ value: "start", label: "Start" },
+	{ value: "center", label: "Centre" },
+	{ value: "end", label: "End" },
+	{ value: "spaceBetween", label: "Space between" },
+];
+
+const SIZINGS: ValueOption[] = [
+	{ value: "hug", label: "Hug contents" },
+	{ value: "fixed", label: "Fixed" },
+];
+
+/**
+ * Whether a child takes a share of the leftover space.
+ *
+ * Two named options rather than a boolean value kind: the whole point of the
+ * value system is that an assignment can hold alternatives, name a token and
+ * be resolved per universe, and a second kind of leaf — one that is true or
+ * false rather than a string — would need all of that machinery again for one
+ * field. A closed menu of two already is a boolean, spelled the way every
+ * other value is.
+ */
+const GROWTH: ValueOption[] = [
+	{ value: "fixed", label: "Keep its size" },
+	{ value: "grow", label: "Fill the leftover space" },
+];
+
 /**
  * What each type of value is, in one place: its name, what an empty one starts
  * at, and whether it is a closed set of choices.
@@ -108,6 +159,23 @@ export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
 	align: { label: "Alignment", fallback: ALIGNS[0].value, options: ALIGNS },
 	shadow: { label: "Shadow", fallback: SHADOWS[1].value, options: SHADOWS },
 	text: { label: "Text", fallback: "Text", multiline: true },
+	direction: {
+		label: "Direction",
+		fallback: DIRECTIONS[0].value,
+		options: DIRECTIONS,
+	},
+	placement: {
+		label: "Placement",
+		fallback: PLACEMENTS[0].value,
+		options: PLACEMENTS,
+	},
+	justify: {
+		label: "Justification",
+		fallback: JUSTIFICATIONS[0].value,
+		options: JUSTIFICATIONS,
+	},
+	sizing: { label: "Sizing", fallback: SIZINGS[0].value, options: SIZINGS },
+	growth: { label: "Growth", fallback: GROWTH[0].value, options: GROWTH },
 };
 
 export const VALUE_TYPE_NAMES = Object.keys(VALUE_TYPES) as ValueType[];
@@ -156,6 +224,19 @@ export const single = (value: string): Value => [lit(value)];
 export function numeralOf(text: string): number | undefined {
 	const m = /^\s*(-?\d+(?:\.\d+)?)\s*(?:px)?\s*$/i.exec(text);
 	return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * The bare ASP constant a literal reads as: `"row"` is `row`.
+ *
+ * The counterpart of {@link numeralOf} for the enumerated types. A layout is
+ * described in words rather than in numbers, and a word only reaches a rule as
+ * itself — `layout(C,row)` — so the string has to be spellable as a constant.
+ * Anything else, a colour or a font stack, reads as no word at all, and the
+ * rule that wanted one then simply goes unstated.
+ */
+export function wordOf(text: string): string | undefined {
+	return /^[a-z][A-Za-z0-9_]*$/.test(text) ? text : undefined;
 }
 
 /** True when this assignment contributes a choice to the solver. */
@@ -240,12 +321,27 @@ export const propVar = (nodeId: string, prop: string): string =>
  */
 export const constraintVar = (constraintId: string): string =>
 	`cval(${constraintId})`;
+/**
+ * One setting of an automatic layout — its direction, its gap, or a child's
+ * say in it.
+ *
+ * A layout is not a node's appearance, so these are not properties; but they
+ * are leaves the solver reads, so they are variables, on the same footing as
+ * a fill or a constraint's dimension. That is what makes "a row here and a
+ * column there" a design the document can hold rather than two documents.
+ */
+export const layoutVar = (nodeId: string, field: string): string =>
+	`lval(${nodeId},${field})`;
 
-/** The inverse of {@link tokenVar} / {@link propVar} / {@link constraintVar}. */
+/**
+ * The inverse of {@link tokenVar} / {@link propVar} / {@link constraintVar} /
+ * {@link layoutVar}.
+ */
 export type Variable =
 	| { kind: "token"; token: string }
 	| { kind: "prop"; node: string; prop: string }
-	| { kind: "constraint"; constraint: string };
+	| { kind: "constraint"; constraint: string }
+	| { kind: "layout"; node: string; field: string };
 
 export function parseVariable(key: string): Variable | null {
 	const prop = /^prop\(([^,]+),([^)]+)\)$/.exec(key);
@@ -254,6 +350,8 @@ export function parseVariable(key: string): Variable | null {
 	if (token) return { kind: "token", token: token[1] };
 	const constraint = /^cval\(([^)]+)\)$/.exec(key);
 	if (constraint) return { kind: "constraint", constraint: constraint[1] };
+	const layout = /^lval\(([^,]+),([^)]+)\)$/.exec(key);
+	if (layout) return { kind: "layout", node: layout[1], field: layout[2] };
 	return null;
 }
 

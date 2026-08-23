@@ -26,8 +26,9 @@ import {
 	narrow,
 	travelFrom,
 } from "./freedom.ts";
-import { type Scene, emptyScene } from "./scene.ts";
+import { type Scene, emptyScene, makeLayout } from "./scene.ts";
 import { managedNodes } from "./tree.ts";
+import { single } from "./values.ts";
 
 const empty = (): Scene => ({ ...emptyScene(), nodes: [] });
 
@@ -202,14 +203,11 @@ function laidOut(): Scene {
 			makeNode("rect", { x: 0, y: 0, width: 50, height: 30 }, { id }),
 		);
 	}
-	return setLayout(scene, "box", {
-		direction: "row",
-		gap: 10,
-		padding: 10,
-		align: "start",
-		justify: "start",
-		sizing: "fixed",
-	});
+	return setLayout(
+		scene,
+		"box",
+		makeLayout({ gap: 10, padding: 10, sizing: "fixed" }),
+	);
 }
 
 test("a laid-out child has no freedom left, which is why it cannot be dragged", async () => {
@@ -243,7 +241,7 @@ test("a growing child is still pinned — the container decides its size", async
 				? {
 						...n,
 						children: (n.children ?? []).map((c) =>
-							c.id === "c2" ? { ...c, grow: true } : c,
+							c.id === "c2" ? { ...c, grow: single("grow") } : c,
 						),
 					}
 				: n,

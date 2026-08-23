@@ -6,8 +6,18 @@
  * the numbers in as plain pixels, and this side is arithmetic over them. That
  * is what keeps the compiler pure and testable in Node, where no canvas exists.
  */
-import { KINDS, PROPS, type SceneNode, type Sizing, isLaidOut } from "./scene.ts";
+import {
+	KINDS,
+	PROPS,
+	type SceneNode,
+	type Sizing,
+	isLaidOut,
+	layoutLength,
+	layoutValueOf,
+	layoutWord,
+} from "./scene.ts";
 import { flatten } from "./tree.ts";
+import { type ResolveContext, varies } from "./values.ts";
 
 export interface Size {
 	width: number;
@@ -81,16 +91,35 @@ export function measuredCount(
  * *maximum* over the children, and a maximum over solved values is not a linear
  * constraint. So it is a bottom-up pass here, over exactly the arithmetic the
  * layout rules use, and the answer goes in as that node's `lask` fact.
+ *
+ * `context` is what the layout's own settings resolve against, so a gap that
+ * names a token counts as the token's length. It carries no picks: this runs
+ * *before* the solve that decides them, so a setting with alternatives is read
+ * at its first — the same approximation this pass already makes for a nested
+ * text node's wording.
  */
-export function naturalSize(node: SceneNode, measured?: Measurements): Size {
-	const layout = node.layout;
-	if (!layout || layout.sizing !== "hug" || !isLaidOut(node)) {
+export function naturalSize(
+	node: SceneNode,
+	measured?: Measurements,
+	context?: ResolveContext,
+): Size {
+	// A container whose sizing is itself a choice has no one natural size, so
+	// it asks for the frame it was drawn at: that is exactly what the fixed
+	// alternative means, and the hugging one works its own size out from the
+	// equations and never reads this.
+	if (
+		!isLaidOut(node) ||
+		varies(layoutValueOf(node, "sizing")) ||
+		layoutWord(node, "sizing", context) !== "hug"
+	) {
 		return askedSize(node, measured);
 	}
-	const children = (node.children ?? []).map((c) => naturalSize(c, measured));
-	const pad = Math.max(0, layout.padding);
-	const gap = Math.max(0, layout.gap);
-	const row = layout.direction === "row";
+	const children = (node.children ?? []).map((c) =>
+		naturalSize(c, measured, context),
+	);
+	const pad = layoutLength(node, "padding", context);
+	const gap = layoutLength(node, "gap", context);
+	const row = layoutWord(node, "direction", context) === "row";
 	const main = (s: Size) => (row ? s.width : s.height);
 	const cross = (s: Size) => (row ? s.height : s.width);
 	const along =

@@ -17,9 +17,10 @@ import {
 	isDrawable,
 	isLaidOut,
 	isSurface,
+	layoutWord,
 	wrapsChildren,
 } from "./scene.ts";
-import { type Value, propVar } from "./values.ts";
+import { type ResolveContext, type Value, propVar } from "./values.ts";
 
 /** Depth-first, parents before children — the order nodes are painted in. */
 export function flatten(nodes: readonly SceneNode[]): SceneNode[] {
@@ -231,12 +232,17 @@ export interface DropTarget {
  * The index only means anything under an automatic layout, where it is the
  * arrangement order: it falls where the pointer fell along the main axis.
  * Anywhere else a drop is a plain move and the node goes on top.
+ *
+ * Which axis that is is a value now, so `context` is the universe on screen —
+ * the same document can be a row in one and a column in another, and a drop
+ * has to mean what the designer is looking at.
  */
 export function dropTargetAt(
 	nodes: readonly SceneNode[],
 	point: Point,
 	moving: ReadonlySet<string> = new Set(),
 	solved: Readonly<Record<string, Partial<Frame>>> = {},
+	context?: ResolveContext,
 ): DropTarget {
 	const placed = placedNodes(nodes, solved);
 	const lifted = new Set<string>();
@@ -254,12 +260,11 @@ export function dropTargetAt(
 	}
 
 	const staying = (host.node.children ?? []).filter((c) => !lifted.has(c.id));
-	const layout = host.node.layout;
-	if (!layout || !isLaidOut(host.node)) {
+	if (!isLaidOut(host.node)) {
 		return { id: host.node.id, index: staying.length };
 	}
 
-	const row = layout.direction === "row";
+	const row = layoutWord(host.node, "direction", context) === "row";
 	const at = row ? point.x : point.y;
 	let index = 0;
 	for (const child of staying) {

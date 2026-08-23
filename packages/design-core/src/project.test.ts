@@ -102,3 +102,74 @@ test("a stored geometric constraint survives a round trip, garbage does not", ()
 	// as the value it now is, so nothing downstream has two shapes to handle.
 	assert.deepEqual(scene.constraints[0].value, dimension(120));
 });
+
+test("a layout stored as plain numbers and words reads back as values", () => {
+	const scene = normalizeScene({
+		tokens: [],
+		nodes: [
+			{
+				id: "box",
+				kind: "frame",
+				name: "Box",
+				frame: { x: 0, y: 0, width: 100, height: 100 },
+				props: {},
+				layout: { direction: "column", gap: 24, padding: 8 },
+				children: [
+					{
+						id: "kid",
+						kind: "rect",
+						name: "Kid",
+						frame: { x: 0, y: 0, width: 10, height: 10 },
+						props: {},
+						grow: true,
+						alignSelf: "center",
+					},
+				],
+			},
+		],
+		constraints: [],
+		rules: "",
+	});
+	const box = scene.nodes[0];
+	assert.deepEqual(box.layout?.direction, [{ kind: "literal", value: "column" }]);
+	assert.deepEqual(box.layout?.gap, [{ kind: "literal", value: "24px" }]);
+	assert.deepEqual(
+		box.layout?.justify,
+		[{ kind: "literal", value: "start" }],
+		"a setting stored before it existed takes the table's default",
+	);
+	const kid = box.children?.[0];
+	assert.deepEqual(kid?.grow, [{ kind: "literal", value: "grow" }]);
+	assert.deepEqual(kid?.alignSelf, [{ kind: "literal", value: "center" }]);
+});
+
+test("a child that was never singled out stays that way", () => {
+	const scene = normalizeScene({
+		tokens: [],
+		nodes: [
+			{
+				id: "box",
+				kind: "frame",
+				name: "Box",
+				frame: { x: 0, y: 0, width: 100, height: 100 },
+				props: {},
+				layout: {},
+				children: [
+					{
+						id: "kid",
+						kind: "rect",
+						name: "Kid",
+						frame: { x: 0, y: 0, width: 10, height: 10 },
+						props: {},
+						grow: false,
+					},
+				],
+			},
+		],
+		constraints: [],
+		rules: "",
+	});
+	const kid = scene.nodes[0].children?.[0];
+	assert.equal(kid?.grow, undefined, "a cleared checkbox is nothing at all");
+	assert.ok(!("grow" in (kid as object)));
+});

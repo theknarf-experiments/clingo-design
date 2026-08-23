@@ -13,11 +13,13 @@
 import { type Frame, type PathPoint, boundsOf } from "./geometry.ts";
 import {
 	type Picks,
+	type ResolveContext,
 	type Token,
 	VALUE_TYPES,
 	type Value,
 	type ValueType,
 	constraintVar,
+	layoutVar,
 	lit,
 	numeralOf,
 	ref,
@@ -353,33 +355,57 @@ export type Align = "start" | "center" | "end" | "stretch";
  * Where the leftover space on the *stacking* axis goes.
  *
  * `spaceBetween` is one word because it reaches ASP as a constant, the way
- * `atMost` does — see {@link CONSTRAINT_KINDS}. {@link JUSTIFICATIONS} carries
- * the words a human reads.
+ * `atMost` does — see {@link CONSTRAINT_KINDS}. The words a human reads are
+ * the option labels in `VALUE_TYPES.justify`.
  */
 export type Justify = "start" | "center" | "end" | "spaceBetween";
+export type Sizing = "hug" | "fixed";
 
-export const JUSTIFICATIONS: Record<Justify, string> = {
-	start: "start",
-	center: "center",
-	end: "end",
-	spaceBetween: "space between",
-};
+/** A setting the container holds. */
+export type ContainerProp =
+	| "direction"
+	| "sizing"
+	| "align"
+	| "justify"
+	| "gap"
+	| "padding";
+/** A setting one of its children holds about itself. */
+export type ChildProp = "grow" | "alignSelf";
+export type LayoutProp = ContainerProp | ChildProp;
+
+export interface LayoutPropSpec {
+	label: string;
+	type: ValueType;
+	fallback: string;
+	/** Where it is stored: on the container, or on one of its children. */
+	on: "container" | "child";
+}
 
 /**
- * Turns a container into a solved layout rather than a free-form canvas.
+ * Every input to the layout system, in one place.
  *
- * The positions are not stored: they are variables in a system of linear
- * equations the solver answers, which is why "these three share the leftover
- * space" is expressible at all. Everything here is an *input* to that system.
+ * They are {@link Value}s, not scalars, for the same reason a fill is one: a
+ * design system varies its direction between breakpoints and its gap between
+ * densities, and neither is expressible by a document that can hold only one
+ * of each. A gap that names a `length` token *is* a spacing scale.
+ *
+ * They are not {@link PROPS} because they are not a node's appearance —
+ * nothing paints them, the solver reads them — and a per-kind property list is
+ * the wrong home for a setting that only exists while a layout is switched on.
+ * What they share with a property is the part that matters: a variable key
+ * ({@link layoutVar}), alternatives, tokens, and a pick per universe.
+ *
+ * The compiler emits this table's option lists as facts and derives the layout
+ * predicates from the pick, so adding a setting is an entry here plus one rule
+ * — never a change to how a document is compiled.
  */
-export interface AutoLayout {
-	direction: Direction;
-	/** Between adjacent children, in pixels. */
-	gap: number;
-	/** Inside every edge of the container. */
-	padding: number;
-	align: Align;
-	justify: Justify;
+export const LAYOUT_PROPS: Record<LayoutProp, LayoutPropSpec> = {
+	direction: {
+		label: "Flow",
+		type: "direction",
+		fallback: VALUE_TYPES.direction.fallback,
+		on: "container",
+	},
 	/**
 	 * Whether the container takes its size from its contents.
 	 *
@@ -387,21 +413,91 @@ export interface AutoLayout {
 	 * nothing to do with what it holds: arrange four things in a row and a
 	 * fixed container simply clips them.
 	 */
-	sizing: Sizing;
-}
-
-export type Sizing = "hug" | "fixed";
-
-export const ALIGNMENTS = new Set<string>(["start", "center", "end", "stretch"]);
-
-export const DEFAULT_LAYOUT: AutoLayout = {
-	direction: "row",
-	gap: 16,
-	padding: 16,
-	align: "start",
-	justify: "start",
-	sizing: "hug",
+	sizing: {
+		label: "Size",
+		type: "sizing",
+		fallback: VALUE_TYPES.sizing.fallback,
+		on: "container",
+	},
+	align: {
+		label: "Align",
+		type: "placement",
+		fallback: VALUE_TYPES.placement.fallback,
+		on: "container",
+	},
+	justify: {
+		label: "Justify",
+		type: "justify",
+		fallback: VALUE_TYPES.justify.fallback,
+		on: "container",
+	},
+	/** Between adjacent children. */
+	gap: { label: "Gap", type: "length", fallback: "16px", on: "container" },
+	/** Inside every edge of the container. */
+	padding: {
+		label: "Padding",
+		type: "length",
+		fallback: "16px",
+		on: "container",
+	},
+	/** Under a laid-out parent: take a share of the leftover space. */
+	grow: {
+		label: "Grow",
+		type: "growth",
+		fallback: VALUE_TYPES.growth.fallback,
+		on: "child",
+	},
+	/** Under a laid-out parent: sit differently from its siblings. */
+	alignSelf: {
+		label: "Align self",
+		type: "placement",
+		fallback: VALUE_TYPES.placement.fallback,
+		on: "child",
+	},
 };
+
+export const LAYOUT_PROP_NAMES = Object.keys(LAYOUT_PROPS) as LayoutProp[];
+export const CONTAINER_PROPS = LAYOUT_PROP_NAMES.filter(
+	(p) => LAYOUT_PROPS[p].on === "container",
+) as ContainerProp[];
+export const CHILD_PROPS = LAYOUT_PROP_NAMES.filter(
+	(p) => LAYOUT_PROPS[p].on === "child",
+) as ChildProp[];
+
+/**
+ * Turns a container into a solved layout rather than a free-form canvas.
+ *
+ * The positions are not stored: they are variables in a system of linear
+ * equations the solver answers, which is why "these three share the leftover
+ * space" is expressible at all. Everything here is an *input* to that system,
+ * and every input is a value that may hold alternatives — see
+ * {@link LAYOUT_PROPS}.
+ */
+export type AutoLayout = Record<ContainerProp, Value>;
+
+/**
+ * A layout from plain words and numbers — what a caller means when it has one
+ * arrangement in mind rather than a space of them.
+ *
+ * Everything unstated takes the table's fallback, so this is also how a new
+ * layout is made.
+ */
+export function makeLayout(
+	spec: Partial<Record<ContainerProp, string | number>> = {},
+): AutoLayout {
+	const out = {} as AutoLayout;
+	for (const prop of CONTAINER_PROPS) {
+		const given = spec[prop];
+		out[prop] = single(
+			given === undefined
+				? LAYOUT_PROPS[prop].fallback
+				: typeof given === "number"
+					? `${given}px`
+					: given,
+		);
+	}
+	return out;
+}
 
 export interface SceneNode {
 	id: string;
@@ -444,18 +540,85 @@ export interface SceneNode {
 	children?: SceneNode[];
 	/** Set on a container to lay its children out automatically. */
 	layout?: AutoLayout;
-	/** Under a laid-out parent: take a share of the leftover space. */
-	grow?: boolean;
+	/**
+	 * Under a laid-out parent: whether it takes a share of the leftover space.
+	 * A `growth` value — absent is the same as keeping its size.
+	 */
+	grow?: Value;
 	/**
 	 * Under a laid-out parent: sit differently on the cross axis from its
-	 * siblings. Absent means whatever the container says.
+	 * siblings. A `placement` value; absent means whatever the container says.
 	 */
-	alignSelf?: Align;
+	alignSelf?: Value;
 }
 
 /** True when this node's children are placed by the solver. */
 export const isLaidOut = (node: SceneNode): boolean =>
 	node.layout !== undefined && (node.children?.length ?? 0) > 0;
+
+/* ------------------------------------------------------------------ */
+/* Reading a layout                                                    */
+/* ------------------------------------------------------------------ */
+
+/** Whatever a node stores for one layout setting, if anything. */
+export function layoutValueOf(
+	node: SceneNode,
+	prop: LayoutProp,
+): Value | undefined {
+	return LAYOUT_PROPS[prop].on === "child"
+		? node[prop as ChildProp]
+		: node.layout?.[prop as ContainerProp];
+}
+
+/**
+ * What a layout setting comes to, following whatever token it names.
+ *
+ * The same walk the generated program does, done here for everything on this
+ * side that has to know: measuring a hugging container, and working out where
+ * a drop lands in a row. `picks` is the universe being looked at — without one
+ * the first alternative stands in, which is what an unsolved preview should
+ * show.
+ *
+ * Returns nothing for a setting the node does not hold, or one that resolves
+ * to no word at all. The program behaves the same way: the rule that wanted it
+ * simply goes unstated.
+ */
+export function layoutSetting(
+	node: SceneNode,
+	prop: LayoutProp,
+	context: ResolveContext = { tokens: [], picks: {} },
+): string | undefined {
+	return resolveValue(
+		context,
+		layoutValueOf(node, prop),
+		layoutVar(node.id, prop),
+	);
+}
+
+/** The same, as pixels, falling back to the table's default. */
+export function layoutLength(
+	node: SceneNode,
+	prop: LayoutProp,
+	context?: ResolveContext,
+): number {
+	const resolved = layoutSetting(node, prop, context);
+	const n = resolved === undefined ? undefined : numeralOf(resolved);
+	return Math.max(0, n ?? numeralOf(LAYOUT_PROPS[prop].fallback) ?? 0);
+}
+
+/** The same, as one of the words the setting's menu offers. */
+export function layoutWord(
+	node: SceneNode,
+	prop: LayoutProp,
+	context?: ResolveContext,
+): string {
+	const resolved = layoutSetting(node, prop, context);
+	const spec = LAYOUT_PROPS[prop];
+	const legal = VALUE_TYPES[spec.type].options?.some(
+		(o) => o.value === resolved,
+	);
+	return legal && resolved !== undefined ? resolved : spec.fallback;
+}
 
 /* ------------------------------------------------------------------ */
 /* Constraints                                                         */

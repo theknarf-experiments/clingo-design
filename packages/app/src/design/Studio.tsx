@@ -3,6 +3,8 @@ import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import {
 	CONSTRAINT_KINDS,
+	LAYOUT_PROPS,
+	type LayoutProp,
 	DRAW_KINDS,
 	type Edge,
 	KINDS,
@@ -597,6 +599,9 @@ export function Studio({
 			} else if (parsed.kind === "constraint") {
 				const c = scene.constraints.find((k) => k.id === parsed.constraint);
 				out.set(key, c ? `${CONSTRAINT_KINDS[c.kind].label} value` : key);
+			} else if (parsed.kind === "layout") {
+				const name = byId.get(parsed.node)?.name ?? parsed.node;
+				out.set(key, `${name} ${LAYOUT_PROPS[parsed.field as LayoutProp].label}`);
 			} else {
 				const token = scene.tokens.find((t) => t.id === parsed.token);
 				out.set(key, token?.name ?? parsed.token);
