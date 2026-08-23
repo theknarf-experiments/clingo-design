@@ -30,9 +30,10 @@ export interface Universe {
 	/** node ids that survive `visible/1` */
 	visible: Set<string>;
 	/**
-	 * Geometry the solver worked out, for nodes under an automatic layout.
+	 * Geometry the solver worked out — for nodes under an automatic layout, and
+	 * for nodes handed to it by a geometric constraint.
 	 *
-	 * Partial by design: a node laid out by hand is not in here at all, and a
+	 * Partial by design: a node placed by hand is not in here at all, and a
 	 * laid-out one may have only some axes solved. Whatever is present wins
 	 * over the node's stored frame.
 	 */
@@ -307,7 +308,14 @@ const DEFAULTS = {
 	maxMisses: 12,
 };
 
-/** Weak constraints or #minimize/#maximize mean the program ranks its models. */
+/**
+ * Weak constraints or #minimize/#maximize mean the program ranks its models.
+ *
+ * A theory `&minimize` is emphatically not that: it ranks the *points* the
+ * simplex solver may return inside one answer set, and every answer set is
+ * still an equal answer. Matching it here would switch every document with
+ * solved geometry into `optN` and throw away the sampling.
+ */
 function isOptimizing(program: string): boolean {
 	return /^\s*(?::~|#(?:minimize|maximize))/m.test(program);
 }

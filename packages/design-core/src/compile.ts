@@ -13,7 +13,9 @@
  *     :- resolved(prop(a,fill), C), resolved(prop(b,fill), C).
  *
  * Geometry goes in as plain facts. Four atoms per node costs nothing; a
- * choosable coordinate would ground a domain of thousands.
+ * choosable coordinate would ground a domain of thousands. Where a coordinate
+ * genuinely has to be worked out it is not a choice either — it is a variable
+ * of the simplex solver, which costs one unknown rather than a domain.
  */
 import { type Measurements, naturalSize } from "./measure.ts";
 import {
@@ -47,6 +49,16 @@ export const posVar = (nodeId: string, axis: "x" | "y"): string =>
 	`lv(${nodeId},${axis})`;
 export const sizeVar = (nodeId: string, axis: "width" | "height"): string =>
 	`lsz(${nodeId},${axis})`;
+
+/**
+ * A node's position in the *canvas*, rather than inside its parent.
+ *
+ * Frames are parent-relative, so two nodes under different parents have
+ * nothing to compare. This is that comparison, and it stays linear: a chain of
+ * additions down the tree — see the geometry rules.
+ */
+export const worldVar = (nodeId: string, axis: "x" | "y"): string =>
+	`wv(${nodeId},${axis})`;
 
 /**
  * The layout system, as rules over the facts a laid-out container emits.
@@ -159,6 +171,75 @@ const LAYOUT_RULES = [
 	"#show lsz/2.",
 ]
 
+/**
+ * Solved geometry: the same `lv`/`lsz` unknowns, for nodes no layout places.
+ *
+ * A node is the solver's to place when a geometric constraint names it, or
+ * when its parent lays it out. The two paths differ only in what they add: a
+ * layout writes the equations itself, while a geometric constraint leaves the
+ * system under-determined and simplex would then return an arbitrary point —
+ * so being named by one also adds a pull back toward the stored frame.
+ *
+ * That pull is `|v - stored|`, which is not linear but is LP-encodable: a
+ * spare variable bounded below by both differences, minimised. All of them
+ * share one objective, so the answer is the *nearest* legal arrangement rather
+ * than merely a legal one. It is a theory `&minimize`, not `#minimize`: it
+ * ranks the points inside one answer set, not the answer sets, so it does not
+ * make the program an optimising one — see `isOptimizing` in explore.ts.
+ */
+const GEOMETRY_RULES = [
+	"#defined gsolved/1.",
+	"#defined lslot/3.",
+	"#defined child/2.",
+	"#defined frame/3.",
+	"#defined constraint/1.",
+	"#defined c_kind/2.",
+	"#defined c_node/2.",
+	"#defined gkind/1.",
+	"gaxis(x). gaxis(y).",
+	"gspan(width). gspan(height).",
+	"% Naming a node in a geometric constraint is what hands it over. The",
+	"% switch is deliberately not consulted: which unknowns exist must not",
+	"% depend on which constraints are assumed, and a node the solver places",
+	"% with nothing to say about it lands on its stored frame anyway.",
+	"gsolved(N) :- constraint(C), c_kind(C,K), gkind(K), c_node(C,N).",
+	"gpos(N,A) :- gsolved(N), gaxis(A).",
+	"gsize(N,S) :- gsolved(N), gspan(S).",
+	"",
+	"% ---- nearest to where the document put it ----",
+	"gdisp(N,A) :- gpos(N,A).",
+	"gdisp(N,S) :- gsize(N,S).",
+	"&sum{ lv(N,A); -gd(N,A) } <= V :- gpos(N,A), frame(N,A,V).",
+	"&sum{ lv(N,A); gd(N,A) } >= V :- gpos(N,A), frame(N,A,V).",
+	"&sum{ lsz(N,S); -gd(N,S) } <= V :- gsize(N,S), frame(N,S,V).",
+	"&sum{ lsz(N,S); gd(N,S) } >= V :- gsize(N,S), frame(N,S,V).",
+	"&minimize{ gd(N,A) : gdisp(N,A) }.",
+	"",
+	"% ---- world coordinates ----",
+	"% Only along the chains that need one: a solved node and its ancestors.",
+	"gworld(N,A) :- gsolved(N), gaxis(A).",
+	"gworld(P,A) :- gworld(N,A), child(P,N).",
+	"% An offset that is the solver's — a laid-out child's, or a solved node's",
+	"% — enters as the unknown; anything else enters as the number the document",
+	"% stores, which is what keeps a deep tree cheap.",
+	"gmoved(N,A) :- gpos(N,A).",
+	"gmoved(N,A) :- lslot(_,N,_), gaxis(A).",
+	"&sum{ wv(N,A); -wv(P,A); -lv(N,A) } = 0 :- gworld(N,A), child(P,N), gmoved(N,A).",
+	"&sum{ wv(N,A); -wv(P,A) } = V :- gworld(N,A), child(P,N), not gmoved(N,A),",
+	"                                 frame(N,A,V).",
+	"&sum{ wv(N,A); -lv(N,A) } = 0 :- gworld(N,A), not child(_,N), gmoved(N,A).",
+	"&sum{ wv(N,A) } = V :- gworld(N,A), not child(_,N), not gmoved(N,A),",
+	"                       frame(N,A,V).",
+]
+
+/**
+ * Which constraint kinds place their nodes. Read off the one table that says
+ * what a kind is, so a geometric kind never needs a case here.
+ */
+const GEOMETRIC_KINDS = Object.entries(CONSTRAINT_KINDS)
+	.filter(([, spec]) => spec.geometric)
+	.map(([kind]) => `gkind(${kind}).`)
+
 /** Predicates the generated program exposes to user rules. */
 export const CONTRACT = `% Predicates you can rely on:
 %
@@ -186,6 +267,17 @@ export const CONTRACT = `% Predicates you can rely on:
 %   hidden(N)                   assert to remove a node
 %   visible(N)                  derived: node(N), not hidden(N)
 %
+% Geometry the solver decides, rather than the document:
+%
+%   gsolved(N)                  assert to hand N's frame to the solver
+%   lv(N, x|y)                  its offset inside its parent
+%   lsz(N, width|height)        its size
+%   wv(N, x|y)                  where it lands on the canvas
+%
+% Those three are theory variables, not atoms. A solved node with nothing
+% said about it lands exactly on its stored frame; say something, and it
+% moves as little as it can to satisfy you.
+%
 % Linear arithmetic (clingo-lpx) is available too. Variables here are not
 % atoms: they take values from a simplex solver, reported as __lpx(V,"N").
 % Values are exact rationals, and a constraint may relate any number of them —
@@ -198,7 +290,8 @@ export const CONTRACT = `% Predicates you can rely on:
 %
 % Examples:
 %   :- resolved(prop(card,fill), C), resolved(prop(badge,fill), C).
-%   :- frame(A,x,X), frame(B,x,X), child(P,A), child(P,B), A != B.`;
+%   :- frame(A,x,X), frame(B,x,X), child(P,A), child(P,B), A != B.
+%   gsolved(badge).  &sum{ wv(badge,x); -wv(card,x) } >= 24.`;
 
 function atom(name: string, ...args: Array<string | number>): string {
 	return `${name}(${args.join(",")}).`;
@@ -414,6 +507,10 @@ export function compile(
 		section("derivations", derivedLines),
 		section("layout", layoutLines),
 		laidOut ? section("layout rules", LAYOUT_RULES) : "",
+		// Always emitted, unlike the layout rules: `gsolved(N)` is something a
+		// hand-written rule may assert, and a contract that quietly does nothing
+		// on some documents is not one.
+		section("geometry rules", [...GEOMETRIC_KINDS, ...GEOMETRY_RULES]),
 		section("constraints", constraintLines),
 		constraintLines.length === 0
 			? ""

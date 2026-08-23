@@ -461,6 +461,16 @@ export interface ConstraintSpec {
 	counted: boolean;
 	/** Fewest nodes for the constraint to say anything. */
 	minNodes: number;
+	/**
+	 * True when the kind talks about *where a node is* rather than about one of
+	 * its properties.
+	 *
+	 * Naming a node in a geometric constraint hands that node's frame over to
+	 * the solver — see the geometry rules in `compile.ts`. Nothing is geometric
+	 * yet; the flag is what a geometric kind will switch on, so adding one stays
+	 * a table entry plus its rule.
+	 */
+	geometric: boolean;
 }
 
 /**
@@ -476,18 +486,21 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		summary: "no two share a {prop}",
 		counted: false,
 		minNodes: 2,
+		geometric: false,
 	},
 	match: {
 		label: "All the same",
 		summary: "share one {prop}",
 		counted: false,
 		minNodes: 2,
+		geometric: false,
 	},
 	atMost: {
 		label: "At most N distinct",
 		summary: "use at most {n} distinct {prop}",
 		counted: true,
 		minNodes: 2,
+		geometric: false,
 	},
 };
 
