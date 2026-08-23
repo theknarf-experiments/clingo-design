@@ -15,6 +15,7 @@ import { formatDiagnostics, parseAtom } from "./atoms.ts";
 import { type Freedom, probeFreedom } from "./freedom.ts";
 import type { Frame } from "./geometry.ts";
 import type { Measurements } from "./measure.ts";
+import { readSolved } from "./model.ts";
 import type { Scene } from "./scene.ts";
 import type { Solver, SolverSession } from "./solver.ts";
 import {
@@ -158,36 +159,6 @@ function readAtoms(
 			onVisible(atom.args[0]);
 		}
 	}
-}
-
-/**
- * Theory values arrive as exact rationals — `"320/3"` rather than `106.667`.
- * Only the renderer needs a float, so the conversion happens here and as late
- * as possible.
- */
-function rational(text: string): number | undefined {
-	const slash = text.indexOf("/");
-	const n =
-		slash === -1
-			? Number(text)
-			: Number(text.slice(0, slash)) / Number(text.slice(slash + 1));
-	return Number.isFinite(n) ? n : undefined;
-}
-
-const AXIS = { x: "x", y: "y", width: "width", height: "height" } as const;
-
-/** Pulls `__lpx(lv(n,x),"12")` and `__lpx(lsz(n,width),"80")` out of a model. */
-function readSolved(atoms: readonly string[]): Record<string, Partial<Frame>> {
-	const out: Record<string, Partial<Frame>> = {};
-	for (const text of atoms) {
-		const m = /^__lpx\((lv|lsz)\(([^,]+),([a-z]+)\),"([^"]*)"\)$/.exec(text);
-		if (!m) continue;
-		const axis = AXIS[m[3] as keyof typeof AXIS];
-		const value = rational(m[4]);
-		if (axis === undefined || value === undefined) continue;
-		(out[m[2]] ??= {})[axis] = value;
-	}
-	return out;
 }
 
 function interpret(atoms: readonly string[]): Universe {

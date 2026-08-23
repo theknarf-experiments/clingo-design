@@ -10,7 +10,11 @@ export interface Atom {
 
 /**
  * Parses `name(a,b)` / `name`. Arguments are split on top-level commas so
- * nested terms survive, though the generated program does not use them.
+ * nested terms survive — `__lpx(lv(n,x),"12")` is two arguments, not three.
+ *
+ * Quoted arguments are left quoted but are not split inside: `literal/2` now
+ * crosses back from the solver, and a headline reading "Fast, quiet" is one
+ * argument however many commas it holds. See {@link unquote}.
  */
 export function parseAtom(text: string): Atom | null {
 	const open = text.indexOf("(");
@@ -26,9 +30,17 @@ export function parseAtom(text: string): Atom | null {
 	const args: string[] = [];
 	let depth = 0;
 	let start = 0;
+	let quoted = false;
 	for (let i = 0; i < inner.length; i++) {
 		const ch = inner[i];
-		if (ch === "(") depth++;
+		if (quoted) {
+			// A backslash escapes whatever follows, the closing quote included.
+			if (ch === "\\") i++;
+			else if (ch === '"') quoted = false;
+			continue;
+		}
+		if (ch === '"') quoted = true;
+		else if (ch === "(") depth++;
 		else if (ch === ")") depth--;
 		else if (ch === "," && depth === 0) {
 			args.push(inner.slice(start, i).trim());
@@ -37,6 +49,19 @@ export function parseAtom(text: string): Atom | null {
 	}
 	args.push(inner.slice(start).trim());
 	return { name, args: args.filter((a) => a.length > 0) };
+}
+
+/**
+ * The text an ASP string argument stands for: quotes off, escapes undone.
+ *
+ * Anything unquoted is returned as it came, since a constant is already its
+ * own text.
+ */
+export function unquote(argument: string): string {
+	if (argument.length < 2 || !argument.startsWith('"') || !argument.endsWith('"')) {
+		return argument;
+	}
+	return argument.slice(1, -1).replace(/\\(.)/g, "$1");
 }
 
 /**

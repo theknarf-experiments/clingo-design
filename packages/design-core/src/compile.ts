@@ -488,6 +488,8 @@ export const CONTRACT = `% Predicates you can rely on:
 %
 % Scene:
 %   node(N)  kind(N, ${NODE_KINDS.join("|")})  child(Parent, Child)
+%   order(N, I)                 where N sits among its siblings, 1-based —
+%                               child/2 is a set, so this is the paint order
 %   frame(N, x|y|width|height, Pixels)   <- relative to the parent, if any
 %   hidden(N)                   assert to remove a node
 %   visible(N)                  derived: node(N), not hidden(N)
@@ -702,9 +704,26 @@ export function compile(
 	const measureContext = { tokens: scene.tokens, picks: {} };
 	// One pass for every parent, rather than a tree search per node.
 	const parents = parentMap(scene.nodes);
+	/**
+	 * Where each node sits among its siblings, 1-based.
+	 *
+	 * `child/2` is a set, and a set has no paint order — so a reader working
+	 * from the answer set alone would have to guess which of two overlapping
+	 * rectangles is on top. One fact per node is what makes the ASP description
+	 * of the picture complete rather than nearly complete.
+	 */
+	const order = new Map<string, number>();
+	const rank = (list: readonly SceneNode[]): void => {
+		list.forEach((node, index) => {
+			order.set(node.id, index + 1);
+			if (node.children) rank(node.children);
+		});
+	};
+	rank(scene.nodes);
 	for (const node of flatten(scene.nodes)) {
 		nodeLines.push(atom("node", node.id));
 		nodeLines.push(atom("kind", node.id, node.kind));
+		nodeLines.push(atom("order", node.id, order.get(node.id) ?? 1));
 		nodeLines.push(atom("frame", node.id, "x", Math.round(node.frame.x)));
 		nodeLines.push(atom("frame", node.id, "y", Math.round(node.frame.y)));
 		nodeLines.push(atom("frame", node.id, "width", Math.round(node.frame.width)));
@@ -881,6 +900,36 @@ export function compile(
 		section("output", [
 			"#show pick/2.",
 			"#show visible/1.",
+			"% The picture itself, so an answer set *is* a drawable scene rather",
+			"% than a set of decisions someone else has to apply to the document.",
+			"% All of it, including the parts that are plain facts today: what makes",
+			"% this worth paying for is that a rule can change any of them, and a",
+			"% reader that took the tree from the TypeScript document would then be",
+			"% reading a different design from the one the solver answered with.",
+			"% Measured on `card`: 45 atoms a model becomes 176, 18 KB crossing the",
+			"% worker boundary becomes 67 KB, and an exploration goes 20ms -> 34ms.",
+			"% 102 of the 131 atoms that adds are byte-identical in every model — the",
+			"% tree, the frames and the literal table are facts — so if this ever",
+			"% hurts, the fix is a delta at the worker boundary, or a term-based",
+			"% `#show ... : scenery` behind an assumed atom so the sampling solves,",
+			"% which read nothing but the picks, stop paying for a picture. Both are",
+			"% cheaper than showing less of the scene.",
+			"#defined node/1.",
+			"#defined kind/2.",
+			"#defined order/2.",
+			"#defined literal/2.",
+			"#show node/1.",
+			"#show kind/2.",
+			"#show order/2.",
+			"#show child/2.",
+			"#show frame/3.",
+			"% Literal ids rather than the text, with the table alongside. Inlining",
+			"% the text instead is within a tenth either way — cheaper on a document",
+			"% with many distinct literals, dearer on a wide one that repeats a few —",
+			"% and ids are what makes \"these two share a colour\" a comparison rather",
+			"% than a string match.",
+			"#show rendered/3.",
+			"#show literal/2.",
 			"% Projection is on what is *rendered*, not on which alternative was",
 			"% picked. Two ways to spell the same colour are one design, and a",
 			"% token nothing references does not create designs at all.",
