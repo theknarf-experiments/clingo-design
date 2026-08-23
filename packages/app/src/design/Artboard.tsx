@@ -25,13 +25,30 @@ import styles from "./Artboard.module.css";
 const PAINT: Record<PropName, (value: string) => CSSProperties> = {
 	fill: (value) => ({ background: value }),
 	radius: (value) => ({ borderRadius: value }),
-	// Both inherit in CSS, so an SVG inside the box picks them up on its own
-	// rather than being handed them.
-	stroke: (value) => ({ stroke: value }),
-	strokeWidth: (value) => ({ strokeWidth: value }),
+	// A stroke on a box is a border. The stroked kinds draw an SVG instead and
+	// override this — see {@link INHERITED_STROKE}. Both halves declare the
+	// style so setting either one alone still shows an edge.
+	stroke: (value) => ({ borderColor: value, borderStyle: "solid" }),
+	strokeWidth: (value) => ({ borderWidth: value, borderStyle: "solid" }),
+	shadow: (value) => ({ boxShadow: value }),
+	opacity: (value) => ({ opacity: value }),
 	ink: (value) => ({ color: value }),
+	fontFamily: (value) => ({ fontFamily: value }),
 	size: (value) => ({ fontSize: value }),
 	weight: (value) => ({ fontWeight: value }),
+	lineHeight: (value) => ({ lineHeight: value }),
+	align: (value) => ({ textAlign: value as CSSProperties["textAlign"] }),
+};
+
+/**
+ * Stroke as SVG paints it, for the kinds whose content is an `<svg>`.
+ *
+ * Both properties inherit in CSS, so the shape inside picks them up from the
+ * box on its own rather than being handed them.
+ */
+const INHERITED_STROKE = {
+	stroke: (value: string) => ({ stroke: value }),
+	strokeWidth: (value: string) => ({ strokeWidth: value }),
 };
 
 interface ShapeSpec {
@@ -57,15 +74,19 @@ const SHAPES: Partial<Record<NodeKind, ShapeSpec>> = {
 	// Fully rounded corners *are* an ellipse; an SVG for it would only add a
 	// second way to size the same box.
 	ellipse: { box: { borderRadius: "50%" } },
-	line: { content: (node, frame) => <Stroke node={node} frame={frame} /> },
+	line: {
+		paint: INHERITED_STROKE,
+		content: (node, frame) => <Stroke node={node} frame={frame} />,
+	},
 	arrow: {
+		paint: INHERITED_STROKE,
 		content: (node, frame) => <Stroke node={node} frame={frame} head />,
 	},
 	path: {
 		// A path's fill belongs to the polygon, not to the box around it: the
 		// box is only the vertices' bounding rectangle and painting it would
 		// show a shape the document does not contain.
-		paint: { fill: (value) => ({ fill: value }) },
+		paint: { ...INHERITED_STROKE, fill: (value) => ({ fill: value }) },
 		content: (node, frame) => <Plot node={node} frame={frame} />,
 	},
 };

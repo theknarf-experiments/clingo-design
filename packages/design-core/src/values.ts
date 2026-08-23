@@ -11,14 +11,105 @@
  * value that happens to be shared.
  */
 
-export type ValueType = "color" | "length" | "number" | "weight";
+export type ValueType =
+	| "color"
+	| "length"
+	| "number"
+	| "weight"
+	| "font"
+	| "align"
+	| "shadow";
 
-export const VALUE_TYPE_LABEL: Record<ValueType, string> = {
-	color: "Colour",
-	length: "Length",
-	number: "Number",
-	weight: "Weight",
+/** One entry of a closed menu — see {@link ValueTypeSpec.options}. */
+export interface ValueOption {
+	/** Stored in the document, and what the renderer receives. */
+	value: string;
+	/** What the menu calls it. */
+	label: string;
+}
+
+export interface ValueTypeSpec {
+	label: string;
+	/** What an empty assignment of this type starts at, and falls back to. */
+	fallback: string;
+	/**
+	 * A closed set of choices. The editor offers a menu for these rather than a
+	 * text field, and the stored value is still the literal CSS the renderer
+	 * wants — a label is only what the menu calls it. So an enumerated type
+	 * costs the renderer nothing: there is no name-to-declaration table on the
+	 * other side, and a value typed before the list existed still paints.
+	 */
+	options?: readonly ValueOption[];
+}
+
+/**
+ * No webfonts are available offline, so the roster is system stacks — a small
+ * curated set rather than a free text field nobody can spell correctly.
+ */
+const FONTS: ValueOption[] = [
+	{
+		value: 'system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif',
+		label: "Sans",
+	},
+	{
+		value: 'Georgia, Cambria, "Times New Roman", Times, serif',
+		label: "Serif",
+	},
+	{
+		value: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+		label: "Mono",
+	},
+	{
+		value:
+			'ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN", system-ui, sans-serif',
+		label: "Rounded",
+	},
+];
+
+/**
+ * An elevation ramp rather than an offset/blur/colour triple.
+ *
+ * A shadow that is four coupled numbers is four rows in the inspector and four
+ * ways to make something that looks wrong; every design tool ships a ladder
+ * instead. Storing the whole declaration keeps it one variable, so "either of
+ * these two elevations" branches the space exactly like a fill does.
+ */
+const SHADOWS: ValueOption[] = [
+	{ value: "none", label: "None" },
+	{ value: "0 1px 2px rgba(15,23,42,0.10)", label: "Subtle" },
+	{ value: "0 2px 8px rgba(15,23,42,0.14)", label: "Soft" },
+	{ value: "0 8px 24px rgba(15,23,42,0.18)", label: "Raised" },
+	{ value: "0 20px 48px rgba(15,23,42,0.24)", label: "Floating" },
+];
+
+const ALIGNS: ValueOption[] = [
+	{ value: "left", label: "Left" },
+	{ value: "center", label: "Centre" },
+	{ value: "right", label: "Right" },
+];
+
+/**
+ * What each type of value is, in one place: its name, what an empty one starts
+ * at, and whether it is a closed set of choices.
+ */
+export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
+	color: { label: "Colour", fallback: "#94a3b8" },
+	length: { label: "Length", fallback: "8px" },
+	number: { label: "Number", fallback: "1" },
+	weight: { label: "Weight", fallback: "400" },
+	font: { label: "Font", fallback: FONTS[0].value, options: FONTS },
+	align: { label: "Alignment", fallback: ALIGNS[0].value, options: ALIGNS },
+	shadow: { label: "Shadow", fallback: SHADOWS[1].value, options: SHADOWS },
 };
+
+export const VALUE_TYPE_NAMES = Object.keys(VALUE_TYPES) as ValueType[];
+
+/** What a menu calls a stored value, or the value itself if it is not on one. */
+export function optionLabel(type: ValueType, value: string): string {
+	return (
+		VALUE_TYPES[type].options?.find((o) => o.value === value)?.label ?? value
+	);
+}
 
 /**
  * One option: a concrete value, a reference to another variable's value, or a
@@ -49,14 +140,6 @@ export const single = (value: string): Value => [lit(value)];
 /** True when this assignment contributes a choice to the solver. */
 export const varies = (value: Value | undefined): boolean =>
 	(value?.length ?? 0) > 1;
-
-/** What an empty assignment of each type starts at, and falls back to. */
-export const FALLBACK: Record<ValueType, string> = {
-	color: "#94a3b8",
-	length: "8px",
-	number: "1",
-	weight: "400",
-};
 
 /* ------------------------------------------------------------------ */
 /* Derivations                                                         */

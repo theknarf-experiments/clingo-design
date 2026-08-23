@@ -1,6 +1,6 @@
 import {
-	FALLBACK,
-	VALUE_TYPE_LABEL,
+	VALUE_TYPES,
+	VALUE_TYPE_NAMES,
 	type Picks,
 	type Scene,
 	type Term,
@@ -26,8 +26,6 @@ export interface VariablesProps {
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
 }
-
-const TYPES = Object.keys(FALLBACK) as ValueType[];
 
 /**
  * Named values, referenced from anywhere — CSS custom properties, essentially.
@@ -64,9 +62,9 @@ export function Variables({
 					}}
 				>
 					<option value="">+ New</option>
-					{TYPES.map((type) => (
+					{VALUE_TYPE_NAMES.map((type) => (
 						<option key={type} value={type}>
-							{VALUE_TYPE_LABEL[type]}
+							{VALUE_TYPES[type].label}
 						</option>
 					))}
 				</select>
@@ -96,7 +94,7 @@ export function Variables({
 									)
 								}
 							/>
-							<span className={styles.type}>{VALUE_TYPE_LABEL[token.type]}</span>
+							<span className={styles.type}>{VALUE_TYPES[token.type].label}</span>
 							<button
 								type="button"
 								className={styles.delete}
@@ -116,7 +114,7 @@ export function Variables({
 							type={token.type}
 							value={token.value}
 							tokens={linkable}
-							fallback={FALLBACK[token.type]}
+							fallback={VALUE_TYPES[token.type].fallback}
 							active={picks[variable]}
 							varying={varying.has(variable)}
 							reachable={reach?.[variable]}

@@ -34,7 +34,7 @@ test("the shape slot holds the shapes, in declaration order", () => {
 });
 
 test("an ellipse has a fill and nothing that needs corners", () => {
-	assert.deepEqual(KINDS.ellipse.props, ["fill"]);
+	assert.ok(!KINDS.ellipse.props.includes("radius"));
 	const node = makeNode("ellipse", { x: 0, y: 0, width: 60, height: 40 });
 	assert.equal(node.props.fill?.[0]?.kind, "literal");
 	assert.equal(node.props.radius, undefined);

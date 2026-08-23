@@ -31,8 +31,8 @@ import {
 	wrapsChildren,
 } from "./scene.ts";
 import {
-	FALLBACK,
 	type Token,
+	VALUE_TYPES,
 	type Value,
 	type ValueType,
 	lit,
@@ -741,7 +741,7 @@ export function addToken(scene: Scene, type: ValueType, value?: Value): {
 		// Names must be unique within the document, so references stay readable.
 		name: uniqueName(scene.tokens.map((t) => t.name), type, "-"),
 		type,
-		value: value ?? [lit(FALLBACK[type])],
+		value: value ?? [lit(VALUE_TYPES[type].fallback)],
 	};
 	return { scene: { ...scene, tokens: [...scene.tokens, token] }, id: token.id };
 }
@@ -782,7 +782,7 @@ export function deleteToken(scene: Scene, id: string): Scene {
 	const repair = (value: Value): Value =>
 		value.map((term) =>
 			term.kind === "token" && term.token === id
-				? lit(frozen ?? FALLBACK[token.type])
+				? lit(frozen ?? VALUE_TYPES[token.type].fallback)
 				: term,
 		);
 

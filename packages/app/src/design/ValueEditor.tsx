@@ -2,10 +2,12 @@ import {
 	DERIVATIONS,
 	type Derivation,
 	type Term,
+	VALUE_TYPES,
 	type Value,
 	type ValueType,
 	derive,
 	lit,
+	optionLabel,
 	ref,
 	termLabel,
 	tokenVar,
@@ -91,6 +93,9 @@ export function ValueEditor({
 	testId,
 }: ValueEditorProps) {
 	const isColour = type === "color";
+	// A closed set of choices is a menu. Typing a font stack or a box-shadow by
+	// hand is not editing, it is remembering.
+	const options = VALUE_TYPES[type].options;
 	// A derivation only makes sense where it reads and writes the same type —
 	// the contrast of a font weight is not a thing.
 	const derivations = (Object.keys(DERIVATIONS) as Derivation[]).filter(
@@ -193,7 +198,26 @@ export function ValueEditor({
 								/>
 							)}
 
-							{term.kind === "literal" ? (
+							{term.kind === "literal" && options ? (
+								<select
+									className={styles.choice}
+									data-role="literal"
+									value={term.value}
+									onChange={(e) => replace(index, lit(e.target.value))}
+								>
+									{/* Anything written before the list existed — an older
+									    document, a hand-edited value — stays selectable
+									    rather than silently becoming the first option. */}
+									{options.some((o) => o.value === term.value) ? null : (
+										<option value={term.value}>{term.value}</option>
+									)}
+									{options.map((option) => (
+										<option key={option.value} value={option.value}>
+											{option.label}
+										</option>
+									))}
+								</select>
+							) : term.kind === "literal" ? (
 								<input
 									className={styles.text}
 									data-role="literal"
@@ -207,7 +231,9 @@ export function ValueEditor({
 								>
 									{termLabel(tokens, term, names)}
 									{resolved ? (
-										<span className={styles.resolved}>{resolved}</span>
+										<span className={styles.resolved}>
+											{optionLabel(type, resolved)}
+										</span>
 									) : (
 										<span className={styles.broken}>unresolved</span>
 									)}

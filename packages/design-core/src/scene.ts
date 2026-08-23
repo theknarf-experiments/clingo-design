@@ -12,8 +12,8 @@
  */
 import { type Frame, type Point, boundsOf } from "./geometry.ts";
 import {
-	FALLBACK,
 	type Token,
+	VALUE_TYPES,
 	type Value,
 	type ValueType,
 	lit,
@@ -26,9 +26,14 @@ export type PropName =
 	| "radius"
 	| "stroke"
 	| "strokeWidth"
+	| "shadow"
+	| "opacity"
 	| "ink"
+	| "fontFamily"
 	| "size"
-	| "weight";
+	| "weight"
+	| "lineHeight"
+	| "align";
 
 export interface PropSpec {
 	label: string;
@@ -38,13 +43,38 @@ export interface PropSpec {
 }
 
 export const PROPS: Record<PropName, PropSpec> = {
-	fill: { label: "Fill", type: "color", fallback: FALLBACK.color },
-	radius: { label: "Corner radius", type: "length", fallback: FALLBACK.length },
+	fill: { label: "Fill", type: "color", fallback: VALUE_TYPES.color.fallback },
+	radius: {
+		label: "Corner radius",
+		type: "length",
+		fallback: VALUE_TYPES.length.fallback,
+	},
 	stroke: { label: "Stroke", type: "color", fallback: "#0f172a" },
 	strokeWidth: { label: "Thickness", type: "length", fallback: "2px" },
+	shadow: {
+		label: "Shadow",
+		type: "shadow",
+		fallback: VALUE_TYPES.shadow.fallback,
+	},
+	opacity: { label: "Opacity", type: "number", fallback: "1" },
 	ink: { label: "Colour", type: "color", fallback: "#0f172a" },
+	fontFamily: {
+		label: "Font",
+		type: "font",
+		fallback: VALUE_TYPES.font.fallback,
+	},
 	size: { label: "Size", type: "length", fallback: "16px" },
-	weight: { label: "Weight", type: "weight", fallback: FALLBACK.weight },
+	weight: {
+		label: "Weight",
+		type: "weight",
+		fallback: VALUE_TYPES.weight.fallback,
+	},
+	lineHeight: { label: "Line height", type: "number", fallback: "1.35" },
+	align: {
+		label: "Alignment",
+		type: "align",
+		fallback: VALUE_TYPES.align.fallback,
+	},
 };
 
 export type NodeKind =
@@ -70,7 +100,13 @@ export interface KindSpec {
 	label: string;
 	/** Properties the inspector shows, in order. */
 	props: PropName[];
-	/** What a new node of this kind starts with. */
+	/**
+	 * What a new node of this kind starts with.
+	 *
+	 * A property the inspector offers but that is missing here paints nothing
+	 * until it is set — which is what an optional flourish like a stroke or a
+	 * shadow should do, rather than appearing on every shape ever drawn.
+	 */
 	defaults: Partial<Record<PropName, Value>>;
 	/** Size a click with no drag produces. */
 	defaultSize: { width: number; height: number };
@@ -122,7 +158,7 @@ export type Diagonal = "down" | "up";
 export const KINDS: Record<NodeKind, KindSpec> = {
 	frame: {
 		label: "Frame",
-		props: ["fill", "radius"],
+		props: ["fill", "radius", "stroke", "strokeWidth", "shadow", "opacity"],
 		defaults: { fill: [lit("#ffffff")] },
 		defaultSize: { width: 480, height: 320 },
 		drawable: true,
@@ -135,8 +171,11 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	},
 	rect: {
 		label: "Rectangle",
-		props: ["fill", "radius"],
-		defaults: { fill: [lit(FALLBACK.color)], radius: [lit(FALLBACK.length)] },
+		props: ["fill", "radius", "stroke", "strokeWidth", "shadow", "opacity"],
+		defaults: {
+			fill: [lit(PROPS.fill.fallback)],
+			radius: [lit(PROPS.radius.fallback)],
+		},
 		defaultSize: { width: 160, height: 120 },
 		drawable: true,
 		container: false,
@@ -150,8 +189,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		// A corner radius on something with no corners says nothing, so fill is
 		// the whole of an ellipse's appearance.
 		label: "Ellipse",
-		props: ["fill"],
-		defaults: { fill: [lit(FALLBACK.color)] },
+		props: ["fill", "stroke", "strokeWidth", "shadow", "opacity"],
+		defaults: { fill: [lit(PROPS.fill.fallback)] },
 		defaultSize: { width: 140, height: 140 },
 		drawable: true,
 		container: false,
@@ -162,8 +201,11 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		plotted: false,
 	},
 	line: {
+		// No shadow: a box-shadow follows the node's box, and for a stroked kind
+		// the box is only the rectangle the stroke happens to span — the shadow
+		// would outline a shape the document does not contain.
 		label: "Line",
-		props: ["stroke", "strokeWidth"],
+		props: ["stroke", "strokeWidth", "opacity"],
 		defaults: {
 			stroke: [lit(PROPS.stroke.fallback)],
 			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
@@ -179,7 +221,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	},
 	arrow: {
 		label: "Arrow",
-		props: ["stroke", "strokeWidth"],
+		props: ["stroke", "strokeWidth", "opacity"],
 		defaults: {
 			stroke: [lit(PROPS.stroke.fallback)],
 			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
@@ -198,9 +240,9 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		// hiding it behind the shape menu would hide the only tool that needs
 		// explaining.
 		label: "Path",
-		props: ["fill", "stroke", "strokeWidth"],
+		props: ["fill", "stroke", "strokeWidth", "opacity"],
 		defaults: {
-			fill: [lit(FALLBACK.color)],
+			fill: [lit(PROPS.fill.fallback)],
 			stroke: [lit(PROPS.stroke.fallback)],
 			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
 		},
@@ -217,11 +259,19 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	},
 	text: {
 		label: "Text",
-		props: ["ink", "size", "weight"],
+		props: [
+			"ink",
+			"fontFamily",
+			"size",
+			"weight",
+			"lineHeight",
+			"align",
+			"opacity",
+		],
 		defaults: {
 			ink: [lit(PROPS.ink.fallback)],
 			size: [lit(PROPS.size.fallback)],
-			weight: [lit(FALLBACK.weight)],
+			weight: [lit(PROPS.weight.fallback)],
 		},
 		defaultSize: { width: 160, height: 28 },
 		drawable: true,

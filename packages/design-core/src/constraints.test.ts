@@ -116,9 +116,26 @@ test("sharedProps only offers what every selected node exposes", () => {
 	let scene = emptyScene();
 	scene = addNode(scene, makeNode("rect", { x: 0, y: 0, width: 9, height: 9 }, { id: "r" }));
 	scene = addNode(scene, makeNode("text", { x: 0, y: 0, width: 9, height: 9 }, { id: "t" }));
-	assert.deepEqual(sharedProps(scene, ["r"]), ["fill", "radius"]);
-	assert.deepEqual(sharedProps(scene, ["t"]), ["ink", "size", "weight"]);
-	assert.deepEqual(sharedProps(scene, ["r", "t"]), []);
+	assert.deepEqual(sharedProps(scene, ["r"]), [
+		"fill",
+		"radius",
+		"stroke",
+		"strokeWidth",
+		"shadow",
+		"opacity",
+	]);
+	assert.deepEqual(sharedProps(scene, ["t"]), [
+		"ink",
+		"fontFamily",
+		"size",
+		"weight",
+		"lineHeight",
+		"align",
+		"opacity",
+	]);
+	// Opacity is the one thing everything drawable has, so a rule can range
+	// across kinds that otherwise share nothing.
+	assert.deepEqual(sharedProps(scene, ["r", "t"]), ["opacity"]);
 });
 
 test("deleting a node drops the constraints that ranged over it", () => {
