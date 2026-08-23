@@ -4,14 +4,22 @@ import { test } from "node:test";
 import { directSolver } from "./directSolver.ts";
 import { addNode, addNodeTo, makeNode, reparent } from "./edits.ts";
 import { explore } from "./explore.ts";
-import { type AutoLayout, type Scene, emptyScene } from "./scene.ts";
-import { findInTree, mapTree } from "./tree.ts";
+import { type Align, type AutoLayout, type Scene, emptyScene } from "./scene.ts";
+import { dropTargetAt, findInTree, mapTree } from "./tree.ts";
+
+interface Child {
+	id: string;
+	width: number;
+	height: number;
+	grow?: boolean;
+	alignSelf?: Align;
+}
 
 /** A frame of the given size with `n` children, laid out. */
 function row(
 	layout: Partial<AutoLayout>,
 	container: { width: number; height: number },
-	children: Array<{ id: string; width: number; height: number; grow?: boolean }>,
+	children: Child[],
 ): Scene {
 	let scene = emptyScene();
 	scene = { ...scene, nodes: [] };
@@ -45,6 +53,7 @@ function row(
 						gap: 10,
 						padding: 10,
 						align: "start",
+						justify: "start",
 						// These cases pin the container size on purpose; hugging
 						// has its own tests below.
 						sizing: "fixed",
@@ -53,7 +62,12 @@ function row(
 				};
 			}
 			const spec = children.find((c) => c.id === n.id);
-			return spec?.grow ? { ...n, grow: true } : n;
+			if (!spec) return n;
+			return {
+				...n,
+				...(spec.grow ? { grow: true } : {}),
+				...(spec.alignSelf ? { alignSelf: spec.alignSelf } : {}),
+			};
 		}),
 	};
 }
@@ -152,6 +166,147 @@ test("a container without a layout solves nothing", async () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* Justification                                                       */
+/* ------------------------------------------------------------------ */
+
+/** 400 wide, padding 10, gap 10, two children of 100 and 60: 210 to spare. */
+const spare = (justify: AutoLayout["justify"]) =>
+	solve(
+		row({ justify }, { width: 400, height: 100 }, [
+			{ id: "a", width: 100, height: 40 },
+			{ id: "b", width: 60, height: 40 },
+		]),
+	);
+
+test("start leaves the slack at the end", async () => {
+	const solved = await spare("start");
+	assert.equal(solved.a.x, 10);
+	assert.equal(solved.b.x, 120);
+});
+
+test("centre splits the slack either side of the run", async () => {
+	const solved = await spare("center");
+	assert.equal(solved.a.x, 115, "10 + 210/2");
+	assert.equal(solved.b.x, 225);
+	assert.equal(
+		400 - (solved.b.x ?? 0) - 60,
+		solved.a.x,
+		"as much space after the run as before it",
+	);
+});
+
+test("end pushes the run against the far padding", async () => {
+	const solved = await spare("end");
+	assert.equal(solved.a.x, 220);
+	assert.equal(solved.b.x, 330, "220 + 100 + 10");
+	assert.equal(330 + 60, 390, "flush against the padding");
+});
+
+test("space between spreads the slack into the gaps", async () => {
+	const solved = await solve(
+		row({ justify: "spaceBetween" }, { width: 400, height: 100 }, [
+			{ id: "a", width: 100, height: 40 },
+			{ id: "b", width: 60, height: 40 },
+			{ id: "c", width: 40, height: 40 },
+		]),
+	);
+	// 400 - 20 padding - 200 of children = 180, over two gaps.
+	assert.equal(solved.a.x, 10);
+	assert.equal(solved.b.x, 200, "10 + 100 + 90");
+	assert.equal(solved.c.x, 350, "200 + 60 + 90");
+	assert.equal((solved.c.x ?? 0) + 40, 390, "the last one ends flush");
+});
+
+test("space between with one child is just a child at the padding", async () => {
+	const solved = await solve(
+		row({ justify: "spaceBetween" }, { width: 400, height: 100 }, [
+			{ id: "a", width: 100, height: 40 },
+		]),
+	);
+	assert.equal(solved.a.x, 10, "nothing to spread it against");
+	assert.equal(solved.a.width, 100);
+});
+
+test("justification is nothing to argue about when growers took the slack", async () => {
+	// There is no leftover once something has filled it, so every mode has to
+	// agree with start rather than fight the grower for the same pixels.
+	for (const justify of ["start", "center", "end", "spaceBetween"] as const) {
+		const solved = await solve(
+			row({ justify }, { width: 400, height: 100 }, [
+				{ id: "a", width: 100, height: 40 },
+				{ id: "b", width: 10, height: 40, grow: true },
+			]),
+		);
+		assert.equal(solved.a.x, 10, justify);
+		assert.equal(solved.b.x, 120, justify);
+		assert.equal(solved.b.width, 270, `${justify}: 400 - 20 pad - 10 gap - 100`);
+	}
+});
+
+test("a hugging container has no slack to justify, in any mode", async () => {
+	for (const justify of ["start", "center", "end", "spaceBetween"] as const) {
+		const solved = await solve(
+			row({ justify, sizing: "hug" }, { width: 400, height: 100 }, [
+				{ id: "a", width: 100, height: 40 },
+				{ id: "b", width: 60, height: 40 },
+			]),
+		);
+		assert.equal(solved.box.width, 190, justify);
+		assert.equal(solved.a.x, 10, justify);
+		assert.equal(solved.b.x, 120, justify);
+	}
+});
+
+test("a column justifies down its own axis", async () => {
+	const solved = await solve(
+		row(
+			{ direction: "column", justify: "end", gap: 10, padding: 10 },
+			{ width: 200, height: 300 },
+			[
+				{ id: "a", width: 50, height: 30 },
+				{ id: "b", width: 50, height: 70 },
+			],
+		),
+	);
+	assert.equal(solved.b.y, 220, "300 - 10 - 70");
+	assert.equal(solved.a.y, 180);
+	assert.equal(solved.a.x, 10, "the cross axis is untouched");
+});
+
+/* ------------------------------------------------------------------ */
+/* Per-child alignment                                                 */
+/* ------------------------------------------------------------------ */
+
+test("a child can overrule the container's alignment for itself", async () => {
+	const solved = await solve(
+		row({ align: "start", padding: 10 }, { width: 400, height: 120 }, [
+			{ id: "a", width: 40, height: 30 },
+			{ id: "b", width: 40, height: 30, alignSelf: "center" },
+			{ id: "c", width: 40, height: 30, alignSelf: "end" },
+			{ id: "d", width: 40, height: 30, alignSelf: "stretch" },
+		]),
+	);
+	assert.equal(solved.a.y, 10, "following the container");
+	assert.equal(solved.b.y, 45, "(120 - 30) / 2");
+	assert.equal(solved.c.y, 80, "120 - 10 - 30");
+	assert.equal(solved.d.y, 10);
+	assert.equal(solved.d.height, 100, "stretched, alone among them");
+	assert.equal(solved.a.height, 30);
+});
+
+test("an override can also opt out of a stretching container", async () => {
+	const solved = await solve(
+		row({ align: "stretch", padding: 10 }, { width: 400, height: 120 }, [
+			{ id: "a", width: 40, height: 30 },
+			{ id: "b", width: 40, height: 30, alignSelf: "start" },
+		]),
+	);
+	assert.equal(solved.a.height, 100);
+	assert.equal(solved.b.height, 30, "kept the size it asked for");
+	assert.equal(solved.b.y, 10);
+});
+
+/* ------------------------------------------------------------------ */
 /* Hugging                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -246,6 +401,7 @@ test("a hugging container nested in another composes", async () => {
 		gap: 0,
 		padding: 10,
 		align: "start",
+		justify: "start",
 		sizing: "hug",
 	};
 	scene = {
@@ -257,6 +413,77 @@ test("a hugging container nested in another composes", async () => {
 	const solved = await solve(scene);
 	assert.equal(solved.inner.width, 70, "50 plus the inner padding");
 	assert.equal(solved.outer.width, 90, "70 plus the outer padding");
+});
+
+/**
+ * A hugging row holding one rect and one hugging column, whose stored frame is
+ * deliberately nothing like what it will hug to.
+ */
+function nested(outer: Partial<AutoLayout>): Scene {
+	let scene: Scene = { ...emptyScene(), nodes: [] };
+	scene = addNode(
+		scene,
+		makeNode("frame", { x: 0, y: 0, width: 9, height: 9 }, { id: "outer" }),
+	);
+	scene = addNodeTo(
+		scene,
+		"outer",
+		makeNode("rect", { x: 0, y: 0, width: 40, height: 20 }, { id: "a" }),
+	);
+	scene = addNodeTo(
+		scene,
+		"outer",
+		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "inner" }),
+	);
+	for (const id of ["p", "q"]) {
+		scene = addNodeTo(
+			scene,
+			"inner",
+			makeNode("rect", { x: 0, y: 0, width: 30, height: 25 }, { id }),
+		);
+	}
+	const base: AutoLayout = {
+		direction: "row",
+		gap: 0,
+		padding: 10,
+		align: "start",
+		justify: "start",
+		sizing: "hug",
+	};
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (n) => {
+			if (n.id === "outer") return { ...n, layout: { ...base, ...outer } };
+			if (n.id === "inner") {
+				return {
+					...n,
+					layout: { ...base, direction: "column" as const, padding: 5 },
+				};
+			}
+			return n;
+		}),
+	};
+}
+
+test("hugging across the axis follows what a nested hug comes to, not its frame", async () => {
+	const solved = await solve(nested({}));
+	assert.equal(solved.inner.height, 60, "5 + 25 + 25 + 5");
+	assert.equal(solved.inner.width, 40, "30 plus 2 x 5");
+	assert.equal(
+		solved.outer.height,
+		80,
+		"the taller child is the inner container at 60, not its stored 10",
+	);
+	assert.equal(solved.outer.width, 100, "10 + 40 + 40 + 10");
+});
+
+test("stretching a nested hug hands that axis over to the parent", async () => {
+	// Its own hug would fix the height at 60; the parent says otherwise, and a
+	// parent that says so wins rather than making the document unsolvable.
+	const solved = await solve(nested({ align: "stretch" }));
+	assert.equal(solved.outer.height, 80, "still the natural height of its tallest");
+	assert.equal(solved.inner.height, 60, "80 less 2 x 10");
+	assert.equal(solved.a.height, 60);
 });
 
 /* ------------------------------------------------------------------ */
@@ -293,6 +520,7 @@ async function withLayout() {
 							gap: 10,
 							padding: 10,
 							align: "start",
+							justify: "start",
 							sizing: "hug",
 						} as AutoLayout,
 					}
@@ -350,4 +578,63 @@ test("a node cannot be moved inside itself", async () => {
 test("only a container can take children", async () => {
 	const { scene, solved } = await withLayout();
 	assert.equal(reparent(scene, "loose", "a", 0, solved), scene);
+});
+
+/* ------------------------------------------------------------------ */
+/* Finding the drop target under a pointer                             */
+/* ------------------------------------------------------------------ */
+
+test("a drop lands in the container under the pointer, at the pointer", async () => {
+	// The row sits at (100,100) and is 110 wide: a spans 110..150, b 160..200.
+	const { scene, solved } = await withLayout();
+	const drop = (x: number) =>
+		dropTargetAt(scene.nodes, { x, y: 120 }, new Set(["loose"]), solved);
+
+	assert.deepEqual(drop(115), { id: "box", index: 0 }, "before a's middle");
+	assert.deepEqual(drop(155), { id: "box", index: 1 }, "between them");
+	assert.deepEqual(drop(205), { id: "box", index: 2 }, "past b's middle");
+});
+
+test("a drop outside every surface is a drop on the canvas", async () => {
+	const { scene, solved } = await withLayout();
+	assert.deepEqual(
+		dropTargetAt(scene.nodes, { x: 900, y: 900 }, new Set(["loose"]), solved),
+		{ id: null, index: 1 },
+		"one top-level node stays behind once loose is lifted out",
+	);
+});
+
+test("what is being dragged cannot be what it is dropped into", async () => {
+	const { scene, solved } = await withLayout();
+	// The pointer is over the row, but the row is the thing in hand.
+	assert.deepEqual(
+		dropTargetAt(scene.nodes, { x: 150, y: 120 }, new Set(["box"]), solved),
+		{ id: null, index: 1 },
+	);
+});
+
+test("a child dragged within its own layout counts only the siblings left", async () => {
+	const { scene, solved } = await withLayout();
+	assert.deepEqual(
+		dropTargetAt(scene.nodes, { x: 205, y: 120 }, new Set(["a"]), solved),
+		{ id: "box", index: 1 },
+		"past the one remaining child",
+	);
+});
+
+test("a plain container takes a drop on top, order being nobody's business", async () => {
+	let scene: Scene = { ...emptyScene(), nodes: [] };
+	scene = addNode(
+		scene,
+		makeNode("frame", { x: 0, y: 0, width: 200, height: 200 }, { id: "plain" }),
+	);
+	scene = addNodeTo(
+		scene,
+		"plain",
+		makeNode("rect", { x: 10, y: 10, width: 20, height: 20 }, { id: "kid" }),
+	);
+	assert.deepEqual(dropTargetAt(scene.nodes, { x: 100, y: 100 }), {
+		id: "plain",
+		index: 1,
+	});
 });

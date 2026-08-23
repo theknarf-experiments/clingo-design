@@ -16,6 +16,7 @@ import {
 	scalePoints,
 } from "./geometry.ts";
 import {
+	type Align,
 	type AutoLayout,
 	CONSTRAINT_KINDS,
 	type Constraint,
@@ -611,6 +612,31 @@ export function setGrow(scene: Scene, ids: readonly string[], grow: boolean): Sc
 				return rest;
 			}
 			return { ...node, grow: true };
+		}),
+	};
+}
+
+/**
+ * A child's own say on the cross axis, or `undefined` to follow the container.
+ *
+ * Stored as nothing at all when it follows, so a document only carries the
+ * children somebody deliberately singled out.
+ */
+export function setAlignSelf(
+	scene: Scene,
+	ids: readonly string[],
+	align: Align | undefined,
+): Scene {
+	const touch = new Set(ids);
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (node) => {
+			if (!touch.has(node.id)) return node;
+			if (!align) {
+				const { alignSelf: _dropped, ...rest } = node;
+				return rest;
+			}
+			return { ...node, alignSelf: align };
 		}),
 	};
 }

@@ -1,7 +1,9 @@
 import {
 	type Align,
 	type Direction,
+	type Justify,
 	type Sizing,
+	JUSTIFICATIONS,
 	KINDS,
 	PROPS,
 	type Picks,
@@ -15,6 +17,7 @@ import {
 	managedNodes,
 	nodeNames,
 	propValues,
+	setAlignSelf,
 	setGrow,
 	setLayout,
 	setSizing,
@@ -53,6 +56,7 @@ const AXES = ["x", "y", "width", "height"] as const;
 const DIRECTIONS: Direction[] = ["row", "column"];
 const ALIGNMENTS: Align[] = ["start", "center", "end", "stretch"];
 const SIZINGS: Sizing[] = ["hug", "fixed"];
+const JUSTIFY = Object.keys(JUSTIFICATIONS) as Justify[];
 
 function NumberField({
 	label,
@@ -203,17 +207,45 @@ export function Inspector({
 			) : null}
 
 			{managed ? (
-				<label className={styles.check}>
-					<input
-						type="checkbox"
-						data-role="grow"
-						checked={node.grow ?? false}
-						onChange={(e) =>
-							onSceneChange((prev) => setGrow(prev, [node.id], e.target.checked))
-						}
-					/>
-					<span>Fill the leftover space</span>
-				</label>
+				<>
+					<label className={styles.check}>
+						<input
+							type="checkbox"
+							data-role="grow"
+							checked={node.grow ?? false}
+							onChange={(e) =>
+								onSceneChange((prev) => setGrow(prev, [node.id], e.target.checked))
+							}
+						/>
+						<span>Fill the leftover space</span>
+					</label>
+					<div className={styles.grid}>
+						<label className={`${styles.field} ${styles.wide}`}>
+							<span className={styles.fieldLabel}>align self</span>
+							<select
+								className={styles.number}
+								data-role="align-self"
+								value={node.alignSelf ?? ""}
+								onChange={(e) =>
+									onSceneChange((prev) =>
+										setAlignSelf(
+											prev,
+											[node.id],
+											(e.target.value || undefined) as Align | undefined,
+										),
+									)
+								}
+							>
+								<option value="">as the layout says</option>
+								{ALIGNMENTS.map((a) => (
+									<option key={a} value={a}>
+										{a}
+									</option>
+								))}
+							</select>
+						</label>
+					</div>
+				</>
 			) : null}
 
 			{container ? (
@@ -298,6 +330,27 @@ export function Inspector({
 									{ALIGNMENTS.map((a) => (
 										<option key={a} value={a}>
 											{a}
+										</option>
+									))}
+								</select>
+							</label>
+							<label className={styles.field}>
+								<span className={styles.fieldLabel}>justify</span>
+								<select
+									className={styles.number}
+									data-role="layout-justify"
+									value={node.layout.justify}
+									onChange={(e) =>
+										onSceneChange((prev) =>
+											updateLayout(prev, node.id, {
+												justify: e.target.value as Justify,
+											}),
+										)
+									}
+								>
+									{JUSTIFY.map((j) => (
+										<option key={j} value={j}>
+											{JUSTIFICATIONS[j]}
 										</option>
 									))}
 								</select>

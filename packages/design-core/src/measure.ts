@@ -6,7 +6,7 @@
  * the numbers in as plain pixels, and this side is arithmetic over them. That
  * is what keeps the compiler pure and testable in Node, where no canvas exists.
  */
-import { KINDS, PROPS, type SceneNode, type Sizing } from "./scene.ts";
+import { KINDS, PROPS, type SceneNode, type Sizing, isLaidOut } from "./scene.ts";
 import { flatten } from "./tree.ts";
 
 export interface Size {
@@ -48,6 +48,37 @@ export function sizingOf(node: SceneNode): Sizing {
 export function askedSize(node: SceneNode, measured?: Measurements): Size {
 	const size = autoSizes(node) ? measured?.[node.id] : undefined;
 	return size ?? { width: node.frame.width, height: node.frame.height };
+}
+
+/**
+ * What a node would be with nothing pushing on it, its contents included.
+ *
+ * A hugging container's stored frame is stale by construction — the solver owns
+ * its size — so a parent needing to know how big such a child is cannot read it
+ * off the document. Nor can it ask the solver for it: the cross axis takes a
+ * *maximum* over the children, and a maximum over solved values is not a linear
+ * constraint. So it is a bottom-up pass here, over exactly the arithmetic the
+ * layout rules use, and the answer goes in as that node's `lask` fact.
+ */
+export function naturalSize(node: SceneNode, measured?: Measurements): Size {
+	const layout = node.layout;
+	if (!layout || layout.sizing !== "hug" || !isLaidOut(node)) {
+		return askedSize(node, measured);
+	}
+	const children = (node.children ?? []).map((c) => naturalSize(c, measured));
+	const pad = Math.max(0, layout.padding);
+	const gap = Math.max(0, layout.gap);
+	const row = layout.direction === "row";
+	const main = (s: Size) => (row ? s.width : s.height);
+	const cross = (s: Size) => (row ? s.height : s.width);
+	const along =
+		children.reduce((total, s) => total + main(s), 0) +
+		gap * (children.length - 1) +
+		2 * pad;
+	const across = Math.max(...children.map(cross)) + 2 * pad;
+	return row
+		? { width: along, height: across }
+		: { width: across, height: along };
 }
 
 /** The nodes the host should measure, at any depth. */

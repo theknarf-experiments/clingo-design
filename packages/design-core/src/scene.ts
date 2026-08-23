@@ -338,6 +338,21 @@ export const isPlotted = (node: SceneNode): boolean =>
 export type Direction = "row" | "column";
 /** Where children sit on the axis they are *not* stacked along. */
 export type Align = "start" | "center" | "end" | "stretch";
+/**
+ * Where the leftover space on the *stacking* axis goes.
+ *
+ * `spaceBetween` is one word because it reaches ASP as a constant, the way
+ * `atMost` does — see {@link CONSTRAINT_KINDS}. {@link JUSTIFICATIONS} carries
+ * the words a human reads.
+ */
+export type Justify = "start" | "center" | "end" | "spaceBetween";
+
+export const JUSTIFICATIONS: Record<Justify, string> = {
+	start: "start",
+	center: "center",
+	end: "end",
+	spaceBetween: "space between",
+};
 
 /**
  * Turns a container into a solved layout rather than a free-form canvas.
@@ -353,6 +368,7 @@ export interface AutoLayout {
 	/** Inside every edge of the container. */
 	padding: number;
 	align: Align;
+	justify: Justify;
 	/**
 	 * Whether the container takes its size from its contents.
 	 *
@@ -372,6 +388,7 @@ export const DEFAULT_LAYOUT: AutoLayout = {
 	gap: 16,
 	padding: 16,
 	align: "start",
+	justify: "start",
 	sizing: "hug",
 };
 
@@ -419,6 +436,11 @@ export interface SceneNode {
 	layout?: AutoLayout;
 	/** Under a laid-out parent: take a share of the leftover space. */
 	grow?: boolean;
+	/**
+	 * Under a laid-out parent: sit differently on the cross axis from its
+	 * siblings. Absent means whatever the container says.
+	 */
+	alignSelf?: Align;
 }
 
 /** True when this node's children are placed by the solver. */

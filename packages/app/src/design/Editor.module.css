@@ -81,6 +81,15 @@
 .sw { left: 0; top: 100%; }
 .w  { left: 0; top: 50%; }
 
+/* The container a drop would go into. Thicker than a selection outline and
+   tinted, because it answers a question asked mid-gesture. */
+.dropTarget {
+	position: absolute;
+	pointer-events: none;
+	outline: 2px solid var(--dc-accent);
+	background: color-mix(in srgb, var(--dc-accent) 10%, transparent);
+}
+
 .marquee {
 	position: absolute;
 	pointer-events: none;

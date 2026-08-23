@@ -13,6 +13,7 @@ import {
 	type Universe,
 	addNodeTo,
 	boundsOf,
+	dropTargetAt,
 	frameAncestorOf,
 	frameAt,
 	frameFromPoints,
@@ -25,8 +26,10 @@ import {
 	makePath,
 	managedNodes,
 	normaliseFrame,
+	parentMap,
 	placedNodes,
 	pointsBounds,
+	reparent,
 	resizeFrame,
 	resizeSubtree,
 	selectionTargetOf,
@@ -118,6 +121,11 @@ export function Editor({
 	const [current, setCurrent] = useState<Point | null>(null);
 	const [guides, setGuides] = useState<SnapGuide[]>([]);
 	/**
+	 * The container a move gesture would drop into, while it is live. Null both
+	 * when there is no gesture and when the drop would change nothing.
+	 */
+	const [dropTarget, setDropTarget] = useState<string | null>(null);
+	/**
 	 * Points the pen has placed, in canvas coordinates. Null when it is not
 	 * drawing — a path is several clicks, so unlike every other tool it has a
 	 * state that outlives the pointer being down.
@@ -157,9 +165,6 @@ export function Editor({
 	function beginMove(point: Point, ids: ReadonlySet<string>) {
 		const start = new Map<string, Frame>();
 		for (const id of ids) {
-			// A laid-out node would spring back on the next solve, so dragging
-			// it is not a thing the editor offers.
-			if (managed.has(id)) continue;
 			const world = placed.byId.get(id)?.world;
 			if (world) start.set(id, { ...world });
 		}
@@ -316,8 +321,26 @@ export function Editor({
 	 * Only `up` needs these, and only once, so keeping them in a ref is what
 	 * lets the effect below depend on the gesture alone.
 	 */
-	const live = useRef({ scene, selection, placed, preview, universe, toCanvas, targetFor });
-	live.current = { scene, selection, placed, preview, universe, toCanvas, targetFor };
+	const live = useRef({
+		scene,
+		selection,
+		placed,
+		preview,
+		universe,
+		managed,
+		toCanvas,
+		targetFor,
+	});
+	live.current = {
+		scene,
+		selection,
+		placed,
+		preview,
+		universe,
+		managed,
+		toCanvas,
+		targetFor,
+	};
 
 	// A gesture owns the window until release, so the pointer can leave the
 	// document mid-drag without stranding it.
@@ -346,6 +369,17 @@ export function Editor({
 					frameAncestorOf(live.current.scene.nodes, first)?.id ?? "",
 				)?.world
 			: undefined;
+		/** Where each dragged node started out, to tell a reparent from a move. */
+		const parents = parentMap(live.current.scene.nodes);
+		const homeOf = (id: string) => parents.get(id)?.id ?? null;
+		/** The container the pointer is over, and where in it a drop would land. */
+		const dropAt = (point: Point) =>
+			dropTargetAt(
+				live.current.scene.nodes,
+				point,
+				moving,
+				live.current.universe.solved,
+			);
 
 		let moved = false;
 
@@ -374,6 +408,12 @@ export function Editor({
 				for (const [id, frame] of next) next.set(id, normaliseFrame(frame));
 				setPreview(next);
 				setGuides(snapped);
+				// Only worth showing when letting go would actually move the
+				// nodes somewhere else in the tree.
+				const drop = dropAt(point);
+				setDropTarget(
+					[...moving].some((id) => homeOf(id) !== drop.id) ? drop.id : null,
+				);
 				if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) moved = true;
 				return;
 			}
@@ -409,12 +449,8 @@ export function Editor({
 			const toLocal = (frames: ReadonlyMap<string, Frame>) => {
 				const out = new Map<string, Frame>();
 				for (const [id, world] of frames) {
-					// The parent's origin is already implied by the placement: a
-					// node's own frame is its world position minus that origin.
-					const from = now.placed.byId.get(id);
-					const ox = from ? from.world.x - from.node.frame.x : 0;
-					const oy = from ? from.world.y - from.node.frame.y : 0;
-					out.set(id, { ...world, x: world.x - ox, y: world.y - oy });
+					const at = originOf(now.placed.byId.get(id), now.universe.solved[id]);
+					out.set(id, { ...world, x: world.x - at.x, y: world.y - at.y });
 				}
 				return out;
 			};
@@ -432,7 +468,29 @@ export function Editor({
 				}
 			} else if (gesture.kind === "move" && preview && moved) {
 				const local = toLocal(preview);
-				onSceneChange((prev) => setFrames(prev, local), "geometry");
+				const drop = dropAt(point);
+				const rehomed = [...local.keys()].filter((id) => homeOf(id) !== drop.id);
+				// A reparent snapshots where a node visibly is, so it has to see
+				// where the drag left it rather than where it started — otherwise
+				// something dragged out of a layout lands back at the layout.
+				const dropped = { ...now.universe.solved, ...Object.fromEntries(local) };
+
+				onSceneChange((prev) => {
+					// A node the solver places has no frame of its own worth
+					// writing: its stored one is what it *asks* for, and
+					// overwriting that with what it was given loses the request.
+					const staying = new Map(
+						[...local].filter(
+							([id]) => !rehomed.includes(id) && !now.managed.has(id),
+						),
+					);
+					let next = staying.size > 0 ? setFrames(prev, staying) : prev;
+					let index = drop.index;
+					for (const id of rehomed) {
+						next = reparent(next, id, drop.id, index++, dropped);
+					}
+					return next;
+				}, "geometry");
 			} else if (gesture.kind === "marquee") {
 				const box = frameFromPoints(gesture.origin, point);
 				// Marquee selects whole groups, not the leaves inside them.
@@ -488,6 +546,7 @@ export function Editor({
 			setPreview(null);
 			setCurrent(null);
 			setGuides([]);
+			setDropTarget(null);
 		};
 
 		window.addEventListener("pointermove", move);
@@ -509,18 +568,20 @@ export function Editor({
 		selected.map((p) => preview?.get(p.node.id) ?? p.world),
 	);
 
+	const dropHighlight = dropTarget
+		? placed.byId.get(dropTarget)?.world
+		: undefined;
+
 	/** Preview frames are absolute; the renderer wants each node's own space. */
 	const renderPreview = useMemo(() => {
 		if (!preview) return undefined;
 		const out = new Map<string, Frame>();
 		for (const [id, world] of preview) {
-			const from = placed.byId.get(id);
-			const ox = from ? from.world.x - from.node.frame.x : 0;
-			const oy = from ? from.world.y - from.node.frame.y : 0;
-			out.set(id, { ...world, x: world.x - ox, y: world.y - oy });
+			const at = originOf(placed.byId.get(id), universe.solved[id]);
+			out.set(id, { ...world, x: world.x - at.x, y: world.y - at.y });
 		}
 		return out;
-	}, [preview, placed]);
+	}, [preview, placed, universe.solved]);
 
 	/** Top-level surfaces get a name tag, the way an artboard is labelled. */
 	const topFrames = scene.nodes.filter(isSurface);
@@ -569,6 +630,14 @@ export function Editor({
 					{node.name}
 				</button>
 			))}
+
+			{dropHighlight ? (
+				<div
+					className={styles.dropTarget}
+					data-drop-target={dropTarget}
+					style={rectStyle(dropHighlight)}
+				/>
+			) : null}
 
 			{guides.map((guide, i) => (
 				<div
@@ -645,6 +714,23 @@ export function Editor({
 			</div>
 		</div>
 	);
+}
+
+/**
+ * Where a node's parent sits, recovered from the placement.
+ *
+ * A placement is the parent's origin plus the frame the node was placed with —
+ * and for a node the solver owns that is the *solved* frame, not the stored
+ * one. Subtracting the stored frame instead would leave the difference between
+ * the two folded into the origin, which is exactly how far a node dragged out
+ * of a layout would land from where it was dropped.
+ */
+function originOf(placed: Placed | undefined, solved: Partial<Frame> | undefined): Point {
+	if (!placed) return { x: 0, y: 0 };
+	return {
+		x: placed.world.x - (solved?.x ?? placed.node.frame.x),
+		y: placed.world.y - (solved?.y ?? placed.node.frame.y),
+	};
 }
 
 function rectStyle(frame: Frame) {

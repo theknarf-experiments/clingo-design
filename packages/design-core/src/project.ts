@@ -6,6 +6,7 @@
 import {
 	ALIGNMENTS,
 	type AutoLayout,
+	JUSTIFICATIONS,
 	CONSTRAINT_KINDS,
 	type Constraint,
 	DEFAULT_FRAME,
@@ -253,10 +254,17 @@ function isLayout(value: unknown): boolean {
 	return Number.isFinite(Number(value.gap)) && Number.isFinite(Number(value.padding));
 }
 
-/** A layout stored before sizing existed hugs, which is the sane default. */
+/**
+ * A layout stored before a field existed takes the default for it — hugging,
+ * and slack at the end — so an older document reads back looking the same.
+ */
 function normalizeLayout(value: unknown): AutoLayout {
 	const raw = value as AutoLayout;
-	return { ...raw, sizing: raw.sizing === "fixed" ? "fixed" : "hug" };
+	return {
+		...raw,
+		sizing: raw.sizing === "fixed" ? "fixed" : "hug",
+		justify: raw.justify in JUSTIFICATIONS ? raw.justify : "start",
+	};
 }
 
 /** Keeps only placeable nodes, at every depth. */

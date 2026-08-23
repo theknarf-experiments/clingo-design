@@ -10,6 +10,7 @@ import {
 	autoSizes,
 	fontString,
 	lineHeightPx,
+	naturalSize,
 	sizingOf,
 	toMeasure,
 } from "./measure.ts";
@@ -44,6 +45,7 @@ function row(): Scene {
 							gap: 10,
 							padding: 10,
 							align: "start" as const,
+							justify: "start" as const,
 							sizing: "hug" as const,
 						},
 					}
@@ -134,6 +136,31 @@ test("a hugging container grows to the text it actually holds", async () => {
 	assert.equal(fitted.box.width, 301, "10 + 231 + 10 + 40 + 10");
 	assert.equal(fitted.t.width, 231);
 	assert.equal(fitted.r.x, 251, "the sibling moves along with it");
+});
+
+test("a hugging container asks for what its contents come to, not its frame", () => {
+	const box = findInTree(row().nodes, "box");
+	assert.ok(box);
+	assert.deepEqual(
+		askedSize(box),
+		{ width: 10, height: 10 },
+		"its stored frame is stale by construction — the solver owns its size",
+	);
+	assert.deepEqual(naturalSize(box), { width: 230, height: 60 });
+	assert.deepEqual(
+		naturalSize(box, { t: { width: 231, height: 22 } }),
+		{ width: 301, height: 60 },
+		"measurements reach all the way down",
+	);
+});
+
+test("a natural size stops at a container that is not hugging", () => {
+	const fixed = mapTree(row().nodes, (n) =>
+		n.layout ? { ...n, layout: { ...n.layout, sizing: "fixed" as const } } : n,
+	);
+	const box = findInTree(fixed, "box");
+	assert.ok(box);
+	assert.deepEqual(naturalSize(box), { width: 10, height: 10 });
 });
 
 test("a font shorthand is what a canvas asks for", () => {

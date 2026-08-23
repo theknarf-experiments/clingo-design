@@ -61,6 +61,11 @@
 	gap: 0.35rem;
 }
 
+/* A field whose choices are phrases rather than numbers needs the whole row. */
+.wide {
+	grid-column: 1 / -1;
+}
+
 .fieldLabel {
 	font-size: 0.72rem;
 	opacity: 0.55;

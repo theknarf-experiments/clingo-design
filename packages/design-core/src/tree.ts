@@ -187,6 +187,67 @@ export function frameAt(
 	return found;
 }
 
+/** Where a drag would land: a container, or the canvas, and a place in it. */
+export interface DropTarget {
+	/** Null for the top level. */
+	id: string | null;
+	/** Index among the target's children *after* the dragged nodes are lifted out. */
+	index: number;
+}
+
+/**
+ * Where dropping at `point` should put the nodes in `moving`.
+ *
+ * The host is the innermost surface under the pointer, the same rule that
+ * decides where a newly drawn node lands — a group is structure rather than a
+ * place, and dropping into one you cannot see the edges of is a surprise.
+ * Nothing being dragged, or inside something being dragged, can be the host.
+ *
+ * The index only means anything under an automatic layout, where it is the
+ * arrangement order: it falls where the pointer fell along the main axis.
+ * Anywhere else a drop is a plain move and the node goes on top.
+ */
+export function dropTargetAt(
+	nodes: readonly SceneNode[],
+	point: Point,
+	moving: ReadonlySet<string> = new Set(),
+	solved: Readonly<Record<string, Partial<Frame>>> = {},
+): DropTarget {
+	const placed = placedNodes(nodes, solved);
+	const lifted = new Set<string>();
+	for (const p of placed) {
+		if (moving.has(p.node.id)) for (const id of subtreeIds(p.node)) lifted.add(id);
+	}
+
+	let host: Placed | undefined;
+	for (const p of placed) {
+		if (!isSurface(p.node) || lifted.has(p.node.id)) continue;
+		if (frameContains(p.world, point)) host = p;
+	}
+	if (!host) {
+		return { id: null, index: nodes.filter((n) => !lifted.has(n.id)).length };
+	}
+
+	const staying = (host.node.children ?? []).filter((c) => !lifted.has(c.id));
+	const layout = host.node.layout;
+	if (!layout || !isLaidOut(host.node)) {
+		return { id: host.node.id, index: staying.length };
+	}
+
+	const row = layout.direction === "row";
+	const at = row ? point.x : point.y;
+	let index = 0;
+	for (const child of staying) {
+		const frame = { ...child.frame, ...solved[child.id] };
+		const middle = row
+			? host.world.x + frame.x + frame.width / 2
+			: host.world.y + frame.y + frame.height / 2;
+		if (at <= middle) break;
+		index++;
+	}
+	return { id: host.node.id, index };
+}
+
 /* ------------------------------------------------------------------ */
 /* Selection                                                           */
 /* ------------------------------------------------------------------ */
