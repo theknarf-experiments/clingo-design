@@ -21,6 +21,8 @@ import { type Measurements, naturalSize } from "./measure.ts";
 import {
 	type AutoLayout,
 	CONSTRAINT_KINDS,
+	EDGES,
+	EDGE_NAMES,
 	NODE_KINDS,
 	type Scene,
 	isLaidOut,
@@ -230,6 +232,86 @@ const GEOMETRY_RULES = [
 	"&sum{ wv(N,A); -lv(N,A) } = 0 :- gworld(N,A), not child(_,N), gmoved(N,A).",
 	"&sum{ wv(N,A) } = V :- gworld(N,A), not child(_,N), not gmoved(N,A),",
 	"                       frame(N,A,V).",
+	"% A box narrower than nothing is not a compromise, it is a wrong answer.",
+	"% Without this, two demands that can only be met by turning a node inside",
+	"% out come back as a negative width rather than as a conflict.",
+	"&sum{ lsz(N,S) } >= 0 :- gsize(N,S).",
+	"",
+	"% ---- edges, each as one linear quantity ----",
+	"% `ge(N,E)` is twice the coordinate of edge E on node N. Doubled because a",
+	"% centre is otherwise a half, and the guard side of a &sum takes a single",
+	"% bound term rather than arithmetic — so every relation between edges is a",
+	"% sum of whole multiples and an integer bound.",
+	"#defined gedgeof/2.",
+	"glead(A,E) :- gedge(E,A,pos), gplace(E,lead).",
+	"gmid(A,E) :- gedge(E,A,pos), gplace(E,mid).",
+	"gtrail(A,E) :- gedge(E,A,pos), gplace(E,trail).",
+	"gspanof(A,E) :- gedge(E,A,span).",
+	"% How much of the node's own size lies before the edge, doubled to match.",
+	"goff(E,0) :- gplace(E,lead).",
+	"goff(E,1) :- gplace(E,mid).",
+	"goff(E,2) :- gplace(E,trail).",
+	"&sum{ ge(N,E); -2*wv(N,A); -K*lsz(N,S) } = 0 :- gedgeof(N,E), gedge(E,A,pos),",
+	"    goff(E,K), gspanof(A,S).",
+	"&sum{ ge(N,E); -2*lsz(N,E) } = 0 :- gedgeof(N,E), gedge(E,_,span).",
+]
+
+/**
+ * The geometric vocabulary, as facts. Written out of the one table that says
+ * what an edge is, so no rule ever names an edge.
+ */
+const EDGE_FACTS = EDGE_NAMES.flatMap((edge) => {
+	const spec = EDGES[edge]
+	return [
+		atom("gedge", edge, spec.axis, spec.role),
+		...(spec.place ? [atom("gplace", edge, spec.place)] : []),
+	]
+})
+
+/**
+ * The geometric constraint kinds, as relations between edges.
+ *
+ * Each is behind the same `active(C)` switch as a property constraint, so a
+ * pair that cannot both hold comes back as a core naming exactly those two —
+ * the theory propagator reports its conflicts through the same assumptions.
+ * A geometric kind is one entry in `CONSTRAINT_KINDS` plus one rule here.
+ */
+const GEOMETRIC_CONSTRAINT_RULES = [
+	"#defined c_edge/2.",
+	"#defined c_value/2.",
+	"#defined c_slot/3.",
+	"gcon(C) :- constraint(C), c_kind(C,K), gkind(K).",
+	"% Which edges the members actually need a variable for. Deriving it rather",
+	"% than giving every solved node all eight keeps the simplex tableau to the",
+	"% quantities the document mentions.",
+	"gaxial(C,A) :- gcon(C), c_edge(C,E), gedge(E,A,axis).",
+	"gneed(C,E) :- gcon(C), c_edge(C,E), gedge(E,_,R), R != axis.",
+	"gneed(C,E) :- gaxial(C,A), glead(A,E).",
+	"gneed(C,E) :- gaxial(C,A), gtrail(A,E).",
+	"gneed(C,E) :- gaxial(C,A), gmid(A,E).",
+	"gedgeof(N,E) :- gcon(C), c_node(C,N), gneed(C,E).",
+	"% The switch, exactly as the property kinds use it.",
+	"gon(C,K) :- gcon(C), c_kind(C,K), active(C).",
+	"",
+	"% align: every member shares the quantity, so the relation is pairwise.",
+	"&sum{ ge(A,E); -ge(B,E) } = 0 :- gon(C,align), c_edge(C,E),",
+	"                                 c_node(C,A), c_node(C,B), A<B.",
+	"% equalSize: the same statement, about a size rather than a place.",
+	"&sum{ ge(A,E); -ge(B,E) } = 0 :- gon(C,equalSize), c_edge(C,E),",
+	"                                 c_node(C,A), c_node(C,B), A<B.",
+	"% gap: edge to edge along one axis, from the first member to the second.",
+	"&sum{ ge(B,L); -ge(A,T) } = D :- gon(C,gap), gaxial(C,X), glead(X,L),",
+	"    gtrail(X,T), c_slot(C,A,1), c_slot(C,B,2), c_value(C,V), D = 2*V.",
+	"% symmetric: two members either side of a third's centre...",
+	"gmirror(C) :- c_slot(C,_,3).",
+	"&sum{ ge(A,M); ge(B,M); -2*ge(K,M) } = 0 :- gon(C,symmetric), gaxial(C,X),",
+	"    gmid(X,M), c_slot(C,A,1), c_slot(C,B,2), c_slot(C,K,3).",
+	"% ...or of a line on the canvas, when there is no third member to be it.",
+	"&sum{ ge(A,M); ge(B,M) } = D :- gon(C,symmetric), gaxial(C,X), gmid(X,M),",
+	"    c_slot(C,A,1), c_slot(C,B,2), not gmirror(C), c_value(C,V), D = 4*V.",
+	"% pin: the escape hatch — one quantity, one number, no freedom left.",
+	"&sum{ ge(N,E) } = D :- gon(C,pin), c_edge(C,E), c_node(C,N), c_value(C,V),",
+	"                       D = 2*V.",
 ]
 
 /**
@@ -273,10 +355,13 @@ export const CONTRACT = `% Predicates you can rely on:
 %   lv(N, x|y)                  its offset inside its parent
 %   lsz(N, width|height)        its size
 %   wv(N, x|y)                  where it lands on the canvas
+%   ge(N, ${EDGE_NAMES.filter((e) => EDGES[e].role !== "axis").join("|")})
+%                               twice one of its edges, in world coordinates
+%                               — assert gedgeof(N,E) to bring one into being
 %
-% Those three are theory variables, not atoms. A solved node with nothing
-% said about it lands exactly on its stored frame; say something, and it
-% moves as little as it can to satisfy you.
+% Those are theory variables, not atoms. A solved node with nothing said
+% about it lands exactly on its stored frame; say something, and it moves as
+% little as it can to satisfy you. Edges are doubled so a centre is whole.
 %
 % Linear arithmetic (clingo-lpx) is available too. Variables here are not
 % atoms: they take values from a simplex solver, reported as __lpx(V,"N").
@@ -455,15 +540,34 @@ export function compile(
 	// document never changes the *shape* of the program, only its data.
 	const constraintLines: string[] = [];
 	const guards: string[] = [];
+	let geometric = false;
 	for (const c of scene.constraints ?? []) {
-		if (!c.enabled || c.nodes.length < CONSTRAINT_KINDS[c.kind].minNodes) continue;
+		const spec = CONSTRAINT_KINDS[c.kind];
+		if (!c.enabled || c.nodes.length < spec.minNodes) continue;
 		constraintLines.push(atom("constraint", c.id));
 		constraintLines.push(atom("c_kind", c.id, c.kind));
-		constraintLines.push(atom("c_prop", c.id, c.prop));
-		if (CONSTRAINT_KINDS[c.kind].counted) {
+		// A geometric kind carries a property in the document only so that
+		// turning it back into a colour rule remembers one; the program has no
+		// use for it.
+		if (!spec.geometric) constraintLines.push(atom("c_prop", c.id, c.prop));
+		if (spec.counted) {
 			constraintLines.push(atom("c_limit", c.id, Math.max(1, c.limit ?? 1)));
 		}
-		for (const node of c.nodes) constraintLines.push(atom("c_node", c.id, node));
+		if (spec.geometric) {
+			geometric = true;
+			constraintLines.push(atom("c_edge", c.id, c.edge ?? spec.edges[0]));
+			// The one place a value reaches the program — the seam the parametric
+			// phase widens to a token reference.
+			if (spec.valued) {
+				constraintLines.push(atom("c_value", c.id, Math.round(c.value ?? 0)));
+			}
+		}
+		// Order matters to the kinds that read one member differently from
+		// another — which side of a gap, which node is the mirror.
+		c.nodes.forEach((node, index) => {
+			constraintLines.push(atom("c_node", c.id, node));
+			constraintLines.push(atom("c_slot", c.id, node, index + 1));
+		});
 		guards.push(guardAtom(c.id));
 	}
 
@@ -510,7 +614,11 @@ export function compile(
 		// Always emitted, unlike the layout rules: `gsolved(N)` is something a
 		// hand-written rule may assert, and a contract that quietly does nothing
 		// on some documents is not one.
-		section("geometry rules", [...GEOMETRIC_KINDS, ...GEOMETRY_RULES]),
+		section("geometry rules", [
+			...GEOMETRIC_KINDS,
+			...EDGE_FACTS,
+			...GEOMETRY_RULES,
+		]),
 		section("constraints", constraintLines),
 		constraintLines.length === 0
 			? ""
@@ -521,12 +629,19 @@ export function compile(
 					"{ active(C) } :- constraint(C).",
 					":- viol(C), active(C).",
 					"",
+					"% ---- over a property ----",
 					"viol(C) :- c_kind(C,differ), c_prop(C,P), c_node(C,A), c_node(C,B), A<B,",
 					"           rendered(A,P,L), rendered(B,P,L).",
 					"viol(C) :- c_kind(C,match), c_prop(C,P), c_node(C,A), c_node(C,B),",
 					"           rendered(A,P,LA), rendered(B,P,LB), LA != LB.",
 					"c_used(C,L) :- c_kind(C,atMost), c_prop(C,P), c_node(C,A), rendered(A,P,L).",
 					"viol(C) :- c_kind(C,atMost), c_limit(C,K), #count{ L : c_used(C,L) } > K.",
+					// A geometric kind has no `viol`: a linear relation is either
+					// stated or it is not, and the simplex solver is what finds the
+					// contradiction. Only asserted when one is actually in the
+					// document — the rules below would otherwise ground `ge` terms
+					// for nothing.
+					...(geometric ? ["", "% ---- over geometry ----", ...GEOMETRIC_CONSTRAINT_RULES] : []),
 				]),
 		section("visibility", [
 			"#defined hidden/1.",

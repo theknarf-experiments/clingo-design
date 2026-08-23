@@ -73,3 +73,30 @@ test("a legacy artboard is migrated, and nonsense dimensions fall back", () => {
 	);
 	assert.equal(normalizeScene("nope").rules, emptyScene().rules);
 });
+
+test("a stored geometric constraint survives a round trip, garbage does not", () => {
+	const good = {
+		id: "k1",
+		kind: "pin",
+		prop: "fill",
+		nodes: ["a"],
+		edge: "centerX",
+		value: 120,
+		enabled: true,
+	};
+	const scene = normalizeScene({
+		constraints: [
+			good,
+			// A rule naming an edge nothing understands would compile into a fact
+			// no rule matches, and read as a solver bug from the outside.
+			{ ...good, id: "k2", edge: "sideways" },
+			{ ...good, id: "k3", value: "twelve" },
+		],
+	});
+	assert.deepEqual(
+		scene.constraints.map((c) => c.id),
+		["k1"],
+	);
+	assert.equal(scene.constraints[0].edge, "centerX");
+	assert.equal(scene.constraints[0].value, 120);
+});

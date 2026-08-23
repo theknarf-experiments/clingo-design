@@ -11,6 +11,8 @@
  */
 import { type Frame, type Point, boundsOf, frameContains } from "./geometry.ts";
 import {
+	type Edge,
+	EDGES,
 	type SceneNode,
 	isDrawable,
 	isLaidOut,
@@ -115,6 +117,29 @@ export function worldFrame(
 		width: node.frame.width,
 		height: node.frame.height,
 	};
+}
+
+/**
+ * What a geometric constraint measures, read off the document.
+ *
+ * The same quantity the solver calls `ge(N,E)`, but undoubled and from the
+ * stored frames — which is how a new `pin` or `gap` can start at the number
+ * that changes nothing. Undefined for the whole-axis edges, which are a
+ * direction rather than a place.
+ */
+export function edgeAt(
+	nodes: readonly SceneNode[],
+	id: string,
+	edge: Edge,
+): number | undefined {
+	const frame = worldFrame(nodes, id);
+	if (!frame) return undefined;
+	const spec = EDGES[edge];
+	const size = spec.axis === "x" ? frame.width : frame.height;
+	if (spec.role === "span") return size;
+	if (spec.role === "axis") return undefined;
+	const start = spec.axis === "x" ? frame.x : frame.y;
+	return start + size * (spec.place === "lead" ? 0 : spec.place === "mid" ? 0.5 : 1);
 }
 
 export interface Placed {

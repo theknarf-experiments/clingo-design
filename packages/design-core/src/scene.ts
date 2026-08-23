@@ -451,26 +451,125 @@ export const isLaidOut = (node: SceneNode): boolean =>
 /* Constraints                                                         */
 /* ------------------------------------------------------------------ */
 
-export type ConstraintKind = "differ" | "match" | "atMost";
+export type ConstraintKind =
+	| "differ"
+	| "match"
+	| "atMost"
+	| "align"
+	| "gap"
+	| "equalSize"
+	| "symmetric"
+	| "pin";
+
+/**
+ * A quantity a geometric constraint can talk about.
+ *
+ * The six positional ones and the two sizes are things a *node* has; `x` and
+ * `y` are whole axes, which is what a gap is measured along and what a mirror
+ * runs across. All of them are linear in the world coordinates, which is the
+ * only reason simplex can answer a document full of them exactly.
+ */
+export type Edge =
+	| "left"
+	| "centerX"
+	| "right"
+	| "top"
+	| "centerY"
+	| "bottom"
+	| "width"
+	| "height"
+	| "x"
+	| "y";
+
+export interface EdgeSpec {
+	label: string;
+	axis: "x" | "y";
+	/** A place on a node, a size of one, or the axis itself. */
+	role: "pos" | "span" | "axis";
+	/**
+	 * Where on the node a positional edge sits, which is also how much of the
+	 * node's own size lies before it: none at `lead`, half at `mid`, all of it
+	 * at `trail`. Absent on the sizes and the axes.
+	 */
+	place?: "lead" | "mid" | "trail";
+}
+
+/**
+ * The geometric vocabulary, in one place.
+ *
+ * `compile()` emits this table as facts and the rules read it, so an edge is
+ * never named in a rule: adding one is an entry here.
+ */
+export const EDGES: Record<Edge, EdgeSpec> = {
+	left: { label: "Left edge", axis: "x", role: "pos", place: "lead" },
+	centerX: { label: "Horizontal centre", axis: "x", role: "pos", place: "mid" },
+	right: { label: "Right edge", axis: "x", role: "pos", place: "trail" },
+	top: { label: "Top edge", axis: "y", role: "pos", place: "lead" },
+	centerY: { label: "Vertical centre", axis: "y", role: "pos", place: "mid" },
+	bottom: { label: "Bottom edge", axis: "y", role: "pos", place: "trail" },
+	width: { label: "Width", axis: "x", role: "span" },
+	height: { label: "Height", axis: "y", role: "span" },
+	x: { label: "Horizontally", axis: "x", role: "axis" },
+	y: { label: "Vertically", axis: "y", role: "axis" },
+};
+
+export const EDGE_NAMES = Object.keys(EDGES) as Edge[];
+
+/** The positional edge at one end (or the middle) of an axis. */
+export const edgeOn = (
+	axis: "x" | "y",
+	place: "lead" | "mid" | "trail",
+): Edge =>
+	EDGE_NAMES.find(
+		(e) => EDGES[e].axis === axis && EDGES[e].place === place,
+	) as Edge;
+
+/** The six an `align` offers: a node's own places, not its sizes. */
+const PLACES = EDGE_NAMES.filter((e) => EDGES[e].role === "pos");
+const SPANS = EDGE_NAMES.filter((e) => EDGES[e].role === "span");
+const AXES = EDGE_NAMES.filter((e) => EDGES[e].role === "axis");
+
+/**
+ * One term of the sum a fresh geometric constraint seeds its value from.
+ *
+ * `slot` is the 1-based member, `place` where on the axis to measure it —
+ * `self` being the constraint's own edge, for the kinds whose edge already
+ * names a place.
+ */
+export interface SeedTerm {
+	slot: number;
+	place: "lead" | "mid" | "trail" | "self";
+	weight: number;
+}
 
 export interface ConstraintSpec {
 	label: string;
-	/** Phrased for the constraint list, with `{prop}` and `{n}` filled in. */
+	/** Phrased for the constraint list, with `{prop}`, `{n}`, `{edge}` and `{v}` filled in. */
 	summary: string;
 	/** True when the kind reads {@link Constraint.limit}. */
 	counted: boolean;
 	/** Fewest nodes for the constraint to say anything. */
 	minNodes: number;
+	/** Most it can use. Extra members would have nowhere to go. */
+	maxNodes: number;
 	/**
 	 * True when the kind talks about *where a node is* rather than about one of
 	 * its properties.
 	 *
 	 * Naming a node in a geometric constraint hands that node's frame over to
-	 * the solver — see the geometry rules in `compile.ts`. Nothing is geometric
-	 * yet; the flag is what a geometric kind will switch on, so adding one stays
-	 * a table entry plus its rule.
+	 * the solver — see the geometry rules in `compile.ts`.
 	 */
 	geometric: boolean;
+	/** Which quantities it may be about; empty for the property kinds. */
+	edges: Edge[];
+	/** True when the kind reads {@link Constraint.value}. */
+	valued: boolean;
+	/**
+	 * What that value measures in the design as it stands, so a new constraint
+	 * starts out already true rather than yanking the layout somewhere. Read
+	 * from here rather than switched on the kind — see `addConstraint`.
+	 */
+	seed: SeedTerm[];
 }
 
 /**
@@ -486,23 +585,105 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		summary: "no two share a {prop}",
 		counted: false,
 		minNodes: 2,
+		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
+		edges: [],
+		valued: false,
+		seed: [],
 	},
 	match: {
 		label: "All the same",
 		summary: "share one {prop}",
 		counted: false,
 		minNodes: 2,
+		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
+		edges: [],
+		valued: false,
+		seed: [],
 	},
 	atMost: {
 		label: "At most N distinct",
 		summary: "use at most {n} distinct {prop}",
 		counted: true,
 		minNodes: 2,
+		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
+		edges: [],
+		valued: false,
+		seed: [],
+	},
+	align: {
+		label: "Align",
+		summary: "share a {edge}",
+		counted: false,
+		minNodes: 2,
+		maxNodes: Number.POSITIVE_INFINITY,
+		geometric: true,
+		edges: PLACES,
+		valued: false,
+		seed: [],
+	},
+	gap: {
+		// Ordered: the first member is the near side of the gap, so a negative
+		// value is an overlap rather than a swap.
+		label: "Gap",
+		summary: "sit {v} apart, {edge}",
+		counted: false,
+		minNodes: 2,
+		maxNodes: 2,
+		geometric: true,
+		edges: AXES,
+		valued: true,
+		// From the near side of the first member to the far side of the second.
+		seed: [
+			{ slot: 1, place: "trail", weight: -1 },
+			{ slot: 2, place: "lead", weight: 1 },
+		],
+	},
+	equalSize: {
+		label: "Same size",
+		summary: "share a {edge}",
+		counted: false,
+		minNodes: 2,
+		maxNodes: Number.POSITIVE_INFINITY,
+		geometric: true,
+		edges: SPANS,
+		valued: false,
+		seed: [],
+	},
+	symmetric: {
+		// Two members mirror across the line {@link Constraint.value} names; a
+		// third replaces that line with its own centre, so the mirror can be a
+		// thing in the design rather than a number.
+		label: "Symmetric",
+		summary: "mirror each other {edge}",
+		counted: false,
+		minNodes: 2,
+		maxNodes: 3,
+		geometric: true,
+		edges: AXES,
+		valued: true,
+		// The line already halfway between the two centres.
+		seed: [
+			{ slot: 1, place: "mid", weight: 0.5 },
+			{ slot: 2, place: "mid", weight: 0.5 },
+		],
+	},
+	pin: {
+		label: "Pin",
+		summary: "hold a {edge} at {v}",
+		counted: false,
+		minNodes: 1,
+		maxNodes: 1,
+		geometric: true,
+		edges: [...PLACES, ...SPANS],
+		valued: true,
+		seed: [{ slot: 1, place: "self", weight: 1 }],
 	},
 };
+
+export const CONSTRAINT_NAMES = Object.keys(CONSTRAINT_KINDS) as ConstraintKind[];
 
 /**
  * A rule the design must obey, expressed over a property of several nodes.
@@ -515,12 +696,25 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 export interface Constraint {
 	id: string;
 	kind: ConstraintKind;
-	/** The property being constrained. */
+	/** The property being constrained. Meaningless to the geometric kinds. */
 	prop: PropName;
-	/** Nodes it ranges over. */
+	/** Nodes it ranges over, in the order they were named. */
 	nodes: string[];
 	/** Distinct-value budget, for the counted kinds. */
 	limit?: number;
+	/** Which quantity, for the geometric kinds. */
+	edge?: Edge;
+	/**
+	 * The number a `gap`, a `pin` or a mirror line holds to, in pixels.
+	 *
+	 * Deliberately a plain number rather than a {@link Value}: making it able to
+	 * name a token is the parametric phase's job, and the seam is small —
+	 * widen this to `Value`, resolve it wherever the picked alternative is
+	 * known, and hand the result to the single `c_value(C,V)` fact `compile()`
+	 * emits. The ASP side already takes it as a bound term and does its own
+	 * arithmetic, so no rule changes.
+	 */
+	value?: number;
 	/** Off keeps it in the document but out of the program. */
 	enabled: boolean;
 }

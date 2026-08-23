@@ -11,6 +11,7 @@ import {
 	type AutoLayout,
 	JUSTIFICATIONS,
 	CONSTRAINT_KINDS,
+	EDGES,
 	type Constraint,
 	DEFAULT_FRAME,
 	KINDS,
@@ -126,6 +127,10 @@ function isConstraint(value: unknown): value is Constraint {
 		return false;
 	}
 	if (typeof value.prop !== "string" || !(value.prop in PROPS)) return false;
+	// The geometric fields are optional, but a bogus one would compile into a
+	// fact no rule matches — a rule that silently does nothing.
+	if (value.edge !== undefined && !(String(value.edge) in EDGES)) return false;
+	if (value.value !== undefined && !Number.isFinite(value.value)) return false;
 	if (!Array.isArray(value.nodes)) return false;
 	return value.nodes.every((n) => typeof n === "string");
 }

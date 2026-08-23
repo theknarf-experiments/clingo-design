@@ -23,14 +23,18 @@ import {
 	CONSTRAINT_KINDS,
 	type Constraint,
 	type ConstraintKind,
+	type ConstraintSpec,
 	DEFAULT_LAYOUT,
 	type Diagonal,
+	EDGES,
+	type Edge,
 	KINDS,
 	type NodeKind,
 	type PropName,
 	type Scene,
 	type SceneNode,
 	type Sizing,
+	edgeOn,
 	uniqueName,
 	wrapsChildren,
 } from "./scene.ts";
@@ -46,6 +50,7 @@ import {
 	wouldCycle,
 } from "./values.ts";
 import {
+	edgeAt,
 	findInTree,
 	flatten,
 	groupFrame,
@@ -843,27 +848,118 @@ export function wrapInLayout(
  *
  * The property defaults to one the nodes actually have, because a constraint
  * on a property nothing exposes is silently vacuous — the sort of thing that
- * looks like a solver bug from the outside.
+ * looks like a solver bug from the outside. A geometric one defaults to the
+ * number the design is already at, for the same reason in reverse: adding a
+ * rule should say what is true, not yank the layout somewhere new.
  */
 export function addConstraint(
 	scene: Scene,
 	kind: ConstraintKind,
 	nodes: readonly string[],
 	prop?: PropName,
+	edge?: Edge,
 ): { scene: Scene; id: string } {
-	const chosen = prop ?? sharedProps(scene, nodes)[0] ?? "fill";
 	const constraint: Constraint = {
 		id: newNodeId().replace("n_", "k_"),
-		kind,
-		prop: chosen,
-		nodes: [...nodes],
-		...(CONSTRAINT_KINDS[kind].counted ? { limit: 1 } : {}),
 		enabled: true,
+		...shapeFor(scene, kind, nodes, {
+			prop: prop ?? sharedProps(scene, nodes)[0] ?? "fill",
+			edge,
+		}),
 	};
 	return {
 		scene: { ...scene, constraints: [...scene.constraints, constraint] },
 		id: constraint.id,
 	};
+}
+
+/**
+ * Changes what a constraint is *about*, re-seeding whatever the new shape
+ * needs.
+ *
+ * Not `updateConstraint`, because these two fields decide which of the others
+ * mean anything: a `differ` turned into a `pin` has no edge and no value yet,
+ * and defaulting them silently would slam the node to zero. A change of edge
+ * re-seeds for the same reason — 24px of horizontal gap says nothing about a
+ * vertical one.
+ */
+export function retargetConstraint(
+	scene: Scene,
+	id: string,
+	patch: { kind?: ConstraintKind; edge?: Edge },
+): Scene {
+	const current = scene.constraints.find((c) => c.id === id);
+	if (!current) return scene;
+	const next: Constraint = {
+		id: current.id,
+		enabled: current.enabled,
+		// Rebuilt rather than patched, so a field the new kind never reads is
+		// gone from the document instead of lingering as dead data.
+		...shapeFor(scene, patch.kind ?? current.kind, current.nodes, {
+			prop: current.prop,
+			edge: patch.edge ?? current.edge,
+			limit: current.limit,
+		}),
+	};
+	return {
+		...scene,
+		constraints: scene.constraints.map((c) => (c.id === id ? next : c)),
+	};
+}
+
+/** Everything about a constraint that follows from its kind. */
+function shapeFor(
+	scene: Scene,
+	kind: ConstraintKind,
+	nodes: readonly string[],
+	from: { prop: PropName; edge?: Edge; limit?: number },
+): Omit<Constraint, "id" | "enabled"> {
+	const spec = CONSTRAINT_KINDS[kind];
+	// Extra members would have nowhere to go: a gap has two sides, a pin one
+	// subject.
+	const members = nodes.slice(0, spec.maxNodes);
+	const kept = from.edge && spec.edges.includes(from.edge) ? from.edge : undefined;
+	const edge = kept ?? spec.edges[0];
+	return {
+		kind,
+		prop: from.prop,
+		nodes: [...members],
+		...(spec.counted ? { limit: from.limit ?? 1 } : {}),
+		...(spec.geometric ? { edge } : {}),
+		...(spec.valued
+			? { value: Math.round(currentValue(scene, spec, members, edge)) }
+			: {}),
+	};
+}
+
+/**
+ * What a valued geometric kind measures right now, so it starts satisfied.
+ *
+ * The weighted sum comes out of the kind's own table entry, so a new kind
+ * seeds itself by describing what it measures rather than by adding a case.
+ */
+function currentValue(
+	scene: Scene,
+	spec: ConstraintSpec,
+	nodes: readonly string[],
+	edge: Edge,
+): number {
+	const axis = EDGES[edge].axis;
+	let total = 0;
+	for (const term of spec.seed) {
+		const id = nodes[term.slot - 1];
+		const at =
+			id === undefined
+				? undefined
+				: edgeAt(
+						scene.nodes,
+						id,
+						term.place === "self" ? edge : edgeOn(axis, term.place),
+					);
+		if (at === undefined) return 0;
+		total += term.weight * at;
+	}
+	return total;
 }
 
 export function updateConstraint(
