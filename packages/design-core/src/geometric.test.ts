@@ -16,6 +16,7 @@ import {
 	addNode,
 	addNodeTo,
 	deleteNodes,
+	distributeNodes,
 	makeNode,
 	retargetConstraint,
 	updateConstraint,
@@ -412,6 +413,81 @@ test("switching a geometric rule off takes it out of the program", async () => {
 /* ------------------------------------------------------------------ */
 /* Housekeeping                                                        */
 /* ------------------------------------------------------------------ */
+
+test("lining up bottom edges moves the boxes rather than stretching them", async () => {
+	// Both concessions cost the same distance — b's bottom can meet a's by
+	// sliding up 180 or by shrinking 180 — and a design tool has to prefer the
+	// slide. Sizes are the dearer unknown, so it does.
+	const scene = loose(["a", 0, 0, 40, 60], ["b", 0, 200, 40, 40]);
+	const solved = await solve(
+		addConstraint(scene, "align", ["a", "b"], undefined, "bottom").scene,
+	);
+	assert.equal(bottom(solved, "a"), bottom(solved, "b"));
+	assert.equal(solved.a.height, 60, "still the box it was");
+	assert.equal(solved.b.height, 40);
+
+	// But a rule a move cannot satisfy still resizes, and by as little as ever.
+	const sized = await solve(
+		addConstraint(scene, "equalSize", ["a", "b"], undefined, "height").scene,
+	);
+	assert.equal(sized.a.height, sized.b.height);
+	assert.equal(sized.a.width, 40, "and only the span it named");
+	assert.equal(sized.b.width, 40);
+});
+
+test("a new rule is about whichever edge the design already agrees on", async () => {
+	// Side by side, tops level: aligning them on the left would fling one
+	// across the canvas, so an unqualified "align these" means their tops.
+	const scene = loose(["a", 0, 0, 40, 20], ["b", 300, 0, 60, 20]);
+	const aligned = addConstraint(scene, "align", ["a", "b"]);
+	assert.equal(aligned.scene.constraints[0].edge, "top");
+	const solved = await solve(aligned.scene);
+	assert.equal(solved.a.x, 0, "and so nothing moved");
+	assert.equal(solved.b.x, 300);
+
+	// Stacked instead, left edges level: the same rule now means their lefts.
+	const stacked = loose(["a", 0, 0, 40, 20], ["b", 0, 300, 60, 20]);
+	assert.equal(addConstraint(stacked, "align", ["a", "b"]).scene.constraints[0].edge, "left");
+	// Heights already match, widths do not, so "same size" means the heights.
+	assert.equal(
+		addConstraint(stacked, "equalSize", ["a", "b"]).scene.constraints[0].edge,
+		"height",
+	);
+	// And a gap is measured along the axis they are actually strung out on.
+	assert.equal(addConstraint(stacked, "gap", ["a", "b"]).scene.constraints[0].edge, "y");
+	assert.equal(addConstraint(scene, "gap", ["a", "b"]).scene.constraints[0].edge, "x");
+});
+
+test("distributing states a gap per neighbouring pair, at the average", async () => {
+	// 20 and 60 apart, so evening them up is 40 each — and the run keeps its
+	// overall length, which is the point of averaging rather than picking one.
+	const scene = loose(
+		["a", 0, 0, 40, 20],
+		["b", 60, 0, 40, 20],
+		["c", 160, 0, 40, 20],
+	);
+	const { scene: even, ids } = distributeNodes(scene, ["c", "a", "b"]);
+	assert.equal(ids.length, 2, "three in a row is two gaps");
+	assert.deepEqual(
+		even.constraints.map((c) => [c.kind, c.edge, c.nodes, c.value]),
+		[
+			["gap", "x", ["a", "b"], 40],
+			["gap", "x", ["b", "c"], 40],
+		],
+		"ordered by where they sit, not by how they were selected",
+	);
+
+	const solved = await solve(even);
+	assert.equal((solved.b.x ?? 0) - right(solved, "a"), 40);
+	assert.equal((solved.c.x ?? 0) - right(solved, "b"), 40);
+});
+
+test("two nodes are already evenly distributed", () => {
+	const scene = loose(["a", 0, 0, 40, 20], ["b", 60, 0, 40, 20]);
+	const { scene: same, ids } = distributeNodes(scene, ["a", "b"]);
+	assert.deepEqual(ids, []);
+	assert.equal(same, scene, "and the document is untouched");
+});
 
 test("a geometric constraint takes only as many members as it can use", () => {
 	const scene = loose(["a", 0, 0, 10, 10], ["b", 0, 0, 10, 10], ["c", 0, 0, 10, 10]);

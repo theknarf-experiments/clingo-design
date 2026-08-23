@@ -874,6 +874,55 @@ export function addConstraint(
 }
 
 /**
+ * Even gaps down a run of nodes.
+ *
+ * Every other tool distributes by *moving* things once; this one states the
+ * relation and leaves it stated, so the run stays even when one of them is
+ * later resized. It is a gap between each neighbouring pair rather than a kind
+ * of its own: n-1 ordinary constraints, each editable, each nameable in a core.
+ *
+ * The distance is the average of the gaps already there, so the run neither
+ * grows nor shrinks the moment it is evened up.
+ */
+export function distributeNodes(
+	scene: Scene,
+	nodes: readonly string[],
+	axis?: "x" | "y",
+): { scene: Scene; ids: string[] } {
+	const on =
+		axis ?? EDGES[quietestEdge(scene, CONSTRAINT_KINDS.gap, nodes)].axis;
+	const lead = edgeOn(on, "lead");
+	const trail = edgeOn(on, "trail");
+	const at = (id: string, edge: Edge) => edgeAt(scene.nodes, id, edge) ?? 0;
+	const order = nodes
+		.filter((id) => findInTree(scene.nodes, id) !== undefined)
+		.sort((a, b) => at(a, lead) - at(b, lead));
+	// Two nodes have one gap, and one gap is already even.
+	if (order.length < 3) return { scene, ids: [] };
+
+	let total = 0;
+	for (let i = 1; i < order.length; i++) {
+		total += at(order[i], lead) - at(order[i - 1], trail);
+	}
+	const value = Math.round(total / (order.length - 1));
+
+	let next = scene;
+	const ids: string[] = [];
+	for (let i = 1; i < order.length; i++) {
+		const added = addConstraint(
+			next,
+			"gap",
+			[order[i - 1], order[i]],
+			undefined,
+			on,
+		);
+		next = updateConstraint(added.scene, added.id, { value });
+		ids.push(added.id);
+	}
+	return { scene: next, ids };
+}
+
+/**
  * Changes what a constraint is *about*, re-seeding whatever the new shape
  * needs.
  *
@@ -919,7 +968,7 @@ function shapeFor(
 	// subject.
 	const members = nodes.slice(0, spec.maxNodes);
 	const kept = from.edge && spec.edges.includes(from.edge) ? from.edge : undefined;
-	const edge = kept ?? spec.edges[0];
+	const edge = kept ?? quietestEdge(scene, spec, members);
 	return {
 		kind,
 		prop: from.prop,
@@ -930,6 +979,51 @@ function shapeFor(
 			? { value: Math.round(currentValue(scene, spec, members, edge)) }
 			: {}),
 	};
+}
+
+/**
+ * The edge a new constraint should be about, if nobody said.
+ *
+ * The one that moves the design least, which for the kinds that name a place
+ * or a size is the quantity the members already agree on most closely: two
+ * boxes side by side get their tops aligned, not their left edges yanked
+ * together. A valued kind seeds itself instead, so any of its edges changes
+ * nothing and the axis is chosen for legibility — the one the members are
+ * actually strung out along.
+ */
+function quietestEdge(
+	scene: Scene,
+	spec: ConstraintSpec,
+	nodes: readonly string[],
+): Edge {
+	let best = spec.edges[0];
+	let least = Number.POSITIVE_INFINITY;
+	for (const edge of spec.edges) {
+		const spread = spreadOf(scene, nodes, edge);
+		if (spread < least) {
+			least = spread;
+			best = edge;
+		}
+	}
+	return best;
+}
+
+/**
+ * How far apart the members are on one edge.
+ *
+ * Negated for a whole axis, where being strung out along it is exactly what
+ * makes it the right one to measure: a gap belongs on the axis the boxes are
+ * separated on, not the one they overlap on.
+ */
+function spreadOf(scene: Scene, nodes: readonly string[], edge: Edge): number {
+	const spec = EDGES[edge];
+	const of = spec.role === "axis" ? edgeOn(spec.axis, "mid") : edge;
+	const values = nodes
+		.map((id) => edgeAt(scene.nodes, id, of))
+		.filter((v): v is number => v !== undefined);
+	if (values.length < 2) return 0;
+	const spread = Math.max(...values) - Math.min(...values);
+	return spec.role === "axis" ? -spread : spread;
 }
 
 /**

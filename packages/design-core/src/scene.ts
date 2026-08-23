@@ -542,6 +542,16 @@ export interface SeedTerm {
 	weight: number;
 }
 
+/**
+ * How a constraint draws itself over the design.
+ *
+ * The shapes, not the kinds: `edges` is the quantity the members share,
+ * `between` the distance from one to the next, `mirror` the line they balance
+ * across. A new kind picks one of these rather than growing the overlay a case
+ * — see `annotate.ts`.
+ */
+export type Annotated = "none" | "edges" | "between" | "mirror";
+
 export interface ConstraintSpec {
 	label: string;
 	/** Phrased for the constraint list, with `{prop}`, `{n}`, `{edge}` and `{v}` filled in. */
@@ -570,6 +580,8 @@ export interface ConstraintSpec {
 	 * from here rather than switched on the kind — see `addConstraint`.
 	 */
 	seed: SeedTerm[];
+	/** What it draws on the canvas while one of its members is selected. */
+	annotation: Annotated;
 }
 
 /**
@@ -590,6 +602,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		edges: [],
 		valued: false,
 		seed: [],
+		annotation: "none",
 	},
 	match: {
 		label: "All the same",
@@ -601,6 +614,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		edges: [],
 		valued: false,
 		seed: [],
+		annotation: "none",
 	},
 	atMost: {
 		label: "At most N distinct",
@@ -612,6 +626,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		edges: [],
 		valued: false,
 		seed: [],
+		annotation: "none",
 	},
 	align: {
 		label: "Align",
@@ -623,6 +638,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		edges: PLACES,
 		valued: false,
 		seed: [],
+		annotation: "edges",
 	},
 	gap: {
 		// Ordered: the first member is the near side of the gap, so a negative
@@ -640,6 +656,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 			{ slot: 1, place: "trail", weight: -1 },
 			{ slot: 2, place: "lead", weight: 1 },
 		],
+		annotation: "between",
 	},
 	equalSize: {
 		label: "Same size",
@@ -651,6 +668,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		edges: SPANS,
 		valued: false,
 		seed: [],
+		annotation: "edges",
 	},
 	symmetric: {
 		// Two members mirror across the line {@link Constraint.value} names; a
@@ -669,6 +687,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 			{ slot: 1, place: "mid", weight: 0.5 },
 			{ slot: 2, place: "mid", weight: 0.5 },
 		],
+		annotation: "mirror",
 	},
 	pin: {
 		label: "Pin",
@@ -680,6 +699,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		edges: [...PLACES, ...SPANS],
 		valued: true,
 		seed: [{ slot: 1, place: "self", weight: 1 }],
+		annotation: "edges",
 	},
 };
 

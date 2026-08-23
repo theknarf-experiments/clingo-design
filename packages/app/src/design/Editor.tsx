@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+	type Annotation,
 	type Frame,
 	HANDLES,
 	HANDLE_CURSOR,
@@ -13,6 +14,7 @@ import {
 	type SnapGuide,
 	type Universe,
 	addNodeTo,
+	annotate,
 	boundsOf,
 	dropTargetAt,
 	frameAncestorOf,
@@ -45,6 +47,7 @@ import {
 	wrapsChildren,
 } from "@clingo-design/design-core";
 
+import { Annotations } from "./Annotations";
 import { Artboard } from "./Artboard";
 import { cx } from "./cx";
 import styles from "./Editor.module.css";
@@ -163,6 +166,18 @@ export function Editor({
 		const list = placedNodes(scene.nodes, universe.solved);
 		return { list, byId: new Map(list.map((p) => [p.node.id, p])) };
 	}, [scene.nodes, universe.solved]);
+
+	/**
+	 * The geometric rules the selection is subject to, as marks.
+	 *
+	 * Read off the solved geometry rather than the preview: a rule says where
+	 * a node *will* be allowed to sit, and the answer to that only exists once
+	 * the drag has been committed and the solver has spoken.
+	 */
+	const notes = useMemo<Annotation[]>(
+		() => annotate(scene, selection, universe.solved),
+		[scene, selection, universe.solved],
+	);
 
 	/** Nodes an automatic layout owns, which the pointer must not move. */
 	const managed = useMemo(() => managedNodes(scene.nodes), [scene.nodes]);
@@ -794,6 +809,8 @@ export function Editor({
 					</div>
 				);
 			})}
+
+			<Annotations notes={notes} />
 
 			{guides.map((guide, i) => (
 				<div

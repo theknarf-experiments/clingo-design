@@ -4,6 +4,7 @@ export * from "./geometry.ts";
 export * from "./measure.ts";
 export * from "./tree.ts";
 export * from "./edits.ts";
+export * from "./annotate.ts";
 export * from "./compile.ts";
 export * from "./highlight.ts";
 export * from "./project.ts";

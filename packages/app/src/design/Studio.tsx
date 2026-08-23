@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import {
 	DRAW_KINDS,
+	type Edge,
 	KINDS,
 	type NodeKind,
 	SHAPE_KINDS,
@@ -10,7 +11,9 @@ import {
 	type ReorderTo,
 	type Scene,
 	type Universe,
+	addConstraint,
 	deleteNodes,
+	distributeNodes,
 	duplicateNodes,
 	groupNodes,
 	moveNodes,
@@ -31,6 +34,7 @@ import {
 	createCameraStore,
 } from "@clingo-design/canvas";
 
+import { AlignTools } from "./AlignTools";
 import { Artboard } from "./Artboard";
 import { Constraints } from "./Constraints";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -438,6 +442,28 @@ export function Studio({
 		if (created.length) setSelection(new Set(created));
 	}
 
+	/**
+	 * The toolbar's alignments. They state a rule rather than moving anything
+	 * themselves: the solver does the moving, and it keeps doing it.
+	 *
+	 * The Rules panel is opened at the same time, because a press that has a
+	 * lasting consequence should show where that consequence now lives.
+	 */
+	function align(edge: Edge) {
+		if (selection.size < 2) return;
+		const ids = [...selection];
+		onSceneChange(
+			(prev) => addConstraint(prev, "align", ids, undefined, edge).scene,
+		);
+		setPanel("constraints");
+	}
+
+	function distribute() {
+		if (selection.size < 3) return;
+		onSceneChange((prev) => distributeNodes(prev, [...selection]).scene);
+		setPanel("constraints");
+	}
+
 	function group() {
 		if (selection.size === 0) return;
 		let created: string | null = null;
@@ -711,6 +737,13 @@ export function Studio({
 									),
 								)}
 							</div>
+						) : null}
+						{view === "design" ? (
+							<AlignTools
+								count={selection.size}
+								onAlign={align}
+								onDistribute={distribute}
+							/>
 						) : null}
 						{view === "design" ? (
 							<div className={styles.tools}>

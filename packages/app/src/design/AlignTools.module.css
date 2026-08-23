@@ -1,0 +1,13 @@
+/* Another strip in the same bar, so it takes the bar's own styles rather than
+   a second copy of them. */
+.tools {
+	composes: tools from "./Studio.module.css";
+}
+
+.tool {
+	composes: tool iconTool from "./Studio.module.css";
+}
+
+.tip {
+	composes: tip from "./Studio.module.css";
+}

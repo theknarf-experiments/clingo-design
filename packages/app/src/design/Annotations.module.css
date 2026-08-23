@@ -1,0 +1,48 @@
+/* A one-pixel anchor at the document origin — zero would switch rendering off
+   — with every mark overflowing out of it in document coordinates. */
+.marks {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 1px;
+	height: 1px;
+	overflow: visible;
+	pointer-events: none;
+	z-index: 1;
+}
+
+/*
+ * Teal, dashed and thin: the selection outline is a solid accent line and a
+ * snap guide is a solid rose one, so a constraint has to be neither. The
+ * stroke does not thicken with the zoom, which is what keeps it a note in the
+ * margin rather than a line in the drawing.
+ */
+.mark line {
+	stroke: var(--dc-note);
+	stroke-width: 1;
+	stroke-dasharray: 5 3;
+	opacity: 0.75;
+	vector-effect: non-scaling-stroke;
+}
+
+/* A dimension is a measurement, so it is drawn solid, ticks and all — the
+   dashes are for the lines that stand *across* the design and only mean
+   "these agree". */
+.mark[data-shape="span"] line {
+	stroke-dasharray: none;
+}
+
+.label {
+	fill: var(--dc-note);
+	font-family: inherit;
+	font-size: 10px;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.9;
+	/* A halo, so a number over a busy shape stays a number. White rather than
+	   a theme colour: these sit on the artboard, and an artboard is whatever
+	   the designer painted it, most often pale. */
+	paint-order: stroke;
+	stroke: rgb(255 255 255 / 0.8);
+	stroke-width: 3px;
+	stroke-linejoin: round;
+}

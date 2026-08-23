@@ -16,6 +16,10 @@
 	--dc-accent: #6366f1;
 	--dc-accent-soft: #6366f155;
 	--dc-dot: #cbd1da;
+	/* Constraint annotations. Its own hue because the canvas already spends
+	   the accent on selection and rose on snap guides, and a mark that says
+	   "this rule holds here" must not be read as either. */
+	--dc-note: #0d9488;
 
 	/* Syntax colours for the rules panel. Deliberately quiet: the panel is a
 	   reference as often as it is an editor, and a full rainbow over ASP's
@@ -39,6 +43,7 @@
 		--dc-accent: #818cf8;
 		--dc-accent-soft: #818cf855;
 		--dc-dot: #2a2f38;
+		--dc-note: #2dd4bf;
 
 		--dc-syn-plain: #d5dbe5;
 		--dc-syn-comment: #69727f;
