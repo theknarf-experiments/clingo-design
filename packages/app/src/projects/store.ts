@@ -3,16 +3,17 @@ import {
 	type Doc,
 	change,
 	from,
+	getHeads,
 	initializeWasm,
 	load,
 	save,
+	view,
 } from "@automerge/automerge/slim";
 import wasmUrl from "@automerge/automerge/automerge.wasm?url";
 import {
 	type Project,
 	type Scene,
 	normalizeScene,
-	parseLegacyProjects,
 	reconcile,
 } from "@clingo-design/design-core";
 
@@ -36,6 +37,7 @@ import { loadAll, put, remove } from "./idb";
 const docs = new Map<string, Doc<Project>>();
 let snapshot: Project[] = [];
 let ready = false;
+let failure: string | null = null;
 const listeners = new Set<() => void>();
 
 function publish(): void {
@@ -52,6 +54,7 @@ function subscribe(listener: () => void): () => void {
 
 const getProjects = () => snapshot;
 const getReady = () => ready;
+const getFailure = () => failure;
 
 export function useProjects(): Project[] {
 	return useSyncExternalStore(subscribe, getProjects, getProjects);
@@ -59,6 +62,11 @@ export function useProjects(): Project[] {
 
 export function useProjectsReady(): boolean {
 	return useSyncExternalStore(subscribe, getReady, getReady);
+}
+
+/** Why the store is empty, when it is empty because something broke. */
+export function useProjectsError(): string | null {
+	return useSyncExternalStore(subscribe, getFailure, getFailure);
 }
 
 /* ------------------------------------------------------------------ */
@@ -139,11 +147,48 @@ export function saveScene(id: string, scene: Scene): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* Reading                                                             */
+/* History                                                             */
 /* ------------------------------------------------------------------ */
 
-const LEGACY_KEY = "clingo-design.projects";
-const IMPORTED_KEY = "clingo-design.projects.imported";
+/**
+ * A point in the document's history.
+ *
+ * Automerge records every change, so the past does not have to be kept
+ * alongside the document — it *is* the document. What a stack of these
+ * replaces is a stack of whole scenes.
+ */
+export type Heads = string[];
+
+/** The scene as the document currently holds it. */
+export function sceneOf(id: string): Scene | null {
+	return docs.get(id)?.scene ?? null;
+}
+
+export function sameHeads(a: Heads | null, b: Heads | null): boolean {
+	if (!a || !b || a.length !== b.length) return false;
+	return a.every((h, i) => h === b[i]);
+}
+
+export function headsOf(id: string): Heads | null {
+	const doc = docs.get(id);
+	return doc ? getHeads(doc) : null;
+}
+
+/** The scene as it stood at `heads`, without moving the document there. */
+export function sceneAt(id: string, heads: Heads): Scene | null {
+	const doc = docs.get(id);
+	if (!doc) return null;
+	try {
+		return normalizeScene(view(doc, heads).scene);
+	} catch {
+		// Heads from a document that has since been replaced.
+		return null;
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Reading                                                             */
+/* ------------------------------------------------------------------ */
 
 function adopt(id: string, bytes: Uint8Array): void {
 	let doc: Doc<Project>;
@@ -164,36 +209,6 @@ function adopt(id: string, bytes: Uint8Array): void {
 	if (fixed !== doc) schedule(id);
 }
 
-/**
- * The one-time import out of localStorage.
- *
- * The old value is left where it is and a marker written beside it: a marker
- * costs a few bytes, and nobody's work should hinge on this being right the
- * first time.
- */
-function importLegacy(): void {
-	let text: string | null;
-	try {
-		if (localStorage.getItem(IMPORTED_KEY)) return;
-		text = localStorage.getItem(LEGACY_KEY);
-	} catch {
-		// Private mode and blocked-storage settings throw on access.
-		return;
-	}
-	for (const project of parseLegacyProjects(text)) {
-		// Anything already in the database has been edited since; it wins.
-		if (docs.has(project.id)) continue;
-		docs.set(project.id, from(project));
-		schedule(project.id);
-	}
-	try {
-		localStorage.setItem(IMPORTED_KEY, "1");
-	} catch {
-		// Unwritable storage means the import runs again next time, which is
-		// harmless: the ids are the same, so it lands on the same documents.
-	}
-}
-
 async function boot(): Promise<void> {
 	await initializeWasm(wasmUrl);
 	try {
@@ -201,9 +216,19 @@ async function boot(): Promise<void> {
 	} catch {
 		// No database: the session works, it just will not survive a reload.
 	}
-	importLegacy();
 	ready = true;
 	publish();
 }
 
-void boot();
+/**
+ * A failed boot must say so.
+ *
+ * Every reader gates on {@link useProjectsReady}, so a rejected wasm load used
+ * to leave `ready` false forever: no projects, no error, a blank page. The
+ * store now becomes ready either way and carries the reason it is empty.
+ */
+void boot().catch((err: unknown) => {
+	failure = err instanceof Error ? err.message : String(err);
+	ready = true;
+	publish();
+});

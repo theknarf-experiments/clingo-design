@@ -59,14 +59,19 @@
 }
 
 /* Floating cluster over the canvas: back link + project name + view picker. */
+/* Bottom centre, the way every canvas tool puts it: the hand is already down
+   there, and the top of the canvas is where the work is. Centred on the whole
+   surface rather than pinned to an edge, and allowed to wrap on a narrow
+   window so nothing is pushed off-screen. */
 .toolbar {
 	position: absolute;
-	top: 12px;
+	bottom: 16px;
 	left: 12px;
 	right: 12px;
 	z-index: 50;
 	display: flex;
 	align-items: center;
+	justify-content: center;
 	gap: 6px;
 	flex-wrap: wrap;
 	pointer-events: none;
@@ -131,9 +136,11 @@
  * the shortcut as a key cap and appear where the toolbar wants it — the native
  * tooltip is slow, unstyleable, and puts itself under the pointer.
  */
+/* Above the button: the bar sits at the bottom of the canvas, so a tooltip
+   below it would open off the edge of the window. */
 .tip {
 	position: absolute;
-	top: calc(100% + 8px);
+	bottom: calc(100% + 8px);
 	left: 50%;
 	z-index: 1;
 	display: flex;

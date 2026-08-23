@@ -10,7 +10,7 @@
  * a token reference. One alternative is an ordinary design; two or more is a
  * branch the solver explores.
  */
-import { type Frame, type Point, boundsOf } from "./geometry.ts";
+import { type Frame, type PathPoint, boundsOf } from "./geometry.ts";
 import {
 	type Token,
 	VALUE_TYPES,
@@ -420,7 +420,7 @@ export interface SceneNode {
 	 * The frame is exactly their bounding box. Resizing scales them to match;
 	 * see {@link scalePoints}. Absent on every other kind.
 	 */
-	points?: Point[];
+	points?: PathPoint[];
 	/** Whether a plotted kind's last point joins back up to its first. */
 	closed?: boolean;
 	/**

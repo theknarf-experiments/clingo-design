@@ -3,3 +3,16 @@
 	max-width: 40rem;
 	margin: 0 auto;
 }
+
+/* The store's own words, when it could not open. Anything vaguer sends people
+   looking for a problem in their document. */
+.reason {
+	max-width: 40rem;
+	padding: 0.5rem 0.7rem;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.78rem;
+	color: var(--dc-bad, #fca5a5);
+	background: color-mix(in srgb, var(--dc-bad, #fca5a5) 10%, transparent);
+	border: 1px solid color-mix(in srgb, var(--dc-bad, #fca5a5) 35%, transparent);
+	border-radius: 6px;
+}

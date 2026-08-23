@@ -215,9 +215,10 @@ export function Studio({
 	const host = useRef<HTMLElement | null>(null);
 
 	// 100% and fixed: the camera belongs to the user, so nothing the document
-	// does may move it. The offset clears the floating toolbar.
+	// does may move it. The offset is margin, not clearance — the toolbar is at
+	// the bottom now and no longer sits over the document's top-left corner.
 	const camera = useMemo(
-		() => createCameraStore({ x: -32, y: -72, scale: 1 }),
+		() => createCameraStore({ x: -32, y: -32, scale: 1 }),
 		[],
 	);
 

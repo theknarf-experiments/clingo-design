@@ -13,6 +13,7 @@ import {
 	deleteProject,
 	renameProject,
 	useProjects,
+	useProjectsError,
 	useProjectsReady,
 } from "../projects/store";
 import styles from "./Projects.module.css";
@@ -40,6 +41,7 @@ function relativeTime(ts: number): string {
 export function Projects() {
 	const projects = useProjects();
 	const ready = useProjectsReady();
+	const error = useProjectsError();
 	const navigate = useNavigate();
 	const [renaming, setRenaming] = useState<string | null>(null);
 	const [draft, setDraft] = useState("");
@@ -107,8 +109,14 @@ export function Projects() {
 					{/* Nothing until the store has opened: an empty list and a list
 					    not yet read back look the same, and only one of them is
 					    worth saying out loud. */}
+					{error ? (
+						<p className={styles.failed} data-role="store-error">
+							Saved projects could not be opened: {error}
+						</p>
+					) : null}
+
 					{ordered.length === 0 ? (
-						ready ? (
+						ready && !error ? (
 							<p className={styles.empty} data-role="empty">
 								No projects yet. Pick a template above to make one.
 							</p>

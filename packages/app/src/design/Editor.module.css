@@ -144,3 +144,51 @@
 	stroke: var(--dc-accent);
 	stroke-width: 1.5;
 }
+
+/* A path's vertices, shown only while it is the single selection. Square for
+   a corner, round for a smooth point — the same shorthand every vector editor
+   uses, so the shape of the dot says what dragging it will do. */
+.anchor {
+	position: absolute;
+	width: 9px;
+	height: 9px;
+	margin: -5px 0 0 -5px;
+	background: var(--dc-bg, #fff);
+	border: 1.5px solid var(--dc-accent);
+	box-sizing: border-box;
+	cursor: grab;
+	z-index: 3;
+}
+
+.smooth {
+	border-radius: 50%;
+}
+
+.control {
+	position: absolute;
+	width: 8px;
+	height: 8px;
+	margin: -4px 0 0 -4px;
+	background: var(--dc-accent);
+	border: 1.5px solid var(--dc-bg, #fff);
+	border-radius: 50%;
+	box-sizing: border-box;
+	cursor: grab;
+	z-index: 3;
+}
+
+/* The tether from an anchor to its control, so a lone dot is never ambiguous
+   about which vertex it belongs to. */
+.handleLine {
+	position: absolute;
+	inset: 0;
+	overflow: visible;
+	pointer-events: none;
+	z-index: 2;
+}
+
+.handleLine line {
+	stroke: var(--dc-accent);
+	stroke-width: 1;
+	opacity: 0.55;
+}

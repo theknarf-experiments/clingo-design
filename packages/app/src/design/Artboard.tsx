@@ -11,6 +11,7 @@ import {
 	propValues,
 	propVar,
 	resolveValue,
+	pathData,
 	scalePoints,
 } from "@clingo-design/design-core";
 
@@ -135,25 +136,22 @@ function Stroke({
  * layout — so they are scaled into whichever one arrived here.
  */
 function Plot({ node, frame }: { node: SceneNode; frame: Frame }) {
-	const points = scalePoints(node.points ?? [], node.frame, frame)
-		.map((p) => `${p.x},${p.y}`)
-		.join(" ");
-	if (!points) return null;
+	const d = pathData(
+		scalePoints(node.points ?? [], node.frame, frame),
+		node.closed,
+	);
+	if (!d) return null;
 	return (
 		<svg className={styles.stroke} aria-hidden="true">
-			{node.closed ? (
-				<polygon points={points} strokeLinejoin="round" />
-			) : (
+			<path
+				d={d}
 				// An open run of segments is a stroke, not a shape: filling
 				// across the gap between its ends would draw an edge that is
 				// not there. Inline, so it beats the inherited fill.
-				<polyline
-					points={points}
-					style={{ fill: "none" }}
-					strokeLinecap="round"
-					strokeLinejoin="round"
-				/>
-			)}
+				style={node.closed ? undefined : { fill: "none" }}
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			/>
 		</svg>
 	);
 }

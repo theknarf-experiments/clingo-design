@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { addNode, addNodeTo, makeNode, makePath, setFrame } from "./edits.ts";
-import { pointsBounds, scalePoints } from "./geometry.ts";
-import { normalizeScene, parseLegacyProjects } from "./project.ts";
+import {
+	addNode,
+	addNodeTo,
+	makeNode,
+	makePath,
+	movePathPoint,
+	removePathPoint,
+	setFrame,
+	togglePathSmooth,
+} from "./edits.ts";
+import { pathBounds, pathData, pointsBounds, scalePoints } from "./geometry.ts";
+import { normalizeScene } from "./project.ts";
 import { KINDS, type Scene, emptyScene, isPlotted } from "./scene.ts";
 import { findInTree, worldFrame } from "./tree.ts";
 
@@ -148,33 +157,146 @@ test("a stored path keeps its points and its closed flag", () => {
 	assert.deepEqual(node?.points?.[2], { x: 100, y: 80 });
 });
 
-test("a path whose points did not survive is dropped rather than shown blank", () => {
-	const broken = JSON.stringify({
-		version: 1,
-		projects: [
-			{
-				id: "p",
-				name: "Broken",
-				createdAt: 0,
-				updatedAt: 0,
-				scene: {
-					tokens: [],
-					constraints: [],
-					rules: "",
-					nodes: [
-						{
-							id: "p1",
-							kind: "path",
-							name: "Path",
-							frame: { x: 0, y: 0, width: 10, height: 10 },
-							props: {},
-							points: ["nonsense"],
-						},
-					],
-				},
-			},
-		],
-	});
-	assert.equal(parseLegacyProjects(broken)[0]?.scene.nodes.length, 1);
-	assert.equal(parseLegacyProjects(broken)[0]?.scene.nodes[0]?.kind, "frame");
+/* ------------------------------------------------------------------ */
+/* Curves                                                              */
+/* ------------------------------------------------------------------ */
+
+test("a path with no handles is straight lines", () => {
+	const pts = [
+		{ x: 0, y: 0 },
+		{ x: 10, y: 0 },
+		{ x: 10, y: 10 },
+	];
+	assert.equal(pathData(pts, false), "M 0 0 L 10 0 L 10 10");
+	assert.equal(pathData(pts, true), "M 0 0 L 10 0 L 10 10 Z");
+	assert.deepEqual(pathBounds(pts), { x: 0, y: 0, width: 10, height: 10 });
+});
+
+test("a handle turns its segment into a cubic", () => {
+	const pts = [
+		{ x: 0, y: 0, out: { x: 10, y: 0 } },
+		{ x: 20, y: 0, in: { x: -10, y: 0 } },
+	];
+	assert.equal(pathData(pts), "M 0 0 C 10 0, 10 0, 20 0");
+});
+
+test("bounds follow the curve, not the control hull", () => {
+	// Both handles pull straight down 30, but a cubic only reaches three
+	// quarters of the way there. Bounding by the controls would say 30.
+	const pts = [
+		{ x: 0, y: 0, out: { x: 0, y: 30 } },
+		{ x: 40, y: 0, in: { x: 0, y: 30 } },
+	];
+	const box = pathBounds(pts);
+	assert.equal(box?.width, 40);
+	assert.ok(
+		Math.abs((box?.height ?? 0) - 22.5) < 0.001,
+		`peak of this cubic is 22.5, got ${box?.height}`,
+	);
+});
+
+test("a curve that bulges outside its anchors is still contained", () => {
+	const pts = [
+		{ x: 0, y: 0, out: { x: -40, y: 0 } },
+		{ x: 10, y: 0, in: { x: 40, y: 0 } },
+	];
+	const box = pathBounds(pts);
+	assert.ok((box?.x ?? 0) < 0, "reaches left of the first anchor");
+	assert.ok((box?.x ?? 0) + (box?.width ?? 0) > 10, "and right of the second");
+});
+
+test("editing a point re-derives the frame under the shape", () => {
+	let scene = addNode(
+		emptyScene(),
+		makePath(
+			[
+				{ x: 100, y: 100 },
+				{ x: 140, y: 100 },
+				{ x: 140, y: 140 },
+			],
+			true,
+			{ id: "p" },
+		),
+	);
+	const before = findInTree(scene.nodes, "p");
+	assert.deepEqual(before?.frame, { x: 100, y: 100, width: 40, height: 40 });
+
+	// Drag the first vertex up and left, beyond the old box.
+	scene = movePathPoint(scene, "p", 0, { x: -20, y: -20 });
+	const after = findInTree(scene.nodes, "p");
+	assert.deepEqual(
+		after?.frame,
+		{ x: 80, y: 80, width: 60, height: 60 },
+		"the frame follows the points rather than clipping them",
+	);
+	// Every point stays inside its own frame.
+	for (const p of after?.points ?? []) {
+		assert.ok(p.x >= 0 && p.y >= 0, `point ${JSON.stringify(p)} is inside`);
+	}
+	assert.equal(worldFrame(scene.nodes, "p")?.x, 80);
+});
+
+test("smoothing a corner gives it mirrored handles, and un-smoothing removes them", () => {
+	let scene = addNode(
+		emptyScene(),
+		makePath(
+			[
+				{ x: 0, y: 0 },
+				{ x: 50, y: 0 },
+				{ x: 100, y: 0 },
+			],
+			false,
+			{ id: "p" },
+		),
+	);
+	scene = togglePathSmooth(scene, "p", 1);
+	const smooth = findInTree(scene.nodes, "p")?.points?.[1];
+	assert.ok(smooth?.in && smooth?.out, "both sides");
+	assert.deepEqual(
+		{ x: -(smooth?.in?.x ?? 0), y: -(smooth?.in?.y ?? 0) },
+		smooth?.out,
+		"opposite and equal",
+	);
+
+	scene = togglePathSmooth(scene, "p", 1);
+	const corner = findInTree(scene.nodes, "p")?.points?.[1];
+	assert.equal(corner?.in, undefined);
+	assert.equal(corner?.out, undefined);
+});
+
+test("resizing scales the handles with the anchors", () => {
+	let scene = addNode(
+		emptyScene(),
+		makePath(
+			[
+				{ x: 0, y: 0, out: { x: 10, y: 0 } },
+				{ x: 40, y: 40 },
+			],
+			false,
+			{ id: "p" },
+		),
+	);
+	scene = setFrame(scene, "p", { x: 0, y: 0, width: 80, height: 40 });
+	const out = findInTree(scene.nodes, "p")?.points?.[0]?.out;
+	assert.equal(out?.x, 20, "doubled with the width");
+	assert.equal(out?.y, 0);
+});
+
+test("a path keeps at least two points", () => {
+	let scene = addNode(
+		emptyScene(),
+		makePath(
+			[
+				{ x: 0, y: 0 },
+				{ x: 10, y: 0 },
+				{ x: 10, y: 10 },
+			],
+			false,
+			{ id: "p" },
+		),
+	);
+	scene = removePathPoint(scene, "p", 0);
+	assert.equal(findInTree(scene.nodes, "p")?.points?.length, 2);
+	scene = removePathPoint(scene, "p", 0);
+	assert.equal(findInTree(scene.nodes, "p")?.points?.length, 2, "refused");
 });

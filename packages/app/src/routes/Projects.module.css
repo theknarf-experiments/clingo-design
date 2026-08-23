@@ -175,3 +175,15 @@
 	border: 1px dashed var(--dc-line);
 	border-radius: 8px;
 }
+
+/* A store that failed to open must say so here rather than looking like a
+   browser with no projects in it. */
+.failed {
+	margin: 0 0 0.6rem;
+	padding: 0.5rem 0.7rem;
+	font-size: 0.8rem;
+	color: var(--dc-bad, #fca5a5);
+	background: color-mix(in srgb, var(--dc-bad, #fca5a5) 10%, transparent);
+	border: 1px solid color-mix(in srgb, var(--dc-bad, #fca5a5) 35%, transparent);
+	border-radius: 6px;
+}

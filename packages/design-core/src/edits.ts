@@ -10,9 +10,11 @@
  */
 import {
 	type Frame,
+	MIN_NODE_SIZE,
+	type PathPoint,
 	type Point,
 	normaliseFrame,
-	pointsBounds,
+	pathBounds,
 	scalePoints,
 } from "./geometry.ts";
 import {
@@ -106,17 +108,153 @@ export function makeNode(
  * so that frame and points stay on the same whole pixels.
  */
 export function makePath(
-	points: readonly Point[],
+	points: readonly PathPoint[],
 	closed: boolean,
 	options: { id?: string; name?: string } = {},
 ): SceneNode {
-	const whole = points.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
-	const bounds = pointsBounds(whole) ?? { x: 0, y: 0, ...KINDS.path.defaultSize };
+	// Anchors go to whole pixels so frame and points agree; handles are
+	// offsets and stay exactly as drawn, since rounding them would visibly
+	// kink a shallow curve.
+	const whole: PathPoint[] = points.map((p) => ({
+		...p,
+		x: Math.round(p.x),
+		y: Math.round(p.y),
+	}));
+	const bounds = pathBounds(whole, closed) ?? {
+		x: 0,
+		y: 0,
+		...KINDS.path.defaultSize,
+	};
 	return makeNode("path", bounds, {
 		...options,
 		closed,
-		points: whole.map((p) => ({ x: p.x - bounds.x, y: p.y - bounds.y })),
+		points: whole.map((p) => ({ ...p, x: p.x - bounds.x, y: p.y - bounds.y })),
 	});
+}
+
+/**
+ * Rewrites a path's vertices and re-derives its frame from them.
+ *
+ * The points arrive relative to the node's *current* frame origin; the new
+ * bounding box is then subtracted back out, so the frame moves under the
+ * shape rather than the shape moving inside the frame. Everything that edits
+ * a path goes through here, because getting that subtraction wrong is how the
+ * outline and the drawing come apart.
+ */
+export function setPathPoints(
+	scene: Scene,
+	id: string,
+	points: readonly PathPoint[],
+	closed?: boolean,
+): Scene {
+	return {
+		...scene,
+		nodes: refreshGroups(
+			mapTree(scene.nodes, (node) => {
+				if (node.id !== id || !node.points) return node;
+				const shut = closed ?? node.closed ?? false;
+				const bounds = pathBounds(points, shut);
+				if (!bounds) return node;
+				const shift = (p: Point) => ({ x: p.x - bounds.x, y: p.y - bounds.y });
+				return {
+					...node,
+					closed: shut,
+					frame: {
+						x: node.frame.x + bounds.x,
+						y: node.frame.y + bounds.y,
+						width: Math.max(MIN_NODE_SIZE, bounds.width),
+						height: Math.max(MIN_NODE_SIZE, bounds.height),
+					},
+					// Handles are offsets from their anchor, so they survive the
+					// shift untouched — only the anchors move.
+					points: points.map((p) => ({ ...p, ...shift(p) })),
+				};
+			}),
+		),
+	};
+}
+
+/** Moves one vertex, carrying its handles. */
+export function movePathPoint(
+	scene: Scene,
+	id: string,
+	index: number,
+	to: Point,
+): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (!node?.points?.[index]) return scene;
+	const next = node.points.map((p, i) => (i === index ? { ...p, ...to } : p));
+	return setPathPoints(scene, id, next);
+}
+
+/**
+ * Sets one side of a vertex's curve.
+ *
+ * `mirror` keeps the other side opposite and equal, which is what makes a
+ * point smooth: the curve passes through without a crease.
+ */
+export function setPathHandle(
+	scene: Scene,
+	id: string,
+	index: number,
+	side: "in" | "out",
+	offset: Point | undefined,
+	mirror: boolean,
+): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (!node?.points?.[index]) return scene;
+	const other = side === "in" ? "out" : "in";
+	const next = node.points.map((p, i) => {
+		if (i !== index) return p;
+		const point: PathPoint = { x: p.x, y: p.y, in: p.in, out: p.out };
+		point[side] = offset;
+		if (mirror) {
+			point[other] = offset && { x: -offset.x, y: -offset.y };
+		}
+		if (!point.in) delete point.in;
+		if (!point.out) delete point.out;
+		return point;
+	});
+	return setPathPoints(scene, id, next);
+}
+
+/** Drops a vertex. A path needs two, so the last pair is kept. */
+export function removePathPoint(
+	scene: Scene,
+	id: string,
+	index: number,
+): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (!node?.points || node.points.length <= 2) return scene;
+	return setPathPoints(
+		scene,
+		id,
+		node.points.filter((_, i) => i !== index),
+	);
+}
+
+/** Corner <-> smooth. A smooth point gets handles along its neighbours' line. */
+export function togglePathSmooth(
+	scene: Scene,
+	id: string,
+	index: number,
+): Scene {
+	const node = findInTree(scene.nodes, id);
+	const point = node?.points?.[index];
+	if (!node?.points || !point) return scene;
+	if (point.in || point.out) {
+		return setPathHandle(scene, id, index, "out", undefined, true);
+	}
+	const n = node.points.length;
+	const before = node.points[(index - 1 + n) % n];
+	const after = node.points[(index + 1) % n];
+	// A quarter of the way along the neighbours' chord is the usual guess and
+	// looks like a curve rather than a spike.
+	const offset = {
+		x: (after.x - before.x) / 4,
+		y: (after.y - before.y) / 4,
+	};
+	return setPathHandle(scene, id, index, "out", offset, true);
 }
 
 /**

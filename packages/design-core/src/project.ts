@@ -86,9 +86,6 @@ export function findProject(
 /* The localStorage format, kept only to read it one last time         */
 /* ------------------------------------------------------------------ */
 
-/** The version {@link parseLegacyProjects} accepts; nothing writes it now. */
-export const LEGACY_PROJECTS_VERSION = 1;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -247,48 +244,3 @@ function pruneNodes(list: readonly unknown[]): SceneNode[] {
 	return out;
 }
 
-function normalizeProject(input: unknown, index: number): Project | null {
-	if (!isRecord(input)) return null;
-	const id = typeof input.id === "string" && input.id ? input.id : null;
-	if (!id) return null;
-
-	const created = Number(input.createdAt);
-	const updated = Number(input.updatedAt);
-	return {
-		id,
-		name:
-			typeof input.name === "string" && input.name.trim()
-				? input.name.trim()
-				: `Untitled ${index + 1}`,
-		scene: normalizeScene(input.scene),
-		createdAt: Number.isFinite(created) ? created : 0,
-		updatedAt: Number.isFinite(updated) ? updated : 0,
-	};
-}
-
-/**
- * Reads the single JSON blob the studio used to keep every project in, so it
- * can be imported once and never read again. Corrupt or foreign data yields
- * an empty list rather than throwing — losing the list is bad, but a studio
- * that will not load at all is worse.
- */
-export function parseLegacyProjects(text: string | null | undefined): Project[] {
-	if (!text) return [];
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch {
-		return [];
-	}
-	if (!isRecord(parsed) || !Array.isArray(parsed.projects)) return [];
-	if (Number(parsed.version) !== LEGACY_PROJECTS_VERSION) return [];
-
-	const out: Project[] = [];
-	parsed.projects.forEach((raw, i) => {
-		const project = normalizeProject(raw, i);
-		if (project) out.push(project);
-	});
-	// Duplicate ids would make routing ambiguous.
-	const seen = new Set<string>();
-	return out.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
-}

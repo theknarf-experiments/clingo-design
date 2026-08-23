@@ -88,6 +88,114 @@ export function boundsOf(frames: readonly Frame[]): Frame | null {
 	return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+/**
+ * A path vertex, with optional cubic control offsets.
+ *
+ * `in` and `out` are relative to the anchor, so moving a point carries its
+ * curve with it. A point with neither is a corner, and a segment between two
+ * corners is a straight line — which is why a path drawn with plain clicks
+ * needs no handles stored at all.
+ */
+export interface PathPoint extends Point {
+	in?: Point;
+	out?: Point;
+}
+
+const add = (a: Point, b?: Point): Point =>
+	b ? { x: a.x + b.x, y: a.y + b.y } : { ...a };
+
+/** The two control points of the segment from `a` to `b`. */
+export function controlsOf(a: PathPoint, b: PathPoint): [Point, Point] {
+	return [add(a, a.out), add(b, b.in)];
+}
+
+export const isCurved = (a: PathPoint, b: PathPoint): boolean =>
+	a.out !== undefined || b.in !== undefined;
+
+/**
+ * Where a cubic reaches its extremes on one axis.
+ *
+ * Only the anchors are guaranteed to be *on* the curve — a control point pulls
+ * it without being reached — so bounding a curve by its control hull would
+ * draw a selection box visibly larger than the shape. The real extremes are
+ * the roots of the derivative, which is a quadratic.
+ */
+function cubicExtremes(p0: number, c1: number, c2: number, p3: number): number[] {
+	const out = [p0, p3];
+	const a = -p0 + 3 * c1 - 3 * c2 + p3;
+	const b = 2 * (p0 - 2 * c1 + c2);
+	const c = c1 - p0;
+	const at = (t: number) => {
+		const u = 1 - t;
+		return u * u * u * p0 + 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t * p3;
+	};
+	const consider = (t: number) => {
+		if (t > 0 && t < 1) out.push(at(t));
+	};
+	if (Math.abs(a) < 1e-9) {
+		if (Math.abs(b) > 1e-9) consider(-c / b);
+	} else {
+		const disc = b * b - 4 * a * c;
+		if (disc >= 0) {
+			const root = Math.sqrt(disc);
+			consider((-b + root) / (2 * a));
+			consider((-b - root) / (2 * a));
+		}
+	}
+	return out;
+}
+
+/** The exact box a path occupies, curves included. */
+export function pathBounds(
+	points: readonly PathPoint[],
+	closed = false,
+): Frame | null {
+	if (points.length === 0) return null;
+	const xs: number[] = [];
+	const ys: number[] = [];
+	for (const p of points) {
+		xs.push(p.x);
+		ys.push(p.y);
+	}
+	const last = closed ? points.length : points.length - 1;
+	for (let i = 0; i < last; i++) {
+		const a = points[i];
+		const b = points[(i + 1) % points.length];
+		if (!isCurved(a, b)) continue;
+		const [c1, c2] = controlsOf(a, b);
+		xs.push(...cubicExtremes(a.x, c1.x, c2.x, b.x));
+		ys.push(...cubicExtremes(a.y, c1.y, c2.y, b.y));
+	}
+	const x = Math.min(...xs);
+	const y = Math.min(...ys);
+	return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+}
+
+/** The SVG `d` for a path's points. */
+export function pathData(
+	points: readonly PathPoint[],
+	closed = false,
+): string {
+	if (points.length === 0) return "";
+	let d = `M ${points[0].x} ${points[0].y}`;
+	const last = closed ? points.length : points.length - 1;
+	for (let i = 0; i < last; i++) {
+		const a = points[i];
+		const b = points[(i + 1) % points.length];
+		const closing = closed && i === points.length - 1;
+		if (!isCurved(a, b)) {
+			// Z already draws the straight segment home; a line to the start
+			// followed by Z is the same edge twice, which shows up as a doubled
+			// join under a thick stroke.
+			if (!closing) d += ` L ${b.x} ${b.y}`;
+			continue;
+		}
+		const [c1, c2] = controlsOf(a, b);
+		d += ` C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`;
+	}
+	return closed ? `${d} Z` : d;
+}
+
 /** Smallest frame containing every point, or null when there are none. */
 export function pointsBounds(points: readonly Point[]): Frame | null {
 	if (points.length === 0) return null;
@@ -108,14 +216,25 @@ export function pointsBounds(points: readonly Point[]): Frame | null {
  * rather than divided by zero.
  */
 export function scalePoints(
-	points: readonly Point[],
+	points: readonly PathPoint[],
 	from: { width: number; height: number },
 	to: { width: number; height: number },
-): Point[] {
+): PathPoint[] {
 	const sx = from.width === 0 ? 1 : to.width / from.width;
 	const sy = from.height === 0 ? 1 : to.height / from.height;
 	if (sx === 1 && sy === 1) return [...points];
-	return points.map((p) => ({ x: p.x * sx, y: p.y * sy }));
+	const scale = (p: Point | undefined) =>
+		p === undefined ? undefined : { x: p.x * sx, y: p.y * sy };
+	return points.map((p) => {
+		const next: PathPoint = { x: p.x * sx, y: p.y * sy };
+		// Handles are offsets, so they stretch with the shape rather than
+		// staying put and flattening the curve they describe.
+		const i = scale((p as PathPoint).in);
+		const o = scale((p as PathPoint).out);
+		if (i) next.in = i;
+		if (o) next.out = o;
+		return next;
+	});
 }
 
 /** Normalises a drag between two corners into a positive-size frame. */

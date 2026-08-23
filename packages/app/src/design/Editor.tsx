@@ -6,6 +6,7 @@ import {
 	type Handle,
 	KINDS,
 	type NodeKind,
+	type PathPoint,
 	type Placed,
 	type Point,
 	type Scene,
@@ -27,8 +28,14 @@ import {
 	managedNodes,
 	normaliseFrame,
 	parentMap,
+	findInTree,
+	movePathPoint,
+	setPathHandle,
+	removePathPoint,
+	togglePathSmooth,
+	worldOrigin,
 	placedNodes,
-	pointsBounds,
+	pathBounds,
 	reparent,
 	resizeFrame,
 	resizeSubtree,
@@ -39,6 +46,7 @@ import {
 } from "@clingo-design/design-core";
 
 import { Artboard } from "./Artboard";
+import { cx } from "./cx";
 import styles from "./Editor.module.css";
 
 export type Tool = "select" | NodeKind;
@@ -67,6 +75,18 @@ type Gesture =
 	  }
 	| { kind: "resize"; handle: Handle; origin: Point; start: Frame; id: string }
 	| { kind: "marquee"; origin: Point }
+	/** Dragging away from a point the pen has just placed, to curve it. */
+	| { kind: "penPull"; origin: Point }
+	/** Dragging one of a selected path's vertices. */
+	| { kind: "anchor"; id: string; index: number }
+	/** Dragging a vertex's curve handle. `mirror` keeps the far side opposite. */
+	| {
+			kind: "handle";
+			id: string;
+			index: number;
+			side: "in" | "out";
+			mirror: boolean;
+	  }
 	| { kind: "draw"; nodeKind: NodeKind; origin: Point };
 
 export interface EditorProps {
@@ -130,7 +150,7 @@ export function Editor({
 	 * drawing — a path is several clicks, so unlike every other tool it has a
 	 * state that outlives the pointer being down.
 	 */
-	const [pen, setPen] = useState<Point[] | null>(null);
+	const [pen, setPen] = useState<PathPoint[] | null>(null);
 
 	/**
 	 * Every node's absolute frame, indexed by id.
@@ -162,6 +182,18 @@ export function Editor({
 		.map((id) => placed.byId.get(id))
 		.filter((p): p is Placed => p !== undefined);
 
+	/**
+	 * The path whose vertices are on show.
+	 *
+	 * One selected path and the select tool: any other selection is about
+	 * whole nodes, and putting anchor dots on top of it would invite dragging
+	 * the wrong thing.
+	 */
+	const editing =
+		tool === "select" && selected.length === 1 && selected[0].node.points
+			? selected[0]
+			: null;
+
 	function beginMove(point: Point, ids: ReadonlySet<string>) {
 		const start = new Map<string, Frame>();
 		for (const id of ids) {
@@ -170,6 +202,23 @@ export function Editor({
 		}
 		if (start.size === 0) return;
 		setGesture({ kind: "move", origin: point, start });
+	}
+
+	/**
+	 * A canvas point in a node's own coordinates.
+	 *
+	 * Recomputed from the scene on every move rather than captured at gesture
+	 * start: editing a vertex moves the frame under it, so an origin taken
+	 * once would drift by exactly the amount the shape grew.
+	 */
+	function intoPath(prev: Scene, id: string, at: Point): Point | null {
+		const node = findInTree(prev.nodes, id);
+		if (!node) return null;
+		const parent = worldOrigin(prev.nodes, id);
+		return {
+			x: at.x - parent.x - node.frame.x,
+			y: at.y - parent.y - node.frame.y,
+		};
 	}
 
 	function targetFor(nodeId: string): string {
@@ -199,7 +248,7 @@ export function Editor({
 	 * Commits what the pen has, and hands the canvas back to the select tool
 	 * the way every other drawing gesture does.
 	 */
-	function finishPath(points: readonly Point[], closed: boolean) {
+	function finishPath(points: readonly PathPoint[], closed: boolean) {
 		setPen(null);
 		setCurrent(null);
 		onToolChange("select");
@@ -207,7 +256,7 @@ export function Editor({
 		if (points.length < 2) return;
 
 		const node = makePath(points, closed);
-		const bounds = pointsBounds(points);
+		const bounds = pathBounds(points, closed);
 		// Like any other new node: it lands inside whichever surface it was
 		// drawn over, judged by where its middle fell. Read through the ref
 		// because a keypress can end a path several renders after the last one
@@ -232,7 +281,13 @@ export function Editor({
 		const point = toCanvas(event);
 
 		if (tool !== "select") {
-			if (KINDS[tool].plotted) placePoint(point);
+			if (KINDS[tool].plotted) {
+				placePoint(point);
+				// Holding and dragging off the point curves it, the way a pen
+				// works everywhere else. Released without moving, it stays a
+				// corner and nothing is written.
+				setGesture({ kind: "penPull", origin: point });
+			}
 			else {
 				setGesture({ kind: "draw", nodeKind: tool, origin: point });
 				setCurrent(point);
@@ -415,6 +470,45 @@ export function Editor({
 					[...moving].some((id) => homeOf(id) !== drop.id) ? drop.id : null,
 				);
 				if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) moved = true;
+				return;
+			}
+
+			if (gesture.kind === "penPull") {
+				const pull = { x: point.x - gesture.origin.x, y: point.y - gesture.origin.y };
+				if (Math.hypot(pull.x, pull.y) < 2) return;
+				setPen((run) => {
+					if (!run?.length) return run;
+					const last = run.length - 1;
+					return run.map((p, i) =>
+						i === last
+							? { ...p, out: pull, in: { x: -pull.x, y: -pull.y } }
+							: p,
+					);
+				});
+				setCurrent(point);
+				return;
+			}
+
+			if (gesture.kind === "anchor") {
+				const { id, index } = gesture;
+				onSceneChange((prev) => {
+					const local = intoPath(prev, id, point);
+					return local ? movePathPoint(prev, id, index, local) : prev;
+				}, `path-${id}`);
+				return;
+			}
+
+			if (gesture.kind === "handle") {
+				const { id, index, side, mirror } = gesture;
+				onSceneChange((prev) => {
+					const node = findInTree(prev.nodes, id);
+					const anchor = node?.points?.[index];
+					const local = intoPath(prev, id, point);
+					if (!anchor || !local) return prev;
+					// A handle is an offset from its anchor, not a position.
+					const offset = { x: local.x - anchor.x, y: local.y - anchor.y };
+					return setPathHandle(prev, id, index, side, offset, mirror);
+				}, `path-${id}`);
 				return;
 			}
 
@@ -638,6 +732,68 @@ export function Editor({
 					style={rectStyle(dropHighlight)}
 				/>
 			) : null}
+
+
+			{/* A selected path's vertices. Drag one to move it, drag its dot to
+			    bend the curve, double-click to switch between corner and
+			    smooth, alt-click to remove it. */}
+			{editing?.node.points?.map((pt, index) => {
+				const id = editing.node.id;
+				const ox = editing.world.x;
+				const oy = editing.world.y;
+				const at = { x: ox + pt.x, y: oy + pt.y };
+				const sides = (["in", "out"] as const).filter((s) => pt[s]);
+				return (
+					<div key={`pt-${id}-${index}`}>
+						{sides.map((side) => {
+							const h = pt[side] as Point;
+							const to = { x: at.x + h.x, y: at.y + h.y };
+							return (
+								<div key={side}>
+									<svg className={styles.handleLine} aria-hidden="true">
+										<line x1={at.x} y1={at.y} x2={to.x} y2={to.y} />
+									</svg>
+									<div
+										className={styles.control}
+										data-control={`${index}-${side}`}
+										style={{ left: to.x, top: to.y }}
+										onPointerDown={(e) => {
+											e.stopPropagation();
+											setGesture({
+												kind: "handle",
+												id,
+												index,
+												side,
+												// Alt breaks the symmetry, so one side can be
+												// moved without dragging the other with it.
+												mirror: !e.altKey,
+											});
+										}}
+									/>
+								</div>
+							);
+						})}
+						<div
+							className={cx(styles.anchor, pt.in || pt.out ? styles.smooth : null)}
+							data-anchor={index}
+							title="Drag to move · double-click for a curve · alt-click to remove"
+							style={{ left: at.x, top: at.y }}
+							onDoubleClick={(e) => {
+								e.stopPropagation();
+								onSceneChange((prev) => togglePathSmooth(prev, id, index));
+							}}
+							onPointerDown={(e) => {
+								e.stopPropagation();
+								if (e.altKey) {
+									onSceneChange((prev) => removePathPoint(prev, id, index));
+									return;
+								}
+								setGesture({ kind: "anchor", id, index });
+							}}
+						/>
+					</div>
+				);
+			})}
 
 			{guides.map((guide, i) => (
 				<div
