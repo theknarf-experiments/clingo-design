@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
 	type Annotation,
 	type Frame,
+	type Freedom,
 	HANDLES,
 	HANDLE_CURSOR,
 	type Handle,
@@ -16,6 +17,7 @@ import {
 	addNodeTo,
 	annotate,
 	boundsOf,
+	clampTo,
 	dropTargetAt,
 	frameAncestorOf,
 	frameAt,
@@ -24,10 +26,12 @@ import {
 	handleEdges,
 	hitTestTree,
 	isDrawable,
+	isPlaced,
 	isSurface,
 	makeNode,
 	makePath,
 	managedNodes,
+	narrow,
 	normaliseFrame,
 	parentMap,
 	findInTree,
@@ -44,6 +48,7 @@ import {
 	selectionTargetOf,
 	setFrames,
 	snapFrame,
+	travelFrom,
 	wrapsChildren,
 } from "@clingo-design/design-core";
 
@@ -59,6 +64,13 @@ export type Tool = "select" | NodeKind;
  * pixels — divided by the scale, so zooming does not change the target.
  */
 const CLOSE_RADIUS = 10;
+
+/**
+ * How far a travel mark reaches when the constraints never stop it, in
+ * document units. A line to infinity is not a drawing, and the point being
+ * made is "this end is open", which a long line with no tick already makes.
+ */
+const OPEN = 200;
 
 /**
  * What the pointer is currently doing.
@@ -111,6 +123,12 @@ export interface EditorProps {
 	origin: Point;
 	/** Variable keys that are not settled, for the in-place overlay. */
 	varying?: ReadonlySet<string>;
+	/**
+	 * How far the selection's solver-owned coordinates can still travel. A node
+	 * absent from it has not been probed; an axis absent from a node it has is
+	 * the document's own number and free by construction.
+	 */
+	freedom?: Freedom;
 	/** Right-click, in client coordinates. */
 	onContextMenu?: (at: { x: number; y: number }) => void;
 }
@@ -134,6 +152,7 @@ export function Editor({
 	getScale,
 	origin,
 	varying,
+	freedom = {},
 	onContextMenu,
 }: EditorProps) {
 	const surface = useRef<HTMLDivElement>(null);
@@ -181,6 +200,26 @@ export function Editor({
 
 	/** Nodes an automatic layout owns, which the pointer must not move. */
 	const managed = useMemo(() => managedNodes(scene.nodes), [scene.nodes]);
+
+	/**
+	 * How far a set of nodes may be dragged along one axis, as a delta window.
+	 *
+	 * Three things narrow it, and the order matters. A node a layout places is
+	 * pinned by the document itself — knowable without asking anyone, which is
+	 * what lets the drag be limited from its very first frame. A coordinate the
+	 * solver decides is limited by whatever the probe found. Everything else is
+	 * a number in the document, and a number is free.
+	 */
+	function windowFor(ids: Iterable<string>, axis: "x" | "y") {
+		let out: { lo: number | null; hi: number | null } = { lo: null, hi: null };
+		for (const id of ids) {
+			if (managed.has(id)) return { lo: 0, hi: 0 };
+			const at = universe.solved[id]?.[axis];
+			if (at === undefined) continue;
+			out = narrow(out, travelFrom(freedom[id]?.[axis], at));
+		}
+		return out;
+	}
 
 	/** Pointer position in canvas coordinates. */
 	function toCanvas(event: { clientX: number; clientY: number }): Point {
@@ -400,6 +439,7 @@ export function Editor({
 		managed,
 		toCanvas,
 		targetFor,
+		windowFor,
 	});
 	live.current = {
 		scene,
@@ -410,6 +450,7 @@ export function Editor({
 		managed,
 		toCanvas,
 		targetFor,
+		windowFor,
 	};
 
 	// A gesture owns the window until release, so the pointer can leave the
@@ -450,6 +491,15 @@ export function Editor({
 				moving,
 				live.current.universe.solved,
 			);
+		/**
+		 * What the constraints leave this gesture, per axis. Fixed for the whole
+		 * drag for the same reason the snapping targets are: the document cannot
+		 * change under a pointer that is already down.
+		 */
+		const room = {
+			x: live.current.windowFor(moving, "x"),
+			y: live.current.windowFor(moving, "y"),
+		};
 
 		let moved = false;
 
@@ -457,33 +507,45 @@ export function Editor({
 			const point = live.current.toCanvas(event);
 
 			if (gesture.kind === "move") {
-				const dx = point.x - gesture.origin.x;
-				const dy = point.y - gesture.origin.y;
-				const next = new Map<string, Frame>();
-				for (const [id, frame] of gesture.start) {
-					next.set(id, { ...frame, x: frame.x + dx, y: frame.y + dy });
-				}
-				// Snap the selection as a block, using its bounds.
-				const bounds = boundsOf([...next.values()]);
+				// Where letting go would put them, worked out before the offset
+				// is: a drag that carries the nodes out of their container is not
+				// held to the constraints of the container it is leaving.
+				const drop = dropAt(point);
+				const rehoming = [...moving].some((id) => homeOf(id) !== drop.id);
+
+				let dx = point.x - gesture.origin.x;
+				let dy = point.y - gesture.origin.y;
+				// Snap the selection as a block, using its bounds. Folded into the
+				// offset rather than applied after it, so the limit below has the
+				// last word — a snap may not pull a node somewhere it cannot go.
+				const bounds = boundsOf([...gesture.start.values()]);
 				let snapped: SnapGuide[] = [];
 				if (bounds && !event.altKey) {
-					const result = snapFrame(bounds, { targets, container });
-					const ddx = result.frame.x - bounds.x;
-					const ddy = result.frame.y - bounds.y;
-					for (const [id, frame] of next) {
-						next.set(id, { ...frame, x: frame.x + ddx, y: frame.y + ddy });
-					}
+					const from = { ...bounds, x: bounds.x + dx, y: bounds.y + dy };
+					const result = snapFrame(from, { targets, container });
+					dx += result.frame.x - from.x;
+					dy += result.frame.y - from.y;
 					snapped = result.guides;
 				}
-				for (const [id, frame] of next) next.set(id, normaliseFrame(frame));
+				if (!rehoming) {
+					dx = clampTo(dx, room.x);
+					dy = clampTo(dy, room.y);
+				}
+
+				const next = new Map<string, Frame>();
+				for (const [id, frame] of gesture.start) {
+					next.set(
+						id,
+						normaliseFrame({ ...frame, x: frame.x + dx, y: frame.y + dy }),
+					);
+				}
 				setPreview(next);
 				setGuides(snapped);
 				// Only worth showing when letting go would actually move the
 				// nodes somewhere else in the tree.
-				const drop = dropAt(point);
-				setDropTarget(
-					[...moving].some((id) => homeOf(id) !== drop.id) ? drop.id : null,
-				);
+				setDropTarget(rehoming ? drop.id : null);
+				// The *allowed* movement, so a drag that went nowhere because
+				// nowhere was left does not write an edit.
 				if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) moved = true;
 				return;
 			}
@@ -681,6 +743,41 @@ export function Editor({
 		? placed.byId.get(dropTarget)?.world
 		: undefined;
 
+	/**
+	 * The selection's remaining travel, drawn where it would travel.
+	 *
+	 * Only for coordinates the solver decides. An ordinary frame is a number in
+	 * the document and free by construction, and saying so would put a cross
+	 * through every rectangle on the canvas; a pinned axis gets no mark either,
+	 * because its absence is the whole statement. So the marks appear exactly
+	 * where a rule has been written and has left something over.
+	 */
+	const travelMarks = selected.flatMap((p) => {
+		const travel = freedom[p.node.id];
+		if (!travel) return [];
+		const frame = preview?.get(p.node.id) ?? p.world;
+		const centre = {
+			x: frame.x + frame.width / 2,
+			y: frame.y + frame.height / 2,
+		};
+		return (["x", "y"] as const).flatMap((axis) => {
+			const at = universe.solved[p.node.id]?.[axis];
+			if (at === undefined) return [];
+			const { lo, hi } = travelFrom(travel[axis], at);
+			if (lo === 0 && hi === 0) return [];
+			return [
+				{
+					id: p.node.id,
+					axis,
+					across: axis === "x" ? centre.y : centre.x,
+					from: centre[axis] + (lo ?? -OPEN),
+					to: centre[axis] + (hi ?? OPEN),
+					open: [lo === null, hi === null] as const,
+				},
+			];
+		});
+	});
+
 	/** Preview frames are absolute; the renderer wants each node's own space. */
 	const renderPreview = useMemo(() => {
 		if (!preview) return undefined;
@@ -812,6 +909,43 @@ export function Editor({
 
 			<Annotations notes={notes} />
 
+			{/* What the selection may still be dragged along. End ticks where
+			    something stops it; an open end where nothing does. */}
+			{travelMarks.length > 0 ? (
+				<svg className={styles.travel} data-role="freedom" aria-hidden="true">
+					{travelMarks.map((mark) => {
+						const horizontal = mark.axis === "x";
+						const a = horizontal
+							? { x: mark.from, y: mark.across }
+							: { x: mark.across, y: mark.from };
+						const b = horizontal
+							? { x: mark.to, y: mark.across }
+							: { x: mark.across, y: mark.to };
+						return (
+							<g
+								key={`${mark.id}-${mark.axis}`}
+								className={styles.travelMark}
+								data-freedom={`${mark.id}-${mark.axis}`}
+							>
+								<line x1={a.x} y1={a.y} x2={b.x} y2={b.y} />
+								{[a, b].map((end, i) =>
+									mark.open[i] ? null : (
+										<line
+											key={`${end.x},${end.y}`}
+											className={styles.travelEnd}
+											x1={horizontal ? end.x : end.x - 4}
+											y1={horizontal ? end.y - 4 : end.y}
+											x2={horizontal ? end.x : end.x + 4}
+											y2={horizontal ? end.y + 4 : end.y}
+										/>
+									),
+								)}
+							</g>
+						);
+					})}
+				</svg>
+			) : null}
+
 			{guides.map((guide, i) => (
 				<div
 					key={i}
@@ -825,18 +959,26 @@ export function Editor({
 				/>
 			))}
 
-			{selected.map((p) => (
-				<div
-					key={p.node.id}
-					className={
-						wrapsChildren(p.node)
-							? `${styles.outline} ${styles.groupOutline}`
-							: styles.outline
-					}
-					data-outline={p.node.id}
-					style={rectStyle(preview?.get(p.node.id) ?? p.world)}
-				/>
-			))}
+			{/* An outline says "this is selected". A *placed* outline says the
+			    rules have answered the question the outline is about — there is
+			    nowhere left to drag this — and retreats into grey to say so, the
+			    way a property row with nothing left to choose does. */}
+			{selected.map((p) => {
+				const placed = isPlaced(freedom[p.node.id]) || managed.has(p.node.id);
+				return (
+					<div
+						key={p.node.id}
+						className={cx(
+							styles.outline,
+							wrapsChildren(p.node) && styles.groupOutline,
+							placed && styles.determined,
+						)}
+						data-outline={p.node.id}
+						data-determined={placed ? "" : undefined}
+						style={rectStyle(preview?.get(p.node.id) ?? p.world)}
+					/>
+				);
+			})}
 
 			{shownBounds && tool === "select" && gesture.kind !== "marquee" ? (
 				<div className={styles.handles} style={rectStyle(shownBounds)}>

@@ -63,6 +63,23 @@ export const worldVar = (nodeId: string, axis: "x" | "y"): string =>
 	`wv(${nodeId},${axis})`;
 
 /**
+ * The switch that puts the pull-toward-the-stored-frame objective on.
+ *
+ * Assumed on every ordinary solve. It exists so a *probe* can take it off:
+ * asking how far a coordinate could travel is a question about the equations
+ * alone, and an objective that drags everything home would answer it with the
+ * point the designer already has. See {@link probeAtom}.
+ */
+export const PULL_ATOM = "gpull";
+
+/** The switch that asks the solver for one coordinate's extreme. */
+export const probeAtom = (
+	nodeId: string,
+	axis: string,
+	direction: "min" | "max",
+): string => `gprobe(${nodeId},${axis},${direction})`;
+
+/**
  * The layout system, as rules over the facts a laid-out container emits.
  *
  * Written once and generically: `main`/`cross` swap the axes so a column is
@@ -219,7 +236,8 @@ const GEOMETRY_RULES = [
 	"% cost it would pick either. The weight settles that tie the way a design",
 	"% tool has to. It does not forbid a resize — `equalSize` and a pin on a",
 	"% width have no other way to be satisfied, and still are.",
-	"&minimize{ gd(N,A) : gpos(N,A); 4*gd(N,S) : gsize(N,S) }.",
+	"% Behind a switch so a probe can take it off; see the freedom rules below.",
+	"&minimize{ gd(N,A) : gpos(N,A), gpull; 4*gd(N,S) : gsize(N,S), gpull }.",
 	"",
 	"% ---- world coordinates ----",
 	"% Only along the chains that need one: a solved node and its ancestors.",
@@ -258,6 +276,44 @@ const GEOMETRY_RULES = [
 	"&sum{ ge(N,E); -2*wv(N,A); -K*lsz(N,S) } = 0 :- gedgeof(N,E), gedge(E,A,pos),",
 	"    goff(E,K), gspanof(A,S).",
 	"&sum{ ge(N,E); -2*lsz(N,E) } = 0 :- gedgeof(N,E), gedge(E,_,span).",
+]
+
+/**
+ * How much of the geometry is still free — the same question the brave
+ * consequences answer for properties, asked of a continuous quantity.
+ *
+ * A coordinate is pinned when its least and greatest legal values coincide,
+ * and clingo-lpx will report either on request. What it will not do is report
+ * both at once: the objective is one number, so a probe that names several
+ * coordinates gets their *sum*, and a single unbounded one poisons the lot —
+ * measured, and the reason there is no cheap whole-document map here. So the
+ * probe names one coordinate and one direction, and the answer is exact.
+ *
+ * Both switches are ordinary atoms the caller assumes, so probing costs a
+ * solve on the grounding that is already open rather than a re-grounding. The
+ * pull has to come off while probing — with it on, every extreme would be the
+ * point the document already has — so the probe choice only exists when it is
+ * off, and an ordinary solve turns them all off by assuming the pull.
+ */
+const FREEDOM_RULES = [
+	"",
+	"% ---- what is still free ----",
+	"#defined layout/2.",
+	"% Every coordinate the solver decides rather than reads off the document.",
+	"gcoord(N,A) :- gpos(N,A).",
+	"gcoord(N,S) :- gsize(N,S).",
+	"gcoord(N,A) :- lslot(_,N,_), gaxis(A).",
+	"gcoord(N,S) :- lslot(_,N,_), gspan(S).",
+	"gcoord(C,S) :- layout(C,_), gspan(S).",
+	"gdir(min). gdir(max).",
+	"{ gpull }.",
+	"% One coordinate, one direction, and only with the pull off — anything more",
+	"% in the objective and the answer stops being about that coordinate.",
+	"{ gprobe(N,A,D) : gcoord(N,A), gdir(D) } 1 :- not gpull.",
+	"&maximize{ lv(N,A) : gprobe(N,A,max), gaxis(A);",
+	"           -lv(N,A) : gprobe(N,A,min), gaxis(A);",
+	"           lsz(N,S) : gprobe(N,S,max), gspan(S);",
+	"           -lsz(N,S) : gprobe(N,S,min), gspan(S) }.",
 ]
 
 /**
@@ -376,6 +432,12 @@ export const CONTRACT = `% Predicates you can rely on:
 %   &dom{ 0..960 } = x.         bound a variable
 %   &minimize{ x }.             rank models by it; each model then also
 %                               reports __lpx_objective("N",Bounded)
+%
+% There is only ever one theory objective, and the studio already uses it
+% twice: to keep solved nodes near where you drew them, and to ask how far a
+% coordinate could travel. Writing your own adds to it, which will skew both.
+% Inequalities on lv/lsz are the way to say "no further than this", and the
+% freedom readout picks them up.
 %
 % Examples:
 %   :- resolved(prop(card,fill), C), resolved(prop(badge,fill), C).
@@ -622,6 +684,7 @@ export function compile(
 			...GEOMETRIC_KINDS,
 			...EDGE_FACTS,
 			...GEOMETRY_RULES,
+			...FREEDOM_RULES,
 		]),
 		section("constraints", constraintLines),
 		constraintLines.length === 0

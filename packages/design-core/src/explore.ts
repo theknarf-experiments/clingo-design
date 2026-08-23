@@ -10,8 +10,9 @@
  * derived from the models already in hand rather than asked for separately,
  * which takes the usual exploration from three solves down to one.
  */
-import { compile } from "./compile.ts";
+import { PULL_ATOM, compile } from "./compile.ts";
 import { formatDiagnostics, parseAtom } from "./atoms.ts";
+import { type Freedom, probeFreedom } from "./freedom.ts";
 import type { Frame } from "./geometry.ts";
 import type { Measurements } from "./measure.ts";
 import type { Scene } from "./scene.ts";
@@ -329,9 +330,28 @@ export class Explorer {
 	#solver: Solver;
 	#session: SolverSession | null = null;
 	#program = "";
+	/** What the last exploration assumed, so a probe asks about that document. */
+	#assumed: ReadonlyArray<{ atom: string; sign?: boolean }> = [];
 
 	constructor(solver: Solver) {
 		this.#solver = solver;
+	}
+
+	/**
+	 * How far the named nodes' solver-owned coordinates can travel.
+	 *
+	 * Runs on the grounding the last {@link explore} left open, under the same
+	 * assumptions, so it costs solves rather than a re-grounding — but two of
+	 * them per coordinate, which is why the caller decides what is worth asking
+	 * about. Returns nothing at all before the first exploration.
+	 */
+	async probe(
+		solved: Readonly<Record<string, Partial<Frame>>>,
+		nodeIds: readonly string[],
+	): Promise<Freedom> {
+		const session = this.#session;
+		if (!session || nodeIds.length === 0) return {};
+		return probeFreedom(session, this.#assumed, solved, nodeIds);
 	}
 
 	async explore(
@@ -354,12 +374,15 @@ export class Explorer {
 		const pins = Object.entries(options.pins ?? {}).map(
 			([variable, index]) => `pick(${variable},${index})`,
 		);
-		const assume = [...guards, ...pins].map((atom) => ({ atom }));
+		// The pull toward each node's stored frame is a switch too, so a freedom
+		// probe can take it off. Every ordinary solve wants it on.
+		const assume = [...guards, ...pins, PULL_ATOM].map((atom) => ({ atom }));
 		const reusedGrounding = this.#session !== null && this.#program === program;
 
 		if (!reusedGrounding) await this.#reopen(program, userRulesLine);
 		const session = this.#session;
 		if (!session) throw new Error("solver session unavailable");
+		this.#assumed = assume;
 
 		const optimized = isOptimizing(program);
 		let solves = 0;
@@ -537,6 +560,7 @@ export class Explorer {
 		const session = this.#session;
 		this.#session = null;
 		this.#program = "";
+		this.#assumed = [];
 		if (session) await session.close();
 	}
 }

@@ -185,8 +185,19 @@ export function Studio({
 	// is. Measuring here rather than in the compiler is what keeps design-core
 	// runnable outside a browser.
 	const measurements = useMemo(() => measureScene(scene), [scene]);
-	const { exploration, generated, error, conflict, pinConflict, solving } =
-		useExploration(scene, LIMIT, seed, pins, measurements);
+	// Sorted so the same selection reached two different ways is the same
+	// question, and the probe is not repeated for it.
+	const probeIds = useMemo(() => [...selection].sort(), [selection]);
+	const {
+		exploration,
+		generated,
+		error,
+		conflict,
+		pinConflict,
+		solving,
+		freedom,
+		probing,
+	} = useExploration(scene, LIMIT, seed, pins, measurements, probeIds);
 	const blamed = useMemo(() => new Set(conflict), [conflict]);
 	const badPins = useMemo(() => new Set(pinConflict), [pinConflict]);
 	/** Which alternatives are still reachable, per variable. */
@@ -670,6 +681,7 @@ export function Studio({
 											getScale={() => camera.get().scale}
 											origin={{ x: region.x, y: region.y }}
 											varying={varying}
+											freedom={freedom}
 											onContextMenu={(at) => {
 												const box = host.current?.getBoundingClientRect();
 												setMenu({
@@ -881,6 +893,7 @@ export function Studio({
 								varying={varying}
 								solved={primary?.solved}
 								reach={reach}
+								freedom={freedom}
 								pins={pins}
 								onPin={pin}
 							/>
@@ -920,6 +933,8 @@ export function Studio({
 							solving={solving}
 							varyingCount={varying.size}
 							selectionCount={selection.size}
+							freedom={freedom}
+							probing={probing}
 						/>
 					}
 				/>

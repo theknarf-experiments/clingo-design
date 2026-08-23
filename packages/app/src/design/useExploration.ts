@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
 	type Exploration,
 	Explorer,
+	type Freedom,
 	type Measurements,
 	type Scene,
 	UnsatisfiableError,
@@ -22,6 +23,10 @@ export interface ExplorationState {
 	/** Pinned variables the solver blamed, when the pins are what conflict. */
 	pinConflict: string[];
 	solving: boolean;
+	/** How far the probed nodes' solver-owned coordinates can still travel. */
+	freedom: Freedom;
+	/** True while the probe is out, so the UI can wait rather than guess. */
+	probing: boolean;
 }
 
 /**
@@ -42,6 +47,7 @@ export function useExploration(
 	seed = 1,
 	pins: Readonly<Record<string, number>> = {},
 	measurements: Measurements = {},
+	probeIds: readonly string[] = [],
 ): ExplorationState {
 	const [state, setState] = useState<ExplorationState>({
 		exploration: null,
@@ -50,6 +56,8 @@ export function useExploration(
 		conflict: [],
 		pinConflict: [],
 		solving: true,
+		freedom: {},
+		probing: false,
 	});
 
 	const explorer = useRef<Explorer | null>(null);
@@ -90,6 +98,9 @@ export function useExploration(
 					conflict: [],
 					pinConflict: [],
 					solving: false,
+					// Whatever was probed last was probed against another document.
+					freedom: {},
+					probing: false,
 				});
 			} catch (err) {
 				if (generation !== run.current) return;
@@ -100,12 +111,61 @@ export function useExploration(
 					conflict: err instanceof UnsatisfiableError ? err.conflict : [],
 					pinConflict: err instanceof UnsatisfiableError ? err.pinned : [],
 					solving: false,
+					freedom: {},
+					probing: false,
 				}));
 			}
 		}, 150);
 
 		return () => clearTimeout(timer);
 	}, [scene, limit, seed, pins, measurements]);
+
+	/**
+	 * Asks how far the probed nodes can still travel, once the design they
+	 * would be measured against is on screen.
+	 *
+	 * A second pass on purpose: two solves per coordinate comes to about what a
+	 * whole exploration costs, so this must not sit between an edit and the
+	 * design appearing. It runs on the grounding the exploration left open, so
+	 * it is solves and nothing else — and it is skipped entirely for a
+	 * selection whose geometry is the document's own, which is most of them.
+	 */
+	const { exploration } = state;
+	const solved = exploration?.universes[0]?.solved;
+	// The ids as a value, so a fresh array of the same selection is not a
+	// reason to spend eight solves again.
+	const probeKey = probeIds.join(" ");
+	useEffect(() => {
+		if (!solved) return;
+		const wanted = probeKey
+			.split(" ")
+			.filter((id) => id.length > 0 && solved[id] !== undefined);
+		// Nothing here is the solver's, so there is nothing to say — and saying
+		// the last selection's answer about this one would be a lie.
+		if (wanted.length === 0) {
+			setState((s) =>
+				s.probing || Object.keys(s.freedom).length > 0
+					? { ...s, freedom: {}, probing: false }
+					: s,
+			);
+			return;
+		}
+		let live = true;
+		setState((s) => ({ ...s, freedom: {}, probing: true }));
+		void explorer.current?.probe(solved, wanted).then(
+			(freedom) => {
+				if (live) setState((s) => ({ ...s, freedom, probing: false }));
+			},
+			// A probe that raced a re-grounding lost its session; the exploration
+			// that overtook it will start another one.
+			() => {
+				if (live) setState((s) => ({ ...s, probing: false }));
+			},
+		);
+		return () => {
+			live = false;
+		};
+	}, [solved, probeKey]);
 
 	return state;
 }

@@ -1,4 +1,9 @@
-import type { Exploration } from "@clingo-design/design-core";
+import {
+	type Exploration,
+	FRAME_AXES,
+	type Freedom,
+	degreesOfFreedom,
+} from "@clingo-design/design-core";
 
 import styles from "./StatusLine.module.css";
 
@@ -10,6 +15,43 @@ export interface StatusLineProps {
 	varyingCount: number;
 	/** Nodes currently selected on the canvas. */
 	selectionCount?: number;
+	/** How far the selection's solver-owned coordinates can still travel. */
+	freedom?: Freedom;
+	/** True while that is being worked out. */
+	probing?: boolean;
+}
+
+/**
+ * What the selection has left, in words.
+ *
+ * Only worth saying about geometry the solver decides: a node the document
+ * places has all four of its numbers and always will, and announcing that on
+ * every click would be noise. Silence therefore means "nothing has been said
+ * about this node", which is the truth.
+ */
+function room(freedom: Freedom): { label: string; detail: string } | null {
+	const ids = Object.keys(freedom);
+	if (ids.length !== 1) return null;
+	const node = freedom[ids[0]];
+	// Counted over all four numbers, not only the ones the solver took charge
+	// of: "fully determined" has to mean there is nothing left to change, and a
+	// container that hugs its contents still has somewhere to be put.
+	const free = degreesOfFreedom(node);
+	const detail = FRAME_AXES.map((axis) => {
+		const travel = node[axis];
+		if (!free.includes(axis)) return `${axis} pinned`;
+		if (!travel || (travel.min === null && travel.max === null)) {
+			return `${axis} open`;
+		}
+		return `${axis} ${travel.min ?? "−∞"} to ${travel.max ?? "∞"}`;
+	}).join(" · ");
+	return {
+		label:
+			free.length === 0
+				? "fully determined"
+				: `${free.length} degree${free.length === 1 ? "" : "s"} of freedom`,
+		detail,
+	};
 }
 
 /**
@@ -29,7 +71,10 @@ export function StatusLine({
 	solving,
 	varyingCount,
 	selectionCount = 0,
+	freedom = {},
+	probing = false,
 }: StatusLineProps) {
+	const left = room(freedom);
 	return (
 		<div className={styles.status} data-role="status">
 			{error ? (
@@ -78,6 +123,19 @@ export function StatusLine({
 			{selectionCount > 0 ? (
 				<span className={styles.ms}>
 					· {selectionCount} selected
+				</span>
+			) : null}
+			{left ? (
+				<span
+					className={left.label === "fully determined" ? styles.ms : undefined}
+					data-role="freedom"
+					title={`${left.detail} — two solves per coordinate, so this is asked only about the selection`}
+				>
+					· {left.label}
+				</span>
+			) : probing ? (
+				<span className={styles.ms} data-role="freedom">
+					· probing…
 				</span>
 			) : null}
 			{solving ? <span className={styles.spin} /> : null}

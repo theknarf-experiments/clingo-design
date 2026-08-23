@@ -61,6 +61,13 @@
 	gap: 0.35rem;
 }
 
+/* A coordinate the rules leave one value for. The same retreat a property
+   alternative makes when no design can use it: still legible, still part of
+   the document, plainly not a live choice. */
+.pinned {
+	opacity: 0.4;
+}
+
 /* A field whose choices are phrases rather than numbers needs the whole row. */
 .wide {
 	grid-column: 1 / -1;

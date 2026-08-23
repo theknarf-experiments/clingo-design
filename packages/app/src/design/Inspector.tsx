@@ -11,8 +11,10 @@ import {
 	type SceneNode,
 	type Term,
 	DEFAULT_LAYOUT,
+	type Freedom,
 	defaultValue,
 	findInTree,
+	isPinned,
 	isMeasured,
 	managedNodes,
 	nodeNames,
@@ -47,6 +49,11 @@ export interface InspectorProps {
 	solved?: Readonly<Record<string, { width?: number; height?: number }>>;
 	/** Per variable, the alternatives that occur in at least one legal design. */
 	reach?: Readonly<Record<string, Set<number>>>;
+	/**
+	 * The continuous half of the same idea: which of the selection's
+	 * coordinates the rules have left a choice about.
+	 */
+	freedom?: Freedom;
 	/** Alternatives the user has fixed, by variable. */
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
@@ -63,14 +70,21 @@ function NumberField({
 	value,
 	onChange,
 	disabled,
+	pinned,
 }: {
 	label: string;
 	value: number;
 	onChange: (next: number) => void;
 	disabled?: boolean;
+	/** The rules leave this coordinate one legal value; there is no choice. */
+	pinned?: boolean;
 }) {
 	return (
-		<label className={styles.field}>
+		<label
+			className={pinned ? `${styles.field} ${styles.pinned}` : styles.field}
+			data-pinned={pinned ? "" : undefined}
+			title={pinned ? "The rules leave this one value" : undefined}
+		>
 			<span className={styles.fieldLabel}>{label}</span>
 			<input
 				type="number"
@@ -103,6 +117,7 @@ export function Inspector({
 	varying,
 	solved,
 	reach,
+	freedom = {},
 	pins,
 	onPin,
 }: InspectorProps) {
@@ -162,24 +177,37 @@ export function Inspector({
 				</p>
 			) : null}
 			<div className={styles.grid}>
-				{AXES.map((axis) => (
-					<NumberField
-						key={axis}
-						label={axis}
-						value={node.frame[axis]}
-						disabled={
-							(managed && (axis === "x" || axis === "y")) ||
+				{AXES.map((axis) => {
+					// The probe is the authority wherever it has spoken: a field is
+					// dead when the rules leave the coordinate one value, and live
+					// otherwise — even for a coordinate the solver decides, because
+					// the stored number is what that coordinate is pulled toward.
+					// Until it lands, the document's own coarser answer stands in:
+					// a layout places its children, and a size the solver worked out
+					// is not a size to type into.
+					const probed = freedom[node.id]?.[axis];
+					const pinned = probed
+						? isPinned(probed)
+						: (managed && (axis === "x" || axis === "y")) ||
 							(axis === "width" && sizedBySolver.width) ||
-							(axis === "height" && sizedBySolver.height)
-						}
-						onChange={(next) =>
-							onSceneChange(
-								(prev) => setFrame(prev, node.id, { ...node.frame, [axis]: next }),
-								`frame-${axis}`,
-							)
-						}
-					/>
-				))}
+							(axis === "height" && sizedBySolver.height);
+					return (
+						<NumberField
+							key={axis}
+							label={axis}
+							value={node.frame[axis]}
+							pinned={pinned}
+							disabled={pinned}
+							onChange={(next) =>
+								onSceneChange(
+									(prev) =>
+										setFrame(prev, node.id, { ...node.frame, [axis]: next }),
+									`frame-${axis}`,
+								)
+							}
+						/>
+					);
+				})}
 			</div>
 
 			{isMeasured(node) ? (

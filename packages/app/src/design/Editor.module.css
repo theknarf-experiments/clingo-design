@@ -55,6 +55,42 @@
 	outline-style: dashed;
 }
 
+/* Nothing about this node's place is still open — the solver decided all of
+   it. Quiet on purpose: the same retreat into grey that a property row makes
+   when it has only one live alternative left. */
+.determined {
+	outline-color: color-mix(in srgb, var(--dc-accent) 35%, var(--dc-line));
+}
+
+/* The travel marks: the same one-pixel anchor at the document origin that the
+   annotations use, with everything drawn in document coordinates. */
+.travel {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 1px;
+	height: 1px;
+	overflow: visible;
+	pointer-events: none;
+	z-index: 1;
+}
+
+/* Accent, thin and solid: this *is* the selection saying what it can do, so
+   unlike a constraint note it belongs to the selection's own colour. It never
+   thickens with the zoom, so it stays a measurement rather than a shape. */
+.travelMark line {
+	stroke: var(--dc-accent);
+	stroke-width: 1;
+	opacity: 0.45;
+	vector-effect: non-scaling-stroke;
+}
+
+/* An end that something actually stops. The open ends have no tick, which is
+   the difference between "this far" and "as far as you like". */
+.travelEnd {
+	opacity: 0.75;
+}
+
 .handles {
 	position: absolute;
 	pointer-events: none;
