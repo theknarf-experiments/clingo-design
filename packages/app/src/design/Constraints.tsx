@@ -210,8 +210,9 @@ export function Constraints({
 
 			{conflict.size > 0 ? (
 				<p className={styles.conflict} data-role="conflict">
-					These {conflict.size} rules cannot all hold at once. Turn one off, or
-					widen a property so there are more values to go around.
+					{conflict.size === 1
+						? "This rule cannot hold. Turn it off, or widen a property so there are more values to go around."
+						: `These ${conflict.size} rules cannot all hold at once. Turn one off, or widen a property so there are more values to go around.`}
 				</p>
 			) : null}
 

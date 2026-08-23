@@ -43,14 +43,20 @@ export function text(
 	id: string,
 	name: string,
 	box: Box,
-	content: string,
+	// A whole {@link Value} as well as a bare string, because a wording with
+	// alternatives is the ordinary case and not a special one: a template that
+	// wants nine of them should not have to reach past this helper to say so.
+	content: string | Value,
 	props: SceneNode["props"],
 ): SceneNode {
 	// Content joins the other properties rather than sitting beside them, so a
 	// template can give a headline two wordings the way it gives it two colours.
 	return {
 		...makeNode("text", at(box), { id, name }),
-		props: { text: single(content), ...props },
+		props: {
+			text: typeof content === "string" ? single(content) : content,
+			...props,
+		},
 	};
 }
 
