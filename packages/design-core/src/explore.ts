@@ -15,7 +15,7 @@ import { formatDiagnostics, parseAtom } from "./atoms.ts";
 import { type Freedom, probeFreedom } from "./freedom.ts";
 import type { Frame } from "./geometry.ts";
 import type { Measurements } from "./measure.ts";
-import { readSolved } from "./model.ts";
+import { type ModelScene, readModel, readSolved } from "./model.ts";
 import type { Scene } from "./scene.ts";
 import type { Solver, SolverSession } from "./solver.ts";
 import {
@@ -40,6 +40,20 @@ export interface Universe {
 	 * over the node's stored frame.
 	 */
 	solved: Record<string, Partial<Frame>>;
+	/**
+	 * The picture this universe *is* — the tree, the frames and the final text
+	 * of every property, read straight out of the answer set.
+	 *
+	 * This is what a renderer draws. `pick` and `solved` stay because the rest
+	 * of the studio asks different questions of a universe: which alternative
+	 * to pin, how far a coordinate may travel, what to caption a cell with.
+	 *
+	 * Lazy, and deliberately. A sampling run interprets a few hundred
+	 * candidates and shows two dozen of them, so building a scene for each
+	 * would be work thrown away — `distance` and `universeKey`, the only things
+	 * that read a rejected candidate, never touch this.
+	 */
+	readonly model: ModelScene;
 }
 
 export interface SamplingInfo {
@@ -162,10 +176,16 @@ function readAtoms(
 }
 
 function interpret(atoms: readonly string[]): Universe {
+	let scene: ModelScene | undefined;
 	const universe: Universe = {
 		pick: {},
 		visible: new Set(),
 		solved: readSolved(atoms),
+		get model(): ModelScene {
+			// Memoised on the universe rather than on whoever draws it: a grid
+			// cell re-renders far more often than it is re-solved.
+			return (scene ??= readModel(atoms));
+		},
 	};
 	readAtoms(
 		atoms,

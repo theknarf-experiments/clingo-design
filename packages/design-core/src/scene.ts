@@ -335,14 +335,20 @@ export const DRAW_KINDS = NODE_KINDS.filter((k) => KINDS[k].drawable);
 /** The shapes, in the order their shared toolbar slot cycles through them. */
 export const SHAPE_KINDS = DRAW_KINDS.filter((k) => KINDS[k].shape);
 
-export const isDrawable = (node: SceneNode): boolean => KINDS[node.kind].drawable;
-export const isSurface = (node: SceneNode): boolean => KINDS[node.kind].surface;
-export const wrapsChildren = (node: SceneNode): boolean =>
+/**
+ * These ask about the kind and nothing else, so they take anything that has
+ * one — a document node, or a node read back out of an answer set.
+ */
+export interface Kinded {
+	kind: NodeKind;
+}
+
+export const isDrawable = (node: Kinded): boolean => KINDS[node.kind].drawable;
+export const isSurface = (node: Kinded): boolean => KINDS[node.kind].surface;
+export const wrapsChildren = (node: Kinded): boolean =>
 	KINDS[node.kind].wrapsChildren;
-export const isDiagonal = (node: SceneNode): boolean =>
-	KINDS[node.kind].diagonal;
-export const isPlotted = (node: SceneNode): boolean =>
-	KINDS[node.kind].plotted;
+export const isDiagonal = (node: Kinded): boolean => KINDS[node.kind].diagonal;
+export const isPlotted = (node: Kinded): boolean => KINDS[node.kind].plotted;
 
 /* ------------------------------------------------------------------ */
 /* Automatic layout                                                    */

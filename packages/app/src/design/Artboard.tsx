@@ -2,16 +2,16 @@ import { type CSSProperties, type ReactNode, memo, useMemo } from "react";
 import {
 	type Frame,
 	KINDS,
+	type ModelNode,
 	type NodeKind,
 	type PropName,
 	type Scene,
 	type SceneNode,
 	type Universe,
+	flatten,
 	isSurface,
-	propValues,
-	propVar,
-	resolveValue,
 	pathData,
+	propVar,
 	scalePoints,
 } from "@clingo-design/design-core";
 
@@ -57,11 +57,17 @@ interface ShapeSpec {
 	box?: CSSProperties;
 	/** Overrides {@link PAINT} where a kind takes a property somewhere else. */
 	paint?: Partial<Record<PropName, (value: string) => CSSProperties>>;
-	/** Drawn inside the box. */
+	/**
+	 * Drawn inside the box.
+	 *
+	 * `node` is the answer set's account of it; `doc` is the document node it
+	 * came from, present only for the vertices and the lean — see
+	 * {@link Artboard}.
+	 */
 	content?: (
-		node: SceneNode,
+		node: ModelNode,
 		frame: Frame,
-		resolved: Partial<Record<PropName, string>>,
+		doc: SceneNode | undefined,
 	) => ReactNode;
 }
 
@@ -74,27 +80,28 @@ interface ShapeSpec {
 const SHAPES: Partial<Record<NodeKind, ShapeSpec>> = {
 	text: {
 		box: { lineHeight: 1.35, overflow: "hidden", whiteSpace: "pre-wrap" },
-		// Content arrives with everything else, already resolved for this
-		// universe — which is what lets a headline differ between them.
-		content: (_node, _frame, resolved) => resolved.text,
+		// Content is a property like any other, so it arrives resolved for this
+		// universe with everything else — which is what lets a headline differ
+		// between them.
+		content: (node) => node.rendered.text,
 	},
 	// Fully rounded corners *are* an ellipse; an SVG for it would only add a
 	// second way to size the same box.
 	ellipse: { box: { borderRadius: "50%" } },
 	line: {
 		paint: INHERITED_STROKE,
-		content: (node, frame) => <Stroke node={node} frame={frame} />,
+		content: (_node, frame, doc) => <Stroke frame={frame} doc={doc} />,
 	},
 	arrow: {
 		paint: INHERITED_STROKE,
-		content: (node, frame) => <Stroke node={node} frame={frame} head />,
+		content: (_node, frame, doc) => <Stroke frame={frame} doc={doc} head />,
 	},
 	path: {
 		// A path's fill belongs to the polygon, not to the box around it: the
 		// box is only the vertices' bounding rectangle and painting it would
 		// show a shape the document does not contain.
 		paint: { ...INHERITED_STROKE, fill: (value) => ({ fill: value }) },
-		content: (node, frame) => <Plot node={node} frame={frame} />,
+		content: (_node, frame, doc) => <Plot frame={frame} doc={doc} />,
 	},
 };
 
@@ -105,11 +112,11 @@ const SHAPES: Partial<Record<NodeKind, ShapeSpec>> = {
  * stretched frame does not stretch the stroke with it.
  */
 function Stroke({
-	node,
 	frame,
+	doc,
 	head,
-}: { node: SceneNode; frame: Frame; head?: boolean }) {
-	const up = node.diagonal === "up";
+}: { frame: Frame; doc: SceneNode | undefined; head?: boolean }) {
+	const up = doc?.diagonal === "up";
 	const y1 = up ? frame.height : 0;
 	const y2 = up ? 0 : frame.height;
 	return (
@@ -124,7 +131,7 @@ function Stroke({
 			/>
 			{head ? (
 				<polyline
-						points={arrowHead(0, y1, frame.width, y2)}
+					points={arrowHead(0, y1, frame.width, y2)}
 					strokeLinecap="round"
 					strokeLinejoin="round"
 					fill="none"
@@ -141,11 +148,9 @@ function Stroke({
  * *rendered* at can differ — a live resize, or a stretch under an automatic
  * layout — so they are scaled into whichever one arrived here.
  */
-function Plot({ node, frame }: { node: SceneNode; frame: Frame }) {
-	const d = pathData(
-		scalePoints(node.points ?? [], node.frame, frame),
-		node.closed,
-	);
+function Plot({ frame, doc }: { frame: Frame; doc: SceneNode | undefined }) {
+	if (!doc) return null;
+	const d = pathData(scalePoints(doc.points ?? [], doc.frame, frame), doc.closed);
 	if (!d) return null;
 	return (
 		<svg className={styles.stroke} aria-hidden="true">
@@ -154,7 +159,7 @@ function Plot({ node, frame }: { node: SceneNode; frame: Frame }) {
 				// An open run of segments is a stroke, not a shape: filling
 				// across the gap between its ends would draw an edge that is
 				// not there. Inline, so it beats the inherited fill.
-				style={node.closed ? undefined : { fill: "none" }}
+				style={doc.closed ? undefined : { fill: "none" }}
 				strokeLinecap="round"
 				strokeLinejoin="round"
 			/>
@@ -183,6 +188,10 @@ function arrowHead(x1: number, y1: number, x2: number, y2: number): string {
 }
 
 export interface ArtboardProps {
+	/**
+	 * The document. Only the vertices of a plotted node and the lean of a
+	 * diagonal one are read from it — see {@link Artboard}.
+	 */
 	scene: Scene;
 	universe: Universe;
 	/** Overrides live geometry during a drag, before it is committed. */
@@ -195,6 +204,19 @@ export interface ArtboardProps {
 
 /**
  * Renders one universe of the document.
+ *
+ * What it draws is `universe.model`: the tree, the paint order, the frames and
+ * the final text of every property, read straight out of the answer set. The
+ * document is still what you select, drag and inspect, but it is no longer
+ * what you see — so a rule that moves a node or repaints it shows up on the
+ * canvas without the renderer knowing such a rule exists. That is why there is
+ * no `resolveValue` here any more, and no picks: the solver has done it.
+ *
+ * Two things are still read from the document, because the answer set does not
+ * carry them: a plotted node's vertices and a diagonal node's lean. Both are
+ * structure rather than value — no rule can change them today — and putting a
+ * bezier into ASP is a phase of its own. Everything the picture is *made of*
+ * comes from the atoms.
  *
  * Frames are positioned relative to their parent, which is exactly what nested
  * absolutely-positioned elements already do — so the render is a plain
@@ -211,26 +233,23 @@ export const Artboard = memo(function Artboard({
 	className,
 	style,
 }: ArtboardProps) {
-	// Derived values may read another node's property, so resolution needs the
-	// whole document, not just the tokens.
-	const context = useMemo(
-		() => ({
-			tokens: scene.tokens,
-			picks: universe.pick,
-			props: propValues(scene.nodes),
-		}),
-		[scene.tokens, scene.nodes, universe.pick],
-	);
+	// The vertices and the lean, by id. Memoised on the tree: the editor
+	// re-renders on every pointermove and this is a walk of the whole document.
+	const docNodes = useMemo(() => {
+		const byId = new Map<string, SceneNode>();
+		for (const node of flatten(scene.nodes)) byId.set(node.id, node);
+		return byId;
+	}, [scene.nodes]);
 
-	function render(node: SceneNode) {
-		// Solved geometry wins over the stored frame; a live drag wins over both.
-		const solved = universe.solved[node.id];
-		const frame =
-			preview?.get(node.id) ??
-			(solved ? { ...node.frame, ...solved } : node.frame);
+	function render(node: ModelNode) {
+		// The solver has not seen an uncommitted drag, so the one thing that
+		// still overrides the answer set is the frame the pointer is holding.
+		const frame = preview?.get(node.id) ?? node.frame;
 		const unsettled =
 			varying !== undefined &&
-			Object.keys(node.props).some((prop) => varying.has(propVar(node.id, prop)));
+			Object.keys(node.rendered).some((prop) =>
+				varying.has(propVar(node.id, prop)),
+			);
 
 		const box: CSSProperties = {
 			position: "absolute",
@@ -250,11 +269,11 @@ export const Artboard = memo(function Artboard({
 		const shape = SHAPES[node.kind];
 		if (shape?.box) Object.assign(box, shape.box);
 
-		const resolved: Partial<Record<PropName, string>> = {};
+		// `rendered/3` carries every property the node holds; a kind paints the
+		// ones its table entry lists and leaves the rest alone.
 		for (const prop of KINDS[node.kind].props) {
-			const value = resolveValue(context, node.props[prop], propVar(node.id, prop));
+			const value = node.rendered[prop];
 			if (value === undefined) continue;
-			resolved[prop] = value;
 			// Content is not something CSS paints; it is what goes inside.
 			const paint = shape?.paint?.[prop] ?? PAINT[prop];
 			if (paint) Object.assign(box, paint(value));
@@ -270,10 +289,8 @@ export const Artboard = memo(function Artboard({
 				style={box}
 				title={unsettled ? "This property has more than one value" : undefined}
 			>
-				{shape?.content?.(node, frame, resolved)}
-				{node.children?.map((child) =>
-					universe.visible.has(child.id) ? render(child) : null,
-				)}
+				{shape?.content?.(node, frame, docNodes.get(node.id))}
+				{node.children.map(render)}
 			</div>
 		);
 	}
@@ -284,9 +301,7 @@ export const Artboard = memo(function Artboard({
 			style={style}
 			data-artboard=""
 		>
-			{scene.nodes.map((node) =>
-				universe.visible.has(node.id) ? render(node) : null,
-			)}
+			{universe.model.roots.map(render)}
 		</div>
 	);
 });

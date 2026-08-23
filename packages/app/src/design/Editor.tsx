@@ -159,6 +159,21 @@ export function Editor({
 	const [gesture, setGesture] = useState<Gesture>({ kind: "none" });
 	/** Absolute frames while a gesture is live. */
 	const [preview, setPreview] = useState<Map<string, Frame> | null>(null);
+	/**
+	 * Frames the document has but the answer set has not caught up with, in
+	 * each node's own space.
+	 *
+	 * The canvas draws the last answer set, and the next one is a debounce and
+	 * a solve away — so between letting go of a drag and the solver speaking,
+	 * the node would otherwise snap back to where it started and jump forward
+	 * again. This carries the released frames across that gap. It is dropped
+	 * the moment a fresh universe arrives, whatever that universe says: if a
+	 * rule put the node somewhere else, that is the answer.
+	 */
+	const [settling, setSettling] = useState<ReadonlyMap<string, Frame> | null>(
+		null,
+	);
+	useEffect(() => setSettling(null), [universe]);
 	/** Live pointer position, for the marquee, draw and pen rubber bands. */
 	const [current, setCurrent] = useState<Point | null>(null);
 	const [guides, setGuides] = useState<SnapGuide[]>([]);
@@ -638,6 +653,7 @@ export function Editor({
 					? toLocal(new Map([[gesture.id, next]])).get(gesture.id)
 					: undefined;
 				if (frame) {
+					setSettling(new Map([[gesture.id, frame]]));
 					onSceneChange(
 						(prev) => resizeSubtree(prev, gesture.id, frame),
 						"geometry",
@@ -645,6 +661,7 @@ export function Editor({
 				}
 			} else if (gesture.kind === "move" && preview && moved) {
 				const local = toLocal(preview);
+				setSettling(local);
 				const drop = dropAt(point);
 				const rehomed = [...local.keys()].filter((id) => homeOf(id) !== drop.id);
 				// A reparent snapshots where a node visibly is, so it has to see
@@ -784,16 +801,20 @@ export function Editor({
 		});
 	});
 
-	/** Preview frames are absolute; the renderer wants each node's own space. */
+	/**
+	 * What the canvas draws instead of the answer set, in each node's own
+	 * space: the live gesture while there is one, and otherwise whatever the
+	 * last gesture committed that the solver has not answered for yet.
+	 */
 	const renderPreview = useMemo(() => {
-		if (!preview) return undefined;
+		if (!preview) return settling ?? undefined;
 		const out = new Map<string, Frame>();
 		for (const [id, world] of preview) {
 			const at = originOf(placed.byId.get(id), universe.solved[id]);
 			out.set(id, { ...world, x: world.x - at.x, y: world.y - at.y });
 		}
 		return out;
-	}, [preview, placed, universe.solved]);
+	}, [preview, settling, placed, universe.solved]);
 
 	/** Top-level surfaces get a name tag, the way an artboard is labelled. */
 	const topFrames = scene.nodes.filter(isSurface);
