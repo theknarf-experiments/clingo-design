@@ -40,7 +40,9 @@ export function ProgramPanel({
 	status,
 }: ProgramPanelProps) {
 	const [tab, setTab] = useState<Tab>("rules");
-	const [open, setOpen] = useState(true);
+	// Closed by default: this is the escape hatch for reading and writing the
+	// generated ASP, and most sessions never need it open.
+	const [open, setOpen] = useState(false);
 	const paint = useRef<HTMLPreElement | null>(null);
 
 	function select(id: Tab) {

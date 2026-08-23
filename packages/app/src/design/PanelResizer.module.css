@@ -1,0 +1,30 @@
+/* Six pixels of grab, one pixel of line: the divider should look like a hair
+   and behave like a handle. */
+.seam {
+	position: relative;
+	cursor: col-resize;
+	background: transparent;
+	touch-action: none;
+}
+
+.seam::after {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 50%;
+	width: 1px;
+	background: var(--dc-line);
+	transform: translateX(-50%);
+}
+
+.seam:hover::after,
+.seam:focus-visible::after,
+.active::after {
+	width: 2px;
+	background: var(--dc-accent);
+}
+
+.seam:focus-visible {
+	outline: none;
+}

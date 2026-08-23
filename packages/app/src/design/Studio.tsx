@@ -38,6 +38,7 @@ import { Editor, type Tool } from "./Editor";
 import { Inspector } from "./Inspector";
 import { LayerList } from "./LayerList";
 import { ProgramPanel } from "./ProgramPanel";
+import { PanelResizer, usePanelWidth } from "./PanelResizer";
 import { ShapePicker } from "./ShapePicker";
 import { StatusLine } from "./StatusLine";
 import { ToolIcon } from "./ToolIcon";
@@ -174,6 +175,8 @@ export function Studio({
 	 * alone, and is undone by forgetting it.
 	 */
 	const [pins, setPins] = useState<Readonly<Record<string, number>>>({});
+	const [leftWidth, setLeftWidth] = usePanelWidth("clingo-design.panel.left", 190);
+	const [rightWidth, setRightWidth] = usePanelWidth("clingo-design.panel.right", 260);
 	// Text sizes itself, and only something with a canvas can say how big it
 	// is. Measuring here rather than in the compiler is what keeps design-core
 	// runnable outside a browser.
@@ -563,8 +566,13 @@ export function Studio({
 
 	return (
 		<div className={styles.studio}>
-			<div className={styles.body}>
-				<aside className={cx(styles.side, styles.left)}>
+			<div
+				className={styles.body}
+				style={{
+					gridTemplateColumns: `${leftWidth}px 6px minmax(0, 1fr) 6px ${rightWidth}px`,
+				}}
+			>
+				<aside className={styles.side}>
 					<LayerList
 						scene={scene}
 						selection={selection}
@@ -580,6 +588,13 @@ export function Studio({
 						}}
 					/>
 				</aside>
+
+				<PanelResizer
+					side="left"
+					width={leftWidth}
+					onResize={setLeftWidth}
+					label="Resize the layers panel"
+				/>
 
 				<main className={styles.main} data-role="canvas-host" ref={host}>
 					<InfiniteCanvas
@@ -779,6 +794,13 @@ export function Studio({
 						</div>
 					) : null}
 				</main>
+
+				<PanelResizer
+					side="right"
+					width={rightWidth}
+					onResize={setRightWidth}
+					label="Resize the properties panel"
+				/>
 
 				<aside className={cx(styles.side, styles.right)}>
 					<div className={cx(tabStyles.bar, styles.sideTabs)}>

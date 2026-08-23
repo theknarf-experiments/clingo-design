@@ -5,9 +5,11 @@
 	font-size: 14px;
 }
 
+/* Five columns: panel, seam, canvas, seam, panel. The widths are set inline
+   from the studio, which is what makes the seams draggable. */
 .body {
 	display: grid;
-	grid-template-columns: 190px minmax(0, 1fr) 260px;
+	grid-template-columns: 190px 6px minmax(0, 1fr) 6px 260px;
 	min-height: 0;
 }
 
@@ -22,7 +24,6 @@
 	flex-direction: column;
 	overflow: hidden;
 	padding: 0;
-	border-left: 1px solid var(--dc-line);
 }
 
 .sideTabs {
@@ -47,9 +48,7 @@
 	font-variant-numeric: tabular-nums;
 }
 
-.left {
-	border-right: 1px solid var(--dc-line);
-}
+
 
 /* Positioning context for the canvas and the controls floating over it. */
 .main {
