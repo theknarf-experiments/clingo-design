@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { addNode, addNodeTo, makeNode, makePath, setFrame } from "./edits.ts";
 import { pointsBounds, scalePoints } from "./geometry.ts";
-import { createProject, parseProjects, serializeProjects } from "./project.ts";
+import { normalizeScene, parseLegacyProjects } from "./project.ts";
 import { KINDS, type Scene, emptyScene, isPlotted } from "./scene.ts";
 import { findInTree, worldFrame } from "./tree.ts";
 
@@ -142,8 +142,8 @@ test("a stored path keeps its points and its closed flag", () => {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(scene, { ...makePath(SQUARE, true), id: "p1" });
 
-	const back = parseProjects(serializeProjects([createProject({ scene })]));
-	const node = back[0]?.scene.nodes[0];
+	const back = normalizeScene(JSON.parse(JSON.stringify(scene)));
+	const node = back.nodes[0];
 	assert.equal(node?.closed, true);
 	assert.deepEqual(node?.points?.[2], { x: 100, y: 80 });
 });
@@ -175,6 +175,6 @@ test("a path whose points did not survive is dropped rather than shown blank", (
 			},
 		],
 	});
-	assert.equal(parseProjects(broken)[0]?.scene.nodes.length, 1);
-	assert.equal(parseProjects(broken)[0]?.scene.nodes[0]?.kind, "frame");
+	assert.equal(parseLegacyProjects(broken)[0]?.scene.nodes.length, 1);
+	assert.equal(parseLegacyProjects(broken)[0]?.scene.nodes[0]?.kind, "frame");
 });

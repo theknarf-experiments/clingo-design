@@ -4,13 +4,17 @@ import {
 	TEMPLATES,
 	type Template,
 	createProject,
-	deleteProject,
-	renameProject,
 	sortProjects,
 	uniqueProjectName,
 } from "@clingo-design/design-core";
 
-import { setProjects, useProjects } from "../projects/store";
+import {
+	addProject,
+	deleteProject,
+	renameProject,
+	useProjects,
+	useProjectsReady,
+} from "../projects/store";
 import styles from "./Projects.module.css";
 
 function relativeTime(ts: number): string {
@@ -35,6 +39,7 @@ function relativeTime(ts: number): string {
 
 export function Projects() {
 	const projects = useProjects();
+	const ready = useProjectsReady();
 	const navigate = useNavigate();
 	const [renaming, setRenaming] = useState<string | null>(null);
 	const [draft, setDraft] = useState("");
@@ -50,12 +55,12 @@ export function Projects() {
 			name: uniqueProjectName(projects, template.name),
 			scene: template.create(),
 		});
-		setProjects((list) => [project, ...list]);
+		addProject(project);
 		navigate(`/p/${project.id}`);
 	}
 
 	function commitRename(id: string) {
-		setProjects((list) => renameProject(list, id, draft));
+		renameProject(id, draft);
 		setRenaming(null);
 	}
 
@@ -99,10 +104,15 @@ export function Projects() {
 						) : null}
 					</h2>
 
+					{/* Nothing until the store has opened: an empty list and a list
+					    not yet read back look the same, and only one of them is
+					    worth saying out loud. */}
 					{ordered.length === 0 ? (
-						<p className={styles.empty} data-role="empty">
-							No projects yet. Pick a template above to make one.
-						</p>
+						ready ? (
+							<p className={styles.empty} data-role="empty">
+								No projects yet. Pick a template above to make one.
+							</p>
+						) : null
 					) : (
 						<ul className={styles.list}>
 							{ordered.map((project) => (
@@ -160,9 +170,7 @@ export function Projects() {
 													className={`${styles.action} ${styles.danger}`}
 													data-role="confirm-delete"
 													onClick={() => {
-														setProjects((list) =>
-															deleteProject(list, project.id),
-														);
+														deleteProject(project.id);
 														setConfirmDelete(null);
 													}}
 												>

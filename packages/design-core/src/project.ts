@@ -2,6 +2,9 @@
  * Projects: a named {@link Scene} plus metadata, and the pure operations the
  * overview page needs. Storage is the caller's problem — everything here is
  * plain data in, plain data out, so it can be tested without a browser.
+ *
+ * A project used to be an entry in one JSON blob, which is why the reader for
+ * that blob still lives at the bottom of this file.
  */
 import {
 	ALIGNMENTS,
@@ -20,21 +23,17 @@ import {
 	uniqueName,
 } from "./scene.ts";
 
-export interface Project {
+/**
+ * An alias rather than an interface: only aliases get an implicit index
+ * signature, and stores that take `Record<string, unknown>` want one.
+ */
+export type Project = {
 	id: string;
 	name: string;
 	scene: Scene;
 	createdAt: number;
 	updatedAt: number;
-}
-
-/** Bumped whenever the persisted shape changes incompatibly. */
-export const PROJECTS_VERSION = 1;
-
-export interface ProjectFile {
-	version: number;
-	projects: Project[];
-}
+};
 
 function newId(): string {
 	// Available in browsers and Node >= 19.
@@ -75,36 +74,6 @@ export function sortProjects(list: readonly Project[]): Project[] {
 	return [...list].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-export function renameProject(
-	list: readonly Project[],
-	id: string,
-	name: string,
-	now = Date.now(),
-): Project[] {
-	const trimmed = name.trim();
-	// An empty name would leave an unclickable row, so keep the old one.
-	if (!trimmed) return [...list];
-	return list.map((p) =>
-		p.id === id ? { ...p, name: trimmed, updatedAt: now } : p,
-	);
-}
-
-export function deleteProject(
-	list: readonly Project[],
-	id: string,
-): Project[] {
-	return list.filter((p) => p.id !== id);
-}
-
-export function updateProjectScene(
-	list: readonly Project[],
-	id: string,
-	scene: Scene,
-	now = Date.now(),
-): Project[] {
-	return list.map((p) => (p.id === id ? { ...p, scene, updatedAt: now } : p));
-}
-
 export function findProject(
 	list: readonly Project[],
 	id: string | undefined,
@@ -114,16 +83,11 @@ export function findProject(
 }
 
 /* ------------------------------------------------------------------ */
-/* Persistence                                                         */
+/* The localStorage format, kept only to read it one last time         */
 /* ------------------------------------------------------------------ */
 
-export function serializeProjects(list: readonly Project[]): string {
-	const file: ProjectFile = {
-		version: PROJECTS_VERSION,
-		projects: [...list],
-	};
-	return JSON.stringify(file);
-}
+/** The version {@link parseLegacyProjects} accepts; nothing writes it now. */
+export const LEGACY_PROJECTS_VERSION = 1;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -303,11 +267,12 @@ function normalizeProject(input: unknown, index: number): Project | null {
 }
 
 /**
- * Reads back what {@link serializeProjects} wrote, tolerating anything.
- * Corrupt or foreign data yields an empty list rather than throwing — losing
- * the list is bad, but a studio that will not load at all is worse.
+ * Reads the single JSON blob the studio used to keep every project in, so it
+ * can be imported once and never read again. Corrupt or foreign data yields
+ * an empty list rather than throwing — losing the list is bad, but a studio
+ * that will not load at all is worse.
  */
-export function parseProjects(text: string | null | undefined): Project[] {
+export function parseLegacyProjects(text: string | null | undefined): Project[] {
 	if (!text) return [];
 	let parsed: unknown;
 	try {
@@ -316,7 +281,7 @@ export function parseProjects(text: string | null | undefined): Project[] {
 		return [];
 	}
 	if (!isRecord(parsed) || !Array.isArray(parsed.projects)) return [];
-	if (Number(parsed.version) !== PROJECTS_VERSION) return [];
+	if (Number(parsed.version) !== LEGACY_PROJECTS_VERSION) return [];
 
 	const out: Project[] = [];
 	parsed.projects.forEach((raw, i) => {

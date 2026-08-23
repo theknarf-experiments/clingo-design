@@ -2,17 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-	PROJECTS_VERSION,
+	LEGACY_PROJECTS_VERSION,
 	createProject,
-	deleteProject,
 	findProject,
 	normalizeScene,
-	parseProjects,
-	renameProject,
-	serializeProjects,
+	parseLegacyProjects,
 	sortProjects,
 	uniqueProjectName,
-	updateProjectScene,
 } from "./project.ts";
 import { DEFAULT_FRAME, emptyScene } from "./scene.ts";
 
@@ -44,34 +40,6 @@ test("uniqueProjectName avoids collisions", () => {
 	assert.equal(uniqueProjectName(list, "Kiln"), "Kiln");
 });
 
-test("rename trims and bumps updatedAt", () => {
-	const list = [createProject({ id: "a", name: "One", ...at(1) })];
-	const next = renameProject(list, "a", "  Two  ", 50);
-	assert.equal(next[0].name, "Two");
-	assert.equal(next[0].updatedAt, 50);
-});
-
-test("rename ignores an empty name", () => {
-	const list = [createProject({ id: "a", name: "One", ...at(1) })];
-	const next = renameProject(list, "a", "   ", 50);
-	assert.equal(next[0].name, "One");
-	assert.equal(next[0].updatedAt, 1);
-});
-
-test("delete removes only the target", () => {
-	const list = [createProject({ id: "a" }), createProject({ id: "b" })];
-	assert.deepEqual(deleteProject(list, "a").map((p) => p.id), ["b"]);
-	assert.equal(deleteProject(list, "nope").length, 2);
-});
-
-test("updateProjectScene replaces the scene and touches the project", () => {
-	const list = [createProject({ id: "a", ...at(1) })];
-	const scene = { ...emptyScene(), rules: "% edited" };
-	const next = updateProjectScene(list, "a", scene, 99);
-	assert.equal(next[0].scene.rules, "% edited");
-	assert.equal(next[0].updatedAt, 99);
-});
-
 test("sortProjects lists most recently updated first", () => {
 	const list = [
 		createProject({ id: "old", ...at(10) }),
@@ -88,34 +56,34 @@ test("findProject handles a missing or undefined id", () => {
 	assert.equal(findProject(list, undefined), undefined);
 });
 
-test("projects survive a serialize/parse round trip", () => {
-	const list = [
+test("a stored file reads back as the projects that were written", () => {
+	const projects = [
 		createProject({ id: "a", name: "Kiln", ...at(5) }),
 		createProject({ id: "b", name: "Span", ...at(7) }),
 	];
-	const back = parseProjects(serializeProjects(list));
-	assert.deepEqual(back, list);
+	const text = JSON.stringify({ version: LEGACY_PROJECTS_VERSION, projects });
+	assert.deepEqual(parseLegacyProjects(text), projects);
 });
 
-test("parseProjects tolerates junk instead of throwing", () => {
-	assert.deepEqual(parseProjects(null), []);
-	assert.deepEqual(parseProjects(""), []);
-	assert.deepEqual(parseProjects("not json"), []);
-	assert.deepEqual(parseProjects("[]"), []);
-	assert.deepEqual(parseProjects('{"projects":"nope"}'), []);
+test("parseLegacyProjects tolerates junk instead of throwing", () => {
+	assert.deepEqual(parseLegacyProjects(null), []);
+	assert.deepEqual(parseLegacyProjects(""), []);
+	assert.deepEqual(parseLegacyProjects("not json"), []);
+	assert.deepEqual(parseLegacyProjects("[]"), []);
+	assert.deepEqual(parseLegacyProjects('{"projects":"nope"}'), []);
 	// A future/foreign version is discarded rather than misread.
 	assert.deepEqual(
-		parseProjects(JSON.stringify({ version: 999, projects: [{ id: "a" }] })),
+		parseLegacyProjects(JSON.stringify({ version: 999, projects: [{ id: "a" }] })),
 		[],
 	);
 });
 
-test("parseProjects drops entries with no id and de-duplicates", () => {
+test("parseLegacyProjects drops entries with no id and de-duplicates", () => {
 	const text = JSON.stringify({
-		version: PROJECTS_VERSION,
+		version: LEGACY_PROJECTS_VERSION,
 		projects: [{ id: "a", name: "A" }, { name: "no id" }, { id: "a", name: "dupe" }],
 	});
-	const back = parseProjects(text);
+	const back = parseLegacyProjects(text);
 	assert.deepEqual(back.map((p) => p.id), ["a"]);
 	assert.equal(back[0].name, "A");
 });
@@ -123,7 +91,7 @@ test("parseProjects drops entries with no id and de-duplicates", () => {
 test("a document written before frames were nodes is migrated", () => {
 	// The old shape: a global artboard, with nodes loose beside it.
 	const text = JSON.stringify({
-		version: PROJECTS_VERSION,
+		version: LEGACY_PROJECTS_VERSION,
 		projects: [
 			{
 				id: "a",
@@ -145,7 +113,7 @@ test("a document written before frames were nodes is migrated", () => {
 			},
 		],
 	});
-	const [project] = parseProjects(text);
+	const [project] = parseLegacyProjects(text);
 
 	// Its contents end up inside a frame of the old artboard's size.
 	assert.equal(project.scene.nodes.length, 1);
@@ -179,7 +147,7 @@ test("nodes with no frame are dropped, not rendered at 0x0", () => {
 	// Documents outlive schemas: an old flow-layout node has no frame, and
 	// keeping it would put an invisible entry in the layer list.
 	const text = JSON.stringify({
-		version: PROJECTS_VERSION,
+		version: LEGACY_PROJECTS_VERSION,
 		projects: [
 			{
 				id: "a",
@@ -201,7 +169,7 @@ test("nodes with no frame are dropped, not rendered at 0x0", () => {
 			},
 		],
 	});
-	const [project] = parseProjects(text);
+	const [project] = parseLegacyProjects(text);
 	// No legacy artboard here, so the survivors stay at the top level.
 	assert.deepEqual(project.scene.nodes.map((n) => n.id), ["new"]);
 });

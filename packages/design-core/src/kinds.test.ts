@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { compile } from "./compile.ts";
 import { addNode, makeNode } from "./edits.ts";
-import { createProject, parseProjects, serializeProjects } from "./project.ts";
+import { normalizeScene } from "./project.ts";
 import {
 	DRAW_KINDS,
 	KINDS,
@@ -94,6 +94,6 @@ test("a stored line keeps the diagonal it was drawn with", () => {
 			{ id: "l1", diagonal: "up" },
 		),
 	);
-	const back = parseProjects(serializeProjects([createProject({ scene })]));
-	assert.equal(back[0]?.scene.nodes[0]?.diagonal, "up");
+	const back = normalizeScene(JSON.parse(JSON.stringify(scene)));
+	assert.equal(back.nodes[0]?.diagonal, "up");
 });

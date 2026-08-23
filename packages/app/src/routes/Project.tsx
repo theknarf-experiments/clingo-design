@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
 import { Link, useParams } from "react-router";
-import {
-	type Scene,
-	findProject,
-	updateProjectScene,
-} from "@clingo-design/design-core";
+import { type Scene, findProject } from "@clingo-design/design-core";
 
 import { Studio } from "../design/Studio";
 import { useHistory } from "../design/useHistory";
-import { setProjects, useProjects } from "../projects/store";
+import { saveScene, useProjects, useProjectsReady } from "../projects/store";
 import styles from "./Project.module.css";
 
 /**
@@ -20,6 +16,7 @@ import styles from "./Project.module.css";
 export function Project() {
 	const { id } = useParams();
 	const projects = useProjects();
+	const ready = useProjectsReady();
 	const project = findProject(projects, id);
 
 	const history = useHistory<Scene | null>(project?.scene ?? null);
@@ -49,9 +46,11 @@ export function Project() {
 	// them, and the store must mirror the present rather than a stack entry.
 	useEffect(() => {
 		if (!id || !history.present) return;
-		const value = history.present;
-		setProjects((list) => updateProjectScene(list, id, value));
+		saveScene(id, history.present);
 	}, [history.present, id]);
+
+	// Until the store has opened, an unknown id only means "not read back yet".
+	if (!ready) return null;
 
 	if (!project || !scene) {
 		return (
