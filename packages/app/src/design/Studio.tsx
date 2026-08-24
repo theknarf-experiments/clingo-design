@@ -27,6 +27,7 @@ import {
 	collapseToPicks,
 	derivedNodes,
 	describeCosts,
+	describeExplanation,
 	documentBounds,
 	partLabel,
 	FRAME_DIMS,
@@ -222,6 +223,8 @@ export function Studio({
 		solving,
 		freedom,
 		probing,
+		why,
+		onWhy,
 	} = useExploration(scene, LIMIT, seed, pins, measurements, probeIds);
 	const blamed = useMemo(() => new Set(conflict), [conflict]);
 	const badPins = useMemo(() => new Set(pinConflict), [pinConflict]);
@@ -631,6 +634,50 @@ export function Studio({
 			return parts.join(", ") || "Change nothing";
 		},
 		[labelFor, ruleLabel],
+	);
+
+	/**
+	 * The why-probe, as one row of the panel sees it.
+	 *
+	 * One question is outstanding at a time, so this hands the answer to the row
+	 * whose variable it was about and `undefined`-shaped nothing to every other
+	 * — the row still gets its ask button, because the button is what makes the
+	 * question possible in the first place.
+	 *
+	 * The sentence is built in design-core, which is where the honesty lives; all
+	 * that happens here is supplying the document's own names for the rules and
+	 * pins it mentions, since `k_distinct` and `prop(one,fill)` are not words
+	 * anybody reads.
+	 */
+	const whyFor = useCallback(
+		(variable: string) => ({
+			ask: (index: number | null) =>
+				onWhy(
+					index === null
+						? null
+						: {
+								// A value the design is not using is asked about the other
+								// way round: "why can it not be this" rather than "what
+								// made it this".
+								kind: picks[variable] === index ? "value" : "alternative",
+								variable,
+								index,
+							},
+				),
+			at: why?.question.variable === variable ? why.question.index : null,
+			answer:
+				why?.question.variable === variable && why.answer
+					? describeExplanation(why.question, why.answer, {
+							rule: ruleLabel,
+							pin: labelFor,
+						})
+					: null,
+			verdict:
+				why?.question.variable === variable ? (why.answer?.verdict ?? null) : null,
+			solves:
+				why?.question.variable === variable ? (why.answer?.solves ?? null) : null,
+		}),
+		[why, onWhy, picks, ruleLabel, labelFor],
 	);
 
 	const hasSelection = selection.size > 0;
@@ -1302,6 +1349,7 @@ export function Studio({
 								freedom={freedom}
 								pins={pins}
 								onPin={pin}
+								why={whyFor}
 								derived={derived}
 								known={known}
 								everywhere={everywhere}
@@ -1317,6 +1365,7 @@ export function Studio({
 								reach={reach}
 								pins={pins}
 								onPin={pin}
+								why={whyFor}
 							/>
 						) : (
 							<Constraints

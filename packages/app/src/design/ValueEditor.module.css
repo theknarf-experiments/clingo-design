@@ -217,3 +217,67 @@
 	font-size: 0.78rem;
 	line-height: 1.4;
 }
+
+/* Asking is a question about the answer, like pinning, so it reads as an
+   annotation rather than as part of the value — and it is deliberately faint
+   until hovered: the row is for editing, this is for interrogating. */
+.ask {
+	padding: 0 0.15rem;
+	font: inherit;
+	font-size: 0.78rem;
+	line-height: 1;
+	color: inherit;
+	background: none;
+	border: none;
+	opacity: 0.3;
+	cursor: help;
+}
+
+.ask:hover {
+	opacity: 0.85;
+}
+
+.asking {
+	color: var(--dc-accent);
+	opacity: 1;
+}
+
+/* The solver's own words, so they get room to be a sentence rather than a
+   label. The left rule ties the answer to the row it belongs to. */
+.why {
+	margin: 0.35rem 0 0.1rem;
+	padding: 0.3rem 0.4rem;
+	font-size: 0.7rem;
+	line-height: 1.45;
+	/* A several-group answer arrives broken onto lines, and those lines are the
+	   only thing that makes a fifteen-rule sudoku chain readable. */
+	white-space: pre-line;
+	background: var(--dc-raised);
+	border-left: 2px solid var(--dc-accent);
+	border-radius: 0 4px 4px 0;
+}
+
+/* Nothing is wrong here — the value is legal and simply not distinct. */
+.why[data-verdict="possible"] {
+	border-left-color: var(--dc-line);
+}
+
+/* The boundary: no switch to blame, so no rule to offer. */
+.why[data-verdict="unattributable"] {
+	border-left-color: var(--dc-line);
+	opacity: 0.75;
+}
+
+.why[data-pending] {
+	opacity: 0.55;
+	border-left-color: var(--dc-line);
+}
+
+/* The price, beside the answer: which questions are cheap is worth learning. */
+.cost {
+	display: block;
+	margin-top: 0.15rem;
+	font-size: 0.62rem;
+	opacity: 0.45;
+	font-variant-numeric: tabular-nums;
+}

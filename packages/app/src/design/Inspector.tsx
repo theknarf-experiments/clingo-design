@@ -66,7 +66,7 @@ import {
 	variantsOf,
 } from "@clingo-design/design-core";
 
-import { ValueEditor } from "./ValueEditor";
+import { ValueEditor, type WhyRow } from "./ValueEditor";
 import { cx } from "./cx";
 import styles from "./Inspector.module.css";
 
@@ -90,6 +90,14 @@ export interface InspectorProps {
 	/** Alternatives the user has fixed, by variable. */
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
+	/**
+	 * The why-probe, per variable.
+	 *
+	 * A function rather than a table because a row asks for its own key and
+	 * there is at most one question outstanding in the whole panel: building a
+	 * map would be building a map of one entry and 40 undefineds.
+	 */
+	why?: (variable: string) => WhyRow | undefined;
 	/** Nodes the answer set has that the document does not — see `derived.ts`. */
 	derived?: readonly DerivedNode[];
 	/** Derived ids some universe has, whether or not the one on screen does. */
@@ -202,6 +210,7 @@ function DerivedPanel({
 	reach,
 	pins,
 	onPin,
+	why,
 }: {
 	id: string;
 	/** Absent when the universe on screen does not have this node. */
@@ -214,6 +223,7 @@ function DerivedPanel({
 	reach?: Readonly<Record<string, Set<number>>>;
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
+	why?: (variable: string) => WhyRow | undefined;
 }) {
 	/**
 	 * One property of a derived node, as a row.
@@ -252,6 +262,7 @@ function DerivedPanel({
 				reachable={reachable}
 				pinned={pins[variable]}
 				onPin={(index) => onPin(variable, index)}
+				why={why?.(variable)}
 				preview={(term: Term) => (term.kind === "literal" ? term.value : undefined)}
 				onChange={() => {}}
 			/>
@@ -626,6 +637,7 @@ export function Inspector({
 	freedom = {},
 	pins,
 	onPin,
+	why,
 	derived = [],
 	known,
 	everywhere,
@@ -654,6 +666,7 @@ export function Inspector({
 					reach={reach}
 					pins={pins}
 					onPin={onPin}
+					why={why}
 				/>
 			);
 		}
@@ -755,6 +768,7 @@ export function Inspector({
 				reachable={reach?.[variable]}
 				pinned={pins[variable]}
 				onPin={(index) => onPin(variable, index)}
+				why={why?.(variable)}
 				preview={(term: Term) => resolveValue(context, [term], variable)}
 				onChange={(next) =>
 					onSceneChange(
@@ -855,6 +869,7 @@ export function Inspector({
 						reachable={reach?.[variable]}
 						pinned={pins[variable]}
 						onPin={(index) => onPin(variable, index)}
+						why={why?.(variable)}
 						preview={(term: Term) => resolveValue(context, [term], variable)}
 						onChange={(next) =>
 							onSceneChange(
@@ -966,6 +981,7 @@ export function Inspector({
 							reachable={reach?.[variable]}
 							pinned={pins[variable]}
 							onPin={(index) => onPin(variable, index)}
+							why={why?.(variable)}
 							preview={(term: Term) =>
 								resolveValue(context, [term], variable)
 							}

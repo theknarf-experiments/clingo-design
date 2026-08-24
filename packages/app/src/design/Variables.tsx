@@ -14,7 +14,7 @@ import {
 	tokenVar,
 } from "@clingo-design/design-core";
 
-import { ValueEditor } from "./ValueEditor";
+import { ValueEditor, type WhyRow } from "./ValueEditor";
 import styles from "./Variables.module.css";
 
 export interface VariablesProps {
@@ -25,6 +25,8 @@ export interface VariablesProps {
 	reach?: Readonly<Record<string, Set<number>>>;
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
+	/** The why-probe, per variable — see `Inspector`. */
+	why?: (variable: string) => WhyRow | undefined;
 }
 
 /**
@@ -42,6 +44,7 @@ export function Variables({
 	reach,
 	pins,
 	onPin,
+	why,
 }: VariablesProps) {
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 
@@ -120,6 +123,7 @@ export function Variables({
 							reachable={reach?.[variable]}
 							pinned={pins[variable]}
 							onPin={(index) => onPin(variable, index)}
+							why={why?.(variable)}
 							preview={(term: Term) => resolveValue(context, [term], variable)}
 							onChange={(next) =>
 								onSceneChange(

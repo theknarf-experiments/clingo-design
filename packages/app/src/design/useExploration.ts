@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+	type Explanation,
 	type Exploration,
 	Explorer,
 	type Freedom,
 	type Measurements,
+	type Question,
 	type Relaxation,
 	type Scene,
 	UnsatisfiableError,
@@ -39,6 +41,23 @@ export interface ExplorationState {
 	freedom: Freedom;
 	/** True while the probe is out, so the UI can wait rather than guess. */
 	probing: boolean;
+	/**
+	 * The last why-question and its answer, or the question alone while the
+	 * solver is still working on it.
+	 *
+	 * One at a time, and that is the point rather than a limitation: the answer
+	 * costs about one solve per switch the document has, so it is a thing
+	 * somebody asks, not a column the panel fills in. Cleared by every
+	 * exploration — an answer about the previous document would be a lie in the
+	 * shape of a sentence.
+	 */
+	why: { question: Question; answer: Explanation | null } | null;
+}
+
+/** What the hook hands back: the answer, and the way to ask another question. */
+export interface ExplorationApi extends ExplorationState {
+	/** Ask a why-question, or `null` to put the answer away. */
+	onWhy: (question: Question | null) => void;
 }
 
 /**
@@ -60,7 +79,7 @@ export function useExploration(
 	pins: Readonly<Record<string, number>> = {},
 	measurements: Measurements = {},
 	probeIds: readonly string[] = [],
-): ExplorationState {
+): ExplorationApi {
 	const [state, setState] = useState<ExplorationState>({
 		exploration: null,
 		generated: "",
@@ -72,6 +91,7 @@ export function useExploration(
 		solving: true,
 		freedom: {},
 		probing: false,
+		why: null,
 	});
 
 	const explorer = useRef<Explorer | null>(null);
@@ -117,6 +137,8 @@ export function useExploration(
 					// Whatever was probed last was probed against another document.
 					freedom: {},
 					probing: false,
+					// So was whatever was explained last.
+					why: null,
 				});
 			} catch (err) {
 				if (generation !== run.current) return;
@@ -133,6 +155,7 @@ export function useExploration(
 					solving: false,
 					freedom: {},
 					probing: false,
+					why: null,
 				}));
 			}
 		}, 150);
@@ -187,5 +210,48 @@ export function useExploration(
 		};
 	}, [solved, probeKey]);
 
-	return state;
+	/**
+	 * Asks the solver why a value came out as it did, or why the one beside it
+	 * cannot.
+	 *
+	 * A callback rather than an effect, because unlike the freedom probe this is
+	 * not a consequence of the selection — it is a question somebody asked, and
+	 * it costs about one solve per switch the document has. The question goes
+	 * into state immediately so the row can say it is asking, and the answer
+	 * lands beside it.
+	 *
+	 * `asked` guards the race: a second question, a re-exploration, or a click
+	 * that puts the answer away all bump it, and a reply for an older question
+	 * is dropped rather than shown against the new one.
+	 */
+	const asked = useRef(0);
+	const onWhy = useCallback((question: Question | null) => {
+		const generation = ++asked.current;
+		if (!question) {
+			setState((s) => (s.why === null ? s : { ...s, why: null }));
+			return;
+		}
+		setState((s) => ({ ...s, why: { question, answer: null } }));
+		void explorer.current?.why(question).then(
+			(answer) => {
+				if (generation !== asked.current) return;
+				setState((s) => ({ ...s, why: { question, answer } }));
+			},
+			// The grounding went away under it — an edit overtook the question.
+			// The exploration that overtook it has already cleared `why`.
+			() => {
+				if (generation === asked.current) {
+					setState((s) => ({ ...s, why: null }));
+				}
+			},
+		);
+	}, []);
+
+	// A new exploration invalidates any question in flight as well as any answer
+	// already shown: `explore` clears the state, and this stops the reply.
+	useEffect(() => {
+		asked.current++;
+	}, [exploration]);
+
+	return { ...state, onWhy };
 }

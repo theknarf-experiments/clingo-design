@@ -5,6 +5,7 @@ import {
 	VALUE_TYPES,
 	type Value,
 	type ValueType,
+	type Verdict,
 	derive,
 	lit,
 	optionLabel,
@@ -16,6 +17,34 @@ import {
 
 import styles from "./ValueEditor.module.css";
 import { cx } from "./cx";
+
+/**
+ * The why-probe, as one row sees it.
+ *
+ * A greyed swatch is a dead end: it says no design uses this and offers nothing
+ * to do about it. This is the recourse — one question, one click, and the
+ * solver's own answer in the panel. Lazy on purpose: it costs about a solve per
+ * rule the document has, so nothing here happens until somebody asks.
+ */
+export interface WhyRow {
+	/** Ask about one alternative, by solver index. Null puts the answer away. */
+	ask: (index: number | null) => void;
+	/** The alternative asked about, when the outstanding question is this row's. */
+	at: number | null;
+	/** The answer in words, or null while the solver still has the question. */
+	answer: string | null;
+	/** For styling, and so a test can tell "impossible" from "duplicate". */
+	verdict: Verdict | null;
+	/**
+	 * Solver round trips the answer took.
+	 *
+	 * Shown, because the price is part of the answer: a colour row costs three
+	 * solves and a sudoku cell costs ninety, and a designer who can see that
+	 * learns which questions are cheap. It is also the only honest way to
+	 * explain why one click returns instantly and another takes seconds.
+	 */
+	solves: number | null;
+}
 
 export interface ValueEditorProps {
 	label: string;
@@ -41,6 +70,8 @@ export interface ValueEditorProps {
 	pinned?: number;
 	/** Fix or release an alternative. Null releases. */
 	onPin?: (index: number | null) => void;
+	/** Ask the solver about one of these values, and show what it said. */
+	why?: WhyRow;
 	/**
 	 * The solver's own index for each alternative, where it is not the position.
 	 *
@@ -104,6 +135,7 @@ export function ValueEditor({
 	reachable,
 	pinned,
 	onPin,
+	why,
 	indices,
 	readOnly,
 	fallback,
@@ -314,6 +346,28 @@ export function ValueEditor({
 								</select>
 							)}
 
+							{why && value.length > 1 && (dead || isActive) ? (
+								<button
+									type="button"
+									className={cx(
+										styles.ask,
+										why.at === at(index) && styles.asking,
+									)}
+									data-role="why-alt"
+									aria-pressed={why.at === at(index)}
+									title={
+										dead
+											? "Ask the solver why no design uses this. Costs a solve per rule."
+											: "Ask the solver what makes it this value. Costs a solve per rule."
+									}
+									onClick={() =>
+										why.ask(why.at === at(index) ? null : at(index))
+									}
+								>
+									?
+								</button>
+							) : null}
+
 							{onPin && value.length > 1 ? (
 								<button
 									type="button"
@@ -347,6 +401,22 @@ export function ValueEditor({
 					);
 				})}
 			</div>
+
+			{why && why.at !== null ? (
+				<p
+					className={styles.why}
+					data-role="why"
+					data-verdict={why.verdict ?? undefined}
+					data-pending={why.answer === null ? "" : undefined}
+				>
+					{why.answer ?? "Asking the solver — one solve per rule…"}
+					{why.solves !== null ? (
+						<span className={styles.cost} data-role="why-cost">
+							{why.solves} solve{why.solves === 1 ? "" : "s"}
+						</span>
+					) : null}
+				</p>
+			) : null}
 
 			{readOnly ? null : (
 				<button

@@ -33,6 +33,7 @@ import {
 	selectDiverse,
 	universeKey,
 } from "./sampling.ts";
+import { type Explanation, type Question, explain, questionAtom } from "./why.ts";
 
 /**
  * A design the solver found, as its decisions and nothing else.
@@ -680,6 +681,15 @@ export class Explorer {
 	#program = "";
 	/** What the last exploration assumed, so a probe asks about that document. */
 	#assumed: ReadonlyArray<{ atom: string; sign?: boolean }> = [];
+	/**
+	 * Which of those assumptions are the user's, and which are free to let go.
+	 *
+	 * Kept for the same reason `#assumed` is: a follow-up question has to be
+	 * about the document that was explored, and "what could I switch off" is not
+	 * answerable from the assumption list alone — a guard and a pin reach the
+	 * solver as ordinary atoms and only this says which is which.
+	 */
+	#owned: readonly Switch[] = [];
 
 	constructor(solver: Solver) {
 		this.#solver = solver;
@@ -700,6 +710,27 @@ export class Explorer {
 		const session = this.#session;
 		if (!session || nodeIds.length === 0) return {};
 		return probeFreedom(session, this.#assumed, solved, nodeIds);
+	}
+
+	/**
+	 * Why a value came out the way it did — or why the one beside it cannot.
+	 *
+	 * Runs on the grounding and the assumptions the last {@link explore} left,
+	 * like {@link probe}, so the answer is about the document on screen. Costs
+	 * roughly one solve per switch the document has: a click, never a keystroke.
+	 * See `why.ts` for what each verdict is worth.
+	 *
+	 * Null before the first exploration, and after one that failed — there is no
+	 * answer in hand to ask a question about.
+	 */
+	async why(question: Question): Promise<Explanation | null> {
+		const session = this.#session;
+		if (!session) return null;
+		return explain(session, {
+			base: this.#assumed,
+			owned: this.#owned,
+			want: questionAtom(question),
+		});
 	}
 
 	async explore(
@@ -762,8 +793,9 @@ export class Explorer {
 		const session = this.#session;
 		if (!session) throw new Error("solver session unavailable");
 		// A freedom probe reads `__lpx_objective` and nothing else, so it wants
-		// the cheap reading too.
+		// the cheap reading too, and so does a why-question.
 		this.#assumed = bare;
+		this.#owned = owned;
 
 		let solves = 0;
 		// True of the exploration whatever question was asked of the program, so
@@ -1146,6 +1178,7 @@ export class Explorer {
 		this.#session = null;
 		this.#program = "";
 		this.#assumed = [];
+		this.#owned = [];
 		this.#diagnostics = "";
 		if (session) await session.close();
 	}
