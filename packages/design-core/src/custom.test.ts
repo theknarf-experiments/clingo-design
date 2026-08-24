@@ -1,0 +1,361 @@
+/**
+ * The `custom` constraint kind — a rule the user wrote, with a switch and a
+ * name.
+ *
+ * Everything here goes through the real solver, because the whole claim is
+ * about the solver: that a hand-written `viol/1` is guarded by the same
+ * assumption the built-in kinds are, and so comes back in a core naming the
+ * rule rather than as a document that is inexplicably impossible.
+ */
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { compile, variableCounts } from "./compile.ts";
+import { directSolver } from "./directSolver.ts";
+import {
+	addConstraint,
+	addCustomConstraint,
+	addNode,
+	constraintTermError,
+	deleteNodes,
+	makeNode,
+	pruneConstraints,
+	renameConstraint,
+	retargetConstraint,
+	setProp,
+	updateConstraint,
+} from "./edits.ts";
+import { UnsatisfiableError, explore } from "./explore.ts";
+import { RULES_HEADER, type Scene, emptyScene } from "./scene.ts";
+import { lit } from "./values.ts";
+
+const RED = "#ff0000";
+
+/** Three rectangles, each free to take any of three fills. */
+function threeBoxes(): Scene {
+	let scene = emptyScene();
+	const palette = [lit(RED), lit("#00ff00"), lit("#0000ff")];
+	for (const id of ["a", "b", "c"]) {
+		scene = addNode(
+			scene,
+			makeNode("rect", { x: 0, y: 0, width: 40, height: 40 }, { id }),
+		);
+		scene = setProp(scene, [id], "fill", palette);
+	}
+	return scene;
+}
+
+const withRules = (scene: Scene, rules: string): Scene => ({
+	...scene,
+	rules: `${RULES_HEADER}${rules}\n`,
+});
+
+const universes = async (scene: Scene, limit = 200) =>
+	(await explore(scene, directSolver, { limit, sample: "first" })).count;
+
+const fails = async (scene: Scene): Promise<UnsatisfiableError> => {
+	const error = await explore(scene, directSolver).then(
+		() => null,
+		(e: unknown) => e,
+	);
+	assert.ok(error instanceof UnsatisfiableError, "expected no design at all");
+	return error;
+};
+
+/* ------------------------------------------------------------------ */
+/* The switch                                                          */
+/* ------------------------------------------------------------------ */
+
+test("a custom rule narrows the space, and its switch turns it off again", async () => {
+	const added = addCustomConstraint(threeBoxes(), "no_red_a");
+	assert.equal(added.id, "no_red_a");
+	const scene = withRules(
+		added.scene,
+		`viol(no_red_a) :- rendered(a,fill,L), literal(L,"${RED}").`,
+	);
+	// 27 designs; forbidding one of a's three fills leaves 18.
+	assert.equal(await universes(scene), 18);
+
+	const off = updateConstraint(scene, "no_red_a", { enabled: false });
+	assert.equal(off.constraints.length, 1, "still in the document");
+	assert.equal(await universes(off), 27, "and out of the program");
+});
+
+test("a violated custom rule is unsatisfiable, and disabling it is not", async () => {
+	const added = addCustomConstraint(threeBoxes(), "impossible");
+	const scene = withRules(added.scene, "viol(impossible).");
+	const error = await fails(scene);
+	assert.deepEqual(error.conflict, ["impossible"], "blamed by name");
+
+	// The rule is still there and still grounds; only the assumption changed.
+	const off = updateConstraint(scene, "impossible", { enabled: false });
+	assert.equal(await universes(off), 27);
+});
+
+test("a viol whose term is no constraint does nothing at all", async () => {
+	// This is what a rename leaves behind, and it is why `renameConstraint`
+	// rewrites the rules: nothing guards the head, so the switch is gone.
+	const added = addCustomConstraint(threeBoxes(), "here");
+	const scene = withRules(added.scene, "viol(gone).");
+	assert.equal(await universes(scene), 27);
+});
+
+/* ------------------------------------------------------------------ */
+/* Blame                                                               */
+/* ------------------------------------------------------------------ */
+
+test("a core names the custom rule and not an innocent one", async () => {
+	let scene = threeBoxes();
+	// b is red and nothing else, so `differ` over a and b forbids a being red.
+	scene = setProp(scene, ["b"], "fill", [lit(RED)]);
+	const guilty = addCustomConstraint(scene, "a_must_be_red");
+	scene = guilty.scene;
+	const differ = addConstraint(scene, "differ", ["a", "b"], "fill");
+	scene = differ.scene;
+	// c is free, so this one can always hold.
+	const innocent = addConstraint(scene, "differ", ["b", "c"], "fill");
+	scene = withRules(
+		innocent.scene,
+		`viol(a_must_be_red) :- rendered(a,fill,L), not literal(L,"${RED}").`,
+	);
+
+	const error = await fails(scene);
+	assert.ok(
+		error.conflict.includes("a_must_be_red"),
+		"the hand-written rule is named",
+	);
+	assert.ok(error.conflict.includes(differ.id), "so is the built-in it fights");
+	assert.ok(
+		!error.conflict.includes(innocent.id),
+		"and the rule that can hold is not blamed",
+	);
+});
+
+test("two custom rules that contradict each other name each other", async () => {
+	let scene = threeBoxes();
+	scene = addCustomConstraint(scene, "a_red").scene;
+	scene = addCustomConstraint(scene, "a_green").scene;
+	// An innocent third, over a node neither of them mentions.
+	const innocent = addConstraint(scene, "differ", ["b", "c"], "fill");
+	scene = withRules(
+		innocent.scene,
+		[
+			`viol(a_red) :- rendered(a,fill,L), not literal(L,"${RED}").`,
+			'viol(a_green) :- rendered(a,fill,L), not literal(L,"#00ff00").',
+		].join("\n"),
+	);
+
+	const error = await fails(scene);
+	assert.deepEqual([...error.conflict].sort(), ["a_green", "a_red"]);
+	assert.ok(!error.conflict.includes(innocent.id));
+});
+
+/* ------------------------------------------------------------------ */
+/* Coexisting with the other kinds                                     */
+/* ------------------------------------------------------------------ */
+
+test("a custom rule composes with differ rather than replacing it", async () => {
+	// differ over all three leaves the 6 permutations; forbidding red on a
+	// leaves the 4 of those where a is green or blue.
+	let scene = addConstraint(threeBoxes(), "differ", ["a", "b", "c"], "fill").scene;
+	scene = addCustomConstraint(scene, "no_red_a").scene;
+	scene = withRules(
+		scene,
+		`viol(no_red_a) :- rendered(a,fill,L), literal(L,"${RED}").`,
+	);
+	assert.equal(await universes(scene), 4);
+});
+
+test("a custom rule coexists with a geometric kind, which still places nodes", async () => {
+	let scene: Scene = { ...emptyScene(), nodes: [] };
+	scene = addNode(
+		scene,
+		makeNode("rect", { x: 10, y: 0, width: 40, height: 40 }, { id: "a" }),
+	);
+	scene = setProp(scene, ["a"], "fill", [lit(RED), lit("#00ff00")]);
+	const pin = addConstraint(scene, "pin", ["a"], undefined, "left");
+	scene = updateConstraint(pin.scene, pin.id, { value: [lit("100px")] });
+	scene = addCustomConstraint(scene, "not_red").scene;
+	scene = withRules(
+		scene,
+		`viol(not_red) :- rendered(a,fill,L), literal(L,"${RED}").`,
+	);
+
+	// The colour rule cuts the space in half; the pin still moves the box.
+	const result = await explore(scene, directSolver, { sample: "first" });
+	assert.equal(result.count, 1, "one fill survives");
+	assert.equal(result.universes[0].solved.a?.x, 100, "and the pin still holds");
+
+	// Break the geometry instead, and the two kinds are blamed independently:
+	// the theory propagator reports through the same assumptions the property
+	// rules do, and the colour rule — which can still hold — is left out.
+	const second = addConstraint(scene, "pin", ["a"], undefined, "left");
+	const broken = updateConstraint(second.scene, second.id, {
+		value: [lit("300px")],
+	});
+	const error = await fails(broken);
+	assert.deepEqual([...error.conflict].sort(), [pin.id, second.id].sort());
+	assert.ok(
+		!error.conflict.includes("not_red"),
+		"a rule that can still hold is not blamed for the geometry",
+	);
+});
+
+/* ------------------------------------------------------------------ */
+/* What the compiler emits, and does not                               */
+/* ------------------------------------------------------------------ */
+
+test("a custom constraint compiles to two facts and a switch", () => {
+	const { scene } = addCustomConstraint(threeBoxes(), "mine");
+	const { program, guards } = compile(scene);
+	assert.deepEqual(guards, ["active(mine)"]);
+	assert.ok(program.includes("constraint(mine)."));
+	assert.ok(program.includes("c_kind(mine,custom)."));
+	// No members, so nothing that reads members: no property to compare, no
+	// edge, no slots, no dimension.
+	assert.ok(!program.includes("c_prop(mine,"), "no property");
+	assert.ok(!program.includes("c_edge(mine,"), "no edge");
+	assert.ok(!program.includes("c_node(mine,"), "no members");
+	assert.ok(!program.includes("cval(mine)"), "no dimension variable");
+	// And nothing for the multiverse to branch on: a rule with no dimension is
+	// not a variable, so it must not show up in "what varies".
+	assert.equal(variableCounts(scene)["cval(mine)"], undefined);
+});
+
+test("a custom constraint survives deleting every node", () => {
+	// It ranges over nothing the document holds, so no deletion can turn it into
+	// a rule over a ghost — which is the only reason pruning exists.
+	const { scene } = addCustomConstraint(threeBoxes(), "mine");
+	const after = deleteNodes(scene, ["a", "b", "c"]);
+	assert.deepEqual(
+		after.constraints.map((c) => c.id),
+		["mine"],
+	);
+	assert.equal(pruneConstraints(scene), scene, "and nothing changed");
+});
+
+test("switching a kind to custom drops the members it can no longer read", () => {
+	const differ = addConstraint(threeBoxes(), "differ", ["a", "b"], "fill");
+	const custom = retargetConstraint(differ.scene, differ.id, { kind: "custom" });
+	assert.deepEqual(custom.constraints[0].nodes, []);
+	// And back again: a narrowing retarget has always forgotten what would not
+	// fit, so there is nothing to restore — the rule needs new members.
+	const back = retargetConstraint(custom, differ.id, { kind: "differ" });
+	assert.deepEqual(back.constraints[0].nodes, []);
+	// Still a legal document either way.
+	assert.equal(compile(custom).guards.length, 1);
+});
+
+test("a custom constraint takes no group, because it has no members to be a set", () => {
+	const { scene } = addCustomConstraint(threeBoxes(), "mine");
+	const grouped = retargetConstraint(scene, "mine", { group: "row1" });
+	assert.equal(grouped.constraints[0].group, undefined);
+});
+
+/* ------------------------------------------------------------------ */
+/* The name is the contract                                           */
+/* ------------------------------------------------------------------ */
+
+test("a name must be spellable as an ASP constant", () => {
+	const scene = threeBoxes();
+	for (const bad of ["No_Wide_Gaps", "_x", "no wide gaps", "no-wide-gaps", "1st", "", "not"]) {
+		assert.ok(
+			constraintTermError(scene, bad) !== undefined,
+			`${bad} must be refused`,
+		);
+		assert.equal(addCustomConstraint(scene, bad).id, null);
+		assert.equal(addCustomConstraint(scene, bad).scene, scene, "untouched");
+	}
+	for (const good of ["a", "no_wide_gaps", "rule2", "camelCase", "gap", "width"]) {
+		assert.equal(constraintTermError(scene, good), undefined, good);
+	}
+});
+
+test("two rules cannot claim the same term", () => {
+	const first = addCustomConstraint(threeBoxes(), "mine");
+	assert.equal(first.id, "mine");
+	const second = addCustomConstraint(first.scene, "mine");
+	assert.equal(second.id, null);
+	assert.equal(second.scene, first.scene);
+	assert.match(constraintTermError(first.scene, "mine") ?? "", /already called/);
+	// A built-in constraint's generated id is in the same namespace.
+	const differ = addConstraint(first.scene, "differ", ["a", "b"], "fill");
+	assert.notEqual(
+		constraintTermError(differ.scene, differ.id),
+		undefined,
+		"a generated id is claimed too",
+	);
+});
+
+test("an unnamed custom rule gets a readable term, and the next one a fresh one", () => {
+	const first = addCustomConstraint(threeBoxes());
+	assert.equal(first.id, "rule");
+	const second = addCustomConstraint(first.scene);
+	assert.equal(second.id, "rule_2");
+	assert.deepEqual(
+		second.scene.constraints.map((c) => c.id),
+		["rule", "rule_2"],
+	);
+});
+
+test("renaming carries the user's viol rule with it, and says how many it moved", async () => {
+	const added = addCustomConstraint(threeBoxes(), "no_red_a");
+	const scene = withRules(
+		added.scene,
+		[
+			`viol(no_red_a) :- rendered(a,fill,L), literal(L,"${RED}").`,
+			"% and again, with the whitespace a person types",
+			"viol( no_red_a ) :- 1 = 2.",
+		].join("\n"),
+	);
+	assert.equal(await universes(scene), 18);
+
+	const renamed = renameConstraint(scene, "no_red_a", "keep_a_cool");
+	assert.equal(renamed.rewritten, 2, "both references moved");
+	assert.equal(renamed.scene.constraints[0].id, "keep_a_cool");
+	assert.ok(!renamed.scene.rules.includes("no_red_a"));
+	// The point of rewriting: the rule still fires, so the space is still 18.
+	assert.equal(await universes(renamed.scene), 18);
+	assert.deepEqual(compile(renamed.scene).guards, ["active(keep_a_cool)"]);
+});
+
+test("a rename with nothing to rewrite reports zero, which is the warning", async () => {
+	// Reached indirectly, so the rename cannot follow it — and afterwards the
+	// switch does nothing. `rewritten` is how a caller knows to say so.
+	const added = addCustomConstraint(threeBoxes(), "no_red_a");
+	const scene = withRules(added.scene, [
+		"mine(no_red_a).",
+		`viol(C) :- mine(C), rendered(a,fill,L), literal(L,"${RED}").`,
+	].join("\n"));
+	assert.equal(await universes(scene), 18);
+
+	const renamed = renameConstraint(scene, "no_red_a", "keep_a_cool");
+	assert.equal(renamed.rewritten, 0);
+	assert.equal(
+		await universes(renamed.scene),
+		27,
+		"the rule is orphaned — which is exactly what the count is for",
+	);
+});
+
+test("a rename to an illegal or taken term changes nothing", () => {
+	let scene = addCustomConstraint(threeBoxes(), "mine").scene;
+	scene = addCustomConstraint(scene, "yours").scene;
+	scene = withRules(scene, "viol(mine).");
+	for (const bad of ["Mine", "not", "yours", "mine other"]) {
+		const attempt = renameConstraint(scene, "mine", bad);
+		assert.equal(attempt.scene, scene, bad);
+		assert.equal(attempt.rewritten, 0);
+	}
+	// Renaming to its own name is a no-op rather than a rewrite.
+	assert.equal(renameConstraint(scene, "mine", "mine").rewritten, 0);
+	// And an id no constraint holds is not a rename at all.
+	assert.equal(renameConstraint(scene, "nobody", "somebody").scene, scene);
+});
+
+test("renaming works on a generated id too, so there is no per-kind path", () => {
+	const differ = addConstraint(threeBoxes(), "differ", ["a", "b"], "fill");
+	const renamed = renameConstraint(differ.scene, differ.id, "no_twins");
+	assert.equal(renamed.rewritten, 0, "nothing referenced the opaque id");
+	assert.deepEqual(compile(renamed.scene).guards, ["active(no_twins)"]);
+});

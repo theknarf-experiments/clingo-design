@@ -163,15 +163,20 @@ function attribute(core: readonly string[]): {
 } {
 	const conflict: string[] = [];
 	const pinned: string[] = [];
-	for (const atom of core) {
+	for (const text of core) {
 		// The core echoes the assumptions as given, sign prefix and all.
-		const guard = /^\+?active\(([^)]+)\)$/.exec(atom);
-		if (guard) {
-			conflict.push(guard[1]);
-			continue;
+		const atom = parseAtom(text.replace(/^[+-]/, ""));
+		if (!atom) continue;
+		// Parsed rather than matched, for the reason `parseVariable` is: both a
+		// constraint id and a variable key may be a *term*. `active(box(1))` and
+		// `pick(prop(cell(1,1),text),3)` are one argument and two, and a regex
+		// over the argument list reads them as neither — so a core naming them
+		// would come back blaming nothing at all.
+		if (atom.name === "active" && atom.args.length === 1) {
+			conflict.push(atom.args[0]);
+		} else if (atom.name === "pick" && atom.args.length === 2) {
+			pinned.push(atom.args[0]);
 		}
-		const pin = /^\+?pick\((.+),(\d+)\)$/.exec(atom);
-		if (pin) pinned.push(pin[1]);
 	}
 	return { conflict, pinned };
 }

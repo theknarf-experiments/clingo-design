@@ -40,6 +40,7 @@ import {
 	edgeOn,
 	frameDim,
 	frameOf,
+	isConstraintTerm,
 	makeFrame,
 	makeLayout,
 	rangesOverGroup,
@@ -986,6 +987,114 @@ export function addConstraint(
 		id: constraint.id,
 	};
 }
+
+/**
+ * Why `name` cannot be a constraint id, in words, or nothing if it can.
+ *
+ * A constraint id is not an opaque handle — see {@link Constraint.id} — and for
+ * a `custom` rule it is the term the user writes in `viol(...)`, so the two
+ * things that must hold are that ASP can spell it and that no other rule has
+ * claimed it. Returned as a message rather than a boolean because both refusals
+ * are things a person has to be told.
+ */
+export function constraintTermError(
+	scene: Scene,
+	name: string,
+	/** The constraint being renamed, which is allowed to keep its own name. */
+	self?: string,
+): string | undefined {
+	if (!isConstraintTerm(name)) {
+		return "A rule name must start with a lowercase letter and use only letters, digits and underscores.";
+	}
+	if (scene.constraints.some((c) => c.id === name && c.id !== self)) {
+		return `Another rule is already called ${name}.`;
+	}
+	return undefined;
+}
+
+/**
+ * Adds a rule whose condition the user writes themselves.
+ *
+ * The name is the whole of the argument list because it is the whole of the
+ * constraint: no members, no property, no edge — see
+ * `CONSTRAINT_KINDS.custom` — and the id is what the hand-written
+ * `viol(...)` has to say. Null when the name cannot be used, with the document
+ * untouched; ask {@link constraintTermError} first to say why.
+ */
+export function addCustomConstraint(
+	scene: Scene,
+	name?: string,
+): { scene: Scene; id: string | null } {
+	const term =
+		name ??
+		// `rule`, `rule_2`, … — readable, because this one is read: it is what
+		// the user types into their own rule and what a core blames.
+		uniqueName(scene.constraints.map((c) => c.id), "rule", "_");
+	if (constraintTermError(scene, term) !== undefined) return { scene, id: null };
+	const added = addConstraint(scene, "custom", []);
+	// Added under a generated id and renamed, rather than minted with the term:
+	// one place owns what a legal id is and what happens to the rules that
+	// mention the old one — here there are none, so nothing is rewritten.
+	return { scene: renameConstraint(added.scene, added.id, term).scene, id: term };
+}
+
+/**
+ * Changes the term a constraint reaches ASP as, carrying the user's rules with
+ * it.
+ *
+ * This is the one edit that can break something the document does not contain.
+ * A `custom` rule's condition lives in the Rules panel as `viol(old_name) :-
+ * ...`, and renaming the constraint without touching that text would leave a
+ * rule that still grounds, still has a head, and is simply never guarded again
+ * — a switch that quietly stopped doing anything. So the rename rewrites
+ * `viol(old)` to `viol(new)` wherever the rules say it, and reports how many it
+ * changed.
+ *
+ * `rewritten` is the signal, and 0 is worth showing: either the rule has not
+ * been written yet, or the name is reached some other way — `viol(C) :-
+ * mine(C).` — and that indirection is now pointing at a name nothing holds.
+ *
+ * Deliberately narrow: only the argument of a `viol/1`, not every occurrence of
+ * the word. A whole-token substitution across arbitrary ASP would also rewrite
+ * a predicate or a constant that happened to share the name, and corrupting the
+ * user's rules is worse than leaving a comment out of date.
+ */
+export function renameConstraint(
+	scene: Scene,
+	id: string,
+	name: string,
+): { scene: Scene; rewritten: number } {
+	if (name === id) return { scene, rewritten: 0 };
+	if (!scene.constraints.some((c) => c.id === id)) return { scene, rewritten: 0 };
+	if (constraintTermError(scene, name, id) !== undefined) {
+		return { scene, rewritten: 0 };
+	}
+	let rewritten = 0;
+	const rules = scene.rules.replace(
+		new RegExp(`viol\\(\\s*${escapeTerm(id)}\\s*\\)`, "g"),
+		() => {
+			rewritten += 1;
+			return `viol(${name})`;
+		},
+	);
+	return {
+		scene: {
+			...scene,
+			rules,
+			constraints: scene.constraints.map((c) =>
+				c.id === id ? { ...c, id: name } : c,
+			),
+		},
+		rewritten,
+	};
+}
+
+/**
+ * A legal id needs no escaping, but an id from a document nobody validated
+ * might, and a stray metacharacter must not turn the rewrite into a wildcard.
+ */
+const escapeTerm = (term: string): string =>
+	term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Even gaps down a run of nodes.

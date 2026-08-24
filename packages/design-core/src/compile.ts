@@ -33,6 +33,7 @@ import {
 	LAYOUT_PROPS,
 	LAYOUT_PROP_NAMES,
 	NODE_KINDS,
+	constrainsProp,
 	dimension,
 	frameDim,
 	isLaidOut,
@@ -707,6 +708,17 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               and the rule that constrains it needs no ASP
 %   c_prop(C, Prop)             what a property rule is about
 %   c_edge(C, E)                what a geometric one is about
+%
+% The kind \`custom\` is the one that is yours. It has no members, no property
+% and no edge, and the generated program derives no viol/1 for it — your rule
+% does, against the id the document gave it:
+%
+%   viol(no_wide_gaps) :- lgap(row,G), G > 24.
+%
+% That is a plain \`:- ...\` with two things added: an enable checkbox, and a
+% name in the core when the document turns out to be impossible. A viol/1
+% whose term is not a constraint is never guarded and so does nothing — which
+% is what a renamed or mistyped id leaves behind.
 %   c_value(C, Pixels)          derived: numeral(resolved(cval(C)))
 %   gkind(K)                    K places its nodes rather than colours them
 %   gedge(E, x|y, pos|span|axis)   what an edge is
@@ -1058,10 +1070,12 @@ export function compile(
 		// `c_node/2` is then *derived* from `member/2` by the generic rule below,
 		// which is what lets one constraint cover nine cells it never named.
 		if (group) constraintLines.push(atom("c_group", c.id, group));
-		// A geometric kind carries a property in the document only so that
-		// turning it back into a colour rule remembers one; the program has no
-		// use for it.
-		if (!spec.geometric) constraintLines.push(atom("c_prop", c.id, c.prop));
+		// A geometric kind — or a custom one, which has no members to compare —
+		// carries a property in the document only so that turning it back into a
+		// colour rule remembers one; the program has no use for it.
+		if (constrainsProp(c.kind)) {
+			constraintLines.push(atom("c_prop", c.id, c.prop));
+		}
 		if (spec.counted) {
 			constraintLines.push(atom("c_limit", c.id, Math.max(1, c.limit ?? 1)));
 		}
@@ -1199,6 +1213,17 @@ export function compile(
 								"c_node(C,N) :- c_group(C,G), member(G,N).",
 							]
 						: []),
+					"",
+					"% ---- a rule the user wrote ----",
+					"% A `custom` constraint derives no viol/1 of its own: the rule in the",
+					"% Rules panel is the violation condition, written against its id —",
+					"% `viol(no_wide_gaps) :- ...`. So there is nothing to emit here, and",
+					"% that is the point: the switch above and the core below are what the",
+					"% kind is for, and a bare `:- ...` in the panel has neither.",
+					"%",
+					"% One consequence worth knowing: a viol/1 whose term is not a",
+					"% constraint in the document — a renamed rule, a typo — is simply",
+					"% never guarded, so it does nothing at all rather than failing.",
 					"",
 					"% ---- over a property ----",
 					"viol(C) :- c_kind(C,differ), c_prop(C,P), c_node(C,A), c_node(C,B), A<B,",

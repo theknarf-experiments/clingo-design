@@ -30,6 +30,7 @@ import {
 	ref,
 	resolveValue,
 	single,
+	wordOf,
 } from "./values.ts";
 
 export type PropName =
@@ -896,7 +897,8 @@ export type ConstraintKind =
 	| "gap"
 	| "equalSize"
 	| "symmetric"
-	| "pin";
+	| "pin"
+	| "custom";
 
 /**
  * A quantity a geometric constraint can talk about.
@@ -1138,6 +1140,43 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		seed: [{ slot: 1, place: "self", weight: 1 }],
 		annotation: "edges",
 	},
+	/**
+	 * A rule the user wrote, with a switch and a name.
+	 *
+	 * Every other kind derives `viol/1` from facts the document holds; this one
+	 * derives nothing, and the hand-written rule in the Rules panel supplies the
+	 * violation condition itself:
+	 *
+	 *     viol(no_wide_gaps) :- lgap(row,G), G > 24.
+	 *
+	 * The compiler emits `constraint(C)` and `c_kind(C,custom)` and stops. What
+	 * that buys is everything the generic guard machinery already does for the
+	 * built-in kinds and that a bare `:- ...` in the panel could never do: an
+	 * enable checkbox, and a name in the unsat core when the document turns out
+	 * to be impossible. It is the same move that made a rule-named *set* a
+	 * first-class member list, applied to the rule itself.
+	 *
+	 * No members, so no property, no edge, no dimension and no group — a set has
+	 * to be a set of something, and this one ranges over whatever its author's
+	 * rule ranges over. `maxNodes: 0` is the field that says all of that: see
+	 * {@link rangesOverGroup} and {@link constrainsProp}, both of which read it
+	 * rather than naming this kind.
+	 */
+	custom: {
+		label: "Custom rule",
+		// No placeholders: there is nothing in the document to fill them from, and
+		// what this rule means is in the ASP the user wrote.
+		summary: "holds unless your rules say viol(...)",
+		counted: false,
+		// Zero either way: it is not too small to say anything without members —
+		// it says whatever its rule says — and it has nowhere to put one.
+		minNodes: 0,
+		maxNodes: 0,
+		geometric: false,
+		edges: [],
+		seed: [],
+		annotation: "none",
+	},
 };
 
 export const CONSTRAINT_NAMES = Object.keys(CONSTRAINT_KINDS) as ConstraintKind[];
@@ -1153,6 +1192,43 @@ export const CONSTRAINT_NAMES = Object.keys(CONSTRAINT_KINDS) as ConstraintKind[
  */
 export const rangesOverGroup = (kind: ConstraintKind): boolean =>
 	CONSTRAINT_KINDS[kind].maxNodes === Number.POSITIVE_INFINITY;
+
+/**
+ * True when a kind is about a *property* of its members — which is what
+ * `c_prop/2` says and what the `differ`/`match`/`atMost` rules read.
+ *
+ * Read off the table rather than listed, and off two fields rather than one:
+ * `geometric` says a kind talks about where a node is instead of how it looks,
+ * and a kind with no members at all has nothing to be about either way. So
+ * `custom` needs no case here — a rule with no subject cannot have a property.
+ */
+export const constrainsProp = (kind: ConstraintKind): boolean =>
+	!CONSTRAINT_KINDS[kind].geometric && CONSTRAINT_KINDS[kind].maxNodes > 0;
+
+/**
+ * Words a constraint id may not be.
+ *
+ * A constraint id reaches ASP as a bare term — `constraint(no_wide_gaps)` — and
+ * for a {@link CONSTRAINT_KINDS.custom} rule it is also the term the *user*
+ * types in `viol(...)`, so it has to be spellable as a constant. Every lowercase
+ * word clingo's own vocabulary uses was tried against `constraint(W).`, and only
+ * `not` is a syntax error: the directives are all `#`-prefixed, and `count`,
+ * `sum`, `min`, `max`, `inf`, `sup`, `true` and the rest are ordinary constants
+ * in term position. So this set is one word rather than a keyword list nobody
+ * would keep in step.
+ *
+ * Colliding with the generated vocabulary — a rule called `gap`, or `frame` — is
+ * *not* forbidden: nothing joins a constraint id to a kind, an edge or a node
+ * id, so `constraint(gap)` says only what it says.
+ */
+export const RESERVED_TERMS: ReadonlySet<string> = new Set(["not"]);
+
+/**
+ * True when `name` can be a constraint id: an ASP constant, and not a word the
+ * grounder needs. Uniqueness is a document question and lives with the edit.
+ */
+export const isConstraintTerm = (name: string): boolean =>
+	wordOf(name) === name && !RESERVED_TERMS.has(name);
 
 /**
  * Properties every one of these kinds holds — what a rule over them may be
@@ -1178,6 +1254,20 @@ export function sharedPropsOfKinds(kinds: readonly NodeKind[]): PropName[] {
  * exactly which of them conflict — see `compile()`.
  */
 export interface Constraint {
+	/**
+	 * The term this constraint reaches ASP as, and the name a core blames.
+	 *
+	 * Not an opaque handle: `constraint(C)`, `active(C)` and `cval(C)` are all
+	 * built from it, an unsat core comes back naming it, and the editor marks the
+	 * guilty row by it. For a {@link CONSTRAINT_KINDS.custom} rule it is also the
+	 * term the *user* writes in `viol(...)`, which is why there is no separate
+	 * name field: a second identity would have to be mapped back at every one of
+	 * those hops, and the core would name something the document does not hold.
+	 *
+	 * So it must be an ASP constant ({@link isConstraintTerm}) and unique in the
+	 * document, and changing it is a rename that carries the user's rules with it
+	 * — see `renameConstraint`.
+	 */
 	id: string;
 	kind: ConstraintKind;
 	/** The property being constrained. Meaningless to the geometric kinds. */
