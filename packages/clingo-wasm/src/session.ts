@@ -30,7 +30,19 @@ export interface SolveOutcome {
 	exhausted: boolean;
 	/** True when the last model is a proven optimum. */
 	optimal: boolean;
+	/**
+	 * The last model's cost vector, one entry per priority level the program
+	 * uses, *highest level first*. Empty unless the solve was asked to rank.
+	 */
 	costs: number[];
+	/**
+	 * The same, per returned model and in the same order as {@link models}.
+	 *
+	 * A bounded enumeration does not come back best-first — clingo returns the
+	 * models within the bound in search order and the optimum is often last — so
+	 * this is what a caller sorts by. Empty vectors when nothing was ranked.
+	 */
+	modelCosts: number[][];
 	/**
 	 * On UNSATISFIABLE: the subset of the supplied assumptions that conflict,
 	 * in the exact form they were passed. Empty when the program itself is
@@ -48,6 +60,18 @@ export interface SolveRequest {
 	assumptions?: readonly Assumption[];
 	/** Skip collecting symbols; only `count` is filled in. */
 	countOnly?: boolean;
+	/**
+	 * A lexicographic ceiling on the cost vector: every model at or under it is
+	 * an answer, and each comes back with its own cost. Highest priority level
+	 * first, and a level left off the end is unbounded.
+	 *
+	 * This is the answer to "show me every design within a whisker of the best"
+	 * — which is a different question from `optN`, and the only one worth asking
+	 * of a program that is meant to hold several designs at once. Without it the
+	 * program's weak constraints are *ignored*: they cost nothing, restrict
+	 * nothing, and every model is an equal answer.
+	 */
+	bound?: readonly number[];
 }
 
 /**
@@ -103,6 +127,7 @@ interface RawOutcome {
 	exhausted?: boolean;
 	optimal?: boolean;
 	costs?: number[];
+	modelCosts?: number[][];
 	core?: string[];
 }
 
@@ -178,12 +203,13 @@ export class Session {
 			mod.ccall(
 				"cd_solve",
 				"number",
-				["number", "string", "number", "string"],
+				["number", "string", "number", "string", "string"],
 				[
 					this.#id,
 					mode,
 					request.models ?? 0,
 					encode(request.assumptions ?? []),
+					(request.bound ?? []).map((n) => Math.round(n)).join(","),
 				],
 			),
 		);
@@ -197,6 +223,7 @@ export class Session {
 			exhausted: parsed.exhausted ?? false,
 			optimal: parsed.optimal ?? false,
 			costs: parsed.costs ?? [],
+			modelCosts: parsed.modelCosts ?? [],
 			core: parsed.core ?? [],
 			stderr,
 		};

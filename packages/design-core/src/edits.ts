@@ -1212,6 +1212,12 @@ export function retargetConstraint(
 	const next: Constraint = {
 		id: current.id,
 		enabled: current.enabled,
+		// Kept, like the switch and for the same reason: how firmly a rule holds
+		// is a fact about that rule, not about its kind. Turning "these must
+		// differ" into "these must line up" is a change of subject, and losing
+		// "prefer" on the way through would be a silent change of strength.
+		...(current.strength === undefined ? {} : { strength: current.strength }),
+		...(current.weight === undefined ? {} : { weight: current.weight }),
 		// Rebuilt rather than patched, so a field the new kind never reads is
 		// gone from the document instead of lingering as dead data.
 		...shapeFor(scene, patch.kind ?? current.kind, current.nodes, {

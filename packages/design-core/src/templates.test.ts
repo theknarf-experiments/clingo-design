@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { directSolver } from "./directSolver.ts";
-import { explore, varyingVars } from "./explore.ts";
+import { updateConstraint } from "./edits.ts";
+import { compareCosts, explore, varyingVars } from "./explore.ts";
 import { frameOf, sceneContext } from "./scene.ts";
 import { flatten } from "./tree.ts";
 import { TEMPLATES, findTemplate } from "./templates/index.ts";
@@ -100,6 +101,42 @@ test("button set varies per assignment, not through a token", async () => {
 		"prop(three,fill)",
 		"prop(two,fill)",
 	]);
+});
+
+test("preference orders the whole space, and the tiers decide", async () => {
+	const scene = findTemplate("ranked")!.create();
+	const out = await explore(scene, directSolver, { limit: 24 });
+	// Nine designs, all of them legal and all of them shown: two preferences
+	// that cannot both hold are a ranking, not a smaller space.
+	assert.equal(out.count, 9);
+	assert.equal(out.optimized, true);
+	assert.equal(out.truncated, false);
+	// Three tiers, strongest first, and the best design pays the cheaper rule.
+	assert.deepEqual(out.levels, [3, 2, 1]);
+	assert.deepEqual(out.costs, [0, 1, 0]);
+	const costs = out.universes.map((u) => u.costs);
+	assert.deepEqual(costs[0], out.costs, "best first");
+	for (let i = 1; i < costs.length; i++) {
+		assert.ok(compareCosts(costs[i - 1], costs[i]) <= 0);
+	}
+	// The winner is an all-different design, which is what the stronger tier
+	// asked for; the restraint it gave up shows as the point at the second level.
+	const [a, b, c] = ["one", "two", "three"].map(
+		(id) => out.universes[0].model.byId[id]?.rendered.fill,
+	);
+	assert.equal(new Set([a, b, c]).size, 3);
+
+	// Swap the two tiers and the same space, the same nine designs, ranks the
+	// other way round. Nothing else about the document changes.
+	let swapped = updateConstraint(scene, "variety", { strength: "prefer" });
+	swapped = updateConstraint(swapped, "restraint", { strength: "strong" });
+	const other = await explore(swapped, directSolver, { limit: 24 });
+	assert.equal(other.count, 9);
+	assert.deepEqual(other.costs, [0, 1, 0]);
+	const winner = ["one", "two", "three"].map(
+		(id) => other.universes[0].model.byId[id]?.rendered.fill,
+	);
+	assert.ok(new Set(winner).size <= 2, "restraint now wins");
 });
 
 test("two frames share one accent variable", async () => {

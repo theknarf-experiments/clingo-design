@@ -1183,6 +1183,76 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 
 export const CONSTRAINT_NAMES = Object.keys(CONSTRAINT_KINDS) as ConstraintKind[];
 
+/* ------------------------------------------------------------------ */
+/* How firmly a rule holds                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A rule's strength: a prohibition, or a preference at one of three tiers.
+ *
+ * On the *instance* rather than on the kind, and that is the whole claim: "all
+ * these must differ" and "prefer that these differ" are the same relation at
+ * two strengths, over the same members, about the same property. A parallel set
+ * of `preferDiffer`/`preferMatch` kinds would double {@link CONSTRAINT_KINDS}
+ * to say nothing new, and every table read that asks what a kind *is* —
+ * `rangesOverGroup`, `constrainsProp`, `annotation`, `seed` — would have two
+ * entries to keep in step.
+ */
+export type Strength = "must" | "strong" | "prefer" | "slight";
+
+export interface StrengthSpec {
+	label: string;
+	/**
+	 * The `@` priority a violation costs at, or undefined for a prohibition.
+	 *
+	 * Levels are a lexicographic order, not a scale: no amount of cost at a
+	 * lower level outweighs a point at a higher one. That is what makes a tier
+	 * list worth having over a single number — "brand colours are
+	 * non-negotiable, then prefer contrast, then prefer tight spacing" is three
+	 * tiers and cannot be spelled with weights alone.
+	 *
+	 * Numbered from 1 up so that level 0 — an ASP weak constraint's default
+	 * priority — stays free for a rule the user writes by hand, which then ranks
+	 * below every tier here.
+	 */
+	level?: number;
+	/** Wrapped around the kind's own summary in the rules list. */
+	phrase: string;
+}
+
+/**
+ * The tiers, ordered. One table, and the *only* place a priority number is
+ * written down: the compiler emits `c_level/2` from it and one generic weak
+ * constraint reads that, so a new tier is an entry here and nothing else.
+ */
+export const STRENGTHS: Record<Strength, StrengthSpec> = {
+	must: { label: "Must", phrase: "{s}" },
+	strong: { label: "Strongly prefer", level: 3, phrase: "strongly prefer: {s}" },
+	prefer: { label: "Prefer", level: 2, phrase: "prefer: {s}" },
+	slight: { label: "Slightly prefer", level: 1, phrase: "slightly prefer: {s}" },
+};
+
+/** The tiers, strongest first — which is also the order the costs come back in. */
+export const STRENGTH_NAMES = Object.keys(STRENGTHS) as Strength[];
+
+/** What a constraint's strength is when the document does not say. */
+export const DEFAULT_STRENGTH: Strength = "must";
+
+/**
+ * True when a rule is a preference rather than a prohibition — read off the
+ * table, so no caller ever compares against `"must"`.
+ */
+export const isSoft = (strength: Strength | undefined): boolean =>
+	STRENGTHS[strength ?? DEFAULT_STRENGTH].level !== undefined;
+
+/** The priority a violation costs at, or undefined for a prohibition. */
+export const levelOf = (strength: Strength | undefined): number | undefined =>
+	STRENGTHS[strength ?? DEFAULT_STRENGTH].level;
+
+/** What a violation of `constraint` costs at its tier. At least one point. */
+export const weightOf = (constraint: Constraint): number =>
+	Math.max(1, Math.round(constraint.weight ?? 1));
+
 /**
  * True when a kind can range over a set it never enumerated — see
  * {@link Constraint.group}.
@@ -1320,9 +1390,36 @@ export interface Constraint {
 	 * per universe rather than being a fact.
 	 */
 	value?: Value;
+	/**
+	 * Whether this rule forbids its violation or merely costs something.
+	 *
+	 * Absent is {@link DEFAULT_STRENGTH}, so every document written before soft
+	 * rules existed reads as all-hard, which is what it was. A soft rule still
+	 * derives the same `viol/1`; what changes is what the program does with it —
+	 * `:- viol(C)` becomes `:~ viol(C). [W@L,C]`. See {@link STRENGTHS}.
+	 */
+	strength?: Strength;
+	/**
+	 * What a violation costs at that tier. Absent is 1; meaningless when hard.
+	 *
+	 * A whole violation, once: `viol/1` is one atom per rule, so a rule is
+	 * broken or it is not and this is the price, not a measure of how badly. A
+	 * cost that grows with the damage is a `:~` of your own in the Rules panel.
+	 */
+	weight?: number;
 	/** Off keeps it in the document but out of the program. */
 	enabled: boolean;
 }
+
+/**
+ * Which tier a priority level belongs to, for reading a cost vector back.
+ *
+ * Undefined for a level no tier claims, which is what a `:~` the user wrote by
+ * hand has — so a cost entry either gets a tier's name or gets none, and never
+ * gets the wrong one.
+ */
+export const strengthOfLevel = (level: number): Strength | undefined =>
+	STRENGTH_NAMES.find((s) => STRENGTHS[s].level === level);
 
 export interface Scene {
 	/** Named values, referenced from anywhere. Like CSS custom properties. */

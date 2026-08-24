@@ -23,7 +23,7 @@ import { type Freedom, probeFreedom } from "./freedom.ts";
 import type { Frame } from "./geometry.ts";
 import type { Measurements } from "./measure.ts";
 import { type ModelScene, readModel, readSolved } from "./model.ts";
-import type { Scene } from "./scene.ts";
+import { STRENGTHS, type Scene, strengthOfLevel } from "./scene.ts";
 import type { Assumption, Solver, SolverSession } from "./solver.ts";
 import {
 	type SampleStrategy,
@@ -53,6 +53,17 @@ export interface Candidate {
 	pick: Record<string, number>;
 	/** node ids that survive `visible/1` */
 	visible: Set<string>;
+	/**
+	 * What this design gave up, one entry per priority level and highest level
+	 * first. Empty in a document that expresses no preference, which is most.
+	 *
+	 * On the candidate rather than alongside it because it is a property of the
+	 * design and travels with it: the pool is sorted by this, the caption shows
+	 * it, and a hydrated universe has to arrive still carrying the cost its bare
+	 * candidate was chosen for. Pair it with {@link Exploration.levels} to say
+	 * *which* preference each number belongs to.
+	 */
+	costs: number[];
 }
 
 /** A candidate the solver was also asked to describe the picture of. */
@@ -118,10 +129,34 @@ export interface Exploration {
 	reusedGrounding: boolean;
 	/** How the shown universes were chosen. */
 	sampling: SamplingInfo;
-	/** True when the program optimises and only proven optima are shown. */
+	/**
+	 * True when the document expresses a preference, so the universes are the
+	 * near-optimal ones in cost order rather than a sample of the whole space.
+	 *
+	 * Not "only proven optima": that is what this used to mean and it was the
+	 * wrong answer. A tool whose point is holding several designs at once must
+	 * not show one the moment somebody writes down a preference — see
+	 * {@link bound}.
+	 */
 	optimized: boolean;
-	/** Cost of the optimum, when optimising. */
+	/** What the best design found costs, per level, highest level first. */
 	costs: number[];
+	/**
+	 * The ceiling every shown design is at or under, per level.
+	 *
+	 * Lexicographic, so it is not read entry by entry: a design beats the bound
+	 * as soon as it is under it at the first level they differ at.
+	 */
+	bound: number[];
+	/**
+	 * Which priority level each entry of a cost vector belongs to, highest first
+	 * — the document's own levels, from `compile`.
+	 *
+	 * A `:~` written by hand in the Rules panel adds a level nothing here can
+	 * see, which shifts the vector; the lengths then disagree, and that
+	 * disagreement is the signal not to put a tier's name on a number.
+	 */
+	levels: number[];
 	/**
 	 * What clingo said about the program while grounding it, with line numbers
 	 * already pointing at the user's own rules. Empty when it said nothing.
@@ -132,6 +167,15 @@ export interface Exploration {
 	 */
 	diagnostics: string;
 }
+
+/**
+ * What an exploration reports about the *program* rather than about the
+ * question asked of it — filled in the same way whichever path answered.
+ */
+type Common = Pick<
+	Exploration,
+	"generated" | "reusedGrounding" | "diagnostics" | "levels" | "ms" | "solves"
+>;
 
 /**
  * Thrown when the program admits no universes at all.
@@ -213,8 +257,11 @@ function readAtoms(
 	}
 }
 
-function readCandidate(atoms: readonly string[]): Candidate {
-	const candidate: Candidate = { pick: {}, visible: new Set() };
+function readCandidate(
+	atoms: readonly string[],
+	costs: readonly number[] = [],
+): Candidate {
+	const candidate: Candidate = { pick: {}, visible: new Set(), costs: [...costs] };
 	readAtoms(
 		atoms,
 		(variable, index) => {
@@ -226,15 +273,99 @@ function readCandidate(atoms: readonly string[]): Candidate {
 }
 
 /** Reads an answer set that was asked for with `scenery` on. */
-function interpret(atoms: readonly string[]): Universe {
+function interpret(
+	atoms: readonly string[],
+	costs: readonly number[] = [],
+): Universe {
 	let scene: ModelScene | undefined;
 	return {
-		...readCandidate(atoms),
+		...readCandidate(atoms, costs),
 		solved: readSolved(atoms),
 		get model(): ModelScene {
 			return (scene ??= readModel(atoms));
 		},
 	};
+}
+
+/**
+ * Lexicographic order on cost vectors: the first level they differ at decides,
+ * and a shorter vector is padded with zeros.
+ *
+ * This is what `@` levels *mean*, and it is why the ordering is done here at
+ * all: a bounded enumeration comes back in search order, and on every program
+ * tried the optimum was the last model of the run.
+ */
+export function compareCosts(a: readonly number[], b: readonly number[]): number {
+	const n = Math.max(a.length, b.length);
+	for (let i = 0; i < n; i++) {
+		const d = (a[i] ?? 0) - (b[i] ?? 0);
+		if (d !== 0) return d;
+	}
+	return 0;
+}
+
+/**
+ * What a design gave up, in words: "Prefer 1 · Slightly prefer 2".
+ *
+ * One function because there is one answer, and the status line and the
+ * artboard captions must not disagree about what a number means. Only the
+ * levels that actually cost something are named — a design that paid nothing at
+ * a tier has nothing to say about it, and one that paid nothing anywhere says
+ * "nothing", which is a phrase both readers can build a sentence around.
+ *
+ * Falls back to the bare numbers when the vector is longer than the levels the
+ * document knows about, which is what a `:~` written by hand in the Rules panel
+ * does to it. Better an unlabelled cost than a cost labelled with the wrong
+ * tier.
+ */
+export function describeCosts(
+	costs: readonly number[],
+	levels: readonly number[],
+): string {
+	if (costs.length === 0) return "";
+	if (costs.length !== levels.length) return `cost ${costs.join(", ")}`;
+	const paid = costs
+		.map((cost, i) => ({ cost, strength: strengthOfLevel(levels[i]) }))
+		.filter((entry) => entry.cost !== 0);
+	if (paid.length === 0) return "nothing";
+	return paid
+		.map(({ cost, strength }) =>
+			strength ? `${STRENGTHS[strength].label} ${cost}` : `cost ${cost}`,
+		)
+		.join(" · ");
+}
+
+/**
+ * The ceiling a ranked exploration enumerates under: the optimum, loosened by
+ * `slack` points.
+ *
+ * Points rather than a percentage, and that is a decision worth the paragraph:
+ * a point *is* the unit the tiers are written in — one violated preference of
+ * weight one — so "within two points of the best" reads as "gives up at most
+ * two more preferences", which is a sentence a designer can act on. A
+ * percentage is not: the best design usually costs nothing at all, and 50% of
+ * nothing is nothing, so a relative bound would silently collapse the very
+ * documents this feature is for back onto their optima.
+ *
+ * Every level is loosened, not only the lowest, because the bound clingo takes
+ * is *lexicographic* — verified against this build: with two levels, a ceiling
+ * of `2,2` admits a design costing `1,3`, since the first level already decides
+ * it. A bound that held the top level at its optimum would therefore show only
+ * designs that agree with the best about the most important thing, which for a
+ * single-tier document is the collapse this whole mechanism exists to avoid.
+ * Loosening the top tier too is also what makes the trade-off *visible*: the
+ * grid holds designs that gave up something dear to buy something cheap, and
+ * each says on its caption what it paid.
+ *
+ * One point at minimum, so a preference always leaves something to compare the
+ * best design against.
+ */
+export function rankedBound(
+	costs: readonly number[],
+	slack: number,
+): number[] {
+	const points = Math.max(1, Math.round(slack));
+	return costs.map((cost) => cost + points);
 }
 
 /**
@@ -353,6 +484,17 @@ export interface ExploreOptions {
 	 * the program, so changing one re-grounds.
 	 */
 	measurements?: Measurements;
+	/**
+	 * How many points below the best a design may be and still be shown — one
+	 * point being one violated preference of weight one.
+	 *
+	 * The dial between "the single best design" and "the whole space", and the
+	 * floor is one point rather than zero, deliberately: a preference with
+	 * nothing to compare the best design against is a preference whose effect
+	 * nobody can see.
+	 * @default 2
+	 */
+	slack?: number;
 }
 
 const DEFAULTS = {
@@ -363,6 +505,16 @@ const DEFAULTS = {
 	countLimit: 2_000,
 	sample: "diverse" as SampleStrategy,
 	seed: 1,
+	/** Points of suboptimality still worth showing. Two preferences' worth. */
+	slack: 2,
+	/**
+	 * Candidates a ranked enumeration draws before ordering them.
+	 *
+	 * More than a grid holds, because the enumeration is not best-first and the
+	 * cheapest way to be sure the second-best design is in hand is to have seen
+	 * a good many of them. Bare solves, so this is one round trip either way.
+	 */
+	rankPool: 200,
 	/** Fraction of varying tokens pinned per sampling query. */
 	coverage: 0.75,
 	/** Give up on a sampling query set after this many misses in a row. */
@@ -374,8 +526,18 @@ const DEFAULTS = {
  *
  * A theory `&minimize` is emphatically not that: it ranks the *points* the
  * simplex solver may return inside one answer set, and every answer set is
- * still an equal answer. Matching it here would switch every document with
- * solved geometry into `optN` and throw away the sampling.
+ * still an equal answer. The two objectives are separate and both live at once
+ * — verified through the real solver, and there is a test for it — so a ranked
+ * document still places its solved nodes exactly where an unranked one would.
+ *
+ * Text rather than a flag off `compile`, because the Rules panel is a place
+ * people write ASP by hand and a `:~` typed in there ranks the program just as
+ * much as one the document generated. The cost of reading the text is a false
+ * positive — a weak constraint whose condition grounds away still matches — and
+ * that no longer matters: a ranked exploration asks for the optimum first, and
+ * an empty cost vector is how it finds out there was nothing to rank and hands
+ * the question back. What used to be a program answering SATISFIABLE with zero
+ * models, reaching the canvas as a blank.
  */
 function isOptimizing(program: string): boolean {
 	return /^\s*(?::~|#(?:minimize|maximize))/m.test(program);
@@ -424,9 +586,10 @@ export class Explorer {
 		const strategy = options.sample ?? DEFAULTS.sample;
 		const seed = options.seed ?? DEFAULTS.seed;
 		const poolSize = options.poolSize ?? limit * 2;
+		const slack = options.slack ?? DEFAULTS.slack;
 		const started = Date.now();
 
-		const { program, generated, guards, userRulesLine } = compile(scene, {
+		const { program, generated, guards, userRulesLine, levels } = compile(scene, {
 			measurements: options.measurements,
 		});
 		// Constraints and pins are both assumed rather than baked in: that is
@@ -460,20 +623,44 @@ export class Explorer {
 		// the cheap reading too.
 		this.#assumed = bare;
 
-		let optimized = isOptimizing(program);
 		let solves = 0;
+		// True of the exploration whatever question was asked of the program, so
+		// the two paths below cannot answer it differently.
+		const common: Omit<Common, "ms" | "solves"> = {
+			generated,
+			reusedGrounding,
+			diagnostics: this.#diagnostics,
+			levels,
+		};
+
+		// A document that expresses a preference is a different question, not a
+		// harder version of the same one: the answer is the near-optimal designs
+		// in cost order, and there is nothing to sample. It can decline — a
+		// `#maximize` whose condition grounds away ranks nothing — and then this
+		// falls through to the ordinary path below.
+		if (isOptimizing(program)) {
+			const ranked = await this.#rank(session, bare, withPicture, limit, slack);
+			solves += ranked.solves;
+			if (ranked.exploration) {
+				return {
+					...common,
+					ms: Date.now() - started,
+					solves,
+					...ranked.exploration,
+				};
+			}
+		}
 
 		// One more than we will show, so `truncated` is exact rather than a
-		// guess based on hitting the cap. In an optimising program only proven
-		// optima count as answers.
+		// guess based on hitting the cap.
 		//
 		// The one solve that asks for pictures up front. Wherever the space fits
 		// in the grid these *are* the universes shown, so gating this would
 		// trade a single solve for up to `limit` of them; where it does not, at
 		// most `limit + 1` pictures are drawn for nothing.
-		let enumerated = await session.solve({
+		const enumerated = await session.solve({
 			models: limit + 1,
-			mode: optimized ? "optN" : "auto",
+			mode: "auto",
 			assumptions: withPicture,
 		});
 		solves++;
@@ -481,23 +668,10 @@ export class Explorer {
 			const { conflict, pinned } = attribute(enumerated.core);
 			throw new UnsatisfiableError(conflict, pinned);
 		}
-		// `isOptimizing` reads the program text, so a weak constraint whose
-		// condition grounds away still looks like one — and `optN` answers a
-		// program with nothing to rank by enumerating nothing at all. Satisfiable
-		// with no models is never a true answer, so read it as "there was no
-		// optimum here" and ask again the ordinary way. Without this a `#maximize`
-		// over an empty set is a blank canvas rather than a design.
-		if (optimized && enumerated.models.length === 0) {
-			optimized = false;
-			enumerated = await session.solve({
-				models: limit + 1,
-				mode: "auto",
-				assumptions: withPicture,
-			});
-			solves++;
-		}
 
-		const enumeratedUniverses = enumerated.models.map(interpret);
+		const enumeratedUniverses = enumerated.models.map((atoms) =>
+			interpret(atoms),
+		);
 		const truncated = enumeratedUniverses.length > limit;
 
 		let brave: Consequences;
@@ -539,7 +713,7 @@ export class Explorer {
 			cautious = accumulate(cautiousOut.models.at(-1) ?? []);
 			total = countOut.exhausted ? countOut.count : null;
 
-			if (strategy === "diverse" && !optimized) {
+			if (strategy === "diverse") {
 				const sampled = await this.#sample(session, brave, poolSize, seed, bare);
 				solves += sampled.solves;
 				// Enumeration order is biased, but those models are still valid
@@ -554,8 +728,6 @@ export class Explorer {
 				universes = hydrated.universes;
 				sampling = { strategy, pool: pool.length, seed, sampled: true };
 			} else {
-				// Optimising programs are already ranked: showing anything other
-				// than the best would misrepresent them.
 				universes = enumeratedUniverses.slice(0, limit);
 				sampling = {
 					strategy: "first",
@@ -567,20 +739,119 @@ export class Explorer {
 		}
 
 		return {
-			generated,
+			...common,
+			ms: Date.now() - started,
 			universes,
 			brave,
 			cautious,
 			truncated,
 			count: universes.length,
 			total,
-			ms: Date.now() - started,
 			solves,
-			reusedGrounding,
-			diagnostics: this.#diagnostics,
 			sampling,
-			optimized,
-			costs: enumerated.costs,
+			// Nothing ranked: either the document expresses no preference, or the
+			// one it expresses grounded away to nothing.
+			optimized: false,
+			costs: [],
+			bound: [],
+		};
+	}
+
+	/**
+	 * The near-optimal designs, best first — a document with a preference in it.
+	 *
+	 * Two solves, and the shape of them is the whole design decision of this
+	 * feature. `optN` alone would answer with the proven optima and nothing
+	 * else, which on most documents is a single design: a tool for holding
+	 * several at once would become a tool that shows you one, and the preference
+	 * a designer just wrote down would have deleted their design space. So the
+	 * optimum is only the first question. The second is *bounded suboptimality*:
+	 * every design within {@link rankedBound} of it, which clingo answers
+	 * natively through `--opt-mode=enum,<bound>` — confirmed against this build,
+	 * including that the bound is lexicographic and that the models come back in
+	 * search order rather than best first.
+	 *
+	 * Both solves are bare. What comes back is candidates with costs; the ones
+	 * that earn a slot are drawn afterwards by the same `#hydrate` a sampled
+	 * exploration uses, and a hydrating solve ignores the weak constraints
+	 * entirely — the picks it assumes already name one design, so there is
+	 * nothing left to rank.
+	 *
+	 * Returns no exploration when the program's `:~` or `#maximize` turned out to
+	 * rank nothing after grounding — an empty cost vector. That is not an error
+	 * and not a blank canvas: it is the map template, whose `#maximize` is
+	 * switched off by a commented fact, and the caller carries on the ordinary
+	 * way.
+	 */
+	async #rank(
+		session: SolverSession,
+		bare: ReadonlyArray<Assumption>,
+		withPicture: ReadonlyArray<Assumption>,
+		limit: number,
+		slack: number,
+	): Promise<{ exploration: Omit<Exploration, keyof Common> | null; solves: number }> {
+		const best = await session.solve({
+			models: 1,
+			mode: "optN",
+			assumptions: bare,
+		});
+		let solves = 1;
+		if (best.result === "UNSATISFIABLE") {
+			const { conflict, pinned } = attribute(best.core);
+			throw new UnsatisfiableError(conflict, pinned);
+		}
+		const optimum = best.models[0];
+		if (!optimum || best.costs.length === 0) {
+			return { exploration: null, solves };
+		}
+
+		const bound = rankedBound(best.costs, slack);
+		const within = await session.solve({
+			models: DEFAULTS.rankPool,
+			bound,
+			assumptions: bare,
+		});
+		solves++;
+
+		// The optimum first, because a capped enumeration can miss it: measured,
+		// `enum` walks the bounded region in search order and the best design was
+		// the last model of every run. Prepended rather than appended so `dedupe`
+		// keeps it at the front.
+		const pool = dedupe<Candidate>([
+			readCandidate(optimum, best.costs),
+			...within.models.map((atoms, i) =>
+				readCandidate(atoms, within.modelCosts[i] ?? []),
+			),
+		]);
+		pool.sort((a, b) => compareCosts(a.costs, b.costs));
+
+		const chosen = pool.slice(0, limit);
+		const hydrated = await this.#hydrate(session, chosen, withPicture);
+		solves += hydrated.solves;
+
+		// Over the near-optimal designs rather than the whole space, because for a
+		// ranked document that *is* the space: "what every good design agrees
+		// about" is the question worth an overlay, and "what every legal design
+		// agrees about" would include the designs the preference exists to reject.
+		return {
+			exploration: {
+				universes: hydrated.universes,
+				brave: unionOf(pool),
+				cautious: intersectionOf(pool),
+				truncated: pool.length > limit || !within.exhausted,
+				count: hydrated.universes.length,
+				total: within.exhausted ? pool.length : null,
+				sampling: {
+					strategy: "ranked",
+					pool: pool.length,
+					seed: 0,
+					sampled: pool.length > limit,
+				},
+				optimized: true,
+				costs: best.costs,
+				bound,
+			},
+			solves,
 		};
 	}
 
@@ -684,7 +955,10 @@ export class Explorer {
 						`a chosen design could not be drawn: ${outcome.result}`,
 					);
 				}
-				return interpret(atoms);
+				// Carried over rather than re-read: this solve assumed the picks and
+				// so has no bound and no cost of its own, and the cost is why the
+				// candidate was chosen.
+				return interpret(atoms, candidate.costs);
 			}),
 		);
 		return { universes, solves };

@@ -21,6 +21,7 @@ import {
 	KINDS,
 	PROPS,
 	RULES_HEADER,
+	STRENGTHS,
 	type Scene,
 	type SceneNode,
 	dimension,
@@ -136,6 +137,12 @@ function isConstraint(value: unknown): value is Constraint {
 	// The geometric fields are optional, but a bogus one would compile into a
 	// fact no rule matches — a rule that silently does nothing.
 	if (value.edge !== undefined && !(String(value.edge) in EDGES)) return false;
+	// A bogus strength is worse than a bogus edge: it would compile to a
+	// priority level nothing names, so the rule would be ranked at a tier the
+	// panel cannot show and the cost vector would gain an entry nobody can read.
+	if (value.strength !== undefined && !(String(value.strength) in STRENGTHS)) {
+		return false;
+	}
 	if (
 		value.value !== undefined &&
 		!Number.isFinite(value.value) &&

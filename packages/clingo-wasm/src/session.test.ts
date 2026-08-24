@@ -178,14 +178,60 @@ test("optN enumerates only proven optima", async () => {
 	);
 });
 
-test("plain mode walks improving models and ends on the optimum", async () => {
+test("plain mode ignores the weak constraints entirely", async () => {
 	await withSession(
 		`${PROGRAM}\n:~ bind(accent,rose). [1@1]\n`,
 		async (s) => {
+			// Not "walks improving models", which is what this used to do and was
+			// a trap: an enumeration that should return a space returned a
+			// shrinking chain of it, silently, the moment anything in the program
+			// ranked. Ranking is now something a caller asks for.
 			const out = await s.solve({ models: 0 });
-			assert.deepEqual(out.costs, [0]);
-			assert.equal(out.models.length, 1);
-			assert.ok(!out.models.at(-1)?.includes("bind(accent,rose)"));
+			assert.equal(out.models.length, 6);
+			assert.deepEqual(out.costs, []);
+			assert.ok(out.models.some((m) => m.includes("bind(accent,rose)")));
+		},
+	);
+});
+
+test("a bound enumerates every model at or under it, with each cost", async () => {
+	await withSession(
+		`${PROGRAM}\n:~ bind(accent,rose). [1@1]\n`,
+		async (s) => {
+			// Bounded suboptimality: the four optima *and* the two designs that
+			// cost a point, which is the whole feature — a ranked program still
+			// holds several answers.
+			const out = await s.solve({ models: 0, bound: [1] });
+			assert.equal(out.models.length, 6);
+			assert.equal(out.modelCosts.length, 6);
+			for (const [i, model] of out.models.entries()) {
+				assert.deepEqual(
+					out.modelCosts[i],
+					[model.includes("bind(accent,rose)") ? 1 : 0],
+					"each model reports its own cost",
+				);
+			}
+			// A bound of zero admits only the optima.
+			const best = await s.solve({ models: 0, bound: [0] });
+			assert.equal(best.models.length, 4);
+		},
+	);
+});
+
+test("levels are lexicographic, and the cost vector is highest level first", async () => {
+	await withSession(
+		// Two preferences that cannot both hold: rose costs a point at the high
+		// level, anything else costs nine at the low one.
+		`${PROGRAM}\n:~ bind(accent,rose). [1@2]\n:~ bind(accent,C), C != rose. [9@1]\n`,
+		async (s) => {
+			const out = await s.solve({ models: 1, mode: "optN" });
+			// Nine points at the lower level do not buy one at the higher.
+			assert.deepEqual(out.costs, [0, 9]);
+			assert.ok(out.models[0]?.includes("bind(accent,rose)") === false);
+			// The bound is lexicographic too: a ceiling of 1,0 lets in a design
+			// costing 0,9 because the first level already decided it.
+			const within = await s.solve({ models: 0, bound: [1, 0] });
+			assert.ok(within.modelCosts.some((c) => c[0] === 0 && c[1] === 9));
 		},
 	);
 });
@@ -194,10 +240,11 @@ test("opt mode does not leak between solves on one session", async () => {
 	await withSession(
 		`${PROGRAM}\n:~ bind(accent,rose). [1@1]\n`,
 		async (s) => {
-			// optN enumerates every optimum; plain opt stops at one. Alternating
-			// proves the configuration is reset each time rather than sticking.
+			// Three treatments of the same weak constraint on one grounding:
+			// only the optima, everything within a point, everything at all.
 			assert.equal((await s.solve({ models: 0, mode: "optN" })).models.length, 4);
-			assert.equal((await s.solve({ models: 0 })).models.length, 1);
+			assert.equal((await s.solve({ models: 0, bound: [1] })).models.length, 6);
+			assert.equal((await s.solve({ models: 0 })).models.length, 6);
 			assert.equal((await s.solve({ models: 0, mode: "optN" })).models.length, 4);
 		},
 	);

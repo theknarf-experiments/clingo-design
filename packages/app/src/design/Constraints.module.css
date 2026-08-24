@@ -87,6 +87,20 @@
 	cursor: pointer;
 }
 
+/* Takes the line, because it is the line: how firmly the rule holds, with the
+   switch that decides whether it holds at all and the button that removes it. */
+.strength {
+	flex: 1 1 auto;
+	min-width: 0;
+	padding: 0.1rem 0.2rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: var(--dc-dim);
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
 .kind,
 .prop {
 	flex: 1 1 auto;

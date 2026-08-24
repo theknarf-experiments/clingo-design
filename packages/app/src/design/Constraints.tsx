@@ -5,12 +5,17 @@ import {
 	type Constraint,
 	type ConstraintKind,
 	type ConstraintSpec,
+	DEFAULT_STRENGTH,
 	EDGES,
 	type Edge,
 	type ModelScene,
 	PROPS,
 	type PropName,
+	STRENGTHS,
+	STRENGTH_NAMES,
 	type Scene,
+	type Strength,
+	isSoft,
 	addConstraint,
 	addCustomConstraint,
 	constrainsProp,
@@ -260,11 +265,18 @@ export function Constraints({
 
 	function describe(c: Constraint): string {
 		const spec = CONSTRAINT_KINDS[c.kind];
-		return spec.summary
+		const summary = spec.summary
 			.replace("{prop}", PROPS[c.prop].label.toLowerCase())
 			.replace("{n}", String(c.limit ?? 1))
 			.replace("{edge}", (EDGES[c.edge ?? "left"].label ?? "").toLowerCase())
 			.replace("{v}", dimensionOf(c));
+		// The kind says what the relation is; the strength says whether it is a
+		// demand. Both from their own table, so neither has a copy of the other's
+		// wording — see STRENGTHS.
+		return STRENGTHS[c.strength ?? DEFAULT_STRENGTH].phrase.replace(
+			"{s}",
+			summary,
+		);
 	}
 
 	return (
@@ -360,6 +372,10 @@ export function Constraints({
 						data-constraint={c.id}
 						data-blamed={conflict.has(c.id) ? "" : undefined}
 					>
+						{/* Two lines, because the panel is 260px and five controls across
+						    it collapse each other to nothing. The first says how firmly the
+						    rule holds and whether it holds at all; the second says what the
+						    rule *is*. */}
 						<div className={styles.ruleHead}>
 							<input
 								type="checkbox"
@@ -373,6 +389,61 @@ export function Constraints({
 									)
 								}
 							/>
+							{/* First in the rule because it is the verb of the sentence the
+							    rule reads as: "must — all different — fill". A preference is
+							    not a different kind of rule, so it is not in the kind menu. */}
+							<select
+								className={styles.strength}
+								data-role="constraint-strength"
+								value={c.strength ?? DEFAULT_STRENGTH}
+								title="Forbid this, or merely prefer it. Preferences are ranked against each other, strongest tier first."
+								onChange={(e) =>
+									onSceneChange((prev) =>
+										updateConstraint(prev, c.id, {
+											strength: e.target.value as Strength,
+										}),
+									)
+								}
+							>
+								{STRENGTH_NAMES.map((strength) => (
+									<option key={strength} value={strength}>
+										{STRENGTHS[strength].label}
+									</option>
+								))}
+							</select>
+							{isSoft(c.strength) ? (
+								<input
+									type="number"
+									className={styles.limit}
+									data-role="constraint-weight"
+									min={1}
+									value={c.weight ?? 1}
+									title="What breaking this costs, in points, inside its tier"
+									onChange={(e) =>
+										onSceneChange(
+											(prev) =>
+												updateConstraint(prev, c.id, {
+													weight: Math.max(1, Number(e.target.value) || 1),
+												}),
+											`constraint-weight:${c.id}`,
+										)
+									}
+								/>
+							) : null}
+							<button
+								type="button"
+								className={styles.delete}
+								data-role="delete-constraint"
+								title="Delete this rule"
+								onClick={() =>
+									onSceneChange((prev) => deleteConstraint(prev, c.id))
+								}
+							>
+								×
+							</button>
+						</div>
+
+						<div className={styles.ruleHead}>
 							<select
 								className={styles.kind}
 								data-role="constraint-kind"
@@ -487,18 +558,6 @@ export function Constraints({
 								spec={spec}
 								onSceneChange={onSceneChange}
 							/>
-
-							<button
-								type="button"
-								className={styles.delete}
-								data-role="delete-constraint"
-								title="Delete this rule"
-								onClick={() =>
-									onSceneChange((prev) => deleteConstraint(prev, c.id))
-								}
-							>
-								×
-							</button>
 						</div>
 
 						{takesMembers(c.kind) ? (

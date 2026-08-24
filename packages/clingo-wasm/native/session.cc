@@ -226,8 +226,17 @@ int cd_open(char const *program, char const *options) {
  * (0 = all). `assumptions` is a newline-separated list of signed terms, e.g.
  * "+pick(tok(accent),0)\n-pick(tok(accent),1)" — newline because an ASP string
  * literal can contain ';' but never a raw newline.
+ *
+ * `bound` is a comma-separated cost ceiling, highest priority level first, and
+ * it is what makes a ranked program still hold several answers: every model
+ * whose cost vector is lexicographically at or under it is an answer, not only
+ * the proven optima. Empty means the weak constraints are ignored entirely —
+ * the deliberate default, because a program that ranks its models must not
+ * thereby stop enumerating them. See `--opt-mode` in clingo's own manual; the
+ * spelling `enum,<b1>,<b2>` was confirmed against this build.
  */
-int cd_solve(int id, char const *mode, int models, char const *assumptions) {
+int cd_solve(int id, char const *mode, int models, char const *assumptions,
+             char const *bound) {
     Session *session = find_session(id);
     if (session == nullptr) {
         emit_error("no such session");
@@ -244,7 +253,16 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
         bool opt_n = mode_str == "optN";
         bool enumerating = collect && !opt_n;
         conf["solve"]["enum_mode"] = enumerating ? mode_str.c_str() : "auto";
-        conf["solve"]["opt_mode"] = opt_n ? "optN" : "opt";
+        // Three ways to treat the program's weak constraints, and the default is
+        // the one that leaves the answers alone. "opt" was the old default and
+        // was a trap: with an optimize statement anywhere in the program it
+        // walks *improving* models, so an enumeration that should have returned
+        // a design space returned a shrinking chain of it instead.
+        std::string bound_str = (bound != nullptr) ? bound : "";
+        std::string opt_mode = opt_n              ? "optN"
+                               : bound_str.empty() ? "ignore"
+                                                   : "enum," + bound_str;
+        conf["solve"]["opt_mode"] = opt_mode.c_str();
 
         // Assumptions are mapped to program literals rather than passed as
         // symbols, so that an unsat core can be translated back into the
@@ -263,6 +281,7 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
                 // is unsatisfiable on its own; forbidding it is free.
                 if (positive) {
                     std::string out = "{\"result\":\"UNSATISFIABLE\",\"models\":[],";
+                    out += "\"modelCosts\":[],";
                     out += "\"exhausted\":true,\"optimal\":false,\"costs\":[],\"core\":[";
                     quote(token, out);
                     out += "]}";
@@ -278,6 +297,11 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
         }
 
         std::string models_json = "[";
+        // One cost vector per collected model, so a ranked answer can be shown
+        // *as* a ranking. `costs` below is only ever the last model's, which for
+        // an improving search is the best one and for a bounded enumeration is
+        // whichever came last — no use to a caller that wants to order them.
+        std::string costs_json = "[";
         bool first_model = true;
         long long seen = 0;
         std::vector<int64_t> costs;
@@ -298,8 +322,18 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
                 }
                 ++seen;
                 if (collect) {
-                    if (!first_model) { models_json += ","; }
+                    if (!first_model) {
+                        models_json += ",";
+                        costs_json += ",";
+                    }
                     first_model = false;
+                    auto const &mc = model.cost();
+                    costs_json += "[";
+                    for (size_t i = 0; i < mc.size(); ++i) {
+                        if (i != 0) { costs_json += ","; }
+                        costs_json += std::to_string(mc[i]);
+                    }
+                    costs_json += "]";
                     models_json += "[";
                     bool first_symbol = true;
                     auto put = [&](std::string const &text) {
@@ -329,6 +363,7 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
             }
         }
         models_json += "]";
+        costs_json += "]";
 
         std::string out = "{\"result\":";
         quote(result.is_satisfiable()     ? "SATISFIABLE"
@@ -336,6 +371,7 @@ int cd_solve(int id, char const *mode, int models, char const *assumptions) {
                                           : "UNKNOWN",
               out);
         out += ",\"models\":" + models_json;
+        out += ",\"modelCosts\":" + costs_json;
         out += ",\"count\":" + std::to_string(seen);
         out += ",\"exhausted\":";
         out += result.is_exhausted() ? "true" : "false";

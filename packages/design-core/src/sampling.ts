@@ -17,7 +17,17 @@
  */
 import type { Candidate } from "./explore.ts";
 
-export type SampleStrategy = "first" | "diverse";
+/**
+ * How the shown universes were chosen.
+ *
+ * `first` is enumeration order — biased, and only honest when it *is* the whole
+ * space. `diverse` is the two mechanisms above. `ranked` is neither: the
+ * document expresses a preference, so the designs are ordered by what they cost
+ * and the best of them are shown. Nothing is sampled there, and nothing may be:
+ * showing a diverse spread of a ranked space would put a bad design next to the
+ * best one with no way to tell which was which.
+ */
+export type SampleStrategy = "first" | "diverse" | "ranked";
 
 /**
  * A small deterministic PRNG (xorshift32).

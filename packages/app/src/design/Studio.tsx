@@ -25,6 +25,7 @@ import {
 	moveNodes,
 	collapseToPicks,
 	derivedNodes,
+	describeCosts,
 	documentBounds,
 	partLabel,
 	FRAME_DIMS,
@@ -761,6 +762,18 @@ export function Studio({
 	function captionFor(universe: Universe) {
 		const parts: string[] = [];
 		let more = 0;
+		// What this design cost, first, because in a ranked document it is the
+		// reason it is in this position. A ranking nobody can see is a ranking
+		// nobody trusts, and the grid is where the comparison actually happens.
+		if (universe.costs.length > 0) {
+			// A design that gave up nothing is not "nothing", it is the best one —
+			// the grid is where that comparison is made, so it says so.
+			parts.push(
+				universe.costs.every((cost) => cost === 0)
+					? "best"
+					: describeCosts(universe.costs, exploration?.levels ?? []),
+			);
+		}
 		for (const variable of unsettled) {
 			const index = universe.pick[variable];
 			if (index === undefined) continue;
@@ -917,7 +930,9 @@ export function Studio({
 										</div>
 									)}
 									{view === "multiverse" ? (
-										<div className={styles.caption}>{captionFor(universe)}</div>
+										<div className={styles.caption} data-role="caption">
+											{captionFor(universe)}
+										</div>
 									) : null}
 								</div>
 							);
@@ -1021,7 +1036,11 @@ export function Studio({
 								</button>
 							</div>
 						) : null}
-						{exploration?.sampling.sampled && view === "multiverse" ? (
+						{/* A ranked space has no sample to redraw: the designs shown are the
+						    best ones, and a different seed would return the same list. */}
+						{exploration?.sampling.sampled &&
+						!exploration.optimized &&
+						view === "multiverse" ? (
 							<button
 								type="button"
 								className={styles.tool}

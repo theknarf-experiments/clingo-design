@@ -18,6 +18,7 @@ import { pair } from "./pair.ts";
 import { palette } from "./palette.ts";
 import { places } from "./places.ts";
 import { rail } from "./rail.ts";
+import { ranked } from "./ranked.ts";
 import { sudoku } from "./sudoku.ts";
 
 export interface Template {
@@ -59,6 +60,13 @@ export const TEMPLATES: Template[] = [
 		description:
 			"Three buttons that must all differ, with ink computed to stay readable.",
 		create: palette,
+	},
+	{
+		id: "ranked",
+		name: "Preference",
+		description:
+			"Variety against restraint: two rules that cannot both hold, ranked instead of enforced.",
+		create: ranked,
 	},
 	{
 		id: "rail",

@@ -41,6 +41,7 @@
 
 /* Marks how the shown set was chosen, rather than what it contains. */
 .tag {
+	margin-left: 0.35rem;
 	padding: 1px 6px;
 	border-radius: 999px;
 	border: 1px solid var(--dc-line);

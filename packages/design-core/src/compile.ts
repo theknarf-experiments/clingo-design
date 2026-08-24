@@ -38,9 +38,11 @@ import {
 	frameDim,
 	isLaidOut,
 	layoutValueOf,
+	levelOf,
 	rangesOverGroup,
 	type Scene,
 	type SceneNode,
+	weightOf,
 } from "./scene.ts";
 import {
 	DERIVATIONS,
@@ -711,6 +713,9 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               and the rule that constrains it needs no ASP
 %   c_prop(C, Prop)             what a property rule is about
 %   c_edge(C, E)                what a geometric one is about
+%   c_level(C, L)  c_weight(C, W)   present only for a *soft* rule: violating it
+%                               costs W at priority L instead of being forbidden
+%   c_soft(C)                   derived: C is ranked rather than prohibited
 %   c_value(C, Pixels)          derived: numeral(resolved(cval(C)))
 %   gkind(K)                    K places its nodes rather than colours them
 %   gedge(E, x|y, pos|span|axis)   what an edge is
@@ -728,6 +733,29 @@ export const CONTRACT = `% Predicates you can rely on:
 % the core when the document turns out to have no design at all. A viol/1 whose
 % term is not a constraint in the document is never guarded and so does nothing
 % — which is what a renamed or mistyped id leaves behind.
+%
+% Set that same rule's strength to a preference and nothing about the line you
+% wrote changes: the viol/1 it derives is *ranked* instead of forbidden, and the
+% cost it carries shows on the design that paid it. That is the whole of soft
+% custom rules — a preference you can phrase in ASP, with a name, a switch, and
+% a price.
+%
+% Preference in general. Levels are lexicographic — no amount of cost at a lower
+% level outweighs a point at a higher one — and only designs within a bound of
+% the best are shown, so a document that ranks its designs still holds several.
+% You can write your own weak constraint too, and it composes with the document's:
+%
+%   :~ rendered(N,fill,L), pale(L). [1@1, N]
+%
+% Two things to know. Priorities 1 to 3 are the tiers the rules panel offers, so
+% level 0 is the one that ranks below all of them; and a cost vector reports one
+% entry per level in the program, highest first, so adding a level of your own
+% shifts what the status line can name.
+%
+% The theory objective is a different mechanism entirely and does not interact
+% with this: &minimize ranks the *points* simplex may return inside one answer
+% set, while a weak constraint ranks the answer sets. Both are live at once —
+% solved geometry still lands where it should in a ranked document.
 %
 % Reading your own switch is allowed and is worth knowing about, because a
 % constraint that is off emits no constraint/1 fact: active(...) then has
@@ -855,6 +883,22 @@ export interface CompileResult {
 	 * UNSAT the solver returns the conflicting subset.
 	 */
 	guards: string[];
+	/**
+	 * Priority levels the document's soft rules use, highest first — empty when
+	 * every rule is a prohibition.
+	 *
+	 * The key to reading a cost vector: clingo reports one entry per level
+	 * *present in the program*, in descending order, so `costs[i]` is what a
+	 * design gave up at `levels[i]`. Reported from here rather than read off the
+	 * document because this is the code that decides which constraints made it
+	 * into the program at all — a rule with too few members emits nothing and so
+	 * contributes no level either.
+	 *
+	 * It is the document's levels only. A `:~` in the Rules panel adds its own,
+	 * which shifts the vector, and nothing here can see that — hence the length
+	 * check wherever a cost is labelled.
+	 */
+	levels: number[];
 }
 
 /**
@@ -1070,6 +1114,8 @@ export function compile(
 	const constraintLines: string[] = [];
 	const guards: string[] = [];
 	let geometric = false;
+	/** Priority levels the soft rules use, so a cost vector can be read back. */
+	const levels = new Set<number>();
 	let grouped = false;
 	for (const c of scene.constraints ?? []) {
 		const spec = CONSTRAINT_KINDS[c.kind];
@@ -1094,6 +1140,15 @@ export function compile(
 		}
 		if (spec.counted) {
 			constraintLines.push(atom("c_limit", c.id, Math.max(1, c.limit ?? 1)));
+		}
+		// Soft or hard is one fact, not two kinds. A hard rule emits nothing here
+		// and the guard below reads its absence, so every document written before
+		// preference existed compiles to exactly the program it did before.
+		const level = levelOf(c.strength);
+		if (level !== undefined) {
+			levels.add(level);
+			constraintLines.push(atom("c_level", c.id, level));
+			constraintLines.push(atom("c_weight", c.id, weightOf(c)));
 		}
 		if (spec.geometric) {
 			geometric = true;
@@ -1215,7 +1270,26 @@ export function compile(
 					"% assumed true when solving, so an unsatisfiable answer comes back",
 					"% with a *core*: the smallest set of them that cannot hold together.",
 					"{ active(C) } :- constraint(C).",
-					":- viol(C), active(C).",
+					"% Hard or soft is one fact about the rule, so this is one guard with",
+					"% one exception rather than two families of kind. A rule with no",
+					"% c_level/2 is a prohibition, which is what every rule was.",
+					"#defined c_level/2.",
+					"#defined c_weight/2.",
+					"c_soft(C) :- c_level(C,_).",
+					":- viol(C), active(C), not c_soft(C).",
+					...(levels.size === 0
+						? []
+						: [
+								"% ---- preference ----",
+								"% The same viol/1 the hard rules derive, ranked instead of",
+								"% forbidden. One weak constraint covers every soft rule at every",
+								"% tier because the weight and the level are *terms*: the document",
+								"% changes the facts, never the shape of the program.",
+								"%",
+								"% The tuple ends in C so two rules violated at the same tier cost",
+								"% their weights separately rather than collapsing into one.",
+								":~ viol(C), active(C), c_level(C,L), c_weight(C,W). [W@L,C]",
+							]),
 					// The rules below are generic while the facts are per-document,
 					// so a document with no `atMost` emits no c_limit/2 and one whose
 					// every rule is geometric or custom emits no c_prop/2. Declared
@@ -1369,6 +1443,7 @@ export function compile(
 		userRulesLine: prefix.split("\n").length,
 		variables,
 		guards,
+		levels: [...levels].sort((a, b) => b - a),
 	};
 }
 
