@@ -59,12 +59,16 @@ function send<T>(request: WithoutId<SolverRequest>): Promise<T> {
 
 export const workerSolver: Solver = {
 	async open(program: string, options = ""): Promise<SolverSession> {
-		const handle = await send<number>({ op: "open", program, options });
+		const { handle, diagnostics } = await send<{
+			handle: number;
+			diagnostics: string;
+		}>({ op: "open", program, options });
 		return {
 			solve: (request: SolveRequest = {}) =>
 				send<SolveOutcome>({ op: "solve", session: handle, request }),
 			close: () =>
 				send<null>({ op: "close", session: handle }).then(() => undefined),
+			diagnostics,
 		};
 	},
 };

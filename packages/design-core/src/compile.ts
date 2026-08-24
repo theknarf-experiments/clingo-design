@@ -1216,6 +1216,15 @@ export function compile(
 					"% with a *core*: the smallest set of them that cannot hold together.",
 					"{ active(C) } :- constraint(C).",
 					":- viol(C), active(C).",
+					// The rules below are generic while the facts are per-document,
+					// so a document with no `atMost` emits no c_limit/2 and one whose
+					// every rule is geometric or custom emits no c_prop/2. Declared
+					// rather than left absent because clingo remarks on a body atom
+					// no rule heads — correctly, and it is now surfaced in the panel,
+					// where "c_limit(C,K) does not occur" is noise about a predicate
+					// the reader never wrote.
+					"#defined c_prop/2.",
+					"#defined c_limit/2.",
 					...(grouped
 						? [
 								"",

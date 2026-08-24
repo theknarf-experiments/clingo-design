@@ -40,6 +40,17 @@ export interface SolveOutcome {
 export interface SolverSession {
 	solve(request?: SolveRequest): Promise<SolveOutcome>;
 	close(): Promise<void>;
+	/**
+	 * What clingo said about the program while grounding it, and nothing about
+	 * any one solve — an atom in a body no rule derives, a `#show` for a
+	 * predicate that is not there.
+	 *
+	 * Grounding-time, so it belongs to the program rather than to an answer: a
+	 * session grounds once and solves many times. These are not errors; the
+	 * program ran. They are what makes a typo in a hand-written rule visible
+	 * instead of silent, which is the whole reason the channel is here.
+	 */
+	readonly diagnostics: string;
 }
 
 export interface Solver {

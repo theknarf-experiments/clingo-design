@@ -71,9 +71,36 @@ struct LpxValues : SolveEventHandler {
     clingolpx_theory_t *lpx;
 };
 
+/**
+ * clingo's own diagnostics: "atom does not occur in any rule head", an unsafe
+ * variable, a `#show` for a predicate nothing derives.
+ *
+ * Both the parser and the grounder throw these away unless handed a logger, and
+ * the parse call additionally took a message limit of zero — so a typo inside a
+ * rule used to be perfectly silent. That matters here more than it would in a
+ * library: the rules panel is a place people write ASP by hand, and a panel that
+ * says nothing about a misspelled predicate is a panel that lies by omission.
+ *
+ * Written to stderr in clingo's own wording, deliberately. The message arrives
+ * already carrying its location (`<block>:3:8-14: info: ...`), the Emscripten
+ * runtime routes stderr to `printErr`, and `formatDiagnostics` on the far side
+ * already parses exactly that shape to say "your rules, line 3". So the whole
+ * channel exists; this only stops discarding what flows down it.
+ */
+constexpr unsigned MESSAGE_LIMIT = 20;
+
+void log_message(Clingo::WarningCode, char const *message) {
+    std::fprintf(stderr, "%s\n", message);
+}
+
+/** The same, in the shape `clingo_ast_parse_string` wants. */
+void log_message_c(clingo_warning_t, char const *message, void *) {
+    std::fprintf(stderr, "%s\n", message);
+}
+
 struct Session {
     explicit Session(std::vector<char const *> const &args)
-        : ctl{StringSpan{args.data(), args.size()}} {
+        : ctl{StringSpan{args.data(), args.size()}, log_message, MESSAGE_LIMIT} {
         Detail::handle_error(clingolpx_create(&lpx));
     }
     ~Session() {
@@ -171,7 +198,8 @@ int cd_open(char const *program, char const *options) {
         AST::with_builder(ctl, [&](AST::ProgramBuilder &builder) {
             Rewriter rewriter{session->lpx, builder.to_c()};
             Detail::handle_error(clingo_ast_parse_string(
-                program, Rewriter::rewrite, &rewriter, ctl.to_c(), nullptr, nullptr, 0));
+                program, Rewriter::rewrite, &rewriter, ctl.to_c(), log_message_c, nullptr,
+                MESSAGE_LIMIT));
         });
 
         ctl.ground({{"base", {}}});

@@ -1147,6 +1147,7 @@ export function Studio({
 					generated={generated}
 					onChange={(next) => onSceneChange(() => next)}
 					error={error}
+					diagnostics={exploration?.diagnostics ?? ""}
 					universes={universes}
 					projectName={projectName}
 					status={

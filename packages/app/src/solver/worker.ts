@@ -22,7 +22,10 @@ async function handle(request: SolverRequest): Promise<number | unknown> {
 			const session = await Session.open(request.program, request.options ?? "");
 			const handle = nextSession++;
 			sessions.set(handle, session);
-			return handle;
+			// The diagnostics cross with the handle rather than being fetched
+			// later: they are settled the moment the program grounds, and the
+			// session they describe lives on this side of the boundary.
+			return { handle, diagnostics: session.diagnostics };
 		}
 		case "solve": {
 			const session = sessions.get(request.session);

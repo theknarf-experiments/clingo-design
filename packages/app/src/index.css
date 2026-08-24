@@ -20,6 +20,11 @@
 	   the accent on selection and rose on snap guides, and a mark that says
 	   "this rule holds here" must not be read as either. */
 	--dc-note: #0d9488;
+	/* A remark about a program that ran anyway — a rule that grounds and does
+	   nothing. Amber rather than the error red, because the distinction it has
+	   to carry is "your design is on the canvas and one of your rules is not
+	   doing what you think" versus "there is no design at all". */
+	--dc-warn: #b45309;
 
 	/* Syntax colours for the rules panel. Deliberately quiet: the panel is a
 	   reference as often as it is an editor, and a full rainbow over ASP's
@@ -44,6 +49,7 @@
 		--dc-accent-soft: #818cf855;
 		--dc-dot: #2a2f38;
 		--dc-note: #2dd4bf;
+		--dc-warn: #fbbf24;
 
 		--dc-syn-plain: #d5dbe5;
 		--dc-syn-comment: #69727f;

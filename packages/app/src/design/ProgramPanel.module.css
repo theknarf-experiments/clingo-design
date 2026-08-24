@@ -104,3 +104,29 @@
 	font-size: 12px;
 	white-space: pre-wrap;
 }
+
+/* What clingo remarked about a program it nonetheless ran.
+   Deliberately not the error style: an error means there is nothing on the
+   canvas at all, while this means the design is fine and one of the rules is
+   not doing what its author thinks. */
+.notes {
+	padding: 0.4rem 0.75rem;
+	background: color-mix(in srgb, var(--dc-warn) 12%, transparent);
+	color: var(--dc-warn);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+	white-space: pre-wrap;
+}
+
+/* A count on the tab, because the panel starts shut: a warning nobody can see
+   without opening a drawer is a warning that does not exist. */
+.badge {
+	display: inline-block;
+	margin-left: 0.35rem;
+	padding: 0 0.3rem;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--dc-warn) 22%, transparent);
+	color: var(--dc-warn);
+	font-size: 10px;
+	font-variant-numeric: tabular-nums;
+}

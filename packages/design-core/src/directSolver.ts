@@ -14,6 +14,7 @@ export const directSolver: Solver = {
 		return {
 			solve: (request = {}) => session.solve(request),
 			close: () => session.close(),
+			diagnostics: session.diagnostics,
 		};
 	},
 };

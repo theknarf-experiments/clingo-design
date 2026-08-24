@@ -122,6 +122,15 @@ export interface Exploration {
 	optimized: boolean;
 	/** Cost of the optimum, when optimising. */
 	costs: number[];
+	/**
+	 * What clingo said about the program while grounding it, with line numbers
+	 * already pointing at the user's own rules. Empty when it said nothing.
+	 *
+	 * Not errors — every one of these explorations succeeded. This is how a
+	 * misspelled predicate in a hand-written rule stops being silent: the rule
+	 * grounds, contributes nothing, and clingo mentions it.
+	 */
+	diagnostics: string;
 }
 
 /**
@@ -380,6 +389,7 @@ function isOptimizing(program: string): boolean {
 export class Explorer {
 	#solver: Solver;
 	#session: SolverSession | null = null;
+	#diagnostics = "";
 	#program = "";
 	/** What the last exploration assumed, so a probe asks about that document. */
 	#assumed: ReadonlyArray<{ atom: string; sign?: boolean }> = [];
@@ -567,6 +577,7 @@ export class Explorer {
 			ms: Date.now() - started,
 			solves,
 			reusedGrounding,
+			diagnostics: this.#diagnostics,
 			sampling,
 			optimized,
 			costs: enumerated.costs,
@@ -687,6 +698,13 @@ export class Explorer {
 			// would show up as two separate designs.
 			this.#session = await this.#solver.open(program, "--project");
 			this.#program = program;
+			// Read here rather than at every exploration: grounding is when
+			// clingo has anything to say, and a reused grounding keeps whatever
+			// it said the first time.
+			this.#diagnostics = formatDiagnostics(
+				this.#session.diagnostics,
+				userRulesLine,
+			);
 		} catch (err) {
 			// Rewrite clingo's line numbers to point at the user's own rules.
 			const message =
@@ -702,6 +720,7 @@ export class Explorer {
 		this.#session = null;
 		this.#program = "";
 		this.#assumed = [];
+		this.#diagnostics = "";
 		if (session) await session.close();
 	}
 }

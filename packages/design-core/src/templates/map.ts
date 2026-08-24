@@ -176,6 +176,12 @@ viol(all_solid) :- active(all_solid), dim(X), dim(Y), not solid(X,Y).
 % violated, only ranked. And ranking is a different kind of work: measured, fine
 % at side 9 and minutes at side 11. Turn it on with a small board.
 % want(lakes).
+% Says the absence is deliberate. Without it clingo remarks that want/1 occurs
+% in no rule head — correctly, since the only fact is commented out — and the
+% panel would greet every new map with a warning about the one line that is
+% *meant* to be off. This is the idiom for a predicate that may legitimately
+% have no facts, and the generated program above uses it for the same reason.
+#defined want/1.
 lake(X,Y) :- want(lakes), dim(X), dim(Y), solid(X+DX,Y+DY) : step(DX,DY); not solid(X,Y).
 #maximize { 1,X,Y : lake(X,Y) }.
 

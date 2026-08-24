@@ -1,5 +1,10 @@
 import { type ReactNode, useRef, useState } from "react";
-import { CONTRACT, type Scene, type Universe } from "@clingo-design/design-core";
+import {
+	CONTRACT,
+	countDiagnostics,
+	type Scene,
+	type Universe,
+} from "@clingo-design/design-core";
 
 import { Code } from "./Code";
 import { ExportPanel } from "./ExportPanel";
@@ -12,6 +17,16 @@ export interface ProgramPanelProps {
 	generated: string;
 	onChange: (next: Scene) => void;
 	error: string | null;
+	/**
+	 * What clingo remarked about a program it ran anyway, line numbers already
+	 * pointing at the user's own rules.
+	 *
+	 * Separate from `error` because they mean opposite things about the canvas:
+	 * an error means nothing is on it, a remark means the design is fine and a
+	 * rule is not earning its keep. The commonest one by far is a misspelled
+	 * predicate, which grounds happily and does nothing.
+	 */
+	diagnostics: string;
 	/** The space as it stands, for the export tab. */
 	universes: readonly Universe[];
 	projectName: string;
@@ -45,6 +60,7 @@ export function ProgramPanel({
 	generated,
 	onChange,
 	error,
+	diagnostics,
 	universes,
 	projectName,
 	status,
@@ -54,6 +70,11 @@ export function ProgramPanel({
 	// generated ASP, and most sessions never need it open.
 	const [open, setOpen] = useState(false);
 	const paint = useRef<HTMLPreElement | null>(null);
+	// An error wins the band outright: when the document does not ground there
+	// is no answer for a remark to be about, and whatever was said last
+	// describes the program from before the edit that broke it.
+	const notes = error ? "" : diagnostics;
+	const noteCount = countDiagnostics(notes);
 
 	function select(id: Tab) {
 		if (id === tab) {
@@ -112,6 +133,10 @@ export function ProgramPanel({
 						<div className={styles.error} data-role="error">
 							{error}
 						</div>
+					) : noteCount > 0 ? (
+						<div className={styles.notes} data-role="diagnostics">
+							{notes}
+						</div>
 					) : null}
 				</>
 			) : null}
@@ -130,6 +155,15 @@ export function ProgramPanel({
 							onClick={() => select(id)}
 						>
 							{label}
+							{id === "rules" && noteCount > 0 ? (
+								<span
+									className={styles.badge}
+									data-role="diagnostic-count"
+									title={`${noteCount} thing${noteCount === 1 ? "" : "s"} clingo remarked on`}
+								>
+									{noteCount}
+								</span>
+							) : null}
 							{active ? <span className={styles.caret} aria-hidden="true" /> : null}
 						</button>
 					);

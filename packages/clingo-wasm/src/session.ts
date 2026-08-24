@@ -109,9 +109,27 @@ interface RawOutcome {
 export class Session {
 	#id: number;
 	#closed = false;
+	#diagnostics: string;
 
-	private constructor(id: number) {
+	private constructor(id: number, diagnostics: string) {
 		this.#id = id;
+		this.#diagnostics = diagnostics;
+	}
+
+	/**
+	 * What clingo said about the program while grounding it — an unsafe
+	 * variable, a `#show` for a predicate nothing derives, an atom in a body
+	 * that no rule ever puts in a head. Empty for a program it had nothing to
+	 * say about.
+	 *
+	 * A property of the *program* rather than of a solve, which is why it is
+	 * captured once here: these arise while grounding, and a session grounds
+	 * once and then solves many times. Not an error — every one of these
+	 * programs ran. They are the difference between a typo that is silent and
+	 * one the panel can point at.
+	 */
+	get diagnostics(): string {
+		return this.#diagnostics;
 	}
 
 	/**
@@ -144,7 +162,8 @@ export class Session {
 				stderr,
 			});
 		}
-		return new Session(id);
+		// Whatever clingo said while grounding a program it nonetheless accepted.
+		return new Session(id, stderr.trim());
 	}
 
 	get closed(): boolean {
