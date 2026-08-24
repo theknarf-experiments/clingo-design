@@ -13,6 +13,7 @@ import { blank } from "./blank.ts";
 import { buttons } from "./buttons.ts";
 import { card } from "./card.ts";
 import { component } from "./component.ts";
+import { map } from "./map.ts";
 import { pair } from "./pair.ts";
 import { palette } from "./palette.ts";
 import { places } from "./places.ts";
@@ -79,6 +80,13 @@ export const TEMPLATES: Template[] = [
 		description:
 			"81 cells of nine digits and 27 all-different rules: one document, one answer.",
 		create: sudoku,
+	},
+	{
+		id: "map",
+		name: "Map generation",
+		description:
+			"121 tiles and four requirements: every artboard is a level that obeys them.",
+		create: map,
 	},
 	{
 		id: "pair",

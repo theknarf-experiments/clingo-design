@@ -445,7 +445,7 @@ export class Explorer {
 		// the cheap reading too.
 		this.#assumed = bare;
 
-		const optimized = isOptimizing(program);
+		let optimized = isOptimizing(program);
 		let solves = 0;
 
 		// One more than we will show, so `truncated` is exact rather than a
@@ -456,7 +456,7 @@ export class Explorer {
 		// in the grid these *are* the universes shown, so gating this would
 		// trade a single solve for up to `limit` of them; where it does not, at
 		// most `limit + 1` pictures are drawn for nothing.
-		const enumerated = await session.solve({
+		let enumerated = await session.solve({
 			models: limit + 1,
 			mode: optimized ? "optN" : "auto",
 			assumptions: withPicture,
@@ -465,6 +465,21 @@ export class Explorer {
 		if (enumerated.result === "UNSATISFIABLE") {
 			const { conflict, pinned } = attribute(enumerated.core);
 			throw new UnsatisfiableError(conflict, pinned);
+		}
+		// `isOptimizing` reads the program text, so a weak constraint whose
+		// condition grounds away still looks like one — and `optN` answers a
+		// program with nothing to rank by enumerating nothing at all. Satisfiable
+		// with no models is never a true answer, so read it as "there was no
+		// optimum here" and ask again the ordinary way. Without this a `#maximize`
+		// over an empty set is a blank canvas rather than a design.
+		if (optimized && enumerated.models.length === 0) {
+			optimized = false;
+			enumerated = await session.solve({
+				models: limit + 1,
+				mode: "auto",
+				assumptions: withPicture,
+			});
+			solves++;
 		}
 
 		const enumeratedUniverses = enumerated.models.map(interpret);
