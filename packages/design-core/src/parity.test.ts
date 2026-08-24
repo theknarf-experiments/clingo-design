@@ -22,7 +22,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PULL_ATOM, compile } from "./compile.ts";
+import { PULL_ATOM, SCENERY_ATOM, compile } from "./compile.ts";
 import { derivedNodes, documentIds } from "./derived.ts";
 import { directSolver } from "./directSolver.ts";
 import { explore } from "./explore.ts";
@@ -46,7 +46,7 @@ async function models(scene: Scene, limit: number): Promise<string[][]> {
 	try {
 		const out = await session.solve({
 			models: limit,
-			assumptions: [...guards, PULL_ATOM].map((atom) => ({ atom })),
+			assumptions: [...guards, PULL_ATOM, SCENERY_ATOM].map((atom) => ({ atom })),
 		});
 		assert.equal(out.result, "SATISFIABLE");
 		return out.models;

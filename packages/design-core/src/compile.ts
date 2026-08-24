@@ -92,6 +92,24 @@ export const worldVar = (nodeId: string, axis: "x" | "y"): string =>
  */
 export const PULL_ATOM = "gpull";
 
+/**
+ * The switch that puts the *picture* in the answer set.
+ *
+ * The scene predicates are shown behind it — `#show node(N) : node(N),
+ * scenery.` and its siblings — so a solve that only wants to know which
+ * alternatives were picked can assume it false and get the 32 atoms the
+ * program showed before the whole scene went into the output, instead of the
+ * ~120 it shows now. That is not a saving on one solve; it is a saving on the
+ * hundred-odd sampling and consequence solves an exploration fires, none of
+ * which reads anything but `pick/2` and `visible/1`.
+ *
+ * A `{ scenery }.` choice rather than an `#external`, for the reason recorded
+ * throughout this file: an unassigned external is fixed false in
+ * preprocessing. The gate atom is not in any `#project` signature, so
+ * projection absorbs it and the number of answer sets is unchanged.
+ */
+export const SCENERY_ATOM = "scenery";
+
 /** The switch that asks the solver for one coordinate's extreme. */
 export const probeAtom = (
 	nodeId: string,
@@ -1074,28 +1092,32 @@ export function compile(
 			"% reading a different design from the one the solver answered with.",
 			"% Measured on `card`: 45 atoms a model becomes 176, 18 KB crossing the",
 			"% worker boundary becomes 67 KB, and an exploration goes 20ms -> 34ms.",
-			"% 102 of the 131 atoms that adds are byte-identical in every model — the",
-			"% tree, the frames and the literal table are facts — so if this ever",
-			"% hurts, the fix is a delta at the worker boundary, or a term-based",
-			"% `#show ... : scenery` behind an assumed atom so the sampling solves,",
-			"% which read nothing but the picks, stop paying for a picture. Both are",
-			"% cheaper than showing less of the scene.",
+			"%",
+			"% All of it behind one switch, because most solves do not want a picture:",
+			"% an exploration of `buttons` fires 116 solves and reads 24 pictures. A",
+			"% solve that assumes `scenery` false gets exactly the atoms this program",
+			"% showed before the scene went in. See SCENERY_ATOM, and `#hydrate` in",
+			"% explore.ts for who turns it back on.",
+			"{ scenery }.",
 			"#defined node/1.",
 			"#defined kind/2.",
 			"#defined order/2.",
 			"#defined literal/2.",
-			"#show node/1.",
-			"#show kind/2.",
-			"#show order/2.",
-			"#show child/2.",
-			"#show frame/3.",
+			"#defined child/2.",
+			"#defined frame/3.",
+			"#defined rendered/3.",
+			"#show node(N) : node(N), scenery.",
+			"#show kind(N,K) : kind(N,K), scenery.",
+			"#show order(N,I) : order(N,I), scenery.",
+			"#show child(P,C) : child(P,C), scenery.",
+			"#show frame(N,D,V) : frame(N,D,V), scenery.",
 			"% Literal ids rather than the text, with the table alongside. Inlining",
 			"% the text instead is within a tenth either way — cheaper on a document",
 			"% with many distinct literals, dearer on a wide one that repeats a few —",
 			"% and ids are what makes \"these two share a colour\" a comparison rather",
 			"% than a string match.",
-			"#show rendered/3.",
-			"#show literal/2.",
+			"#show rendered(N,P,L) : rendered(N,P,L), scenery.",
+			"#show literal(I,T) : literal(I,T), scenery.",
 			"% Variables a rule minted, and what they may say. A document variable's",
 			"% alternatives are already in the document, so only the others are worth",
 			"% the bytes: on a document with no such rule these two show nothing at",
@@ -1104,15 +1126,15 @@ export function compile(
 			"#defined docvar/1.",
 			"dvar(V) :- var(V), not docvar(V).",
 			"dalt(V,I,L) :- dvar(V), alt_literal(V,I,L).",
-			"#show dvar/1.",
-			"#show dalt/3.",
+			"#show dvar(V) : dvar(V), scenery.",
+			"#show dalt(V,I,L) : dalt(V,I,L), scenery.",
 			"% Sets a rule named, so a constraint can be pointed at one without the",
 			"% document enumerating what is in it — and so the Rules panel can offer",
 			"% the groups that actually exist rather than asking for an ASP term.",
 			"#defined group/1.",
 			"#defined member/2.",
-			"#show group/1.",
-			"#show member/2.",
+			"#show group(G) : group(G), scenery.",
+			"#show member(G,N) : member(G,N), scenery.",
 			"% Projection is on what is *rendered*, not on which alternative was",
 			"% picked. Two ways to spell the same colour are one design, and a",
 			"% token nothing references does not create designs at all.",

@@ -10,8 +10,12 @@
  * other direction: the answer set is the description, and the document is only
  * where it came from.
  *
- * Nothing consumes it yet. It is pure, so it can be tested against the real
- * solver without a canvas anywhere near it.
+ * The canvas is what consumes it. It is pure, so it can be tested against the
+ * real solver without a canvas anywhere near it — and because it needs the
+ * scene predicates to say anything at all, an answer set that was asked for
+ * without them reads as an empty document rather than as an error. That is why
+ * a solve is only allowed to skip the picture where the result is a
+ * {@link Candidate} and not a `Universe`; see explore.ts.
  */
 import { parseAtom, unquote } from "./atoms.ts";
 import type { Frame } from "./geometry.ts";

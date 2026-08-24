@@ -15,7 +15,7 @@
  *     candidate furthest from everything chosen so far, so the grid shows
  *     contrast rather than near-duplicates.
  */
-import type { Universe } from "./explore.ts";
+import type { Candidate } from "./explore.ts";
 
 export type SampleStrategy = "first" | "diverse";
 
@@ -39,7 +39,7 @@ export function makeRng(seed: number): () => number {
 }
 
 /** Identity of a universe, for de-duplication. */
-export function universeKey(universe: Universe): string {
+export function universeKey(universe: Candidate): string {
 	const picks = Object.entries(universe.pick)
 		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 		.map(([variable, index]) => `${variable}=${index}`);
@@ -52,7 +52,7 @@ export function universeKey(universe: Universe): string {
  * node visibility. Tokens that are settled contribute nothing, so distance
  * automatically measures only what actually varies.
  */
-export function distance(a: Universe, b: Universe): number {
+export function distance(a: Candidate, b: Candidate): number {
 	let d = 0;
 	const variables = new Set([...Object.keys(a.pick), ...Object.keys(b.pick)]);
 	for (const variable of variables) {
@@ -71,13 +71,13 @@ export function distance(a: Universe, b: Universe): number {
  * Deterministic: it always starts from the pool's first element, so the same
  * pool yields the same order.
  */
-export function selectDiverse(
-	pool: readonly Universe[],
+export function selectDiverse<T extends Candidate>(
+	pool: readonly T[],
 	k: number,
-): Universe[] {
+): T[] {
 	if (pool.length <= k) return [...pool];
 
-	const chosen: Universe[] = [pool[0]];
+	const chosen: T[] = [pool[0]];
 	const remaining = pool.slice(1);
 	// Distance from each remaining candidate to the chosen set.
 	const nearest = remaining.map((u) => distance(u, pool[0]));

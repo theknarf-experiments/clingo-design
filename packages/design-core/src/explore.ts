@@ -9,15 +9,21 @@
  * When enumeration exhausts the space, brave and cautious consequences are
  * derived from the models already in hand rather than asked for separately,
  * which takes the usual exploration from three solves down to one.
+ *
+ * Most of the solves an exploration does are not looked at. A sampling run
+ * draws a few hundred candidates to show two dozen, and asks two more questions
+ * of the whole space besides. So the picture is behind `SCENERY_ATOM` and only
+ * turned on for the solves whose answer someone is going to look at: see
+ * {@link Candidate}, and `#hydrate` for the ones that earn a slot late.
  */
-import { PULL_ATOM, compile } from "./compile.ts";
+import { PULL_ATOM, SCENERY_ATOM, compile } from "./compile.ts";
 import { formatDiagnostics, parseAtom } from "./atoms.ts";
 import { type Freedom, probeFreedom } from "./freedom.ts";
 import type { Frame } from "./geometry.ts";
 import type { Measurements } from "./measure.ts";
 import { type ModelScene, readModel, readSolved } from "./model.ts";
 import type { Scene } from "./scene.ts";
-import type { Solver, SolverSession } from "./solver.ts";
+import type { Assumption, Solver, SolverSession } from "./solver.ts";
 import {
 	type SampleStrategy,
 	makeRng,
@@ -26,11 +32,30 @@ import {
 	universeKey,
 } from "./sampling.ts";
 
-export interface Universe {
+/**
+ * A design the solver found, as its decisions and nothing else.
+ *
+ * This is what a *rejected* answer is. Sampling draws a few hundred of these to
+ * show two dozen, and the only questions asked of one before it is chosen are
+ * "is this a duplicate" and "how far is it from what I already have" — both of
+ * which read the picks. So a candidate solve assumes `scenery` off and comes
+ * back with a quarter of the atoms.
+ *
+ * There is deliberately no picture on here. A candidate cannot be drawn, and
+ * that is a type error rather than a blank canvas: the alternative design, a
+ * `model` that is empty when nobody asked for one, fails silently and looks
+ * exactly like a document with nothing in it. {@link Explorer.explore} turns
+ * every candidate it means to show into a {@link Universe} first.
+ */
+export interface Candidate {
 	/** variable key -> which alternative is active */
 	pick: Record<string, number>;
 	/** node ids that survive `visible/1` */
 	visible: Set<string>;
+}
+
+/** A candidate the solver was also asked to describe the picture of. */
+export interface Universe extends Candidate {
 	/**
 	 * Geometry the solver worked out — for nodes under an automatic layout, and
 	 * for nodes handed to it by a geometric constraint.
@@ -48,10 +73,8 @@ export interface Universe {
 	 * of the studio asks different questions of a universe: which alternative
 	 * to pin, how far a coordinate may travel, what to caption a cell with.
 	 *
-	 * Lazy, and deliberately. A sampling run interprets a few hundred
-	 * candidates and shows two dozen of them, so building a scene for each
-	 * would be work thrown away — `distance` and `universeKey`, the only things
-	 * that read a rejected candidate, never touch this.
+	 * Lazy, and deliberately: a grid cell re-renders far more often than it is
+	 * re-solved, and the atoms are already in hand.
 	 */
 	readonly model: ModelScene;
 }
@@ -175,26 +198,39 @@ function readAtoms(
 	}
 }
 
-function interpret(atoms: readonly string[]): Universe {
-	let scene: ModelScene | undefined;
-	const universe: Universe = {
-		pick: {},
-		visible: new Set(),
-		solved: readSolved(atoms),
-		get model(): ModelScene {
-			// Memoised on the universe rather than on whoever draws it: a grid
-			// cell re-renders far more often than it is re-solved.
-			return (scene ??= readModel(atoms));
-		},
-	};
+function readCandidate(atoms: readonly string[]): Candidate {
+	const candidate: Candidate = { pick: {}, visible: new Set() };
 	readAtoms(
 		atoms,
 		(variable, index) => {
-			universe.pick[variable] = index;
+			candidate.pick[variable] = index;
 		},
-		(node) => universe.visible.add(node),
+		(node) => candidate.visible.add(node),
 	);
-	return universe;
+	return candidate;
+}
+
+/** Reads an answer set that was asked for with `scenery` on. */
+function interpret(atoms: readonly string[]): Universe {
+	let scene: ModelScene | undefined;
+	return {
+		...readCandidate(atoms),
+		solved: readSolved(atoms),
+		get model(): ModelScene {
+			return (scene ??= readModel(atoms));
+		},
+	};
+}
+
+/**
+ * Whether a candidate is already a universe.
+ *
+ * Structural because that is what the distinction *is*: the two differ by
+ * whether the solve that produced them was asked for a picture, and the pool a
+ * selection runs over holds both.
+ */
+function isDrawn(candidate: Candidate): candidate is Universe {
+	return "model" in candidate;
 }
 
 function accumulate(atoms: readonly string[]): Consequences {
@@ -207,20 +243,34 @@ function accumulate(atoms: readonly string[]): Consequences {
 	return acc;
 }
 
-function dedupe(universes: readonly Universe[]): Universe[] {
-	const seen = new Set<string>();
-	const out: Universe[] = [];
-	for (const u of universes) {
-		const key = universeKey(u);
-		if (seen.has(key)) continue;
-		seen.add(key);
-		out.push(u);
+/**
+ * Drops duplicates, keeping the position of the first of each — but the drawn
+ * copy of a design in preference to a bare one.
+ *
+ * Position matters: {@link selectDiverse} starts from the first element, and the
+ * sampled candidates come before the enumerated ones deliberately, so the
+ * selection begins somewhere in the space rather than at the top of the search
+ * tree. What must not follow from that is throwing away a picture already paid
+ * for because a bare candidate saying the same thing was drawn first.
+ */
+function dedupe<T extends Candidate>(candidates: readonly T[]): T[] {
+	const at = new Map<string, number>();
+	const out: T[] = [];
+	for (const candidate of candidates) {
+		const key = universeKey(candidate);
+		const seen = at.get(key);
+		if (seen === undefined) {
+			at.set(key, out.length);
+			out.push(candidate);
+		} else if (!isDrawn(out[seen]) && isDrawn(candidate)) {
+			out[seen] = candidate;
+		}
 	}
 	return out;
 }
 
 /** Union of the universes: everything that happens somewhere. */
-function unionOf(universes: readonly Universe[]): Consequences {
+function unionOf(universes: readonly Candidate[]): Consequences {
 	const acc: Consequences = { pick: {}, visible: new Set() };
 	for (const u of universes) {
 		for (const [variable, index] of Object.entries(u.pick)) {
@@ -232,7 +282,7 @@ function unionOf(universes: readonly Universe[]): Consequences {
 }
 
 /** Intersection of the universes: everything that is settled. */
-function intersectionOf(universes: readonly Universe[]): Consequences {
+function intersectionOf(universes: readonly Candidate[]): Consequences {
 	const [first, ...rest] = universes;
 	if (!first) return { pick: {}, visible: new Set() };
 
@@ -368,12 +418,20 @@ export class Explorer {
 		// The pull toward each node's stored frame is a switch too, so a freedom
 		// probe can take it off. Every ordinary solve wants it on.
 		const assume = [...guards, ...pins, PULL_ATOM].map((atom) => ({ atom }));
+		// Every solve below is one of these two. `bare` is the cheap one — a few
+		// dozen atoms of decisions — and it is what all the consequence and
+		// sampling work runs on; `withPicture` costs three or four times as many
+		// atoms and is asked for only where one is going to be looked at.
+		const bare = [...assume, { atom: SCENERY_ATOM, sign: false }];
+		const withPicture = [...assume, { atom: SCENERY_ATOM }];
 		const reusedGrounding = this.#session !== null && this.#program === program;
 
 		if (!reusedGrounding) await this.#reopen(program, userRulesLine);
 		const session = this.#session;
 		if (!session) throw new Error("solver session unavailable");
-		this.#assumed = assume;
+		// A freedom probe reads `__lpx_objective` and nothing else, so it wants
+		// the cheap reading too.
+		this.#assumed = bare;
 
 		const optimized = isOptimizing(program);
 		let solves = 0;
@@ -381,10 +439,15 @@ export class Explorer {
 		// One more than we will show, so `truncated` is exact rather than a
 		// guess based on hitting the cap. In an optimising program only proven
 		// optima count as answers.
+		//
+		// The one solve that asks for pictures up front. Wherever the space fits
+		// in the grid these *are* the universes shown, so gating this would
+		// trade a single solve for up to `limit` of them; where it does not, at
+		// most `limit + 1` pictures are drawn for nothing.
 		const enumerated = await session.solve({
 			models: limit + 1,
 			mode: optimized ? "optN" : "auto",
-			assumptions: assume,
+			assumptions: withPicture,
 		});
 		solves++;
 		if (enumerated.result === "UNSATISFIABLE") {
@@ -421,10 +484,12 @@ export class Explorer {
 				sampled: false,
 			};
 		} else {
+			// Bare: brave and cautious would otherwise union and intersect a whole
+			// scene per witness, and `accumulate` reads two predicates of it.
 			const [braveOut, cautiousOut, countOut] = await Promise.all([
-				session.solve({ models: 0, mode: "brave", assumptions: assume }),
-				session.solve({ models: 0, mode: "cautious", assumptions: assume }),
-				session.solve({ models: countLimit, countOnly: true, assumptions: assume }),
+				session.solve({ models: 0, mode: "brave", assumptions: bare }),
+				session.solve({ models: 0, mode: "cautious", assumptions: bare }),
+				session.solve({ models: countLimit, countOnly: true, assumptions: bare }),
 			]);
 			solves += 3;
 			// Brave and cautious emit progressive witnesses; the last is the answer.
@@ -433,12 +498,18 @@ export class Explorer {
 			total = countOut.exhausted ? countOut.count : null;
 
 			if (strategy === "diverse" && !optimized) {
-				const drawn = await this.#sample(session, brave, poolSize, seed, assume);
-				solves += drawn.solves;
+				const sampled = await this.#sample(session, brave, poolSize, seed, bare);
+				solves += sampled.solves;
 				// Enumeration order is biased, but those models are still valid
 				// candidates; the selector decides what actually earns a slot.
-				const pool = dedupe([...drawn.universes, ...enumeratedUniverses]);
-				universes = selectDiverse(pool, limit);
+				const pool = dedupe<Candidate>([
+					...sampled.candidates,
+					...enumeratedUniverses,
+				]);
+				const chosen = selectDiverse(pool, limit);
+				const hydrated = await this.#hydrate(session, chosen, withPicture);
+				solves += hydrated.solves;
+				universes = hydrated.universes;
 				sampling = { strategy, pool: pool.length, seed, sampled: true };
 			} else {
 				// Optimising programs are already ranked: showing anything other
@@ -483,26 +554,28 @@ export class Explorer {
 		brave: Consequences,
 		poolSize: number,
 		seed: number,
-		guards: ReadonlyArray<{ atom: string }>,
-	): Promise<{ universes: Universe[]; solves: number }> {
-		const candidates = new Map<string, string[]>();
+		guards: ReadonlyArray<Assumption>,
+	): Promise<{ candidates: Candidate[]; solves: number }> {
+		const varying = new Map<string, string[]>();
 		for (const [variable, indices] of Object.entries(brave.pick)) {
 			if (indices.size > 1) {
-				candidates.set(variable, [...indices].sort().map(String));
+				varying.set(variable, [...indices].sort().map(String));
 			}
 		}
-		if (candidates.size === 0) return { universes: [], solves: 0 };
+		if (varying.size === 0) return { candidates: [], solves: 0 };
 
 		const rng = makeRng(seed);
 		const seen = new Set<string>();
-		const universes: Universe[] = [];
+		const candidates: Candidate[] = [];
 		let solves = 0;
 		let misses = 0;
 		let coverage = DEFAULTS.coverage;
 
-		while (universes.length < poolSize && misses < DEFAULTS.maxMisses) {
-			const assumptions = randomAssumptions(candidates, rng, coverage);
-			// The guards stay on: a sample must be a legal design too.
+		while (candidates.length < poolSize && misses < DEFAULTS.maxMisses) {
+			const assumptions = randomAssumptions(varying, rng, coverage);
+			// The guards stay on: a sample must be a legal design too. `scenery` is
+			// among them, off — this loop fires most of the solves in an
+			// exploration and reads nothing but the picks.
 			const outcome = await session.solve({
 				models: 1,
 				assumptions: [...guards, ...assumptions],
@@ -516,16 +589,61 @@ export class Explorer {
 				coverage = Math.max(0.2, coverage * 0.7);
 				continue;
 			}
-			const universe = interpret(first);
-			const key = universeKey(universe);
+			const candidate = readCandidate(first);
+			const key = universeKey(candidate);
 			if (seen.has(key)) {
 				misses++;
 				continue;
 			}
 			seen.add(key);
-			universes.push(universe);
+			candidates.push(candidate);
 			misses = 0;
 		}
+		return { candidates, solves };
+	}
+
+	/**
+	 * Asks for the picture of the candidates that earned a slot.
+	 *
+	 * One solve each, with every one of the candidate's picks assumed — and
+	 * `1 { pick(V,I) : alt(V,I) } 1` means assuming them fixes the discrete half
+	 * of the answer set exactly, so what comes back is the design that was
+	 * chosen and not merely one nearby. It cannot be unsatisfiable: the
+	 * candidate itself witnesses that those picks hold together, and `scenery`
+	 * is a free choice on top of them. If it ever is, that is a bug in this
+	 * file and the exploration says so rather than drawing an empty canvas.
+	 *
+	 * The candidates that came out of the enumeration already have a picture, so
+	 * this costs at most `limit` solves and usually fewer.
+	 */
+	async #hydrate(
+		session: SolverSession,
+		chosen: readonly Candidate[],
+		guards: ReadonlyArray<Assumption>,
+	): Promise<{ universes: Universe[]; solves: number }> {
+		let solves = 0;
+		const universes = await Promise.all(
+			chosen.map(async (candidate) => {
+				if (isDrawn(candidate)) return candidate;
+				const outcome = await session.solve({
+					models: 1,
+					assumptions: [
+						...guards,
+						...Object.entries(candidate.pick).map(([variable, index]) => ({
+							atom: `pick(${variable},${index})`,
+						})),
+					],
+				});
+				solves++;
+				const atoms = outcome.models[0];
+				if (!atoms) {
+					throw new Error(
+						`a chosen design could not be drawn: ${outcome.result}`,
+					);
+				}
+				return interpret(atoms);
+			}),
+		);
 		return { universes, solves };
 	}
 

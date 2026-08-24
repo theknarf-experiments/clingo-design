@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PULL_ATOM, compile } from "./compile.ts";
+import { PULL_ATOM, SCENERY_ATOM, compile } from "./compile.ts";
 import { derivedNodes, documentIds } from "./derived.ts";
 import { directSolver } from "./directSolver.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
@@ -184,7 +184,7 @@ test("a document with no such rule pays nothing for either", async () => {
 	const session = await directSolver.open(program, "--project");
 	const out = await session.solve({
 		models: 1,
-		assumptions: [...guards, PULL_ATOM].map((atom) => ({ atom })),
+		assumptions: [...guards, PULL_ATOM, SCENERY_ATOM].map((atom) => ({ atom })),
 	});
 	await session.close();
 	const model = readModel(out.models[0]);

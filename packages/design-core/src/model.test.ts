@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PULL_ATOM, compile } from "./compile.ts";
+import { PULL_ATOM, SCENERY_ATOM, compile } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
 import { readModel, type ModelNode } from "./model.ts";
 import { makeNode } from "./edits.ts";
@@ -26,7 +26,7 @@ async function firstModel(scene: Scene): Promise<string[]> {
 	try {
 		const out = await session.solve({
 			models: 1,
-			assumptions: [...guards, PULL_ATOM].map((atom) => ({ atom })),
+			assumptions: [...guards, PULL_ATOM, SCENERY_ATOM].map((atom) => ({ atom })),
 		});
 		assert.equal(out.result, "SATISFIABLE");
 		const model = out.models[0];
@@ -240,7 +240,7 @@ test("a scene with alternatives reads differently in different universes", async
 	const session = await directSolver.open(program, "--project");
 	const out = await session.solve({
 		models: 0,
-		assumptions: [...guards, PULL_ATOM].map((atom) => ({ atom })),
+		assumptions: [...guards, PULL_ATOM, SCENERY_ATOM].map((atom) => ({ atom })),
 	});
 	await session.close();
 

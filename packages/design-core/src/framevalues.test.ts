@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PULL_ATOM, compile, variableCounts } from "./compile.ts";
+import { PULL_ATOM, SCENERY_ATOM, compile, variableCounts } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
 import {
 	addConstraint,
@@ -434,7 +434,7 @@ test("the geometry rules read a derived frame like any other", async () => {
 	try {
 		const out = await session.solve({
 			models: 0,
-			assumptions: [...guards, PULL_ATOM].map((atom) => ({ atom })),
+			assumptions: [...guards, PULL_ATOM, SCENERY_ATOM].map((atom) => ({ atom })),
 		});
 		assert.equal(out.result, "SATISFIABLE");
 		assert.equal(out.models.length, 2);
