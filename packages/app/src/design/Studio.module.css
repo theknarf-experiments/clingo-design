@@ -219,6 +219,69 @@
 
 /* Sits over the canvas rather than replacing it, so the camera survives a
    transient empty result. */
+/* Said over the canvas, because the artboards under it are not designs the
+   document admits — they are the ways out of the fact that it admits none. */
+.ways {
+	position: absolute;
+	top: 10px;
+	left: 50%;
+	transform: translateX(-50%);
+	max-width: min(680px, calc(100% - 24px));
+	padding: 7px 12px;
+	font-size: 12px;
+	line-height: 1.5;
+	background: var(--dc-raised);
+	border: 1px solid color-mix(in srgb, var(--dc-bad, #fca5a5) 45%, var(--dc-line));
+	border-radius: 8px;
+	box-shadow: 0 2px 10px rgb(0 0 0 / 0.16);
+	pointer-events: none;
+}
+
+/* A way out's caption is the button: the offer and the thing you click are the
+   same object, so there is nothing to aim at beside the design it produces. */
+.wayButton {
+	/* Under the design it produces, not over it. The read-only copy inside a
+	   placed artboard is a zero-sized absolute box, so an in-flow caption lands
+	   on top of the drawing — fine for a word of grey text, wrong for a button
+	   somebody has to read before clicking. */
+	position: absolute;
+	top: 100%;
+	left: 0;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 8px;
+	margin-top: 6px;
+	font: inherit;
+	font-size: 12px;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 6px;
+	opacity: 1;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.wayButton:hover {
+	border-color: var(--dc-accent, #6366f1);
+	background: color-mix(in srgb, var(--dc-accent, #6366f1) 14%, var(--dc-raised));
+}
+
+.wayButton[data-free] {
+	border-color: color-mix(in srgb, var(--dc-good, #86efac) 50%, var(--dc-line));
+}
+
+.wayTag {
+	padding: 0 4px;
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.55;
+	border: 1px solid var(--dc-line);
+	border-radius: 3px;
+}
+
 .empty {
 	position: absolute;
 	inset: 0;

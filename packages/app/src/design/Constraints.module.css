@@ -56,6 +56,73 @@
 	border-radius: 5px;
 }
 
+/* The ways out. Not loud: this is the constructive half, and the sentence above
+   it has already said what is wrong. */
+.ways {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.waysHead {
+	margin: 0;
+	font-size: 0.7rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.5;
+}
+
+.way {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.4rem;
+	padding: 0.35rem 0.45rem;
+	font: inherit;
+	font-size: 0.74rem;
+	text-align: left;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 5px;
+	cursor: pointer;
+}
+
+.way:hover {
+	border-color: var(--dc-accent, #7dd3fc);
+	background: color-mix(in srgb, var(--dc-accent, #7dd3fc) 12%, var(--dc-raised));
+}
+
+/* A relaxation that only lets go of pins costs the document nothing, so it
+   reads as an offer rather than as a decision. */
+.way[data-free] {
+	border-color: color-mix(in srgb, var(--dc-good, #86efac) 45%, transparent);
+}
+
+.wayTag {
+	flex: 0 0 auto;
+	padding: 0 0.25rem;
+	font-size: 0.62rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.55;
+	border: 1px solid var(--dc-line);
+	border-radius: 3px;
+}
+
+/* Legal, and short of what was asked for. Deliberately not the conflict
+   colouring: nothing here is broken in the sense that needs fixing. */
+.disappointing {
+	margin: 0;
+	padding: 0.4rem 0.5rem;
+	font-size: 0.74rem;
+	line-height: 1.45;
+	opacity: 0.8;
+	background: var(--dc-raised);
+	border: 1px dashed var(--dc-line);
+	border-radius: 5px;
+}
+
 .rule {
 	display: flex;
 	flex-direction: column;
@@ -69,6 +136,13 @@
 .blamed {
 	border-color: var(--dc-bad, #fca5a5);
 	background: color-mix(in srgb, var(--dc-bad, #fca5a5) 10%, var(--dc-raised));
+}
+
+/* A preference this design gave up: dashed rather than coloured, because it is
+   a rule doing its job and not a rule in trouble. */
+.broken {
+	border-style: dashed;
+	border-color: color-mix(in srgb, currentColor 38%, transparent);
 }
 
 .off {

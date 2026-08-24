@@ -11,6 +11,7 @@ import {
 	type ModelScene,
 	PROPS,
 	type PropName,
+	type Relaxation,
 	STRENGTHS,
 	STRENGTH_NAMES,
 	type Scene,
@@ -46,6 +47,23 @@ export interface ConstraintsProps {
 	selection: ReadonlySet<string>;
 	/** Constraint ids the solver blamed for an impossible document. */
 	conflict: ReadonlySet<string>;
+	/**
+	 * Soft rules the design on screen breaks.
+	 *
+	 * Not a conflict and not an error: a preference costs points rather than
+	 * forbidding, so this is a legal design that gave something up. The panel has
+	 * to say the two differently, because the previous phase made this state
+	 * newly reachable and "your rules conflict" would be a lie about it.
+	 */
+	broken: ReadonlySet<string>;
+	/** The ways out of the conflict, cheapest first, each already solved for. */
+	relaxations: readonly Relaxation[];
+	/** True when the search proved these are every way out of that size. */
+	exhaustive: boolean;
+	/** "Switch off Fill all different" — the studio owns the wording. */
+	describeRelaxation: (relaxation: Relaxation) => string;
+	/** Take one. */
+	onRelax: (relaxation: Relaxation) => void;
 	/** Select the nodes a constraint ranges over, so it can be seen. */
 	onSelectionChange: (ids: string[]) => void;
 	/**
@@ -168,6 +186,11 @@ export function Constraints({
 	onSceneChange,
 	selection,
 	conflict,
+	broken,
+	relaxations,
+	exhaustive,
+	describeRelaxation,
+	onRelax,
 	onSelectionChange,
 	model,
 }: ConstraintsProps) {
@@ -334,8 +357,66 @@ export function Constraints({
 			{conflict.size > 0 ? (
 				<p className={styles.conflict} data-role="conflict">
 					{conflict.size === 1
-						? "This rule cannot hold. Turn it off, or widen a property so there are more values to go around."
-						: `These ${conflict.size} rules cannot all hold at once. Turn one off, or widen a property so there are more values to go around.`}
+						? "This rule cannot hold as things stand."
+						: `These ${conflict.size} rules cannot all hold at once.`}{" "}
+					{/* The generic advice, and only when there is nothing better to
+					    say. A list of specific ways out is below whenever the solver
+					    found any, and telling somebody to "turn one off" underneath
+					    two buttons that turn the right one off is noise — worse, it is
+					    wrong advice in the case where the rules are fine and it is the
+					    pins that cannot hold. */}
+					{relaxations.length === 0
+						? "Turn one off, or widen a property so there are more values to go around."
+						: null}
+				</p>
+			) : null}
+
+			{/* The other half of the answer. A core says what is wrong; this says
+			    what to do about it, and each row is a design that already exists —
+			    the solve that proved the way out works is the solve that drew it,
+			    so it is on the canvas right now. Several rows means several
+			    *equally cheap* ways out, and choosing between them is not the
+			    tool's business: which rule matters is the only thing here that
+			    nobody but the designer knows. */}
+			{relaxations.length > 0 ? (
+				<div className={styles.ways} data-role="relaxations">
+					<p className={styles.waysHead}>
+						{relaxations.length === 1
+							? "One way out"
+							: `${exhaustive ? "" : "At least "}${relaxations.length} ways out — each is drawn on the canvas`}
+					</p>
+					{relaxations.map((relaxation) => (
+						<button
+							key={[...relaxation.rules, ...relaxation.pins].join("|")}
+							type="button"
+							className={styles.way}
+							data-role="relaxation"
+							data-free={relaxation.free ? "" : undefined}
+							title={
+								relaxation.free
+									? "Let go of these held values. Not an edit — there is nothing to undo."
+									: "Switch these rules off. An edit, so ⌘Z brings them back."
+							}
+							onClick={() => onRelax(relaxation)}
+						>
+							<span>{describeRelaxation(relaxation)}</span>
+							<span className={styles.wayTag}>
+								{relaxation.free ? "free" : "edit"}
+							</span>
+						</button>
+					))}
+				</div>
+			) : null}
+
+			{/* Possible, and disappointing — which the previous phase made
+			    reachable and which must not read as a conflict. A soft rule cannot
+			    make a document impossible, so nothing here needs fixing; the
+			    document is simply asking for more than it can have. */}
+			{conflict.size === 0 && broken.size > 0 ? (
+				<p className={styles.disappointing} data-role="broken">
+					{broken.size === 1
+						? "One preference is broken in the design on screen. Nothing here is impossible — this is the best the rules allow."
+						: `${broken.size} preferences are broken in the design on screen. Nothing here is impossible — this is the best the rules allow.`}
 				</p>
 			) : null}
 
@@ -367,10 +448,14 @@ export function Constraints({
 						className={cx(
 							styles.rule,
 							conflict.has(c.id) && styles.blamed,
+							broken.has(c.id) && styles.broken,
 							!c.enabled && styles.off,
 						)}
 						data-constraint={c.id}
 						data-blamed={conflict.has(c.id) ? "" : undefined}
+						// A preference this design gave up. Marked, not flagged: it is
+						// what the rule is *for*, and the design is legal.
+						data-broken={broken.has(c.id) ? "" : undefined}
 					>
 						{/* Two lines, because the panel is 260px and five controls across
 						    it collapse each other to nothing. The first says how firmly the

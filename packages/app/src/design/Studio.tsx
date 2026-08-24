@@ -12,6 +12,7 @@ import {
 	type PropName,
 	SHAPE_KINDS,
 	type Frame,
+	type Relaxation,
 	type ReorderTo,
 	type Scene,
 	type Universe,
@@ -33,10 +34,12 @@ import {
 	flatten,
 	parseVariable,
 	sceneContext,
+	takesMembers,
 	variableCounts,
 	reorderNodes,
 	ungroupNodes,
 	varyingVariables,
+	updateConstraint,
 	varyingVars,
 	type ModelScene,
 	wrapInLayout,
@@ -214,6 +217,8 @@ export function Studio({
 		error,
 		conflict,
 		pinConflict,
+		relaxations,
+		exhaustive,
 		solving,
 		freedom,
 		probing,
@@ -305,6 +310,22 @@ export function Studio({
 	const universes = exploration?.universes ?? [];
 	const primary = universes[0];
 	/**
+	 * Soft rules the design on screen breaks.
+	 *
+	 * The other half of a conflict, and the newly reachable one: a preference
+	 * costs points instead of forbidding, so a document full of them is
+	 * satisfiable and merely disappointing. That state has to look different from
+	 * an impossible one — nothing here needs fixing, and offering a way out of it
+	 * would be offering to solve a problem the user does not have.
+	 *
+	 * Read off the universe actually drawn rather than the whole space, because
+	 * that is the claim worth making: *this* design gave this up.
+	 */
+	const broken = useMemo(
+		() => primary?.violated ?? new Set<string>(),
+		[primary],
+	);
+	/**
 	 * The universe on screen, as something a frame can be resolved against.
 	 *
 	 * Geometry is a value now, so "where is this node" has no answer without a
@@ -340,8 +361,27 @@ export function Studio({
 	}, [primary]);
 	const answer = primary?.model ?? remembered;
 
-	// Design shows one concrete universe to edit; multiverse shows the space.
-	const shown = view === "multiverse" ? universes : primary ? [primary] : [];
+	/**
+	 * True when the canvas is showing the ways *out* of a conflict rather than
+	 * the designs the document admits.
+	 *
+	 * A contradiction used to leave an empty canvas and a sentence in a panel.
+	 * The complement of a core is a set of designs, so it can be drawn — and
+	 * "switch this off and you get this" is the only form of the answer a
+	 * designer can act on. So the grid stays full and changes what it means,
+	 * which is also why it ignores the view toggle: there is nothing to edit
+	 * until one of these is taken.
+	 */
+	const showingWays = universes.length === 0 && relaxations.length > 0;
+	// Design shows one concrete universe to edit; multiverse shows the space;
+	// an impossible document shows its ways out.
+	const shown = showingWays
+		? relaxations.map((r) => r.universe)
+		: view === "multiverse"
+			? universes
+			: primary
+				? [primary]
+				: [];
 	// Copies of the document are laid out by how much space it occupies.
 	const bounds = useMemo(() => documentBounds(scene, context), [scene, context]);
 	const region = useMemo(
@@ -365,7 +405,7 @@ export function Studio({
 	const boxes = useMemo<Frame[]>(
 		() =>
 			Array.from({ length: shown.length }, (_, i) =>
-				view === "design" && i === 0
+				view === "design" && i === 0 && !showingWays
 					? region
 					: {
 							x: layout.placements[i]?.x ?? 0,
@@ -374,7 +414,7 @@ export function Studio({
 							height: bounds.height,
 						},
 			),
-		[shown.length, view, region, layout, bounds],
+		[shown.length, view, showingWays, region, layout, bounds],
 	);
 	// Two dozen artboards is two dozen full copies of the document; the ones
 	// nowhere near the viewport get no DOM at all.
@@ -470,6 +510,128 @@ export function Studio({
 		onSceneChange((prev) => collapseToPicks(prev, pins));
 		setPins({});
 	}
+
+	/**
+	 * What a variable is called, for anywhere its key would otherwise show:
+	 * `prop(card,fill)` reads better as `card fill`.
+	 *
+	 * One function rather than a lookup table, because the two readers want
+	 * different sets of keys — the multiverse captions want the ones the solver
+	 * left open, a relaxation wants whichever pins it proposes releasing — and a
+	 * table built for one of them answers "undefined" for the other.
+	 */
+	const labelFor = useCallback(
+		(key: string): string => {
+			/**
+			 * What to call the node a variable belongs to.
+			 *
+			 * A component instance's parts are derived, so the document has no name
+			 * for `inst(primary,buttonLabel)` — but the definition does, and a
+			 * caption reading an ASP term is a caption nobody reads.
+			 */
+			const nameOf = (id: string) =>
+				byId.get(id)?.name ?? partLabel(scene, id) ?? id;
+			const parsed = parseVariable(key);
+			if (!parsed) return key;
+			if (parsed.kind === "prop") {
+				return `${nameOf(parsed.node)} ${parsed.prop}`;
+			}
+			if (parsed.kind === "constraint") {
+				const c = scene.constraints.find((k) => k.id === parsed.constraint);
+				return c ? `${CONSTRAINT_KINDS[c.kind].label} value` : key;
+			}
+			if (parsed.kind === "layout") {
+				return `${nameOf(parsed.node)} ${LAYOUT_PROPS[parsed.field as LayoutProp].label}`;
+			}
+			if (parsed.kind === "frame") {
+				return `${nameOf(parsed.node)} ${FRAME_DIMS[parsed.dim as Dimension].label}`;
+			}
+			return scene.tokens.find((t) => t.id === parsed.token)?.name ?? parsed.token;
+		},
+		[byId, scene],
+	);
+
+	/**
+	 * A rule, in the words the panel uses for it — and with what it ranges over,
+	 * because two rules of the same kind are the *usual* conflict.
+	 *
+	 * "Switch off All different" beside "Switch off All different" is two
+	 * identical offers with different consequences, which is worse than an ASP
+	 * term. A rule with no members is its own name already, so it gets nothing
+	 * added.
+	 */
+	const ruleLabel = useCallback(
+		(id: string): string => {
+			const c = scene.constraints.find((k) => k.id === id);
+			if (!c) return id;
+			if (!takesMembers(c.kind)) return c.id;
+			const over =
+				c.group ??
+				`${c.nodes
+					.slice(0, 2)
+					.map((n) => byId.get(n)?.name ?? partLabel(scene, n) ?? n)
+					.join(", ")}${c.nodes.length > 2 ? "…" : ""}`;
+			const label = CONSTRAINT_KINDS[c.kind].label;
+			return over ? `${label} on ${over}` : label;
+		},
+		[byId, scene],
+	);
+
+	/**
+	 * Take a way out of a conflict: release its pins, switch off its rules.
+	 *
+	 * Both halves in one call and in that order, because the two are different
+	 * kinds of act and the cheap one must not be lost behind the dear one. A pin
+	 * release is not an edit at all — no undo entry, nothing written down — so a
+	 * relaxation made only of pins costs the document nothing, which is why those
+	 * are offered first.
+	 */
+	const applyRelaxation = useCallback(
+		(relaxation: Relaxation) => {
+			if (relaxation.pins.length > 0) {
+				setPins((prev) => {
+					const next = { ...prev };
+					for (const variable of relaxation.pins) delete next[variable];
+					return next;
+				});
+			}
+			if (relaxation.rules.length > 0) {
+				// One edit, not one per rule: taking a way out is a single decision
+				// and a single ⌘Z has to undo the whole of it.
+				onSceneChange((prev) =>
+					relaxation.rules.reduce(
+						(s, id) => updateConstraint(s, id, { enabled: false }),
+						prev,
+					),
+				);
+			}
+		},
+		[onSceneChange],
+	);
+
+	/**
+	 * What a way out reads as: "Switch off Fill all different", "Release card
+	 * fill".
+	 *
+	 * The rule's own words rather than its ASP term, and the variable's name
+	 * rather than its key — a relaxation is a sentence somebody has to agree
+	 * with, and neither `k_675e3ee2` nor `prop(card,fill)` is one.
+	 */
+	const describeRelaxation = useCallback(
+		(relaxation: Relaxation): string => {
+			const parts: string[] = [];
+			if (relaxation.pins.length > 0) {
+				parts.push(
+					`Release ${relaxation.pins.map((v) => labelFor(v)).join(" and ")}`,
+				);
+			}
+			if (relaxation.rules.length > 0) {
+				parts.push(`Switch off ${relaxation.rules.map(ruleLabel).join(" and ")}`);
+			}
+			return parts.join(", ") || "Change nothing";
+		},
+		[labelFor, ruleLabel],
+	);
 
 	const hasSelection = selection.size > 0;
 
@@ -792,39 +954,11 @@ export function Studio({
 		return parts.join(" · ") || "settled";
 	}
 
-	/** `prop(card,fill)` reads better as `card fill`. */
-	const labels = useMemo(() => {
-		const out = new Map<string, string>();
-		/**
-		 * What to call the node a variable belongs to.
-		 *
-		 * A component instance's parts are derived, so the document has no name
-		 * for `inst(primary,buttonLabel)` — but the definition does, and a caption
-		 * reading an ASP term is a caption nobody reads.
-		 */
-		const nameOf = (id: string) =>
-			byId.get(id)?.name ?? partLabel(scene, id) ?? id;
-		for (const key of unsettled) {
-			const parsed = parseVariable(key);
-			if (!parsed) out.set(key, key);
-			else if (parsed.kind === "prop") {
-				out.set(key, `${nameOf(parsed.node)} ${parsed.prop}`);
-			} else if (parsed.kind === "constraint") {
-				const c = scene.constraints.find((k) => k.id === parsed.constraint);
-				out.set(key, c ? `${CONSTRAINT_KINDS[c.kind].label} value` : key);
-			} else if (parsed.kind === "layout") {
-				const name = nameOf(parsed.node);
-				out.set(key, `${name} ${LAYOUT_PROPS[parsed.field as LayoutProp].label}`);
-			} else if (parsed.kind === "frame") {
-				const name = nameOf(parsed.node);
-				out.set(key, `${name} ${FRAME_DIMS[parsed.dim as Dimension].label}`);
-			} else {
-				const token = scene.tokens.find((t) => t.id === parsed.token);
-				out.set(key, token?.name ?? parsed.token);
-			}
-		}
-		return out;
-	}, [unsettled, byId, scene]);
+	/** The same, for the choices the solver left open — one lookup each. */
+	const labels = useMemo(
+		() => new Map([...unsettled].map((key) => [key, labelFor(key)] as const)),
+		[unsettled, labelFor],
+	);
 
 	return (
 		<div className={styles.studio}>
@@ -874,7 +1008,8 @@ export function Studio({
 					>
 						{shown.map((universe, i) => {
 							if (onscreen && !onscreen.has(i)) return null;
-							const editable = view === "design" && i === 0;
+							const editable = view === "design" && i === 0 && !showingWays;
+							const way = showingWays ? relaxations[i] : undefined;
 							const box = boxes[i];
 							return (
 								<div
@@ -888,7 +1023,7 @@ export function Studio({
 										height: box.height,
 									}}
 									onPointerDown={
-										view === "multiverse"
+										view === "multiverse" && !showingWays
 											? (e) => {
 													e.stopPropagation();
 													pinUniverse(universe);
@@ -929,7 +1064,31 @@ export function Studio({
 											<Artboard scene={scene} universe={universe} />
 										</div>
 									)}
-									{view === "multiverse" ? (
+									{way ? (
+										// A way out is not a design to browse, it is an offer to
+										// take, so its caption is the button rather than sitting
+										// beside one. Marked free when it asks nothing of the
+										// document — releasing a pin is not an edit.
+										<button
+											type="button"
+											className={cx(styles.caption, styles.wayButton)}
+											data-role="way"
+											data-way={i}
+											data-free={way.free ? "" : undefined}
+											title={
+												way.free
+													? "Let go of these held values — not an edit, nothing to undo"
+													: "Switch these rules off in the document"
+											}
+											onPointerDown={(e) => e.stopPropagation()}
+											onClick={() => applyRelaxation(way)}
+										>
+											{describeRelaxation(way)}
+											<span className={styles.wayTag}>
+												{way.free ? "free" : "edit"}
+											</span>
+										</button>
+									) : view === "multiverse" ? (
 										<div className={styles.caption} data-role="caption">
 											{captionFor(universe)}
 										</div>
@@ -1061,6 +1220,19 @@ export function Studio({
 						/>
 					) : null}
 
+					{showingWays ? (
+						// Said over the canvas rather than only in the panel: the
+						// artboards below are not designs the document admits, and
+						// somebody arriving at this screen has to be told that before
+						// they read anything off them.
+						<div className={styles.ways} data-role="ways">
+							<strong>{error ?? "No design satisfies these rules."}</strong>{" "}
+							{exhaustive
+								? "Each is drawn below — click one to take it."
+								: "Some of them are drawn below — click one to take it."}
+						</div>
+					) : null}
+
 					{shown.length === 0 ? (
 						<div className={styles.empty} data-role="empty">
 							{badPins.size > 0
@@ -1152,6 +1324,11 @@ export function Studio({
 								onSceneChange={onSceneChange}
 								selection={selection}
 								conflict={blamed}
+								broken={broken}
+								relaxations={relaxations}
+								exhaustive={exhaustive}
+								describeRelaxation={describeRelaxation}
+								onRelax={applyRelaxation}
 								onSelectionChange={selectionIds}
 									model={answer}
 							/>

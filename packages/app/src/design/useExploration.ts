@@ -4,6 +4,7 @@ import {
 	Explorer,
 	type Freedom,
 	type Measurements,
+	type Relaxation,
 	type Scene,
 	UnsatisfiableError,
 } from "@clingo-design/design-core";
@@ -22,6 +23,17 @@ export interface ExplorationState {
 	conflict: string[];
 	/** Pinned variables the solver blamed, when the pins are what conflict. */
 	pinConflict: string[];
+	/**
+	 * The ways out of that conflict, cheapest first, each with the design it
+	 * leads to. Empty for a failure nothing the user owns can fix.
+	 */
+	relaxations: Relaxation[];
+	/**
+	 * True when the relaxation search proved it had found every way out of this
+	 * size, so the panel may say "these are the ways out" rather than "here are
+	 * some".
+	 */
+	exhaustive: boolean;
 	solving: boolean;
 	/** How far the probed nodes' solver-owned coordinates can still travel. */
 	freedom: Freedom;
@@ -55,6 +67,8 @@ export function useExploration(
 		error: null,
 		conflict: [],
 		pinConflict: [],
+		relaxations: [],
+		exhaustive: true,
 		solving: true,
 		freedom: {},
 		probing: false,
@@ -97,6 +111,8 @@ export function useExploration(
 					error: null,
 					conflict: [],
 					pinConflict: [],
+					relaxations: [],
+					exhaustive: true,
 					solving: false,
 					// Whatever was probed last was probed against another document.
 					freedom: {},
@@ -110,6 +126,10 @@ export function useExploration(
 					error: err instanceof Error ? err.message : String(err),
 					conflict: err instanceof UnsatisfiableError ? err.conflict : [],
 					pinConflict: err instanceof UnsatisfiableError ? err.pinned : [],
+					relaxations:
+						err instanceof UnsatisfiableError ? err.relaxations : [],
+					exhaustive:
+						err instanceof UnsatisfiableError ? err.exhaustive : true,
 					solving: false,
 					freedom: {},
 					probing: false,

@@ -23,6 +23,7 @@ import { type Freedom, probeFreedom } from "./freedom.ts";
 import type { Frame } from "./geometry.ts";
 import type { Measurements } from "./measure.ts";
 import { type ModelScene, readModel, readSolved } from "./model.ts";
+import { type Switch, type Way, findWays } from "./relax.ts";
 import { STRENGTHS, type Scene, strengthOfLevel } from "./scene.ts";
 import type { Assumption, Solver, SolverSession } from "./solver.ts";
 import {
@@ -89,6 +90,20 @@ export interface Universe extends Candidate {
 	 * re-solved, and the atoms are already in hand.
 	 */
 	readonly model: ModelScene;
+	/**
+	 * Rules this design breaks — the soft ones, since a hard one being broken is
+	 * not a design.
+	 *
+	 * This is what makes "possible but disappointing" a thing the studio can
+	 * say. A document whose only conflicts are preferences is satisfiable, and
+	 * before soft rules existed that state could not arise: every conflict was
+	 * an impossibility. Now the common case is a design that is perfectly legal
+	 * and gives something up, and the rule it gave up is nameable.
+	 *
+	 * Costs say *how much* was given up; this says *what*. Both, because a tier
+	 * total is not actionable and a rule name is not comparable.
+	 */
+	readonly violated: ReadonlySet<string>;
 }
 
 export interface SamplingInfo {
@@ -178,6 +193,32 @@ type Common = Pick<
 >;
 
 /**
+ * A way out of a contradiction, with the design it leads to.
+ *
+ * The picture is the whole point. "Switch off these two rules" is a worse
+ * version of the core the user already has; "switch off these two rules and you
+ * get *this*" is a decision they can make. So every relaxation carries a
+ * universe, drawn by the very solve that proved the relaxation works — see
+ * `findWays`, which asks for `scenery` because it knows someone will look.
+ */
+export interface Relaxation {
+	/** Rules to switch off. A document edit, and an undo entry. */
+	rules: string[];
+	/** Variables to unpin. Not an edit at all. */
+	pins: string[];
+	/**
+	 * True when this costs the document nothing — only pins are let go.
+	 *
+	 * Worth its own field rather than left as `rules.length === 0` at every use
+	 * site, because it is the *reason* these come first: a pin is a question the
+	 * user asked and can stop asking.
+	 */
+	free: boolean;
+	/** The design that comes out. */
+	universe: Universe;
+}
+
+/**
  * Thrown when the program admits no universes at all.
  *
  * Everything the user can switch on — a constraint, a pinned value — is
@@ -186,27 +227,64 @@ type Common = Pick<
  * `conflict` names the guilty constraints and `pinned` the guilty pins. Both
  * are empty when the contradiction is somewhere the solver cannot attribute,
  * such as a hand-written rule.
+ *
+ * And then it comes back with the other half of the answer. A core says what is
+ * wrong; {@link relaxations} says what to do about it, and each one is a design
+ * on the other side of the decision rather than a suggestion. Empty when the
+ * conflict is unattributable, because a switch nobody has cannot be thrown.
  */
 export class UnsatisfiableError extends Error {
 	readonly conflict: string[];
 	readonly pinned: string[];
+	/**
+	 * The cheapest ways out, fewest rules switched off first — several when
+	 * several are equally cheap, which is the case that matters: whether it is
+	 * the grid rule or the colour rule that has to go is the designer's call,
+	 * and the tool has no way to know.
+	 */
+	readonly relaxations: Relaxation[];
+	/**
+	 * True when the search finished rather than ran out of budget.
+	 *
+	 * The difference between "these are the ways out" and "these are ways out",
+	 * which is a sentence the panel has to be able to say honestly.
+	 */
+	readonly exhaustive: boolean;
 
-	constructor(conflict: string[] = [], pinned: string[] = []) {
-		super(blame(conflict, pinned));
+	constructor(
+		conflict: string[] = [],
+		pinned: string[] = [],
+		relaxations: Relaxation[] = [],
+		exhaustive = true,
+	) {
+		super(blame(conflict, pinned, relaxations));
 		this.name = "UnsatisfiableError";
 		this.conflict = conflict;
 		this.pinned = pinned;
+		this.relaxations = relaxations;
+		this.exhaustive = exhaustive;
 	}
 }
 
-function blame(conflict: readonly string[], pinned: readonly string[]): string {
+function blame(
+	conflict: readonly string[],
+	pinned: readonly string[],
+	relaxations: readonly Relaxation[] = [],
+): string {
 	const rules = `${conflict.length} rule${conflict.length === 1 ? "" : "s"}`;
-	if (conflict.length > 0 && pinned.length > 0) {
-		return `The pinned values and ${rules} cannot hold together.`;
-	}
-	if (pinned.length > 0) return "The pinned values cannot hold together.";
-	if (conflict.length > 0) return `${rules} cannot hold together.`;
-	return "No design satisfies these rules.";
+	const what =
+		conflict.length > 0 && pinned.length > 0
+			? `The pinned values and ${rules} cannot hold together.`
+			: pinned.length > 0
+				? "The pinned values cannot hold together."
+				: conflict.length > 0
+					? `${rules} cannot hold together.`
+					: "No design satisfies these rules.";
+	// The count only, and the names in the panel: a status line is one line, and
+	// a rule's name is the document's, not the solver's.
+	if (relaxations.length === 0) return what;
+	const n = relaxations.length;
+	return `${what} ${n} way${n === 1 ? "" : "s"} out.`;
 }
 
 /** Splits a core back into the constraints and the pins it names. */
@@ -232,6 +310,43 @@ function attribute(core: readonly string[]): {
 		}
 	}
 	return { conflict, pinned };
+}
+
+/**
+ * Turns a failed solve into the error the studio shows: who is at fault, and
+ * what to do about it.
+ *
+ * The second half costs solves — one per way out tried — and they are spent
+ * here rather than lazily on request for two reasons. The state is already
+ * stopped, so there is no frame budget to protect; and a way out is only worth
+ * offering *with its picture*, which means the search and the drawing are the
+ * same solve. See `findWays`.
+ *
+ * `base` is the picture-bearing assumption list, so `scenery` is on and the
+ * answer a successful relaxation returns is a universe rather than a set of
+ * decisions someone else has to redraw.
+ */
+async function diagnose(
+	session: SolverSession,
+	base: ReadonlyArray<Assumption>,
+	owned: readonly Switch[],
+	core: readonly string[],
+): Promise<UnsatisfiableError> {
+	const { conflict, pinned } = attribute(core);
+	const { ways, complete } = await findWays(session, { base, owned, core });
+	return new UnsatisfiableError(conflict, pinned, ways.map(relaxation), complete);
+}
+
+/** A way out, with its answer set read as the design it is. */
+function relaxation(way: Way): Relaxation {
+	return {
+		rules: way.rules,
+		pins: way.pins,
+		// Letting go of a pin is not an edit, so a way out made only of pins asks
+		// nothing of the document at all.
+		free: way.rules.length === 0,
+		universe: interpret(way.atoms),
+	};
 }
 
 /**
@@ -278,9 +393,19 @@ function interpret(
 	costs: readonly number[] = [],
 ): Universe {
 	let scene: ModelScene | undefined;
+	const violated = new Set<string>();
+	for (const text of atoms) {
+		const atom = parseAtom(text);
+		// Only the soft ones can be here: the program shows `viol(C)` behind
+		// `active(C)`, and a hard rule that is active and violated is not a model.
+		if (atom && atom.name === "viol" && atom.args.length === 1) {
+			violated.add(atom.args[0]);
+		}
+	}
 	return {
 		...readCandidate(atoms, costs),
 		solved: readSolved(atoms),
+		violated,
 		get model(): ModelScene {
 			return (scene ??= readModel(atoms));
 		},
@@ -601,10 +726,27 @@ export class Explorer {
 		// pin the user set while browsing looks *past* an override on the same
 		// variable rather than contradicting it — two assumptions naming the same
 		// variable would be an unsatisfiable answer with nothing wrong.
-		const pins = Object.entries({
+		const held = Object.entries({
 			...heldPicks(scene),
 			...(options.pins ?? {}),
-		}).map(([variable, index]) => `pick(${variable},${index})`);
+		});
+		const pins = held.map(([variable, index]) => `pick(${variable},${index})`);
+		// Which of the assumptions below belong to the user, and which of those
+		// they can let go of for nothing. A relaxation search may throw any of
+		// these switches and must never touch the two below them: `gpull` and
+		// `scenery` are how an answer is read, not what the document says.
+		const owned: Switch[] = [
+			...guards.map((atom) => ({
+				atom,
+				id: parseAtom(atom)?.args[0] ?? atom,
+				free: false,
+			})),
+			...held.map(([variable, index]) => ({
+				atom: `pick(${variable},${index})`,
+				id: variable,
+				free: true,
+			})),
+		];
 		// The pull toward each node's stored frame is a switch too, so a freedom
 		// probe can take it off. Every ordinary solve wants it on.
 		const assume = [...guards, ...pins, PULL_ATOM].map((atom) => ({ atom }));
@@ -639,7 +781,14 @@ export class Explorer {
 		// `#maximize` whose condition grounds away ranks nothing — and then this
 		// falls through to the ordinary path below.
 		if (isOptimizing(program)) {
-			const ranked = await this.#rank(session, bare, withPicture, limit, slack);
+			const ranked = await this.#rank(
+				session,
+				bare,
+				withPicture,
+				limit,
+				slack,
+				owned,
+			);
 			solves += ranked.solves;
 			if (ranked.exploration) {
 				return {
@@ -665,8 +814,7 @@ export class Explorer {
 		});
 		solves++;
 		if (enumerated.result === "UNSATISFIABLE") {
-			const { conflict, pinned } = attribute(enumerated.core);
-			throw new UnsatisfiableError(conflict, pinned);
+			throw await diagnose(session, withPicture, owned, enumerated.core);
 		}
 
 		const enumeratedUniverses = enumerated.models.map((atoms) =>
@@ -789,6 +937,7 @@ export class Explorer {
 		withPicture: ReadonlyArray<Assumption>,
 		limit: number,
 		slack: number,
+		owned: readonly Switch[],
 	): Promise<{ exploration: Omit<Exploration, keyof Common> | null; solves: number }> {
 		const best = await session.solve({
 			models: 1,
@@ -797,8 +946,11 @@ export class Explorer {
 		});
 		let solves = 1;
 		if (best.result === "UNSATISFIABLE") {
-			const { conflict, pinned } = attribute(best.core);
-			throw new UnsatisfiableError(conflict, pinned);
+			// The soft rules cannot be why: a preference costs points, it forbids
+			// nothing. So this is the same contradiction the unranked path meets,
+			// and it gets the same diagnosis — under the ordinary assumptions,
+			// where the weak constraints are ignored entirely.
+			throw await diagnose(session, withPicture, owned, best.core);
 		}
 		const optimum = best.models[0];
 		if (!optimum || best.costs.length === 0) {
