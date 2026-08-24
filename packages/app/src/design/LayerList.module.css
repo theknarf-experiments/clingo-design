@@ -80,6 +80,13 @@
 	letter-spacing: 0.03em;
 	text-transform: uppercase;
 	opacity: 0.5;
+	/* One line, always. A badge that wraps steals two rows' worth of height
+	   from the name beside it, which is the half anyone is actually reading. */
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
 }
 
 /* Dropping *into* a container outlines the whole row, so it reads differently
@@ -98,4 +105,42 @@
 
 .derived .label {
 	opacity: 0.75;
+}
+
+/* The shelf: the components the document defines, so a second use of one is a
+   click rather than a hunt through the tree. */
+.shelf {
+	margin-top: 0.75rem;
+	padding-top: 0.5rem;
+	border-top: 1px solid var(--dc-line);
+}
+
+.shelfRow {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+}
+
+.shelfRow .layer {
+	min-width: 0;
+}
+
+.place {
+	flex: none;
+	width: 1.4rem;
+	height: 1.4rem;
+	font: inherit;
+	font-size: 0.85rem;
+	line-height: 1;
+	color: inherit;
+	background: transparent;
+	border: 1px solid var(--dc-line);
+	border-radius: 5px;
+	cursor: pointer;
+	opacity: 0.6;
+}
+
+.place:hover {
+	opacity: 1;
+	background: var(--dc-sunken);
 }

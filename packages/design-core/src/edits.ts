@@ -8,6 +8,7 @@
  * Frames are relative to their parent, so an operation on a node needs to say
  * nothing about its descendants: they come along on their own.
  */
+import { componentDef, instanceVariable, openVariables } from "./components.ts";
 import {
 	type Frame,
 	MIN_NODE_SIZE,
@@ -1315,6 +1316,32 @@ export function deleteToken(scene: Scene, id: string): Scene {
 	};
 }
 
+/**
+ * An instance's held picks after a collapse, or undefined to leave it alone.
+ *
+ * Kept out of {@link collapseToPicks} because it is the one part of that walk
+ * that is not "shorten this list": an instance's variables are the definition's
+ * minted again and the document holds no list of them, so what a pick collapses
+ * *to* is an override.
+ */
+function collapseHolds(
+	scene: Scene,
+	node: SceneNode,
+	picks: Readonly<Record<string, number>>,
+): Record<string, number> | undefined {
+	const def = componentDef(scene, node.instanceOf);
+	if (!def) return undefined;
+	const holds = { ...node.holds };
+	let changed = false;
+	for (const v of openVariables(def)) {
+		const index = picks[instanceVariable(node.id, v.node.id, v.prop)];
+		if (index === undefined || holds[v.variable] === index) continue;
+		holds[v.variable] = index;
+		changed = true;
+	}
+	return changed ? holds : undefined;
+}
+
 /** Reduces every varying assignment to the alternative this universe chose. */
 export function collapseToPicks(
 	scene: Scene,
@@ -1346,7 +1373,13 @@ export function collapseToPicks(
 			for (const dim of DIMENSIONS) {
 				frame[dim] = pickOne(frame[dim], frameVar(node.id, dim));
 			}
-			return { ...node, props, frame };
+			// An instance's variables live nowhere in the document, so there is no
+			// list here to shorten — but there is somewhere for the decision to go,
+			// and it is the same place an override goes. This is what makes pinning
+			// a universe in the multiverse and pressing Keep leave the instances
+			// remembering the variant they were showing.
+			const holds = collapseHolds(scene, node, picks);
+			return holds ? { ...node, props, frame, holds } : { ...node, props, frame };
 		}),
 		// A dimension is an assignment too, so collapsing has to reach it or the
 		// document would keep alternatives this universe already decided between.
@@ -1354,4 +1387,132 @@ export function collapseToPicks(
 			c.value ? { ...c, value: pickOne(c.value, constraintVar(c.id)) } : c,
 		),
 	};
+}
+
+/* ------------------------------------------------------------------ */
+/* Components                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Turns a subtree into a component definition.
+ *
+ * Nothing moves and nothing is copied: the subtree stays exactly where it is,
+ * and the flag is the whole of the change. What it means is in `components.ts`
+ * — from here on the compiler mints the subtree's property variables once per
+ * instance, so the subtree stops being one design and becomes a space.
+ *
+ * Only a container is worth defining: a component whose whole content is a
+ * single rectangle is a rectangle.
+ */
+export function defineComponent(scene: Scene, id: string): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (!node || !KINDS[node.kind].container) return scene;
+	return mapSelected(scene, [id], (n) => ({ ...n, component: true }));
+}
+
+/**
+ * Stops treating a subtree as a definition.
+ *
+ * Instances of it are deliberately left alone rather than deleted: they hold
+ * the name of a node that still exists, so marking it again brings them back.
+ * Until then they derive nothing and draw as the empty boxes they are.
+ */
+export function releaseComponent(scene: Scene, id: string): Scene {
+	return mapSelected(scene, [id], ({ component: _dropped, ...rest }) => rest);
+}
+
+/**
+ * Places a use of a definition beside it.
+ *
+ * Beside rather than wherever the pointer is, because an instance is created
+ * from a list rather than drawn out: it has no gesture to take a position from,
+ * and landing next to the thing it is a use of is the one placement that needs
+ * no explanation. Successive instances stack downwards.
+ *
+ * It is created at the definition's size. That size is the instance's own from
+ * then on — the copy inside fills whatever box the instance has — so resizing
+ * one is a placement decision and not a departure from the definition.
+ */
+export function addInstance(
+	scene: Scene,
+	rootId: string,
+	picks: Picks = {},
+): { scene: Scene; id: string } {
+	const found = locate(scene.nodes, rootId);
+	const root = found?.siblings[found.index];
+	if (!found || !root || root.component !== true) return { scene, id: rootId };
+	const context = sceneContext(scene, picks);
+	const box = frameOf(root, context);
+	const taken = found.siblings.filter((n) => n.instanceOf === rootId).length;
+	const node: SceneNode = {
+		...makeNode(
+			"instance",
+			{
+				x: box.x + box.width + 40,
+				y: box.y + taken * (box.height + 16),
+				width: box.width,
+				height: box.height,
+			},
+			{ name: root.name },
+		),
+		instanceOf: rootId,
+	};
+	const parent = found.parent;
+	return {
+		scene: parent
+			? {
+					...scene,
+					nodes: mapTree(scene.nodes, (n) =>
+						n.id === parent.id
+							? { ...n, children: [...(n.children ?? []), node] }
+							: n,
+					),
+				}
+			: { ...scene, nodes: [...scene.nodes, node] },
+		id: node.id,
+	};
+}
+
+/**
+ * Holds — or releases — one of the choices a definition left an instance.
+ *
+ * `variable` is in the *definition's* space, so the same call means the same
+ * thing on every instance. Releasing is what makes the choice the solver's
+ * again, which is not the same as choosing the definition's value: an
+ * unheld variable is a variable that still branches.
+ */
+export function setHold(
+	scene: Scene,
+	instanceId: string,
+	variable: string,
+	index: number | null,
+): Scene {
+	return mapSelected(scene, [instanceId], (node) => {
+		const holds = { ...node.holds };
+		if (index === null) delete holds[variable];
+		else holds[variable] = index;
+		return Object.keys(holds).length === 0
+			? ({ ...node, holds: undefined } as SceneNode)
+			: { ...node, holds };
+	});
+}
+
+/**
+ * Holds every one of a definition's open choices at once, or releases them all.
+ *
+ * Which is what choosing a variant *is*: a variant is a point in the
+ * definition's space, and an instance showing it is an instance that has held
+ * every coordinate of that point. Passing null hands the instance back to the
+ * solver, and it goes back to being several designs.
+ */
+export function setVariant(
+	scene: Scene,
+	instanceId: string,
+	picks: Readonly<Record<string, number>> | null,
+): Scene {
+	return mapSelected(scene, [instanceId], (node) =>
+		picks === null
+			? ({ ...node, holds: undefined } as SceneNode)
+			: { ...node, holds: { ...picks } },
+	);
 }

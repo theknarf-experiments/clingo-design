@@ -15,13 +15,24 @@ import {
 	propVar,
 } from "./index.ts";
 
-test("every drawable kind is a tool, and no wrapper is", () => {
+test("the toolbar holds exactly the kinds a pointer can draw out", () => {
 	for (const kind of NODE_KINDS) {
-		assert.equal(DRAW_KINDS.includes(kind), KINDS[kind].drawable);
+		assert.equal(DRAW_KINDS.includes(kind), KINDS[kind].tool);
+		// Nothing without pixels can be drawn out: there would be nothing to
+		// drag a box around.
+		if (KINDS[kind].tool) assert.ok(KINDS[kind].drawable, `${kind} needs pixels`);
 	}
-	// A group only ever comes from a selection, so it must never be drawable.
+	// A group only ever comes from a selection, and an instance only ever from a
+	// definition, so neither has a slot.
 	assert.equal(KINDS.group.drawable, false);
-	assert.ok(!DRAW_KINDS.includes("group"));
+	assert.equal(KINDS.group.tool, false);
+	// An instance *is* clickable and snappable — the pixels inside it are real —
+	// it just is not something you draw.
+	assert.equal(KINDS.instance.drawable, true);
+	assert.equal(KINDS.instance.tool, false);
+	for (const kind of ["group", "instance"] as const) {
+		assert.ok(!DRAW_KINDS.includes(kind));
+	}
 	for (const kind of ["rect", "ellipse", "line", "arrow"] as const) {
 		assert.ok(DRAW_KINDS.includes(kind), `${kind} should be drawable`);
 	}

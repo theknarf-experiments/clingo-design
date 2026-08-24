@@ -17,6 +17,7 @@
  * {@link Candidate}, and `#hydrate` for the ones that earn a slot late.
  */
 import { PULL_ATOM, SCENERY_ATOM, compile } from "./compile.ts";
+import { heldPicks } from "./components.ts";
 import { formatDiagnostics, parseAtom } from "./atoms.ts";
 import { type Freedom, probeFreedom } from "./freedom.ts";
 import type { Frame } from "./geometry.ts";
@@ -326,6 +327,10 @@ export interface ExploreOptions {
 	 * These are *assumptions*, not edits: they narrow what the solver returns
 	 * without touching the document, so browsing a space costs a solve and is
 	 * undone by forgetting them rather than by an undo entry.
+	 *
+	 * A component instance's overrides arrive the same way, read off the
+	 * document — see `heldPicks`. Anything here wins over one of those, so a pin
+	 * can look past an override without editing it away.
 	 */
 	pins?: Readonly<Record<string, number>>;
 	/**
@@ -412,9 +417,16 @@ export class Explorer {
 		// Constraints and pins are both assumed rather than baked in: that is
 		// what lets an unsatisfiable answer name which of them is at fault, and
 		// it means a pin costs a solve rather than a re-grounding.
-		const pins = Object.entries(options.pins ?? {}).map(
-			([variable, index]) => `pick(${variable},${index})`,
-		);
+		//
+		// A component instance's overrides come in the same way, because that is
+		// all an override is: a pin the document remembers. Written first, so a
+		// pin the user set while browsing looks *past* an override on the same
+		// variable rather than contradicting it — two assumptions naming the same
+		// variable would be an unsatisfiable answer with nothing wrong.
+		const pins = Object.entries({
+			...heldPicks(scene),
+			...(options.pins ?? {}),
+		}).map(([variable, index]) => `pick(${variable},${index})`);
 		// The pull toward each node's stored frame is a switch too, so a freedom
 		// probe can take it off. Every ordinary solve wants it on.
 		const assume = [...guards, ...pins, PULL_ATOM].map((atom) => ({ atom }));

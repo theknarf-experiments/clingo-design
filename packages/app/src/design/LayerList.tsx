@@ -1,11 +1,15 @@
 import { useRef, useState } from "react";
 import {
+	type ComponentDef,
 	type DerivedNode,
 	type Frame,
 	KINDS,
 	type Scene,
 	type SceneNode,
+	addInstance,
+	componentDefs,
 	isLaidOut,
+	partLabel,
 	reparent,
 } from "@clingo-design/design-core";
 
@@ -49,6 +53,7 @@ const GLYPH: Record<SceneNode["kind"], string> = {
 	path: "∿",
 	text: "T",
 	group: "▣",
+	instance: "◈",
 };
 
 interface DocRow {
@@ -153,6 +158,9 @@ export function LayerList({
 	collect(scene.nodes, 0, null);
 	collectDerived(null, 0);
 
+	const defs = componentDefs(scene);
+	const defNames = new Map(defs.map((d) => [d.root.id, d.name] as const));
+
 	const rowOf = (id: string): DocRow | undefined =>
 		rows.find((r): r is DocRow => r.kind === "doc" && r.node.id === id);
 
@@ -254,6 +262,10 @@ export function LayerList({
 	function derivedRow({ derived: node, depth }: DerivedRow) {
 		const id = node.node.id;
 		const sometimes = everywhere !== undefined && !everywhere.has(id);
+		// A part of a component instance is derived like anything else, but its
+		// id is `inst(one,label)` and nobody reads that. It has a name in the
+		// definition, and that is what to show.
+		const part = partLabel(scene, id);
 		return (
 			<li key={id}>
 				<button
@@ -266,25 +278,84 @@ export function LayerList({
 						selection.has(id) && styles.selected,
 					)}
 					style={{ paddingLeft: `${0.4 + depth * 0.75}rem` }}
-					title={`Derived by a rule — ${id}`}
+					title={
+						part
+							? `From the component definition — ${id}`
+							: `Derived by a rule — ${id}`
+					}
 					onClick={() => onSelectionChange([id])}
 				>
 					<span className={styles.kind} aria-hidden="true">
 						{GLYPH[node.node.kind]}
 					</span>
-					<span className={styles.label}>{id}</span>
+					<span className={styles.label}>{part ?? id}</span>
 					<span
 						className={styles.badge}
 						title={
 							sometimes
 								? "A rule derives this node, and not in every design"
-								: "A rule derives this node; the document does not hold it"
+								: part
+									? "The definition produces this node; the document does not hold it"
+									: "A rule derives this node; the document does not hold it"
 						}
 					>
-						{sometimes ? "sometimes" : "derived"}
+						{sometimes ? "sometimes" : part ? "from definition" : "derived"}
 					</span>
 				</button>
 			</li>
+		);
+	}
+
+	/**
+	 * The components the document defines, with a way to place one.
+	 *
+	 * A definition is an ordinary subtree, so it is already in the list above —
+	 * but scrolling a tree looking for the thing you want a second copy of is
+	 * not how anyone works. This is the shelf.
+	 */
+	function shelf(defs: readonly ComponentDef[]) {
+		return (
+			<div className={styles.shelf} data-role="components">
+				<h2>Components</h2>
+				<ul className={styles.list}>
+					{defs.map((def) => (
+						<li key={def.root.id} className={styles.shelfRow}>
+							<button
+								type="button"
+								data-component={def.root.id}
+								className={cx(
+									styles.layer,
+									selection.has(def.root.id) && styles.selected,
+								)}
+								title="Select the definition"
+								onClick={() => onSelectionChange([def.root.id])}
+							>
+								<span className={styles.kind} aria-hidden="true">
+									◈
+								</span>
+								<span className={styles.label}>{def.name}</span>
+							</button>
+							<button
+								type="button"
+								className={styles.place}
+								data-place={def.root.id}
+								title={`Place an instance of ${def.name}`}
+								onClick={() => {
+									let created: string | null = null;
+									onSceneChange((prev) => {
+										const result = addInstance(prev, def.root.id);
+										created = result.id;
+										return result.scene;
+									});
+									if (created) onSelectionChange([created]);
+								}}
+							>
+								+
+							</button>
+						</li>
+					))}
+				</ul>
+			</div>
 		);
 	}
 
@@ -338,7 +409,28 @@ export function LayerList({
 										{GLYPH[node.kind]}
 									</span>
 									<span className={styles.label}>{node.name}</span>
-									{isLaidOut(node) ? (
+									{/* What a row *is* comes before what it does: an instance
+									    that reads as a plain frame is the one thing that
+									    makes a component unreadable. */}
+									{node.instanceOf !== undefined ? (
+										<span
+											className={styles.badge}
+											data-role="instance-badge"
+											title={`An instance of ${defNames.get(node.instanceOf) ?? node.instanceOf}`}
+										>
+											{defNames.has(node.instanceOf)
+												? `of ${defNames.get(node.instanceOf)}`
+												: "orphan"}
+										</span>
+									) : node.component ? (
+										<span
+											className={styles.badge}
+											data-role="component-badge"
+											title="A component definition: this subtree is a design space, and every instance is a point in it"
+										>
+											component
+										</span>
+									) : isLaidOut(node) ? (
 										<span
 											className={styles.badge}
 											title="Children are arranged automatically"
@@ -352,6 +444,7 @@ export function LayerList({
 					})}
 				</ul>
 			)}
+			{defs.length > 0 ? shelf(defs) : null}
 		</div>
 	);
 }

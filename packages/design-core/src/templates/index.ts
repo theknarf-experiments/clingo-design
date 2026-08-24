@@ -12,6 +12,7 @@ import type { Scene } from "../scene.ts";
 import { blank } from "./blank.ts";
 import { buttons } from "./buttons.ts";
 import { card } from "./card.ts";
+import { component } from "./component.ts";
 import { pair } from "./pair.ts";
 import { palette } from "./palette.ts";
 import { places } from "./places.ts";
@@ -37,6 +38,13 @@ export const TEMPLATES: Template[] = [
 		name: "Card",
 		description: "A card whose accent and radius tokens each hold several values.",
 		create: card,
+	},
+	{
+		id: "component",
+		name: "Component",
+		description:
+			"A button whose four variants are its universes, used three times — two of them decided.",
+		create: component,
 	},
 	{
 		id: "buttons",

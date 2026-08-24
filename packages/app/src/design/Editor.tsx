@@ -31,6 +31,7 @@ import {
 	handleEdges,
 	hitTestTree,
 	isDrawable,
+	isPartOf,
 	isPlaced,
 	isSurface,
 	makeNode,
@@ -335,6 +336,11 @@ export function Editor({
 		if (derived.length === 0) return null;
 		const found = derivedAt(derived, point);
 		if (!found) return null;
+		// One exception to paint order, and it is the one case where the derived
+		// node *belongs* to the document node under it: a component instance's
+		// copy is drawn inside the instance, so letting it win would make the only
+		// draggable half of an instance unclickable. See `isPartOf`.
+		if (documentHit !== null && isPartOf(found.node.id, documentHit)) return null;
 		if (
 			documentHit !== null &&
 			!paintedOver(universe.model, found.node.id, documentHit)

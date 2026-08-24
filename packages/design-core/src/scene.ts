@@ -101,7 +101,8 @@ export type NodeKind =
 	| "arrow"
 	| "path"
 	| "text"
-	| "group";
+	| "group"
+	| "instance";
 
 /**
  * What a kind of node *is*, in one place.
@@ -128,6 +129,15 @@ export interface KindSpec {
 	defaultSize: { width: number; height: number };
 	/** Has pixels of its own: it paints, it can be hit, it attracts snaps. */
 	drawable: boolean;
+	/**
+	 * A pointer can draw one out, so the toolbar gets a slot for it.
+	 *
+	 * Not the same question as {@link drawable}: a group and an instance both
+	 * have pixels and can be clicked, and neither is something you drag a box
+	 * out to create — a group is made from a selection and an instance from a
+	 * definition.
+	 */
+	tool: boolean;
 	/** Holds children. */
 	container: boolean;
 	/**
@@ -187,6 +197,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		defaults: { fill: [lit("#ffffff")] },
 		defaultSize: { width: 480, height: 320 },
 		drawable: true,
+		tool: true,
 		container: true,
 		surface: true,
 		wrapsChildren: false,
@@ -204,6 +215,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		},
 		defaultSize: { width: 160, height: 120 },
 		drawable: true,
+		tool: true,
 		container: false,
 		surface: false,
 		wrapsChildren: false,
@@ -220,6 +232,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		defaults: { fill: [lit(PROPS.fill.fallback)] },
 		defaultSize: { width: 140, height: 140 },
 		drawable: true,
+		tool: true,
 		container: false,
 		surface: false,
 		wrapsChildren: false,
@@ -240,6 +253,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		},
 		defaultSize: { width: 160, height: 96 },
 		drawable: true,
+		tool: true,
 		container: false,
 		surface: false,
 		wrapsChildren: false,
@@ -257,6 +271,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		},
 		defaultSize: { width: 160, height: 96 },
 		drawable: true,
+		tool: true,
 		container: false,
 		surface: false,
 		wrapsChildren: false,
@@ -280,6 +295,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		// has some.
 		defaultSize: { width: 120, height: 120 },
 		drawable: true,
+		tool: true,
 		container: false,
 		surface: false,
 		wrapsChildren: false,
@@ -308,6 +324,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		},
 		defaultSize: { width: 160, height: 28 },
 		drawable: true,
+		tool: true,
 		container: false,
 		surface: false,
 		wrapsChildren: false,
@@ -322,9 +339,41 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		defaults: {},
 		defaultSize: { width: 0, height: 0 },
 		drawable: false,
+		tool: false,
 		container: true,
 		surface: false,
 		wrapsChildren: true,
+		shape: false,
+		diagonal: false,
+		measured: false,
+		plotted: false,
+	},
+	/**
+	 * A use of a component — see `components.ts`.
+	 *
+	 * It holds nothing itself: no children, no properties, no appearance. Every
+	 * pixel inside it is a *derived* node the compiler's component rules produce
+	 * from the definition, which is what makes editing the definition change
+	 * every instance with nothing to propagate. What the document stores is
+	 * where it sits, how big it is, which definition it uses, and which of the
+	 * definition's open choices it has made up its mind about.
+	 */
+	instance: {
+		label: "Instance",
+		props: [],
+		defaults: {},
+		defaultSize: { width: 160, height: 48 },
+		// Clickable and snappable: it is a thing on the canvas even though the
+		// pixels belong to the copy inside it.
+		drawable: true,
+		// Never dragged out. An instance comes from a definition.
+		tool: false,
+		// The copy inside is derived, so there is nothing here for a drop to
+		// land in — and a document child would be a child the definition does
+		// not know about.
+		container: false,
+		surface: false,
+		wrapsChildren: false,
 		shape: false,
 		diagonal: false,
 		measured: false,
@@ -334,8 +383,11 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 
 export const NODE_KINDS = Object.keys(KINDS) as NodeKind[];
 
-/** The kinds a pointer can draw out. A group is only ever made from a selection. */
-export const DRAW_KINDS = NODE_KINDS.filter((k) => KINDS[k].drawable);
+/**
+ * The kinds a pointer can draw out. A group is only ever made from a selection,
+ * and an instance only ever from a definition.
+ */
+export const DRAW_KINDS = NODE_KINDS.filter((k) => KINDS[k].tool);
 
 /** The shapes, in the order their shared toolbar slot cycles through them. */
 export const SHAPE_KINDS = DRAW_KINDS.filter((k) => KINDS[k].shape);
@@ -732,6 +784,36 @@ export interface SceneNode {
 	 * siblings. A `placement` value; absent means whatever the container says.
 	 */
 	alignSelf?: Value;
+	/**
+	 * This subtree is a component definition — see `components.ts`.
+	 *
+	 * A definition is not a separate kind of object: it is an ordinary subtree
+	 * with a flag, drawn and edited on the canvas like anything else. What the
+	 * flag adds is that its property variables are re-minted once per instance,
+	 * so the subtree stops being one design and becomes a design *space* that
+	 * several nodes can each take a point of.
+	 */
+	component?: true;
+	/**
+	 * On an `instance` kind: the id of the definition's root node.
+	 *
+	 * A dangling reference derives nothing rather than failing, which is what
+	 * deleting a definition out from under its instances leaves behind.
+	 */
+	instanceOf?: string;
+	/**
+	 * On an `instance` kind: the choices this instance has made up its mind
+	 * about, as *definition-space* variable key -> alternative index.
+	 *
+	 * These are held picks, not values. An instance can only differ from its
+	 * definition where the definition wrote more than one alternative, so an
+	 * override is necessarily a choice among those alternatives — which means
+	 * there is nothing here that could contradict the definition, only
+	 * something that could narrow it. Definition-space keys rather than the
+	 * instance's own so that a variant carries over from one instance to
+	 * another unchanged.
+	 */
+	holds?: Readonly<Record<string, number>>;
 }
 
 /** True when this node's children are placed by the solver. */

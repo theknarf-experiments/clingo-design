@@ -85,9 +85,17 @@ test("a shadow goes on the box kinds, never on a stroked one", () => {
 	}
 });
 
-test("everything drawable can be faded", () => {
+test("everything with an appearance of its own can be faded", () => {
 	for (const kind of NODE_KINDS) {
-		assert.equal(KINDS[kind].props.includes("opacity"), KINDS[kind].drawable);
+		// A kind with no properties has no appearance of its own to fade: a group
+		// is whatever its children are, and an instance is the copy its
+		// definition derives inside it.
+		const paints = KINDS[kind].props.length > 0;
+		assert.equal(KINDS[kind].props.includes("opacity"), paints);
+	}
+	for (const kind of ["group", "instance"] as const) {
+		assert.deepEqual(KINDS[kind].props, []);
+		assert.deepEqual(KINDS[kind].defaults, {});
 	}
 });
 

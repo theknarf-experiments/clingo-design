@@ -20,6 +20,7 @@
  * not a choice either — it is a variable of the simplex solver, which costs one
  * unknown rather than a domain.
  */
+import { componentDefs, instanceNodes } from "./components.ts";
 import { askedSize, measuredCount, naturalSize, type Measurements } from "./measure.ts";
 import {
 	CHILD_PROPS,
@@ -444,6 +445,76 @@ const SCENE_DEFAULT_RULES = [
 ]
 
 /**
+ * Components, as rules over the facts a definition and an instance emit.
+ *
+ * The whole feature is here, and it is short because nothing about it is new
+ * machinery: a definition is a subtree, and an instance is that subtree's
+ * *variables minted again*. Everything downstream — the choice rule, `resolved`,
+ * `rendered`, projection, the reachability marks, pinning — then applies to an
+ * instance's properties because they are ordinary variables and it cannot tell
+ * the difference.
+ *
+ * Two consequences worth naming, because they are the reason for doing it this
+ * way rather than by copying a subtree into the document:
+ *
+ *   - Editing the definition changes every instance, with nothing to propagate.
+ *     The instances were never a copy; they are derived from the definition on
+ *     every solve.
+ *   - Two instances can differ, because each has its own `pick/2` over the same
+ *     alternatives — and they can differ *only* where the definition wrote more
+ *     than one alternative, because that is the only place there is a pick to
+ *     make. Neither of those is enforced anywhere. They are what the shape is.
+ *
+ * The definition's own subtree is compiled and drawn like any other, so what is
+ * on the canvas beside the instances is a real point in the component's space,
+ * not a preview of one.
+ */
+const COMPONENT_RULES = [
+	"#defined component/1.",
+	"#defined cpart/2.",
+	"#defined cinner/2.",
+	"#defined instance/2.",
+	"#defined alt_token/3.",
+	"#defined alt_derived/4.",
+	"% ---- the instance's copy of the definition's tree ----",
+	"% Derived, not copied into the document: one place stays the truth. `cpart`",
+	"% is the definition root and everything under it, `cinner` the same without",
+	"% the root, which is the only part whose geometry differs — the root copy",
+	"% fills the instance's own box, and everything inside sits where the",
+	"% definition put it.",
+	"node(inst(I,N)) :- instance(I,R), cpart(R,N).",
+	"kind(inst(I,N),K) :- instance(I,R), cpart(R,N), kind(N,K).",
+	"order(inst(I,N),O) :- instance(I,R), cinner(R,N), order(N,O).",
+	"child(I,inst(I,R)) :- instance(I,R).",
+	"child(inst(I,P),inst(I,N)) :- instance(I,R), cinner(R,N), child(P,N), cpart(R,P).",
+	"frame(inst(I,N),D,V) :- instance(I,R), cinner(R,N), frame(N,D,V).",
+	"% The root copy takes the instance's size and sits at its origin, so an",
+	"% instance is resizable the way a placement should be, while what is inside",
+	"% it stays the definition's arrangement. Its x and y are left to the scene",
+	"% defaults, which is what puts them at zero.",
+	"frame(inst(I,R),S,V) :- instance(I,R), gspan(S), frame(I,S,V).",
+	"",
+	"% ---- the definition's variables, minted once per instance ----",
+	"% This is what makes an instance a *point* in the component's space rather",
+	"% than a picture of it. Same alternatives, its own pick.",
+	"alt(prop(inst(I,N),P),K) :- instance(I,R), cpart(R,N), alt(prop(N,P),K).",
+	"alt_literal(prop(inst(I,N),P),K,L) :- instance(I,R), cpart(R,N),",
+	"                                      alt_literal(prop(N,P),K,L).",
+	"% A token is the document's, shared by everyone, so a link is copied as it is.",
+	"alt_token(prop(inst(I,N),P),K,T) :- instance(I,R), cpart(R,N),",
+	"                                    alt_token(prop(N,P),K,T).",
+	"% A derivation that reads another part of the *same* definition has to read",
+	"% this instance's copy of that part, or every instance's computed ink would",
+	"% follow the definition's fill instead of its own. Anything else — a token, a",
+	"% node outside the definition — is copied unchanged.",
+	"cpartvar(R,prop(S,Q)) :- cpart(R,S), alt(prop(S,Q),_).",
+	"alt_derived(prop(inst(I,N),P),K,Via,prop(inst(I,S),Q)) :- instance(I,R),",
+	"    cpart(R,N), alt_derived(prop(N,P),K,Via,prop(S,Q)), cpartvar(R,prop(S,Q)).",
+	"alt_derived(prop(inst(I,N),P),K,Via,S) :- instance(I,R), cpart(R,N),",
+	"    alt_derived(prop(N,P),K,Via,S), not cpartvar(R,S).",
+]
+
+/**
  * The geometric vocabulary, as facts. Written out of the one table that says
  * what an edge is, so no rule ever names an edge.
  */
@@ -640,6 +711,27 @@ export const CONTRACT = `% Predicates you can rely on:
 %   gkind(K)                    K places its nodes rather than colours them
 %   gedge(E, x|y, pos|span|axis)   what an edge is
 %   gplace(E, lead|mid|trail)      and where on the node it sits
+%
+% Components. A definition is a subtree; an instance is that subtree's
+% variables minted again, so an instance is a *point* in the component's space
+% rather than a copy of one:
+%
+%   component(R)                R's subtree is a definition
+%   cpart(R, N)                 N is part of it — R included
+%   cinner(R, N)                the same without R, whose copy takes the
+%                               instance's own box
+%   instance(I, R)              I is a use of R. Derivable: one rule can put a
+%                               dozen instances on the canvas
+%
+% Everything under an instance is derived from those:
+%
+%   node(inst(I,N))  kind  order  child  frame        the copy of the tree
+%   alt(prop(inst(I,N),P), K)                         its own choices, over the
+%                                                     definition's alternatives
+%
+% So two instances differ exactly where the definition wrote more than one
+% alternative, and nowhere else. An *override* is not a predicate: it is
+% pick(prop(inst(I,N),P),K) assumed, which is the same thing a pin is.
 %
 % Automatic layout. The settings are values, so the predicates the equations
 % read are derived per universe rather than stated:
@@ -909,6 +1001,33 @@ export function compile(
 		}
 	}
 
+	/**
+	 * Components: which subtrees are definitions, and which nodes use them.
+	 *
+	 * Facts only — the rules that interpret them are generic, so a document with
+	 * a component in it is the same *program* as one without, with more data.
+	 * An instance naming a definition the document no longer holds emits
+	 * nothing, which leaves an empty box on the canvas rather than a program
+	 * that will not ground.
+	 */
+	const componentLines: string[] = [];
+	const definitions = new Set<string>();
+	for (const def of componentDefs(scene)) {
+		definitions.add(def.root.id);
+		componentLines.push(atom("component", def.root.id));
+		for (const part of def.parts) {
+			componentLines.push(atom("cpart", def.root.id, part.id));
+			if (part.id !== def.root.id) {
+				componentLines.push(atom("cinner", def.root.id, part.id));
+			}
+		}
+	}
+	for (const node of instanceNodes(scene)) {
+		if (node.instanceOf === undefined) continue;
+		if (!definitions.has(node.instanceOf)) continue;
+		componentLines.push(atom("instance", node.id, node.instanceOf));
+	}
+
 	// Constraints are facts; the rules that interpret them are generic, so a
 	// document never changes the *shape* of the program, only its data.
 	const constraintLines: string[] = [];
@@ -1038,7 +1157,16 @@ export function compile(
 			...GEOMETRY_RULES,
 			...FREEDOM_RULES,
 		]),
-		// After the geometry rules, which is where `gaxis` and `gspan` are said.
+		section("components", componentLines),
+		// Always emitted, like the geometry rules and for the same reason:
+		// `instance/2` is something a hand-written rule may assert — a row of
+		// twelve instances is one rule — and a contract that quietly does nothing
+		// on some documents is not one. With no facts, none of it grounds.
+		//
+		// After the geometry rules, which is where `gspan` is said.
+		section("component rules", COMPONENT_RULES),
+		// After the component rules, so a node an instance derived defaults the
+		// same way a node a hand-written rule derived does.
 		section("scene defaults", SCENE_DEFAULT_RULES),
 		section("constraints", constraintLines),
 		constraintLines.length === 0

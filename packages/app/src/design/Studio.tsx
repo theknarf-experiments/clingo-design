@@ -16,6 +16,8 @@ import {
 	type Scene,
 	type Universe,
 	addConstraint,
+	addInstance,
+	defineComponent,
 	deleteNodes,
 	distributeNodes,
 	duplicateNodes,
@@ -24,6 +26,7 @@ import {
 	collapseToPicks,
 	derivedNodes,
 	documentBounds,
+	partLabel,
 	FRAME_DIMS,
 	type Dimension,
 	flatten,
@@ -630,8 +633,50 @@ export function Studio({
 		if (freed.length) setSelection(new Set(freed));
 	}
 
+	/**
+	 * The one node a component action can be about: a lone selected container.
+	 *
+	 * A component is a subtree, so a multi-selection has no single root to be
+	 * one, and a leaf has nothing to hold.
+	 */
+	const componentTarget =
+		selection.size === 1
+			? byId.get([...selection][0])
+			: undefined;
+	const canDefine =
+		componentTarget !== undefined &&
+		KINDS[componentTarget.kind].container &&
+		!componentTarget.component;
+
+	function makeComponent() {
+		if (!componentTarget) return;
+		onSceneChange((prev) => defineComponent(prev, componentTarget.id));
+	}
+
 	function menuItems(): Array<MenuItem | "separator"> {
 		return [
+			{
+				id: "make-component",
+				label: "Make a component",
+				disabled: !canDefine,
+				run: makeComponent,
+			},
+			{
+				id: "place-instance",
+				label: "Place an instance",
+				disabled: componentTarget?.component !== true,
+				run: () => {
+					if (!componentTarget) return;
+					let created: string | null = null;
+					onSceneChange((prev) => {
+						const result = addInstance(prev, componentTarget.id, picks);
+						created = result.id;
+						return result.scene;
+					});
+					if (created) setSelection(new Set([created]));
+				},
+			},
+			"separator",
 			{
 				id: "group",
 				label: "Group selection",
@@ -737,19 +782,28 @@ export function Studio({
 	/** `prop(card,fill)` reads better as `card fill`. */
 	const labels = useMemo(() => {
 		const out = new Map<string, string>();
+		/**
+		 * What to call the node a variable belongs to.
+		 *
+		 * A component instance's parts are derived, so the document has no name
+		 * for `inst(primary,buttonLabel)` — but the definition does, and a caption
+		 * reading an ASP term is a caption nobody reads.
+		 */
+		const nameOf = (id: string) =>
+			byId.get(id)?.name ?? partLabel(scene, id) ?? id;
 		for (const key of unsettled) {
 			const parsed = parseVariable(key);
 			if (!parsed) out.set(key, key);
 			else if (parsed.kind === "prop") {
-				out.set(key, `${byId.get(parsed.node)?.name ?? parsed.node} ${parsed.prop}`);
+				out.set(key, `${nameOf(parsed.node)} ${parsed.prop}`);
 			} else if (parsed.kind === "constraint") {
 				const c = scene.constraints.find((k) => k.id === parsed.constraint);
 				out.set(key, c ? `${CONSTRAINT_KINDS[c.kind].label} value` : key);
 			} else if (parsed.kind === "layout") {
-				const name = byId.get(parsed.node)?.name ?? parsed.node;
+				const name = nameOf(parsed.node);
 				out.set(key, `${name} ${LAYOUT_PROPS[parsed.field as LayoutProp].label}`);
 			} else if (parsed.kind === "frame") {
-				const name = byId.get(parsed.node)?.name ?? parsed.node;
+				const name = nameOf(parsed.node);
 				out.set(key, `${name} ${FRAME_DIMS[parsed.dim as Dimension].label}`);
 			} else {
 				const token = scene.tokens.find((t) => t.id === parsed.token);
@@ -757,7 +811,7 @@ export function Studio({
 			}
 		}
 		return out;
-	}, [unsettled, byId, scene.tokens, scene.constraints]);
+	}, [unsettled, byId, scene]);
 
 	return (
 		<div className={styles.studio}>
@@ -1061,6 +1115,7 @@ export function Studio({
 								known={known}
 								everywhere={everywhere}
 								variables={minted}
+								onSelectionChange={selectionIds}
 							/>
 						) : panel === "variables" ? (
 							<Variables

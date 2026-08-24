@@ -21,6 +21,7 @@ import {
 	type Freedom,
 	defaultValue,
 	findInTree,
+	flatten,
 	frameFrozen,
 	frameOf,
 	frameVar,
@@ -50,9 +51,23 @@ import {
 	setProp,
 	tokensFor,
 	varies,
+	type ComponentDef,
+	addInstance,
+	definitionOf,
+	isFullyHeld,
+	instanceVariable,
+	openVariables,
+	releaseComponent,
+	setHold,
+	setVariant,
+	shownVariant,
+	termLabel,
+	varLabel,
+	variantsOf,
 } from "@clingo-design/design-core";
 
 import { ValueEditor } from "./ValueEditor";
+import { cx } from "./cx";
 import styles from "./Inspector.module.css";
 
 export interface InspectorProps {
@@ -88,6 +103,12 @@ export interface InspectorProps {
 	 * has to read its alternatives out of the answer set instead.
 	 */
 	variables?: Readonly<Record<string, readonly ModelAlternative[]>>;
+	/**
+	 * Move the selection. Only the component section uses it: an instance names
+	 * its definition, and a name you cannot follow is a name you have to hunt
+	 * for in the layer tree.
+	 */
+	onSelectionChange?: (ids: string[]) => void;
 }
 
 const SIZINGS: Sizing[] = ["hug", "fixed"];
@@ -304,6 +325,289 @@ function DerivedPanel({
 }
 
 /**
+ * A strip of the definition's variants.
+ *
+ * This is the whole of "see the variants", and it is a strip rather than a
+ * table because that is what the variants *are*: the points of the definition's
+ * own space, one per combination of the choices it left open. Nothing declared
+ * them; they are counted off the alternatives.
+ *
+ * `shown` is the one the universe on screen is drawing and `chosen` the one the
+ * instance has held, and they are different questions: an instance that has
+ * held nothing is still showing something.
+ */
+function VariantStrip({
+	def,
+	variants,
+	truncated,
+	shown,
+	chosen,
+	onChoose,
+}: {
+	def: ComponentDef;
+	variants: ReturnType<typeof variantsOf>["variants"];
+	truncated: boolean;
+	shown: number;
+	/** Set only on an instance that has made up its mind. */
+	chosen?: number;
+	/** Absent on the definition itself, which has nothing to choose. */
+	onChoose?: (at: number) => void;
+}) {
+	if (variants.length === 0) {
+		return (
+			<p className={styles.note} data-role="no-variants">
+				{def.name} has one variant: nothing in it holds more than one value
+				yet. Give a property a second value and it becomes a space.
+			</p>
+		);
+	}
+	return (
+		<>
+			<div className={styles.variants} data-role="variants">
+				{variants.map((variant, at) => (
+					<button
+						key={variant.label}
+						type="button"
+						data-variant={at}
+						data-shown={at === shown ? "" : undefined}
+						data-chosen={at === chosen ? "" : undefined}
+						aria-pressed={at === chosen}
+						disabled={!onChoose}
+						className={cx(
+							styles.variant,
+							at === shown && styles.variantShown,
+							at === chosen && styles.variantChosen,
+						)}
+						title={
+							onChoose
+								? `Hold this instance at "${variant.label}"`
+								: `Variant ${at + 1} of ${variants.length}`
+						}
+						onClick={() => onChoose?.(at)}
+					>
+						{variant.label}
+					</button>
+				))}
+			</div>
+			{truncated ? (
+				<p className={styles.note}>
+					More variants than fit here — the first {variants.length} are shown.
+				</p>
+			) : null}
+		</>
+	);
+}
+
+/**
+ * What a component is, said in the inspector.
+ *
+ * Two selections land here and they are opposite sides of one idea. A
+ * *definition* is a design space: the panel counts its variants and offers to
+ * place a use of it. An *instance* is a point in that space: the panel says
+ * which definition, which variant it is showing, and lets each open choice be
+ * held or handed back.
+ *
+ * An override is a held pick — see `heldPicks` — so the row below is not a
+ * value editor. There is nothing to type: the alternatives are the definition's
+ * and the only thing an instance decides is which one.
+ */
+function ComponentSection({
+	scene,
+	node,
+	picks,
+	reach,
+	onSceneChange,
+	onSelect,
+}: {
+	scene: Scene;
+	node: SceneNode;
+	picks: Picks;
+	reach?: Readonly<Record<string, Set<number>>>;
+	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
+	onSelect?: (ids: string[]) => void;
+}) {
+	const isInstance = node.instanceOf !== undefined;
+	const real = isInstance
+		? definitionOf(scene, node)
+		: node.component
+			? { root: node, name: node.name, parts: flatten([node]) }
+			: undefined;
+
+	if (isInstance && !real) {
+		return (
+			<div data-role="component-section">
+				<h3>Component</h3>
+				<p className={styles.note} data-role="orphan-instance">
+					An instance of “{node.instanceOf}”, which is no longer a component
+					definition. Nothing is derived inside it. Mark that subtree as a
+					component again and this comes back.
+				</p>
+			</div>
+		);
+	}
+	if (!real) return null;
+
+	const { variants, truncated } = variantsOf(scene, real);
+	const open = openVariables(real);
+	const shown = shownVariant(variants, real, node.id, picks);
+	const chosen = isInstance
+		? variants.findIndex((v) =>
+				open.every((o) => node.holds?.[o.variable] === v.picks[o.variable]),
+			)
+		: -1;
+	const names = nodeNames(scene.nodes);
+	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
+
+	return (
+		<div data-role="component-section">
+			<h3>Component</h3>
+			{isInstance ? (
+				<p className={styles.note} data-role="instance-of">
+					An instance of{" "}
+					<button
+						type="button"
+						className={styles.jump}
+						data-role="goto-definition"
+						title="Select the definition"
+						onClick={() => onSelect?.([real.root.id])}
+					>
+						{real.name}
+					</button>
+					. Everything inside is derived from it, so editing the definition
+					changes this too.
+				</p>
+			) : (
+				<p className={styles.note} data-role="definition-note">
+					A definition: this subtree is a design space rather than one design.
+					Every instance is a point in it, free wherever a property here holds
+					more than one value.
+				</p>
+			)}
+
+			<VariantStrip
+				def={real}
+				variants={variants}
+				truncated={truncated}
+				shown={shown}
+				chosen={isInstance && chosen >= 0 ? chosen : undefined}
+				onChoose={
+					isInstance
+						? (at) =>
+								onSceneChange((prev) => setVariant(prev, node.id, variants[at].picks))
+						: undefined
+				}
+			/>
+
+			{isInstance ? (
+				<>
+					{node.holds ? (
+						<button
+							type="button"
+							className={styles.follow}
+							data-role="release-holds"
+							title="Hand every choice back to the solver"
+							onClick={() => onSceneChange((prev) => setVariant(prev, node.id, null))}
+						>
+							{isFullyHeld(real, node)
+								? "Let the solver choose"
+								: "Release every choice"}
+						</button>
+					) : null}
+
+					{open.length > 0 ? <h3>Overrides</h3> : null}
+					{open.map((v) => {
+						const variable = instanceVariable(node.id, v.node.id, v.prop);
+						const held = node.holds?.[v.variable];
+						const live = picks[variable];
+						const reachable = reach?.[variable];
+						return (
+							<div key={v.variable} className={styles.override} data-override={v.variable}>
+								<span className={styles.fieldLabel}>{varLabel(v)}</span>
+								<div className={styles.variants}>
+									{v.value.map((term, at) => {
+										const dead =
+											reachable !== undefined && !reachable.has(at);
+										return (
+											<button
+												key={at}
+												type="button"
+												data-alt={at}
+												data-held={at === held ? "" : undefined}
+												data-active={at === live ? "" : undefined}
+												data-impossible={dead ? "" : undefined}
+												aria-pressed={at === held}
+												className={cx(
+													styles.variant,
+													at === live && styles.variantShown,
+													at === held && styles.variantChosen,
+													dead && styles.variantDead,
+												)}
+												title={
+													at === held
+														? "Hand this choice back to the solver"
+														: "Hold this instance at this value"
+												}
+												onClick={() =>
+													onSceneChange((prev) =>
+														setHold(prev, node.id, v.variable, at === held ? null : at),
+													)
+												}
+											>
+												{resolveValue(context, [term], v.variable) &&
+												PROPS[v.prop].type === "color" ? (
+													<span
+														className={styles.chip}
+														style={{
+															background: resolveValue(context, [term], v.variable),
+														}}
+														aria-hidden="true"
+													/>
+												) : null}
+												{termLabel(scene.tokens, term, names)}
+											</button>
+										);
+									})}
+								</div>
+							</div>
+						);
+					})}
+				</>
+			) : (
+				<div className={styles.defActions}>
+					<button
+						type="button"
+						className={styles.follow}
+						data-role="place-instance"
+						onClick={() => {
+							let created: string | null = null;
+							onSceneChange((prev) => {
+								const result = addInstance(prev, real.root.id, picks);
+								created = result.id;
+								return result.scene;
+							});
+							if (created) onSelect?.([created]);
+						}}
+					>
+						Place an instance
+					</button>
+					<button
+						type="button"
+						className={styles.follow}
+						data-role="release-component"
+						title="Stop treating this subtree as a definition. Its instances keep the name and come back if it is marked again."
+						onClick={() =>
+							onSceneChange((prev) => releaseComponent(prev, real.root.id))
+						}
+					>
+						Not a component
+					</button>
+				</div>
+			)}
+		</div>
+	);
+}
+
+/**
  * Properties of the current selection, in the shape a designer expects:
  * position, then content, then appearance.
  *
@@ -326,6 +630,7 @@ export function Inspector({
 	known,
 	everywhere,
 	variables = {},
+	onSelectionChange,
 }: InspectorProps) {
 	const selected = [...selection]
 		.map((id) => findInTree(scene.nodes, id))
@@ -473,6 +778,18 @@ export function Inspector({
 				onChange={(e) =>
 					onSceneChange((prev) => renameNode(prev, node.id, e.target.value), "name")
 				}
+			/>
+
+			{/* Before anything else, because it says what the selection *is*. An
+			    instance whose panel opens on four number fields is an instance
+			    nobody can tell from a frame. */}
+			<ComponentSection
+				scene={scene}
+				node={node}
+				picks={picks}
+				reach={reach}
+				onSceneChange={onSceneChange}
+				onSelect={onSelectionChange}
 			/>
 
 			<h3>Position</h3>
