@@ -3,8 +3,103 @@
  *
  * The grounding is reused: an {@link Explorer} holds a session and only
  * re-opens it when the *program* changes. Almost every edit does change it —
- * the document compiles to facts — so in practice the reuse only catches
- * renames, text edits and a repeated explore of an unchanged document.
+ * the document compiles to facts — so in practice the reuse catches a repeated
+ * explore of an unchanged document, a pin (which is an assumption and was never
+ * a re-grounding), and renaming a node. That is all; see grounding.test.ts,
+ * which pins the split edit by edit.
+ *
+ * ## Why the obvious fix is not one: the document cannot be `#external`
+ *
+ * clingo's answer to re-grounding is multi-shot — atoms whose truth is set
+ * between solves — and the document's facts look exactly like the thing that
+ * should be external. They are not, and the reason is one sentence: an atom's
+ * *truth* can change without re-grounding, but the set of atoms cannot. Almost
+ * every edit a designer makes introduces a new **term**.
+ *
+ * Measured on this build, in-process through `directSolver`, medians of five:
+ *
+ * ```
+ * doc         nodes   ground     warm     cold   ground as % of cold
+ * card           11     21ms     18ms     41ms        54%
+ * rail            6     24ms      7ms     32ms        75%
+ * palette         9     19ms      6ms     25ms        76%
+ * sudoku         22     77ms     26ms    107ms        72%
+ * synth50        52     34ms     63ms     98ms        35%
+ * synth200      202     96ms    255ms    353ms        27%
+ * synth500      502    226ms    656ms    884ms        26%
+ * buttons         8     16ms     48ms     87ms        18%   (118 solves)
+ * map             6     53ms   2738ms   2773ms         2%   ( 80 solves)
+ * ```
+ *
+ * Read that table before believing the headline. Grounding is a *large share*
+ * only of the documents that are already fast: card re-solves in 41ms and
+ * palette in 25ms, so deleting grounding outright buys card 23ms. The documents
+ * that are actually slow are slow because of solves — map spends 98% of 2.7s
+ * solving — and there multi-shot buys 2%.
+ *
+ * Confirmed in the studio over CDP, which is the number that decides it. A drag
+ * on `card` — the most grounding-dominated document there is — is **95ms** from
+ * mouse-up to the status line settling, of which the exploration reports 55ms
+ * and grounding is ~21ms. So the edit latency people complain about is ~22%
+ * grounding, ~35% solving, and ~40% worker hop and React. Deleting the grounder
+ * outright would take that drag to 74ms, and for a drag it cannot be deleted at
+ * all.
+ *
+ * Grounding itself is a ~15ms fixed floor plus ~0.4ms a node: the blank
+ * template, one node and the whole generic rule skeleton, grounds in 15ms, and
+ * a bare `a.` grounds in 1ms. So three quarters of card's grounding is parsing
+ * 15KB of rules and rewriting them through clingo-lpx, which is a constant.
+ *
+ * ### The split, edit by edit
+ *
+ * Needs a new term, so it re-grounds and always will:
+ *   * drag or resize — `frame(badge,x,41)` is an integer that was not there
+ *   * type into a text node — a new `literal/2` string
+ *   * pick a colour off the picker — the same, plus the table renumbers
+ *   * edit a token's value, add a node, delete a node — new terms throughout
+ *   * a gap or a size in a layout — a new `numeral/2` integer
+ *
+ * Truth only, so it *could* be an external — both verified working through the
+ * shim, which has exposed `cd_externals` all along:
+ *   * switching a rule off: `#external constraint(C)`. A disabled constraint
+ *     emits strictly fewer facts, never other ones.
+ *   * re-pointing a value at a literal *already in the table*:
+ *     `#external alt_literal/3`. One atom moves. But the colour picker emits
+ *     arbitrary colours, so the hit rate on the edit that matters is near zero.
+ *
+ * Already free, and worth saying because it is easy to count twice: pinning and
+ * unpinning, a component override, a freedom probe, a why-question, brave and
+ * cautious. All assumptions.
+ *
+ * ### The decisive measurement
+ *
+ * The one edit worth the whole exercise is the drag, and it was tried. Making a
+ * coordinate external means grounding every coordinate the node could hold.
+ * On eleven nodes — card — with one theory equation per frame, which is the
+ * shape the geometry rules have:
+ *
+ * ```
+ * frame/3 as facts                  ground     9ms   solve    4ms
+ * #external over V=0..100           ground    45ms   solve   67ms
+ * #external over V=0..500           ground   161ms   solve  296ms
+ * #external over V=0..2000          ground   570ms   solve 1112ms
+ * ```
+ *
+ * A canvas 100 pixels wide already costs nine times the grounding it was meant
+ * to save, and a real one costs 130x, on the smallest document in the tool. The
+ * technique fails hardest exactly where it was needed.
+ *
+ * So: not done, deliberately. What is left on the table is the constraint
+ * toggle — 20ms of palette's 87ms, 54ms of map's 2.6s — for a restructuring
+ * that would emit every disabled rule's facts into every grounding, put a
+ * `c_level/2` for switched-off soft rules into the program (which makes
+ * {@link isOptimizing} true for documents where it is false today, and see what
+ * that function's own comment says about collapsing the multiverse), and add a
+ * third state to reason about: an external nobody assigned is fixed *false* in
+ * preprocessing, so an assumption on an atom only that external could derive
+ * comes back UNSATISFIABLE rather than free. That is a large, sharp-edged
+ * change for the cheapest interaction in the studio. The edit latency is real;
+ * this is not where it lives.
  *
  * When enumeration exhausts the space, brave and cautious consequences are
  * derived from the models already in hand rather than asked for separately,

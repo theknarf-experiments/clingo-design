@@ -321,6 +321,62 @@ scale_value(color,C) :- color(C).
 	});
 });
 
+test("releasing an external is reachable, and is permanent", async () => {
+	// Both halves are regressions. `setExternals` shared its encoder with
+	// assumptions, where an omitted sign means *true*, so the release this API
+	// documents assigned the atom true instead — the opposite of what it says.
+	// And a release is not the "back to free" the shim used to claim: clingo
+	// fixes the atom false for good, so the re-assignment below is a no-op and
+	// a caller that wants an external back has to say `sign: false`.
+	const program = `
+#external f(a).
+#external f(b).
+p :- f(a).
+q :- f(b).
+#show p/0.
+#show q/0.
+`;
+	await withSession(program, async (s) => {
+		await s.setExternals([{ atom: "f(a)", sign: true }, { atom: "f(b)", sign: true }]);
+		assert.deepEqual(sorted((await s.solve()).models), ["p q"]);
+
+		// `-` is the reversible one.
+		await s.setExternals([{ atom: "f(b)", sign: false }]);
+		assert.deepEqual(sorted((await s.solve()).models), ["p"]);
+		await s.setExternals([{ atom: "f(b)", sign: true }]);
+		assert.deepEqual(sorted((await s.solve()).models), ["p q"]);
+
+		// An omitted sign reaches release_external rather than assigning true.
+		await s.setExternals([{ atom: "f(a)" }]);
+		assert.deepEqual(sorted((await s.solve()).models), ["q"]);
+
+		// And it does not come back.
+		await s.setExternals([{ atom: "f(a)", sign: true }]);
+		assert.deepEqual(sorted((await s.solve()).models), ["q"]);
+	});
+});
+
+test("an unassigned external is fixed false, which breaks an assumption on it", async () => {
+	// The trap that sent every guard in the design program through a
+	// `{ active(C) } :- constraint(C).` choice rule instead. Pinned here because
+	// it is the reason multi-shot cannot simply replace the guards, and because
+	// "unassigned" reads like "undecided" and is nothing of the kind.
+	const program = `
+#external on(c1).
+{ active(C) } :- on(C).
+#show active/1.
+`;
+	await withSession(program, async (s) => {
+		const cold = await s.solve({ assumptions: [{ atom: "active(c1)" }] });
+		assert.equal(cold.result, "UNSATISFIABLE");
+
+		await s.setExternals([{ atom: "on(c1)", sign: true }]);
+		const warm = await s.solve({ assumptions: [{ atom: "active(c1)" }] });
+		assert.equal(warm.result, "SATISFIABLE");
+		assert.deepEqual(sorted(warm.models), ["active(c1)"]);
+	});
+});
+
 test("a large program grounds and solves without overflowing the stack", async () => {
 	// Regression: the default 64 KB Emscripten stack overflowed on clingo's
 	// recursive parser at roughly 2,500 lines, faulting with "memory access

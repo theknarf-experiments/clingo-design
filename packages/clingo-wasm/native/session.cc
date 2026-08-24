@@ -446,12 +446,21 @@ int cd_configure(int id, char const *path, char const *value) {
 
 /**
  * Sets the truth of `#external` atoms, newline-separated and signed the same
- * way as assumptions; an unsigned entry releases the atom back to `free`.
+ * way as assumptions; an unsigned entry *releases* the atom.
  *
  * Unlike assumptions, an external's truth persists across solves, so a program
- * can carry state without being rebuilt. Nothing in the design tool declares
- * externals today; this is here for programs written by hand in the rules
- * panel.
+ * can carry state without being rebuilt.
+ *
+ * A release is not "back to free": `clingo_control_release_external` fixes the
+ * atom false permanently and a later assignment on it is silently ignored —
+ * measured, not read off the manual. `-atom` is the reversible one.
+ *
+ * Nothing the design document compiles to is declared external, and that is a
+ * measured decision rather than an omission: the facts a document generates are
+ * new *terms* on almost every edit, and a term that is not in the grounding
+ * cannot be switched on. See the header of `design-core/src/explore.ts` for the
+ * numbers and the edit-by-edit split. This entry point is here for programs
+ * written by hand in the rules panel, which can declare their own.
  */
 int cd_externals(int id, char const *atoms) {
     Session *session = find_session(id);

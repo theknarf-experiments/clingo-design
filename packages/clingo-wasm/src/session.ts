@@ -79,12 +79,34 @@ export interface SolveRequest {
  *
  * Newlines rather than semicolons: an ASP string literal may contain ';' but
  * never a raw newline, so this cannot be ambiguous.
+ *
+ * An omitted sign means *true* here, which is the {@link Assumption} contract.
+ * Externals read the third state off an unsigned entry and so encode
+ * separately — see {@link encodeExternals}.
  */
 function encode(
 	literals: ReadonlyArray<{ atom: string; sign?: boolean }>,
 ): string {
 	return literals
 		.map((a) => (a.sign === false ? `-${a.atom}` : `+${a.atom}`))
+		.join("\n");
+}
+
+/**
+ * The same wire format, but an omitted sign is the *release*, not true.
+ *
+ * Externals have three states where an assumption has two, and the shim reads
+ * the third off a token with no sign at all. Sharing `encode` meant an omitted
+ * sign arrived as `+`, so the release this file documents was unreachable: it
+ * assigned the atom true instead, which is the opposite of what was asked.
+ */
+function encodeExternals(
+	externals: ReadonlyArray<{ atom: string; sign?: boolean }>,
+): string {
+	return externals
+		.map((e) =>
+			e.sign === undefined ? e.atom : e.sign ? `+${e.atom}` : `-${e.atom}`,
+		)
 		.join("\n");
 }
 
@@ -234,7 +256,18 @@ export class Session {
 	 *
 	 * Unlike assumptions, externals persist until changed, so this is the
 	 * mechanism for state a program should keep between solves rather than for
-	 * a transient what-if query. Omit `sign` to release an atom back to free.
+	 * a transient what-if query.
+	 *
+	 * Two traps, both verified against this build:
+	 *
+	 * An external nobody has assigned is fixed *false* in preprocessing, so a
+	 * program whose externals are all untouched behaves as if they were never
+	 * declared — and an assumption naming an atom that only such an external
+	 * could derive comes back UNSATISFIABLE rather than free.
+	 *
+	 * Omitting `sign` *releases* the atom, and a release is permanent: the atom
+	 * becomes false for good and a later `sign: true` on it is silently ignored.
+	 * Use `sign: false` for an external that has to come back.
 	 */
 	async setExternals(
 		externals: ReadonlyArray<{ atom: string; sign?: boolean }>,
@@ -247,7 +280,7 @@ export class Session {
 				"cd_externals",
 				"number",
 				["number", "string"],
-				[this.#id, encode(externals)],
+				[this.#id, encodeExternals(externals)],
 			),
 		);
 		envelope(stdout, stderr, "clingo produced no output");
