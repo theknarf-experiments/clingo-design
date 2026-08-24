@@ -620,8 +620,11 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               derivations
 %   dvar(V)                     derived: V is a variable no *document* value
 %                               named — see below
-%   viol(C)                     constraint C is violated
-%   active(C)                   C is switched on (assumed while solving)
+%   viol(C)                     constraint C is violated. Yours to derive as
+%                               well — see the \`custom\` kind below
+%   active(C)                   C is switched on (assumed while solving).
+%                               Readable in a body, which is how a rule stays
+%                               unground while its switch is off
 %   rendered(Node, Prop, Lit)   what a node actually draws with
 %   literal(Lit, "text")        the text a literal id stands for
 %   numeral(Lit, N)             the number a literal reads as: "24px" is 24
@@ -708,21 +711,34 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               and the rule that constrains it needs no ASP
 %   c_prop(C, Prop)             what a property rule is about
 %   c_edge(C, E)                what a geometric one is about
-%
-% The kind \`custom\` is the one that is yours. It has no members, no property
-% and no edge, and the generated program derives no viol/1 for it — your rule
-% does, against the id the document gave it:
-%
-%   viol(no_wide_gaps) :- lgap(row,G), G > 24.
-%
-% That is a plain \`:- ...\` with two things added: an enable checkbox, and a
-% name in the core when the document turns out to be impossible. A viol/1
-% whose term is not a constraint is never guarded and so does nothing — which
-% is what a renamed or mistyped id leaves behind.
 %   c_value(C, Pixels)          derived: numeral(resolved(cval(C)))
 %   gkind(K)                    K places its nodes rather than colours them
 %   gedge(E, x|y, pos|span|axis)   what an edge is
 %   gplace(E, lead|mid|trail)      and where on the node it sits
+%
+% viol/1 is a derivable predicate too, and that is what the kind \`custom\` is
+% for. It has no members, no property and no edge, and the generated program
+% derives no viol/1 for it — a rule of yours does, against the term the document
+% gave it. Add one in the Rules panel, name it, and write the condition:
+%
+%   viol(no_wide_gaps) :- lgap(row,G), G > 24.
+%
+% That is a plain \`:- ...\` with two things added, and they are the two things a
+% bare integrity constraint can never have: an enable checkbox, and a name in
+% the core when the document turns out to have no design at all. A viol/1 whose
+% term is not a constraint in the document is never guarded and so does nothing
+% — which is what a renamed or mistyped id leaves behind.
+%
+% Reading your own switch is allowed and is worth knowing about, because a
+% constraint that is off emits no constraint/1 fact: active(...) then has
+% nothing to derive it from, so a rule whose body says it is discarded at
+% grounding rather than merely turning out false. That is how a requirement you
+% are not using costs nothing —
+%
+%   deep(N,D) :- active(no_deep_nesting), depth(N,D), D > 3.
+%   viol(no_deep_nesting) :- deep(_,_).
+%
+% — and it is why renaming a rule rewrites active(old) alongside viol(old).
 %
 % Components. A definition is a subtree; an instance is that subtree's
 % variables minted again, so an instance is a *point* in the component's space
@@ -1224,6 +1240,12 @@ export function compile(
 					"% One consequence worth knowing: a viol/1 whose term is not a",
 					"% constraint in the document — a renamed rule, a typo — is simply",
 					"% never guarded, so it does nothing at all rather than failing.",
+					"%",
+					"% The choice rule above is also readable from a body, and that is",
+					"% not the same question as truth. A constraint that is switched off",
+					"% emits no constraint/1 fact, so `active(C)` cannot be derived and",
+					"% a rule whose body asks for it never grounds — which is how a",
+					"% requirement you are not using costs nothing. See the map template.",
 					"",
 					"% ---- over a property ----",
 					"viol(C) :- c_kind(C,differ), c_prop(C,P), c_node(C,A), c_node(C,B), A<B,",

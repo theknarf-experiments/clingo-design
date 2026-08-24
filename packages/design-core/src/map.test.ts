@@ -13,8 +13,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { compile } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
-import { explore, type Universe } from "./explore.ts";
+import { renameConstraint, updateConstraint, violRefs } from "./edits.ts";
+import { UnsatisfiableError, explore, type Universe } from "./explore.ts";
 import type { Scene } from "./scene.ts";
 import { findTemplate } from "./templates/index.ts";
 import { propVar } from "./values.ts";
@@ -24,20 +26,18 @@ const level = () => findTemplate("map")!.create();
 const WIDTH = 11;
 const tileVar = (x: number, y: number) => propVar(`t(${x},${y})`, "fill");
 
-/** Turn a `want` requirement on or off, which is how the post is walked. */
+/**
+ * Turn a requirement on or off, which is how the post is walked.
+ *
+ * The ordinary enable switch, not an edit to the rules: that is the whole
+ * conversion — a requirement used to be a `want/1` fact commented in and out.
+ */
 function want(scene: Scene, name: string, on: boolean): Scene {
-	const live = new RegExp(`^want\\(${name}\\)\\.`, "m");
-	const off = new RegExp(`^% want\\(${name}\\)\\.`, "m");
-	const isLive = live.test(scene.rules);
-	const isOff = off.test(scene.rules);
-	assert.ok(isLive || isOff, `want(${name}) appears in the rules`);
-	if (on === isLive) return scene;
-	return {
-		...scene,
-		rules: on
-			? scene.rules.replace(off, `want(${name}).`)
-			: scene.rules.replace(live, `% want(${name}).`),
-	};
+	assert.ok(
+		scene.constraints.some((c) => c.id === name),
+		`${name} is a rule of the document`,
+	);
+	return updateConstraint(scene, name, { enabled: on });
 }
 
 const run = (scene: Scene, limit = 6) =>
@@ -87,7 +87,23 @@ test("the whole board is derived — the document holds a heading and a caption"
 		["title", "caption"],
 		"the board and all 121 tiles are rules, not nodes",
 	);
-	assert.equal(scene.constraints.length, 0);
+	// Five requirements, and nothing to them but a name and a switch: what each
+	// one *means* is the viol/1 in the rules panel.
+	assert.deepEqual(
+		scene.constraints.map((c) => c.id),
+		["connected", "speedrun", "symmetric", "dense", "all_solid"],
+	);
+	for (const c of scene.constraints) {
+		assert.equal(c.kind, "custom", c.id);
+		assert.deepEqual(c.nodes, [], `${c.id} has no members`);
+		assert.equal(c.group, undefined, `${c.id} has no group`);
+		assert.equal(violRefs(scene.rules, c.id), 1, `${c.id} is written once`);
+	}
+	assert.deepEqual(
+		scene.constraints.filter((c) => c.enabled).map((c) => c.id),
+		["connected", "speedrun"],
+		"the post's own starting point",
+	);
 });
 
 test("the board's own constants do not shadow a dimension name", async () => {
@@ -205,6 +221,62 @@ test("symmetric maps mirror on both axes", async () => {
 	}
 });
 
+test("a requirement that is off emits no switch, so its rules cannot ground", () => {
+	// This is the mechanism the template leans on, asserted where it is decidable:
+	// a disabled constraint contributes no `constraint/1` fact, so `active(C)` has
+	// nothing to derive it from and every rule whose body reads it is discarded at
+	// grounding. Timing says the rest; see the file's own measurements.
+	const scene = level();
+	const { program, guards } = compile(scene);
+	assert.deepEqual(guards, ["active(connected)", "active(speedrun)"]);
+	assert.ok(program.includes("constraint(speedrun)."));
+	assert.ok(!program.includes("constraint(all_solid)."), "off is out of the program");
+	// And the rules do read the switch in a body — not only in a viol/1 head,
+	// which would be about truth rather than about grounding.
+	for (const guarded of ["connected", "speedrun", "symmetric", "all_solid"]) {
+		assert.match(scene.rules, new RegExp(`active\\(${guarded}\\)`), guarded);
+	}
+});
+
+test("all tiles walkable and a long walk cannot both hold, and the core says which", async () => {
+	// The demo the kind exists for: two requirements the *designer* wrote, out of
+	// five, and the document is impossible. An open board reaches the exit in
+	// 2*(WIDTH-1) = 20 steps and the speedrun forbids any route of 22 or fewer.
+	const scene = want(level(), "all_solid", true);
+	const error = await explore(scene, directSolver, { limit: 4 }).then(
+		() => null,
+		(e: unknown) => e,
+	);
+	assert.ok(error instanceof UnsatisfiableError, "no design at all");
+	// A core is the smallest set clingo *found*, so what is promised is membership
+	// and a bound. Measured, this one is exactly the two — and stays two with all
+	// five requirements on, which is the sentence the template is here to say.
+	assert.ok(error.conflict.includes("speedrun"), error.conflict.join());
+	assert.ok(error.conflict.includes("all_solid"), error.conflict.join());
+	assert.ok(error.conflict.length <= 2, error.conflict.join());
+
+	const everything = level().constraints.reduce(
+		(s, c) => want(s, c.id, true),
+		level(),
+	);
+	const worst = await explore(everything, directSolver, { limit: 4 }).then(
+		() => null,
+		(e: unknown) => e,
+	);
+	assert.ok(worst instanceof UnsatisfiableError);
+	assert.deepEqual([...worst.conflict].sort(), ["all_solid", "speedrun"]);
+});
+
+test("all tiles walkable is a legal requirement on its own", async () => {
+	// Which is what makes the pair a *contradiction* rather than one bad rule:
+	// switch the speedrun off and the open field is the one design there is.
+	const scene = want(want(level(), "all_solid", true), "speedrun", false);
+	const { universes, total } = await run(scene, 4);
+	assert.equal(total, 1, "exactly one open board");
+	assert.equal(floor(universes[0]).size, WIDTH * WIDTH, "every tile walkable");
+	assert.equal(shortestPath(floor(universes[0])), 2 * (WIDTH - 1));
+});
+
 test("the requirements really are guarded, so an unused one is not grounded", async () => {
 	// `lakes` carries a #maximize, and optimisation is expensive enough that the
 	// template ships with it off. The guard is what makes that free rather than
@@ -227,4 +299,27 @@ test("a weak constraint whose condition grounds away still yields designs", asyn
 	const { universes, optimized } = await run(scene, 4);
 	assert.ok(universes.length > 1, "designs, not a blank canvas");
 	assert.equal(optimized, false, "and the space is reported as unranked");
+});
+
+test("renaming a requirement carries its guard, not only its condition", async () => {
+	// The failure this is here to prevent is silent, and worse than the orphaned
+	// `viol` the rename already handled: leave `active(speedrun)` behind and the
+	// rules under it never ground, so the requirement is not broken but vacuously
+	// satisfied — a generator that quietly stopped generating what was asked for.
+	const renamed = renameConstraint(level(), "speedrun", "long_walk");
+	assert.equal(renamed.rewritten, 2, "the head and the guard");
+	assert.doesNotMatch(renamed.scene.rules, /(viol|active)\(speedrun\)/);
+	// The prose still says "speedrun", deliberately: a whole-token substitution
+	// across arbitrary ASP would rewrite a predicate that happened to share the
+	// name, and an out-of-date comment is the cheaper mistake.
+	assert.ok(renamed.scene.rules.includes("post's speedrun"));
+	assert.deepEqual(compile(renamed.scene).guards, [
+		"active(connected)",
+		"active(long_walk)",
+	]);
+	// And it still does what it did, under the new name.
+	for (const universe of (await run(renamed.scene)).universes) {
+		const walk = shortestPath(floor(universe));
+		assert.ok(walk !== null && walk > WIDTH * 2, `still a long walk, got ${walk}`);
+	}
 });

@@ -85,6 +85,24 @@ function gridLines(): SceneNode[] {
  * contradiction attributable: the core names `row1` rather than "the sudoku".
  * What each one ranges over is a *set the rules named* — nine members this
  * document never enumerated and could not, since the cells are not in it.
+ *
+ * These 27 rows are the one part of the board still written in TypeScript, and
+ * they have to be. A rule you write can now be a first-class constraint — the
+ * `custom` kind, whose violation condition is ASP in the Rules panel — but the
+ * *row* is what carries the switch, and the switch is an assumption: the solver
+ * is handed `active(row1)` before it starts, from the document's own list of
+ * constraints. A rule can mint the atoms and still not get the assumption, and
+ * measured, both ways it can go are dead ends: `constraint(mine).` from a rule
+ * leaves `active(mine)` free, so the solver switches the rule off and it does
+ * nothing; asserting `active(mine).` as well makes it fire, but the core comes
+ * back *empty*, because a core is a subset of what was assumed. Which is to say
+ * a rule-minted constraint is exactly a bare `:- ...` again, with the two things
+ * that make a rule first-class missing.
+ *
+ * So the names have to exist before the first solve, and 27 rows is what that
+ * costs. `custom` would not shorten it either: it would be the same 27 rows,
+ * each needing a hand-written `viol/1` to say what `differ` and `c_group`
+ * already say between them.
  */
 function groups(): Constraint[] {
 	return FAMILIES.flatMap((family) =>

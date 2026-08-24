@@ -262,6 +262,37 @@ test("a custom constraint takes no group, because it has no members to be a set"
 	assert.equal(grouped.constraints[0].group, undefined);
 });
 
+test("a rule cannot mint a constraint, because the switch is an assumption", async () => {
+	// The limit of the kind, and the reason the sudoku's 27 rules are 27 rows of
+	// the document rather than one rule that derives them. `constraint/1` is
+	// derivable — the geometry rules say `#defined constraint/1.` — but what makes
+	// a constraint enforceable is that `active(C)` was *assumed* before the solve,
+	// and the assumptions are the document's list of constraints. Both ways a rule
+	// can try it are dead ends, and this is which:
+	const seed = addCustomConstraint(threeBoxes(), "seed").scene;
+	const minted = withRules(
+		seed,
+		[
+			"constraint(mine). c_kind(mine,custom).",
+			`viol(mine) :- rendered(a,fill,L), literal(L,"${RED}").`,
+		].join("\n"),
+	);
+	// Nothing assumed it, so the solver simply switches it off.
+	assert.deepEqual(compile(minted).guards, ["active(seed)"]);
+	assert.equal(await universes(minted), 27, "the rule does nothing at all");
+
+	// Assert the switch as well and it fires — but it is a bare `:- ...` again:
+	// unswitchable, and invisible to blame, because a core is a subset of what
+	// was assumed and nothing assumed this.
+	const asserted = withRules(minted, `${minted.rules.trim()}\nactive(mine).`);
+	assert.equal(await universes(asserted), 18, "now it holds the space down");
+	const impossible = withRules(
+		seed,
+		"constraint(mine). c_kind(mine,custom). active(mine). viol(mine).",
+	);
+	assert.deepEqual((await fails(impossible)).conflict, [], "and nothing is named");
+});
+
 /* ------------------------------------------------------------------ */
 /* The name is the contract                                           */
 /* ------------------------------------------------------------------ */
@@ -388,14 +419,59 @@ test("a kind with nowhere to put a member is the kind with no subject", () => {
 	}
 });
 
+test("a rule may read its own switch, and the rename carries that too", async () => {
+	// Reading `active(C)` in a body is how a requirement stays unground while it
+	// is off — the map template's whole trick. Left behind by a rename it is worse
+	// than an orphaned `viol`: the rule under it never grounds, so the requirement
+	// is vacuously satisfied rather than broken, and nothing says so.
+	const added = addCustomConstraint(threeBoxes(), "no_red_a");
+	const scene = withRules(added.scene, [
+		"guilty(a) :- active(no_red_a).",
+		`viol(no_red_a) :- guilty(N), rendered(N,fill,L), literal(L,"${RED}").`,
+	].join("\n"));
+	assert.equal(await universes(scene), 18);
+	// The panel's signal is about the condition, not the switch: one viol/1.
+	assert.equal(violRefs(scene.rules, "no_red_a"), 1);
+
+	const renamed = renameConstraint(scene, "no_red_a", "keep_a_cool");
+	assert.equal(renamed.rewritten, 2, "the condition and the guard");
+	assert.doesNotMatch(renamed.scene.rules, /no_red_a/);
+	assert.equal(await universes(renamed.scene), 18, "and it still fires");
+
+	// The same rules with the guard left behind is the silent failure, spelled
+	// out: not unsatisfiable, not blamed — just 27 designs again.
+	const orphaned = withRules(added.scene, [
+		"guilty(a) :- active(somebody_else).",
+		`viol(no_red_a) :- guilty(N), rendered(N,fill,L), literal(L,"${RED}").`,
+	].join("\n"));
+	assert.equal(await universes(orphaned), 27);
+});
+
+test("a word ending in the switch's name is not the switch", () => {
+	// `inactive(mine)` must not read as a mention of `mine`'s switch, or a rename
+	// would corrupt a predicate the user invented.
+	const added = addCustomConstraint(threeBoxes(), "mine");
+	const scene = withRules(added.scene, [
+		"inactive(mine).",
+		"myviol(mine).",
+		"viol(mine) :- 1 = 2.",
+	].join("\n"));
+	const renamed = renameConstraint(scene, "mine", "yours");
+	assert.equal(renamed.rewritten, 1, "only the real viol/1");
+	assert.ok(renamed.scene.rules.includes("inactive(mine)."));
+	assert.ok(renamed.scene.rules.includes("myviol(mine)."));
+	assert.ok(renamed.scene.rules.includes("viol(yours) :- 1 = 2."));
+});
+
 test("violRefs counts exactly what a rename can carry", () => {
 	const added = addCustomConstraint(threeBoxes(), "no_red_a");
 	const scene = withRules(added.scene, [
 		`viol(no_red_a) :- rendered(a,fill,L), literal(L,"${RED}").`,
 		"viol( no_red_a ) :- 1 = 2.",
 	].join("\n"));
-	// The two questions the editor and the rename ask are the same question, so
-	// the panel can never call a rule written that the rename would then orphan.
+	// The rename moves a superset of what the panel calls written — it carries
+	// `active(id)` as well — and that is the safe direction: the panel can never
+	// call a rule written that the rename would then orphan.
 	assert.equal(violRefs(scene.rules, "no_red_a"), 2);
 	assert.equal(renameConstraint(scene, "no_red_a", "cool").rewritten, 2);
 	assert.equal(violRefs(scene.rules, "cool"), 0, "before the rename");

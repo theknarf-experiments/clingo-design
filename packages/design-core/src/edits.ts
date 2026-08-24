@@ -1054,10 +1054,18 @@ export function addCustomConstraint(
  * been written yet, or the name is reached some other way — `viol(C) :-
  * mine(C).` — and that indirection is now pointing at a name nothing holds.
  *
- * Deliberately narrow: only the argument of a `viol/1`, not every occurrence of
- * the word. A whole-token substitution across arbitrary ASP would also rewrite
- * a predicate or a constant that happened to share the name, and corrupting the
- * user's rules is worse than leaving a comment out of date.
+ * `active(old)` moves too, because a rule may read its own switch in a *body*
+ * to keep itself from grounding at all when it is off — which is what the map
+ * template does, and how an unused requirement costs nothing there. Left
+ * behind, that one is worse than an orphaned `viol`: the rule under it never
+ * grounds, so the requirement is not broken but *vacuously satisfied*, and a
+ * generator quietly stops generating what you asked for.
+ *
+ * Deliberately narrow either way: only the argument of a `viol/1` or an
+ * `active/1`, not every occurrence of the word. A whole-token substitution
+ * across arbitrary ASP would also rewrite a predicate or a constant that
+ * happened to share the name, and corrupting the user's rules is worse than
+ * leaving a comment out of date.
  */
 export function renameConstraint(
 	scene: Scene,
@@ -1070,9 +1078,9 @@ export function renameConstraint(
 		return { scene, rewritten: 0 };
 	}
 	let rewritten = 0;
-	const rules = scene.rules.replace(violPattern(id), () => {
+	const rules = scene.rules.replace(mentionPattern(id), (_, head: string) => {
 		rewritten += 1;
-		return `viol(${name})`;
+		return `${head}(${name})`;
 	});
 	return {
 		scene: {
@@ -1087,16 +1095,18 @@ export function renameConstraint(
 }
 
 /**
- * Where the user's rules name a constraint: `viol(id)`, with the whitespace a
- * person types.
+ * Where the user's rules name a constraint, with the whitespace a person types.
  *
- * One definition for two questions that have to have the same answer — what a
- * rename is able to carry, and what the editor counts as "written". If they
- * disagreed, the panel would call a rule written and the rename would then
- * quietly orphan it.
+ * Two predicates take a constraint's own term as an argument: `viol/1`, the
+ * violation condition, and `active/1`, the switch — which a rule may read in a
+ * body to stay unground while it is off. One definition for both, because a
+ * rename has to carry both.
+ *
+ * The lookbehind is the whole reason this is a function and not a literal:
+ * without it `inactive(gap)` would read as a mention of `gap`'s switch.
  */
-const violPattern = (id: string): RegExp =>
-	new RegExp(`viol\\(\\s*${escapeTerm(id)}\\s*\\)`, "g");
+const mentionPattern = (id: string, of = "viol|active"): RegExp =>
+	new RegExp(`(?<![A-Za-z0-9_])(${of})\\(\\s*${escapeTerm(id)}\\s*\\)`, "g");
 
 /**
  * How many times the user's rules say `viol(id)`.
@@ -1105,11 +1115,17 @@ const violPattern = (id: string): RegExp =>
  * search rather than a solve, and honest only about what it measures. A rule
  * reached indirectly — `viol(C) :- mine(C).` — counts zero here and still
  * fires, so zero means "nothing here names it", never "it is broken". Which is
- * the same thing `renameConstraint`'s `rewritten: 0` is warning about, from the
- * same regex, which is the point of sharing one.
+ * the same thing `renameConstraint`'s `rewritten: 0` is warning about.
+ *
+ * Only `viol/1`, where the rename carries `active/1` as well: reading a switch
+ * is not writing a rule, so a document that guards on `active(gap)` and never
+ * says `viol(gap)` has not written that rule yet and the panel should say so.
+ * The two sets may differ, but only in the safe direction — what the rename
+ * moves is a superset of what the panel calls written, so the panel can never
+ * call a rule written that the rename would then orphan.
  */
 export const violRefs = (rules: string, id: string): number =>
-	rules.match(violPattern(id))?.length ?? 0;
+	rules.match(mentionPattern(id, "viol"))?.length ?? 0;
 
 /**
  * A legal id needs no escaping, but an id from a document nobody validated
