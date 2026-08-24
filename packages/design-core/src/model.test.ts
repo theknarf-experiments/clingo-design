@@ -13,7 +13,7 @@ import { PULL_ATOM, compile } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
 import { readModel, type ModelNode } from "./model.ts";
 import { makeNode } from "./edits.ts";
-import { type Scene, type SceneNode, makeLayout } from "./scene.ts";
+import { type Scene, type SceneNode, frameOf, makeLayout } from "./scene.ts";
 import { card } from "./templates/card.ts";
 import { palette } from "./templates/palette.ts";
 import { flatten } from "./tree.ts";
@@ -59,7 +59,7 @@ test("reads the whole tree back out of an answer set", async () => {
 		const read = model.byId[node.id];
 		assert.ok(read, `${node.id} missing`);
 		assert.equal(read.kind, node.kind);
-		assert.deepEqual(read.frame, node.frame);
+		assert.deepEqual(read.frame, frameOf(node));
 		assert.deepEqual(
 			read.children.map((c) => c.id),
 			(node.children ?? []).map((c) => c.id),

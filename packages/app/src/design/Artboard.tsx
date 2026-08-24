@@ -9,6 +9,7 @@ import {
 	type SceneNode,
 	type Universe,
 	flatten,
+	frameOf,
 	isSurface,
 	pathData,
 	propVar,
@@ -52,6 +53,21 @@ const INHERITED_STROKE = {
 	strokeWidth: (value: string) => ({ strokeWidth: value }),
 };
 
+/**
+ * The two things the answer set does not carry, with the box they were authored
+ * against.
+ *
+ * A path's vertices are stored relative to the frame the node was *drawn* at,
+ * and that frame is a value now — so the number to scale them from has to be
+ * resolved in this universe rather than read off the document as a plain
+ * rectangle.
+ */
+interface DocShape {
+	node: SceneNode;
+	/** The frame the vertices were authored against, in this universe. */
+	authored: Frame;
+}
+
 interface ShapeSpec {
 	/** Merged into the box before the node's own properties paint over it. */
 	box?: CSSProperties;
@@ -67,7 +83,7 @@ interface ShapeSpec {
 	content?: (
 		node: ModelNode,
 		frame: Frame,
-		doc: SceneNode | undefined,
+		doc: DocShape | undefined,
 	) => ReactNode;
 }
 
@@ -115,8 +131,8 @@ function Stroke({
 	frame,
 	doc,
 	head,
-}: { frame: Frame; doc: SceneNode | undefined; head?: boolean }) {
-	const up = doc?.diagonal === "up";
+}: { frame: Frame; doc: DocShape | undefined; head?: boolean }) {
+	const up = doc?.node.diagonal === "up";
 	const y1 = up ? frame.height : 0;
 	const y2 = up ? 0 : frame.height;
 	return (
@@ -148,9 +164,12 @@ function Stroke({
  * *rendered* at can differ — a live resize, or a stretch under an automatic
  * layout — so they are scaled into whichever one arrived here.
  */
-function Plot({ frame, doc }: { frame: Frame; doc: SceneNode | undefined }) {
+function Plot({ frame, doc }: { frame: Frame; doc: DocShape | undefined }) {
 	if (!doc) return null;
-	const d = pathData(scalePoints(doc.points ?? [], doc.frame, frame), doc.closed);
+	const d = pathData(
+		scalePoints(doc.node.points ?? [], doc.authored, frame),
+		doc.node.closed,
+	);
 	if (!d) return null;
 	return (
 		<svg className={styles.stroke} aria-hidden="true">
@@ -159,7 +178,7 @@ function Plot({ frame, doc }: { frame: Frame; doc: SceneNode | undefined }) {
 				// An open run of segments is a stroke, not a shape: filling
 				// across the gap between its ends would draw an edge that is
 				// not there. Inline, so it beats the inherited fill.
-				style={doc.closed ? undefined : { fill: "none" }}
+				style={doc.node.closed ? undefined : { fill: "none" }}
 				strokeLinecap="round"
 				strokeLinejoin="round"
 			/>
@@ -236,10 +255,13 @@ export const Artboard = memo(function Artboard({
 	// The vertices and the lean, by id. Memoised on the tree: the editor
 	// re-renders on every pointermove and this is a walk of the whole document.
 	const docNodes = useMemo(() => {
-		const byId = new Map<string, SceneNode>();
-		for (const node of flatten(scene.nodes)) byId.set(node.id, node);
+		const context = { tokens: scene.tokens, picks: universe.pick };
+		const byId = new Map<string, DocShape>();
+		for (const node of flatten(scene.nodes)) {
+			byId.set(node.id, { node, authored: frameOf(node, context) });
+		}
 		return byId;
-	}, [scene.nodes]);
+	}, [scene.nodes, scene.tokens, universe.pick]);
 
 	function render(node: ModelNode) {
 		// The solver has not seen an uncommitted drag, so the one thing that

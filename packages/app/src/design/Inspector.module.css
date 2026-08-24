@@ -185,3 +185,25 @@
 	overflow-wrap: anywhere;
 	opacity: 0.85;
 }
+
+/* Turns one number into two, which is the whole of how a position becomes a
+   design decision. Small and quiet: most frames are one number and should look
+   like one. */
+.split {
+	flex: none;
+	width: 1.1rem;
+	padding: 0;
+	font: inherit;
+	font-size: 0.72rem;
+	line-height: 1;
+	color: inherit;
+	background: none;
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	opacity: 0.4;
+	cursor: pointer;
+}
+
+.split:hover {
+	opacity: 1;
+}

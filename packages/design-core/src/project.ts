@@ -13,9 +13,11 @@ import {
 	CONTAINER_PROPS,
 	LAYOUT_PROPS,
 	CONSTRAINT_KINDS,
+	DIMENSIONS,
 	EDGES,
 	type Constraint,
 	DEFAULT_FRAME,
+	type FrameValue,
 	KINDS,
 	PROPS,
 	RULES_HEADER,
@@ -23,6 +25,7 @@ import {
 	type SceneNode,
 	dimension,
 	emptyScene,
+	makeFrame,
 	starterTokens,
 	uniqueName,
 } from "./scene.ts";
@@ -169,12 +172,12 @@ function migrateNodes(input: Record<string, unknown>): SceneNode[] {
 			id: "frame1",
 			kind: "frame",
 			name: "Frame 1",
-			frame: {
+			frame: makeFrame({
 				x: 0,
 				y: 0,
 				width: size(legacy.width, DEFAULT_FRAME.width),
 				height: size(legacy.height, DEFAULT_FRAME.height),
-			},
+			}),
 			props: {},
 			children: nodes,
 		},
@@ -198,18 +201,14 @@ function isToken(value: unknown): boolean {
 	);
 }
 
-/** A node is usable only if it carries a numeric frame. Recurses into groups. */
+/** A node is usable only if it carries a frame with all four dimensions. */
 function isPlacedNode(value: unknown): value is SceneNode {
 	if (!isRecord(value)) return false;
 	if (typeof value.id !== "string" || !value.id) return false;
 	if (typeof value.kind !== "string" || !(value.kind in KINDS)) return false;
 	const frame = value.frame;
 	if (!isRecord(frame)) return false;
-	if (
-		!(["x", "y", "width", "height"] as const).every((k) =>
-			Number.isFinite(Number(frame[k])),
-		)
-	) {
+	if (!DIMENSIONS.every((k) => dimensionValue(frame[k]) !== undefined)) {
 		return false;
 	}
 	if (value.children !== undefined && !Array.isArray(value.children)) return false;
@@ -234,6 +233,34 @@ function isPoints(value: unknown): boolean {
 
 function isLayout(value: unknown): boolean {
 	return isRecord(value);
+}
+
+/**
+ * One dimension as it is stored now: a {@link Value}.
+ *
+ * A frame stored before its dimensions were values is four bare numbers, and
+ * comes back as four single-alternative values — rounded on the way in, because
+ * that rounding is what keeps the canvas and hit testing on the same pixel.
+ * Undefined for anything that is neither, which is what makes a node with no
+ * usable frame get dropped rather than rendered at nothing by nothing.
+ */
+function dimensionValue(raw: unknown): Value | undefined {
+	if (Array.isArray(raw)) return raw.length > 0 ? (raw as Value) : undefined;
+	const n = Number(raw);
+	// A bare string is a number here, not a word: nothing else was ever stored.
+	if ((typeof raw === "number" || typeof raw === "string") && Number.isFinite(n)) {
+		return single(`${Math.round(n)}px`);
+	}
+	return undefined;
+}
+
+/** Every dimension in the shape the document holds now. */
+function normalizeFrame(raw: Record<string, unknown>): FrameValue {
+	const out = {} as FrameValue;
+	for (const dim of DIMENSIONS) {
+		out[dim] = dimensionValue(raw[dim]) ?? single("0px");
+	}
+	return out;
 }
 
 /**
@@ -283,9 +310,15 @@ function pruneNodes(list: readonly unknown[]): SceneNode[] {
 						},
 					}
 				: node;
-		let fixed = carried.layout
-			? { ...carried, layout: normalizeLayout(carried.layout) }
-			: carried;
+		const withGeometry = {
+			...carried,
+			frame: normalizeFrame(
+				(raw as { frame: Record<string, unknown> }).frame,
+			),
+		};
+		let fixed = withGeometry.layout
+			? { ...withGeometry, layout: normalizeLayout(withGeometry.layout) }
+			: withGeometry;
 		for (const prop of CHILD_PROPS) {
 			const setting = settingValue(fixed[prop]);
 			if (setting === fixed[prop]) continue;

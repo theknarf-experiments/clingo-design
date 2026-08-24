@@ -2,6 +2,9 @@ import {
 	CHILD_PROPS,
 	type DerivedNode,
 	CONTAINER_PROPS,
+	DIMENSIONS,
+	type Dimension,
+	FRAME_DIMS,
 	LAYOUT_PROPS,
 	type LayoutProp,
 	type Sizing,
@@ -18,6 +21,9 @@ import {
 	type Freedom,
 	defaultValue,
 	findInTree,
+	frameFrozen,
+	frameOf,
+	frameVar,
 	isPinned,
 	isMeasured,
 	lit,
@@ -40,8 +46,10 @@ import {
 	renameNode,
 	resolveValue,
 	setFrame,
+	setFrameValue,
 	setProp,
 	tokensFor,
+	varies,
 } from "@clingo-design/design-core";
 
 import { ValueEditor } from "./ValueEditor";
@@ -82,19 +90,24 @@ export interface InspectorProps {
 	variables?: Readonly<Record<string, readonly ModelAlternative[]>>;
 }
 
-const AXES = ["x", "y", "width", "height"] as const;
 const SIZINGS: Sizing[] = ["hug", "fixed"];
 
 function NumberField({
 	label,
 	value,
 	onChange,
+	onSplit,
 	disabled,
 	pinned,
 }: {
 	label: string;
 	value: number;
 	onChange: (next: number) => void;
+	/**
+	 * Give this dimension a second alternative — the one gesture that turns a
+	 * position into a design decision. Absent where there is nothing to split.
+	 */
+	onSplit?: () => void;
 	disabled?: boolean;
 	/** The rules leave this coordinate one legal value; there is no choice. */
 	pinned?: boolean;
@@ -117,6 +130,20 @@ function NumberField({
 					if (Number.isFinite(next)) onChange(next);
 				}}
 			/>
+			{onSplit ? (
+				<button
+					type="button"
+					className={styles.split}
+					data-role={`split-${label}`}
+					title="Give this a second value, so the design branches here"
+					onClick={(e) => {
+						e.preventDefault();
+						onSplit();
+					}}
+				>
+					+
+				</button>
+			) : null}
 		</label>
 	);
 }
@@ -239,7 +266,7 @@ function DerivedPanel({
 							: `Inside ${parent}, from the answer set.`}
 					</p>
 					<div className={styles.grid}>
-						{AXES.map((axis) => (
+						{DIMENSIONS.map((axis) => (
 							<label
 								key={axis}
 								className={`${styles.field} ${styles.pinned}`}
@@ -359,6 +386,34 @@ export function Inspector({
 	const container = KINDS[node.kind].container && (node.children?.length ?? 0) > 0;
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 	const names = nodeNames(scene.nodes);
+	/** Where the node actually is, in the universe on screen. */
+	const box = frameOf(node, context);
+
+	/**
+	 * A dimension with one number in it, which is what a number field can edit.
+	 *
+	 * Anything else — a choice, or a link to a token — is a value with a life of
+	 * its own, and typing a number over it would either throw an alternative away
+	 * or silently unwire a parameter.
+	 */
+	function plainDimension(dim: Dimension): boolean {
+		return !varies(node.frame[dim]) && !frameFrozen(node, dim, context);
+	}
+
+	/**
+	 * The probe is the authority wherever it has spoken: a field is dead when the
+	 * rules leave the coordinate one value, and live otherwise — even for a
+	 * coordinate the solver decides, because the stored number is what that
+	 * coordinate is pulled toward. Until it lands, the document's own coarser
+	 * answer stands in: a layout places its children, and a size the solver worked
+	 * out is not a size to type into.
+	 */
+	function dimensionPinned(dim: Dimension): boolean {
+		const probed = freedom[node.id]?.[dim];
+		if (probed) return isPinned(probed);
+		if (managed && FRAME_DIMS[dim].role === "pos") return true;
+		return dim === "width" ? sizedBySolver.width : dim === "height" ? sizedBySolver.height : false;
+	}
 
 	/**
 	 * One layout setting, as an ordinary value row.
@@ -427,39 +482,72 @@ export function Inspector({
 					necessarily what it gets.
 				</p>
 			) : null}
+			{/* The ordinary case: four numbers in a compact grid, each with a way to
+			    turn itself into a decision. Empty only when all four have become
+			    one, and then it would be a gap in the panel. */}
+			{DIMENSIONS.some(plainDimension) ? (
 			<div className={styles.grid}>
-				{AXES.map((axis) => {
-					// The probe is the authority wherever it has spoken: a field is
-					// dead when the rules leave the coordinate one value, and live
-					// otherwise — even for a coordinate the solver decides, because
-					// the stored number is what that coordinate is pulled toward.
-					// Until it lands, the document's own coarser answer stands in:
-					// a layout places its children, and a size the solver worked out
-					// is not a size to type into.
-					const probed = freedom[node.id]?.[axis];
-					const pinned = probed
-						? isPinned(probed)
-						: (managed && (axis === "x" || axis === "y")) ||
-							(axis === "width" && sizedBySolver.width) ||
-							(axis === "height" && sizedBySolver.height);
-					return (
-						<NumberField
-							key={axis}
-							label={axis}
-							value={node.frame[axis]}
-							pinned={pinned}
-							disabled={pinned}
-							onChange={(next) =>
-								onSceneChange(
-									(prev) =>
-										setFrame(prev, node.id, { ...node.frame, [axis]: next }),
-									`frame-${axis}`,
-								)
-							}
-						/>
-					);
-				})}
+				{DIMENSIONS.filter(plainDimension).map((dim) => (
+					<NumberField
+						key={dim}
+						label={dim}
+						value={box[dim]}
+						pinned={dimensionPinned(dim)}
+						disabled={dimensionPinned(dim)}
+						// Splitting is offered even where the rules have settled the
+						// coordinate: what a second alternative says is "these are two
+						// designs", which is a question about the space rather than an
+						// edit the solver has already answered.
+						onSplit={() =>
+							onSceneChange((prev) =>
+								setFrameValue(prev, [node.id], dim, [
+									...node.frame[dim],
+									lit(`${box[dim]}px`),
+								]),
+							)
+						}
+						onChange={(next) =>
+							onSceneChange(
+								(prev) => setFrame(prev, node.id, { ...box, [dim]: next }, picks),
+								`frame-${dim}`,
+							)
+						}
+					/>
+				))}
 			</div>
+			) : null}
+
+			{/* A dimension holding more than one number, or one that names a token,
+			    gets the row every other value gets: the alternatives, which one this
+			    universe is using, what the rules have ruled out, and a pin. This is
+			    where "here on desktop, there on mobile" is written. */}
+			{DIMENSIONS.filter((dim) => !plainDimension(dim)).map((dim) => {
+				const variable = frameVar(node.id, dim);
+				return (
+					<ValueEditor
+						key={dim}
+						testId={`frame-${dim}`}
+						label={FRAME_DIMS[dim].label}
+						type={FRAME_DIMS[dim].type}
+						value={node.frame[dim]}
+						tokens={tokensOfType(scene, FRAME_DIMS[dim].type)}
+						fallback={`${box[dim]}px`}
+						names={names}
+						active={picks[variable]}
+						varying={varying.has(variable)}
+						reachable={reach?.[variable]}
+						pinned={pins[variable]}
+						onPin={(index) => onPin(variable, index)}
+						preview={(term: Term) => resolveValue(context, [term], variable)}
+						onChange={(next) =>
+							onSceneChange(
+								(prev) => setFrameValue(prev, [node.id], dim, next),
+								`frame-${node.id}-${dim}`,
+							)
+						}
+					/>
+				);
+			})}
 
 			{isMeasured(node) ? (
 				<div className={styles.grid}>

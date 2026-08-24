@@ -17,6 +17,7 @@ import { groupProps, readModel } from "./model.ts";
 import {
 	RULES_HEADER,
 	type Constraint,
+	makeFrame,
 	type Scene,
 	rangesOverGroup,
 	starterTokens,
@@ -58,7 +59,7 @@ function scene(count: number, constraint: Constraint): Scene {
 				id: "page",
 				kind: "frame",
 				name: "Page",
-				frame: { x: 0, y: 0, width: 200, height: 100 },
+				frame: makeFrame({ x: 0, y: 0, width: 200, height: 100 }),
 				props: { fill: [ref("surface")] },
 				children: [],
 			},

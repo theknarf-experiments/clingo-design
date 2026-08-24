@@ -9,6 +9,7 @@ import {
 	type Scene,
 	emptyScene,
 	makeLayout,
+	frameOf,
 } from "./scene.ts";
 import { single } from "./values.ts";
 
@@ -524,7 +525,7 @@ test("leaving a layout keeps the node where the solver had put it", async () => 
 	const moved = reparent(scene, "b", null, 2, solved);
 	const b = findInTree(moved.nodes, "b");
 	assert.deepEqual(
-		b?.frame,
+		b && frameOf(b),
 		{ x: 160, y: 110, width: 40, height: 20 },
 		"snapshotted in canvas coordinates, not the stale stored frame",
 	);
@@ -540,7 +541,7 @@ test("joining a layout hands its position over to the container", async () => {
 	// The stored frame is rebased into the container, but what it will *be* is
 	// the layout's business.
 	const loose = findInTree(moved.nodes, "loose");
-	assert.deepEqual(loose?.frame, { x: 400, y: 200, width: 30, height: 30 });
+	assert.deepEqual(loose && frameOf(loose), { x: 400, y: 200, width: 30, height: 30 });
 
 	const after = await solve(moved);
 	assert.equal(after.loose.x, 110, "third in the row: 10 + 40 + 10 + 40 + 10");

@@ -8,7 +8,7 @@ import {
 	sortProjects,
 	uniqueProjectName,
 } from "./project.ts";
-import { DEFAULT_FRAME, dimension, emptyScene } from "./scene.ts";
+import { DEFAULT_FRAME, dimension, emptyScene, frameOf } from "./scene.ts";
 
 const at = (n: number) => ({ now: n });
 
@@ -57,18 +57,20 @@ test("findProject handles a missing or undefined id", () => {
 test("normalizeScene fills every missing field", () => {
 	const s = normalizeScene({});
 	assert.ok(s.tokens.length > 0, "a document always has its starter variables");
-	assert.deepEqual(s.nodes[0].frame, { x: 0, y: 0, ...DEFAULT_FRAME });
+	assert.deepEqual(frameOf(s.nodes[0]), { x: 0, y: 0, ...DEFAULT_FRAME });
 	assert.equal(s.nodes.length, 1);
 	assert.equal(typeof s.rules, "string");
 });
 
 test("a legacy artboard is migrated, and nonsense dimensions fall back", () => {
 	assert.deepEqual(
-		normalizeScene({ artboard: { width: 900, height: 500 }, nodes: [] }).nodes[0].frame,
+		frameOf(
+			normalizeScene({ artboard: { width: 900, height: 500 }, nodes: [] }).nodes[0],
+		),
 		{ x: 0, y: 0, width: 900, height: 500 },
 	);
 	assert.deepEqual(
-		normalizeScene({ artboard: { width: "wide", height: null } }).nodes[0].frame,
+		frameOf(normalizeScene({ artboard: { width: "wide", height: null } }).nodes[0]),
 		{ x: 0, y: 0, ...DEFAULT_FRAME },
 	);
 	assert.equal(normalizeScene("nope").rules, emptyScene().rules);

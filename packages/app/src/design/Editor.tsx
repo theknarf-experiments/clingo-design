@@ -12,6 +12,7 @@ import {
 	type PathPoint,
 	type Placed,
 	type Point,
+	type ResolveContext,
 	type Scene,
 	type SnapGuide,
 	type Universe,
@@ -23,7 +24,9 @@ import {
 	dropTargetAt,
 	frameAncestorOf,
 	frameAt,
+	frameDim,
 	frameFromPoints,
+	frameOf,
 	framesIntersect,
 	handleEdges,
 	hitTestTree,
@@ -48,6 +51,7 @@ import {
 	reparent,
 	resizeFrame,
 	resizeSubtree,
+	sceneContext,
 	selectionTargetOf,
 	setFrames,
 	snapFrame,
@@ -207,10 +211,23 @@ export function Editor({
 	 * re-renders on every pointermove, and both the drag maths and the commit
 	 * conversion look up nodes by id, which would otherwise be a tree walk each.
 	 */
+	/**
+	 * The universe on screen, as something a frame resolves against.
+	 *
+	 * A dimension is a value, so the document alone does not say where anything
+	 * is: hit testing, snapping and the outlines all have to read the design the
+	 * eye is looking at, and every gesture writes back into the alternative it
+	 * picked.
+	 */
+	const context = useMemo<ResolveContext>(
+		() => ({ tokens: scene.tokens, picks: universe.pick }),
+		[scene.tokens, universe.pick],
+	);
+
 	const placed = useMemo(() => {
-		const list = placedNodes(scene.nodes, universe.solved);
+		const list = placedNodes(scene.nodes, universe.solved, context);
 		return { list, byId: new Map(list.map((p) => [p.node.id, p])) };
-	}, [scene.nodes, universe.solved]);
+	}, [scene.nodes, universe.solved, context]);
 
 	/**
 	 * The geometric rules the selection is subject to, as marks.
@@ -220,8 +237,8 @@ export function Editor({
 	 * the drag has been committed and the solver has spoken.
 	 */
 	const notes = useMemo<Annotation[]>(
-		() => annotate(scene, selection, universe.solved),
-		[scene, selection, universe.solved],
+		() => annotate(scene, selection, universe.solved, context),
+		[scene, selection, universe.solved, context],
 	);
 
 	/** Nodes an automatic layout owns, which the pointer must not move. */
@@ -294,10 +311,11 @@ export function Editor({
 	function intoPath(prev: Scene, id: string, at: Point): Point | null {
 		const node = findInTree(prev.nodes, id);
 		if (!node) return null;
-		const parent = worldOrigin(prev.nodes, id);
+		const now = sceneContext(prev, universe.pick);
+		const parent = worldOrigin(prev.nodes, id, now);
 		return {
-			x: at.x - parent.x - node.frame.x,
-			y: at.y - parent.y - node.frame.y,
+			x: at.x - parent.x - frameDim(node, "x", now),
+			y: at.y - parent.y - frameDim(node, "y", now),
 		};
 	}
 
@@ -368,9 +386,10 @@ export function Editor({
 					now.scene.nodes,
 					{ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
 					now.universe.solved,
+					now.context,
 				)?.node.id ?? null)
 			: null;
-		onSceneChange((prev) => addNodeTo(prev, host, node));
+		onSceneChange((prev) => addNodeTo(prev, host, node, universe.pick));
 		onSelectionChange([node.id]);
 	}
 
@@ -396,7 +415,7 @@ export function Editor({
 			return;
 		}
 
-		const hit = hitTestTree(scene.nodes, point, universe.solved);
+		const hit = hitTestTree(scene.nodes, point, universe.solved, context);
 		// A derived node is drawn but is not in the document, so the document's
 		// own hit testing cannot see it and the click would land on whatever it
 		// is drawn over. Paint order settles that, and the gesture then stops
@@ -433,7 +452,7 @@ export function Editor({
 	/** Double-click reaches through a group or into a frame, to the leaf. */
 	function onDoubleClick(event: React.MouseEvent) {
 		if (tool !== "select") return;
-		const hit = hitTestTree(scene.nodes, toCanvas(event), universe.solved);
+		const hit = hitTestTree(scene.nodes, toCanvas(event), universe.solved, context);
 		if (!hit) return;
 		event.stopPropagation();
 		onSelectionChange([hit.node.id]);
@@ -444,7 +463,7 @@ export function Editor({
 		event.preventDefault();
 		event.stopPropagation();
 		const point = toCanvas(event);
-		const hit = hitTestTree(scene.nodes, point, universe.solved);
+		const hit = hitTestTree(scene.nodes, point, universe.solved, context);
 		const targetId = hit ? targetFor(hit.node.id) : null;
 		// A derived node is not something the menu's edits can act on, but
 		// clearing the selection out from under one because the document cannot
@@ -501,6 +520,7 @@ export function Editor({
 		placed,
 		preview,
 		universe,
+		context,
 		managed,
 		toCanvas,
 		targetFor,
@@ -512,6 +532,7 @@ export function Editor({
 		placed,
 		preview,
 		universe,
+		context,
 		managed,
 		toCanvas,
 		targetFor,
@@ -641,7 +662,9 @@ export function Editor({
 				const { id, index } = gesture;
 				onSceneChange((prev) => {
 					const local = intoPath(prev, id, point);
-					return local ? movePathPoint(prev, id, index, local) : prev;
+					return local
+						? movePathPoint(prev, id, index, local, universe.pick)
+						: prev;
 				}, `path-${id}`);
 				return;
 			}
@@ -655,7 +678,15 @@ export function Editor({
 					if (!anchor || !local) return prev;
 					// A handle is an offset from its anchor, not a position.
 					const offset = { x: local.x - anchor.x, y: local.y - anchor.y };
-					return setPathHandle(prev, id, index, side, offset, mirror);
+					return setPathHandle(
+						prev,
+						id,
+						index,
+						side,
+						offset,
+						mirror,
+						universe.pick,
+					);
 				}, `path-${id}`);
 				return;
 			}
@@ -691,7 +722,11 @@ export function Editor({
 			const toLocal = (frames: ReadonlyMap<string, Frame>) => {
 				const out = new Map<string, Frame>();
 				for (const [id, world] of frames) {
-					const at = originOf(now.placed.byId.get(id), now.universe.solved[id]);
+					const at = originOf(
+						now.placed.byId.get(id),
+						now.universe.solved[id],
+						now.context,
+					);
 					out.set(id, { ...world, x: world.x - at.x, y: world.y - at.y });
 				}
 				return out;
@@ -705,7 +740,7 @@ export function Editor({
 				if (frame) {
 					setSettling(new Map([[gesture.id, frame]]));
 					onSceneChange(
-						(prev) => resizeSubtree(prev, gesture.id, frame),
+						(prev) => resizeSubtree(prev, gesture.id, frame, now.universe.pick),
 						"geometry",
 					);
 				}
@@ -728,10 +763,20 @@ export function Editor({
 							([id]) => !rehomed.includes(id) && !now.managed.has(id),
 						),
 					);
-					let next = staying.size > 0 ? setFrames(prev, staying) : prev;
+					let next =
+						staying.size > 0
+							? setFrames(prev, staying, now.universe.pick)
+							: prev;
 					let index = drop.index;
 					for (const id of rehomed) {
-						next = reparent(next, id, drop.id, index++, dropped);
+						next = reparent(
+							next,
+							id,
+							drop.id,
+							index++,
+							dropped,
+							now.universe.pick,
+						);
 					}
 					return next;
 				}, "geometry");
@@ -770,6 +815,7 @@ export function Editor({
 							now.scene.nodes,
 							{ x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
 							now.universe.solved,
+							now.context,
 						)?.node.id ?? null);
 
 				// A drag up-right or down-left runs along the other diagonal of
@@ -781,7 +827,7 @@ export function Editor({
 							? "up"
 							: "down",
 				});
-				onSceneChange((prev) => addNodeTo(prev, host, node));
+				onSceneChange((prev) => addNodeTo(prev, host, node, now.universe.pick));
 				onSelectionChange([node.id]);
 				onToolChange("select");
 			}
@@ -860,11 +906,11 @@ export function Editor({
 		if (!preview) return settling ?? undefined;
 		const out = new Map<string, Frame>();
 		for (const [id, world] of preview) {
-			const at = originOf(placed.byId.get(id), universe.solved[id]);
+			const at = originOf(placed.byId.get(id), universe.solved[id], context);
 			out.set(id, { ...world, x: world.x - at.x, y: world.y - at.y });
 		}
 		return out;
-	}, [preview, settling, placed, universe.solved]);
+	}, [preview, settling, placed, universe.solved, context]);
 
 	/** Top-level surfaces get a name tag, the way an artboard is labelled. */
 	const topFrames = scene.nodes.filter(isSurface);
@@ -901,8 +947,16 @@ export function Editor({
 					data-frame-label={node.id}
 					data-selected={selection.has(node.id) ? "" : undefined}
 					style={{
-						left: (preview?.get(node.id) ?? placed.byId.get(node.id)?.world ?? node.frame).x,
-						top: (preview?.get(node.id) ?? placed.byId.get(node.id)?.world ?? node.frame).y,
+						left: (
+							preview?.get(node.id) ??
+							placed.byId.get(node.id)?.world ??
+							frameOf(node, context)
+						).x,
+						top: (
+							preview?.get(node.id) ??
+							placed.byId.get(node.id)?.world ??
+							frameOf(node, context)
+						).y,
 					}}
 					onPointerDown={(e) => {
 						e.stopPropagation();
@@ -974,7 +1028,9 @@ export function Editor({
 							onPointerDown={(e) => {
 								e.stopPropagation();
 								if (e.altKey) {
-									onSceneChange((prev) => removePathPoint(prev, id, index));
+									onSceneChange((prev) =>
+										removePathPoint(prev, id, index, universe.pick),
+									);
 									return;
 								}
 								setGesture({ kind: "anchor", id, index });
@@ -1131,11 +1187,15 @@ export function Editor({
  * the two folded into the origin, which is exactly how far a node dragged out
  * of a layout would land from where it was dropped.
  */
-function originOf(placed: Placed | undefined, solved: Partial<Frame> | undefined): Point {
+function originOf(
+	placed: Placed | undefined,
+	solved: Partial<Frame> | undefined,
+	context: ResolveContext,
+): Point {
 	if (!placed) return { x: 0, y: 0 };
 	return {
-		x: placed.world.x - (solved?.x ?? placed.node.frame.x),
-		y: placed.world.y - (solved?.y ?? placed.node.frame.y),
+		x: placed.world.x - (solved?.x ?? frameDim(placed.node, "x", context)),
+		y: placed.world.y - (solved?.y ?? frameDim(placed.node, "y", context)),
 	};
 }
 

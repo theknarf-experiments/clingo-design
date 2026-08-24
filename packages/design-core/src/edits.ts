@@ -24,7 +24,9 @@ import {
 	type Constraint,
 	type ConstraintKind,
 	type ConstraintSpec,
+	DIMENSIONS,
 	type Diagonal,
+	type Dimension,
 	EDGES,
 	type Edge,
 	KINDS,
@@ -35,18 +37,26 @@ import {
 	type Sizing,
 	dimension,
 	edgeOn,
+	frameDim,
+	frameOf,
+	makeFrame,
 	makeLayout,
 	rangesOverGroup,
+	sceneContext,
 	sharedPropsOfKinds,
 	uniqueName,
+	withFrame,
 	wrapsChildren,
 } from "./scene.ts";
 import {
+	type Picks,
+	type ResolveContext,
 	type Token,
 	VALUE_TYPES,
 	type Value,
 	type ValueType,
 	constraintVar,
+	frameVar,
 	lit,
 	propVar,
 	resolveValue,
@@ -99,7 +109,7 @@ export function makeNode(
 		id: options.id ?? newNodeId(),
 		kind,
 		name: options.name ?? spec.label,
-		frame: normaliseFrame(frame),
+		frame: makeFrame(normaliseFrame(frame)),
 		...(spec.diagonal ? { diagonal: options.diagonal ?? "down" } : {}),
 		...(spec.plotted
 			? { points: [...(options.points ?? [])], closed: options.closed ?? false }
@@ -158,7 +168,9 @@ export function setPathPoints(
 	id: string,
 	points: readonly PathPoint[],
 	closed?: boolean,
+	picks: Picks = {},
 ): Scene {
+	const context = sceneContext(scene, picks);
 	return {
 		...scene,
 		nodes: refreshGroups(
@@ -168,20 +180,24 @@ export function setPathPoints(
 				const bounds = pathBounds(points, shut);
 				if (!bounds) return node;
 				const shift = (p: Point) => ({ x: p.x - bounds.x, y: p.y - bounds.y });
-				return {
-					...node,
-					closed: shut,
-					frame: {
-						x: node.frame.x + bounds.x,
-						y: node.frame.y + bounds.y,
+				return withFrame(
+					{
+						...node,
+						closed: shut,
+						// Handles are offsets from their anchor, so they survive the
+						// shift untouched — only the anchors move.
+						points: points.map((p) => ({ ...p, ...shift(p) })),
+					},
+					{
+						x: frameDim(node, "x", context) + bounds.x,
+						y: frameDim(node, "y", context) + bounds.y,
 						width: Math.max(MIN_NODE_SIZE, bounds.width),
 						height: Math.max(MIN_NODE_SIZE, bounds.height),
 					},
-					// Handles are offsets from their anchor, so they survive the
-					// shift untouched — only the anchors move.
-					points: points.map((p) => ({ ...p, ...shift(p) })),
-				};
+					context,
+				);
 			}),
+			context,
 		),
 	};
 }
@@ -192,11 +208,12 @@ export function movePathPoint(
 	id: string,
 	index: number,
 	to: Point,
+	picks: Picks = {},
 ): Scene {
 	const node = findInTree(scene.nodes, id);
 	if (!node?.points?.[index]) return scene;
 	const next = node.points.map((p, i) => (i === index ? { ...p, ...to } : p));
-	return setPathPoints(scene, id, next);
+	return setPathPoints(scene, id, next, undefined, picks);
 }
 
 /**
@@ -212,6 +229,7 @@ export function setPathHandle(
 	side: "in" | "out",
 	offset: Point | undefined,
 	mirror: boolean,
+	picks: Picks = {},
 ): Scene {
 	const node = findInTree(scene.nodes, id);
 	if (!node?.points?.[index]) return scene;
@@ -227,7 +245,7 @@ export function setPathHandle(
 		if (!point.out) delete point.out;
 		return point;
 	});
-	return setPathPoints(scene, id, next);
+	return setPathPoints(scene, id, next, undefined, picks);
 }
 
 /** Drops a vertex. A path needs two, so the last pair is kept. */
@@ -235,6 +253,7 @@ export function removePathPoint(
 	scene: Scene,
 	id: string,
 	index: number,
+	picks: Picks = {},
 ): Scene {
 	const node = findInTree(scene.nodes, id);
 	if (!node?.points || node.points.length <= 2) return scene;
@@ -242,6 +261,8 @@ export function removePathPoint(
 		scene,
 		id,
 		node.points.filter((_, i) => i !== index),
+		undefined,
+		picks,
 	);
 }
 
@@ -250,12 +271,13 @@ export function togglePathSmooth(
 	scene: Scene,
 	id: string,
 	index: number,
+	picks: Picks = {},
 ): Scene {
 	const node = findInTree(scene.nodes, id);
 	const point = node?.points?.[index];
 	if (!node?.points || !point) return scene;
 	if (point.in || point.out) {
-		return setPathHandle(scene, id, index, "out", undefined, true);
+		return setPathHandle(scene, id, index, "out", undefined, true, picks);
 	}
 	const n = node.points.length;
 	const before = node.points[(index - 1 + n) % n];
@@ -266,7 +288,7 @@ export function togglePathSmooth(
 		x: (after.x - before.x) / 4,
 		y: (after.y - before.y) / 4,
 	};
-	return setPathHandle(scene, id, index, "out", offset, true);
+	return setPathHandle(scene, id, index, "out", offset, true, picks);
 }
 
 /**
@@ -280,20 +302,23 @@ export function addNodeTo(
 	scene: Scene,
 	parentId: string | null,
 	node: SceneNode,
+	picks: Picks = {},
 ): Scene {
 	if (!parentId) return addNode(scene, node);
-	const origin = worldOrigin(scene.nodes, parentId);
+	const context = sceneContext(scene, picks);
+	const origin = worldOrigin(scene.nodes, parentId, context);
 	const parent = findInTree(scene.nodes, parentId);
 	if (!parent) return addNode(scene, node);
 
-	const local: SceneNode = {
-		...node,
-		frame: {
-			...node.frame,
-			x: node.frame.x - (origin.x + parent.frame.x),
-			y: node.frame.y - (origin.y + parent.frame.y),
+	const at = frameOf(node, context);
+	const local: SceneNode = withFrame(
+		node,
+		{
+			x: at.x - (origin.x + frameDim(parent, "x", context)),
+			y: at.y - (origin.y + frameDim(parent, "y", context)),
 		},
-	};
+		context,
+	);
 	return {
 		...scene,
 		nodes: mapTree(scene.nodes, (n) =>
@@ -307,12 +332,17 @@ export function addNode(scene: Scene, node: SceneNode): Scene {
 }
 
 /** Removes the named nodes and everything beneath them. */
-export function deleteNodes(scene: Scene, ids: readonly string[]): Scene {
+export function deleteNodes(
+	scene: Scene,
+	ids: readonly string[],
+	picks: Picks = {},
+): Scene {
 	const drop = new Set(ids);
 	return pruneConstraints({
 		...scene,
 		nodes: refreshGroups(
 			mapTree(scene.nodes, (node) => (drop.has(node.id) ? null : node)),
+			sceneContext(scene, picks),
 		),
 	});
 }
@@ -328,23 +358,26 @@ export function moveNodes(
 	ids: readonly string[],
 	dx: number,
 	dy: number,
+	picks: Picks = {},
 ): Scene {
 	const touch = new Set(ids);
+	const context = sceneContext(scene, picks);
 	return {
 		...scene,
 		nodes: refreshGroups(
 			mapTree(scene.nodes, (node) =>
 				touch.has(node.id)
-					? {
-							...node,
-							frame: normaliseFrame({
-								...node.frame,
-								x: node.frame.x + dx,
-								y: node.frame.y + dy,
-							}),
-						}
+					? withFrame(
+							node,
+							{
+								x: frameDim(node, "x", context) + dx,
+								y: frameDim(node, "y", context) + dy,
+							},
+							context,
+						)
 					: node,
 			),
+			context,
 		),
 	};
 }
@@ -355,34 +388,74 @@ export function moveNodes(
  * The frame *is* the bounding box of those points, so a resize that left them
  * where they were would leave the two describing different shapes.
  */
-function refit(node: SceneNode, frame: Frame): SceneNode {
+function refit(
+	node: SceneNode,
+	frame: Frame,
+	context: ResolveContext,
+): SceneNode {
 	const next = normaliseFrame(frame);
-	if (!node.points) return { ...node, frame: next };
-	return {
-		...node,
-		frame: next,
-		points: scalePoints(node.points, node.frame, next),
-	};
+	if (!node.points) return withFrame(node, next, context);
+	return withFrame(
+		{ ...node, points: scalePoints(node.points, frameOf(node, context), next) },
+		next,
+		context,
+	);
 }
 
-/** Replaces frames wholesale — what a drag or resize commits. */
+/**
+ * Replaces frames wholesale — what a drag or resize commits.
+ *
+ * `picks` is the universe on screen, and it is what makes this safe on a node
+ * with two positions: the write lands on the alternative that universe chose
+ * and the others are untouched, so a drag moves the one you can see rather than
+ * collapsing the node to a single place. See {@link withFrame}.
+ */
 export function setFrames(
 	scene: Scene,
 	frames: ReadonlyMap<string, Frame>,
+	picks: Picks = {},
 ): Scene {
+	const context = sceneContext(scene, picks);
 	return {
 		...scene,
 		nodes: refreshGroups(
 			mapTree(scene.nodes, (node) => {
 				const next = frames.get(node.id);
-				return next ? refit(node, next) : node;
+				return next ? refit(node, next, context) : node;
 			}),
+			context,
 		),
 	};
 }
 
-export function setFrame(scene: Scene, id: string, frame: Frame): Scene {
-	return setFrames(scene, new Map([[id, frame]]));
+export function setFrame(
+	scene: Scene,
+	id: string,
+	frame: Frame,
+	picks: Picks = {},
+): Scene {
+	return setFrames(scene, new Map([[id, frame]]), picks);
+}
+
+/**
+ * Replaces one dimension's whole list of alternatives.
+ *
+ * The counterpart of {@link setProp} for geometry, and the only edit that
+ * changes how *many* positions a node has: giving x a second value is what
+ * makes the document hold two designs, and taking one away is what collapses
+ * them back. A drag never comes through here — see {@link withFrame}.
+ */
+export function setFrameValue(
+	scene: Scene,
+	ids: readonly string[],
+	dim: Dimension,
+	value: Value,
+): Scene {
+	if (value.length === 0) return scene;
+	return mapSelected(scene, ids, (node) => ({
+		...node,
+		frame: { ...node.frame, [dim]: value },
+	}));
 }
 
 /**
@@ -393,14 +466,16 @@ export function resizeSubtree(
 	scene: Scene,
 	id: string,
 	next: Frame,
+	picks: Picks = {},
 ): Scene {
 	const node = findInTree(scene.nodes, id);
 	if (!node) return scene;
 	if (!node.children || node.children.length === 0) {
-		return setFrame(scene, id, next);
+		return setFrame(scene, id, next, picks);
 	}
 
-	const from = node.frame;
+	const context = sceneContext(scene, picks);
+	const from = frameOf(node, context);
 	const target = normaliseFrame(next);
 	const sx = from.width === 0 ? 1 : target.width / from.width;
 	const sy = from.height === 0 ? 1 : target.height / from.height;
@@ -409,14 +484,15 @@ export function resizeSubtree(
 	// multiply — no origin to subtract.
 	const frames = new Map<string, Frame>([[id, target]]);
 	for (const child of flatten(node.children ?? [])) {
+		const box = frameOf(child, context);
 		frames.set(child.id, {
-			x: child.frame.x * sx,
-			y: child.frame.y * sy,
-			width: child.frame.width * sx,
-			height: child.frame.height * sy,
+			x: box.x * sx,
+			y: box.y * sy,
+			width: box.width * sx,
+			height: box.height * sy,
 		});
 	}
-	return setFrames(scene, frames);
+	return setFrames(scene, frames, picks);
 }
 
 function mapSelected(
@@ -519,13 +595,15 @@ export function reparent(
 	parentId: string | null,
 	index: number,
 	solved: Readonly<Record<string, Partial<Frame>>> = {},
+	picks: Picks = {},
 ): Scene {
 	const node = findInTree(scene.nodes, id);
 	if (!node || parentId === id) return scene;
 	// A node cannot be moved inside itself.
 	if (parentId && subtreeIds(node).includes(parentId)) return scene;
 
-	const placed = placedNodes(scene.nodes, solved);
+	const context = sceneContext(scene, picks);
+	const placed = placedNodes(scene.nodes, solved, context);
 	const self = placed.find((p) => p.node.id === id);
 	if (!self) return scene;
 
@@ -538,15 +616,16 @@ export function reparent(
 		originY = parent.world.y;
 	}
 
-	const moved: SceneNode = {
-		...node,
-		frame: {
+	const moved: SceneNode = withFrame(
+		node,
+		{
 			x: self.world.x - originX,
 			y: self.world.y - originY,
 			width: self.world.width,
 			height: self.world.height,
 		},
-	};
+		context,
+	);
 
 	const insert = (list: readonly SceneNode[]): SceneNode[] => {
 		const out = [...list];
@@ -561,7 +640,10 @@ export function reparent(
 			)
 		: insert(without);
 
-	return pruneConstraints({ ...scene, nodes: refreshGroups(nodes) });
+	return pruneConstraints({
+		...scene,
+		nodes: refreshGroups(nodes, context),
+	});
 }
 
 /** Reorders within a node's own sibling list — a {@link reparent} that stays put. */
@@ -569,25 +651,40 @@ export function moveWithinParent(
 	scene: Scene,
 	id: string,
 	index: number,
+	picks: Picks = {},
 ): Scene {
 	const found = locate(scene.nodes, id);
 	if (!found) return scene;
-	return reparent(scene, id, found.parent?.id ?? null, index);
+	return reparent(scene, id, found.parent?.id ?? null, index, {}, picks);
 }
 
-function deepCopy(node: SceneNode, offset: number): SceneNode {
+function deepCopy(
+	node: SceneNode,
+	offset: number,
+	context: ResolveContext,
+): SceneNode {
+	// The copy keeps every alternative the original had — a node with two
+	// positions duplicates into a node with two positions — and only the one on
+	// screen is nudged, so the offset lands where the eye can see it.
+	//
+	// Nudged *before* the id changes: which alternative a universe picked is
+	// recorded against the original's variable key, and a fresh id has no pick
+	// of its own, so writing after the rename would always land on the first.
+	const nudged = withFrame(
+		node,
+		{
+			x: frameDim(node, "x", context) + offset,
+			y: frameDim(node, "y", context) + offset,
+		},
+		context,
+	);
 	return {
-		...node,
+		...nudged,
 		id: newNodeId(),
 		props: { ...node.props },
 		...(node.points ? { points: node.points.map((p) => ({ ...p })) } : {}),
-		frame: {
-			...node.frame,
-			x: node.frame.x + offset,
-			y: node.frame.y + offset,
-		},
 		...(node.children
-			? { children: node.children.map((c) => deepCopy(c, offset)) }
+			? { children: node.children.map((c) => deepCopy(c, offset, context)) }
 			: {}),
 	};
 }
@@ -597,16 +694,18 @@ export function duplicateNodes(
 	scene: Scene,
 	ids: readonly string[],
 	offset = 16,
+	picks: Picks = {},
 ): { scene: Scene; ids: string[] } {
 	const copy = new Set(ids);
 	const created: string[] = [];
+	const context = sceneContext(scene, picks);
 
 	const walk = (list: readonly SceneNode[]): SceneNode[] => {
 		const out: SceneNode[] = [];
 		for (const node of list) {
 			out.push(node.children ? { ...node, children: walk(node.children) } : node);
 			if (copy.has(node.id)) {
-				const clone = deepCopy(node, offset);
+				const clone = deepCopy(node, offset, context);
 				created.push(clone.id);
 				out.push(clone);
 			}
@@ -633,9 +732,11 @@ export function groupNodes(
 	scene: Scene,
 	ids: readonly string[],
 	name = "Group",
+	picks: Picks = {},
 ): { scene: Scene; id: string | null } {
 	const wanted = new Set(ids);
 	if (wanted.size < 1) return { scene, id: null };
+	const context = sceneContext(scene, picks);
 
 	// Pick the sibling list containing the frontmost selected node.
 	let host: readonly SceneNode[] | null = null;
@@ -653,18 +754,24 @@ export function groupNodes(
 	const members = host.filter((n) => wanted.has(n.id));
 	if (members.length === 0) return { scene, id: null };
 
-	const bounds = groupFrame(members);
+	const bounds = groupFrame(members, context);
 	const group: SceneNode = {
 		id: newNodeId(),
 		kind: "group",
 		name,
-		frame: bounds,
+		frame: makeFrame(bounds),
 		props: {},
 		// Members become relative to the group's origin.
-		children: members.map((m) => ({
-			...m,
-			frame: { ...m.frame, x: m.frame.x - bounds.x, y: m.frame.y - bounds.y },
-		})),
+		children: members.map((m) =>
+			withFrame(
+				m,
+				{
+					x: frameDim(m, "x", context) - bounds.x,
+					y: frameDim(m, "y", context) - bounds.y,
+				},
+				context,
+			),
+		),
 	};
 
 	const rebuild = (list: readonly SceneNode[]): SceneNode[] => {
@@ -693,9 +800,11 @@ export function groupNodes(
 export function ungroupNodes(
 	scene: Scene,
 	ids: readonly string[],
+	picks: Picks = {},
 ): { scene: Scene; ids: string[] } {
 	const wanted = new Set(ids);
 	const freed: string[] = [];
+	const context = sceneContext(scene, picks);
 
 	const walk = (list: readonly SceneNode[]): SceneNode[] => {
 		const out: SceneNode[] = [];
@@ -704,14 +813,16 @@ export function ungroupNodes(
 			if (wrapsChildren(node) && wanted.has(node.id) && children) {
 				// Lift the children back into the wrapper's own coordinate space.
 				for (const child of children) {
-					out.push({
-						...child,
-						frame: {
-							...child.frame,
-							x: child.frame.x + node.frame.x,
-							y: child.frame.y + node.frame.y,
-						},
-					});
+					out.push(
+						withFrame(
+							child,
+							{
+								x: frameDim(child, "x", context) + frameDim(node, "x", context),
+								y: frameDim(child, "y", context) + frameDim(node, "y", context),
+							},
+							context,
+						),
+					);
 					freed.push(child.id);
 				}
 				continue;
@@ -721,7 +832,7 @@ export function ungroupNodes(
 		return out;
 	};
 
-	const nodes = refreshGroups(walk(scene.nodes));
+	const nodes = refreshGroups(walk(scene.nodes), context);
 	return { scene: { ...scene, nodes }, ids: freed };
 }
 
@@ -820,10 +931,10 @@ export function setSizing(
 export function wrapInLayout(
 	scene: Scene,
 	ids: readonly string[],
+	picks: Picks = {},
 ): { scene: Scene; id: string | null } {
-	const grouped = groupNodes(scene, ids, "Layout");
+	const grouped = groupNodes(scene, ids, "Layout", picks);
 	if (!grouped.id) return { scene, id: null };
-	const bounds = findInTree(grouped.scene.nodes, grouped.id)?.frame;
 	const withLayout = mapTree(grouped.scene.nodes, (node) =>
 		node.id !== grouped.id
 			? node
@@ -831,9 +942,6 @@ export function wrapInLayout(
 					...node,
 					kind: "frame" as const,
 					name: "Layout",
-					// Only the origin matters: the layout hugs, so the solver
-					// decides how big this ends up.
-					frame: bounds ?? node.frame,
 					props: { ...KINDS.frame.defaults },
 					layout: makeLayout(),
 				},
@@ -898,7 +1006,12 @@ export function distributeNodes(
 		axis ?? EDGES[quietestEdge(scene, CONSTRAINT_KINDS.gap, nodes)].axis;
 	const lead = edgeOn(on, "lead");
 	const trail = edgeOn(on, "trail");
-	const at = (id: string, edge: Edge) => edgeAt(scene.nodes, id, edge) ?? 0;
+	// Tokens resolved, picks not: seeding runs before any universe is chosen, so
+	// a dimension with alternatives is measured at its first — the same
+	// approximation `naturalSize` already makes for a varying gap.
+	const context = sceneContext(scene);
+	const at = (id: string, edge: Edge) =>
+		edgeAt(scene.nodes, id, edge, context) ?? 0;
 	const order = nodes
 		.filter((id) => findInTree(scene.nodes, id) !== undefined)
 		.sort((a, b) => at(a, lead) - at(b, lead));
@@ -1034,7 +1147,7 @@ function spreadOf(scene: Scene, nodes: readonly string[], edge: Edge): number {
 	const spec = EDGES[edge];
 	const of = spec.role === "axis" ? edgeOn(spec.axis, "mid") : edge;
 	const values = nodes
-		.map((id) => edgeAt(scene.nodes, id, of))
+		.map((id) => edgeAt(scene.nodes, id, of, sceneContext(scene)))
 		.filter((v): v is number => v !== undefined);
 	if (values.length < 2) return 0;
 	const spread = Math.max(...values) - Math.min(...values);
@@ -1064,6 +1177,7 @@ function currentValue(
 						scene.nodes,
 						id,
 						term.place === "self" ? edge : edgeOn(axis, term.place),
+						sceneContext(scene),
 					);
 		if (at === undefined) return 0;
 		total += term.weight * at;
@@ -1192,7 +1306,11 @@ export function deleteToken(scene: Scene, id: string): Scene {
 			for (const [prop, value] of Object.entries(node.props)) {
 				if (value) props[prop as PropName] = repair(value);
 			}
-			return { ...node, props };
+			// A dimension is a value, so it can hold the reference too — a
+			// position driven by a `length` token is the whole point of one.
+			const frame = { ...node.frame };
+			for (const dim of DIMENSIONS) frame[dim] = repair(frame[dim]);
+			return { ...node, props, frame };
 		}),
 	};
 }
@@ -1222,7 +1340,13 @@ export function collapseToPicks(
 			for (const [prop, value] of Object.entries(node.props)) {
 				if (value) props[prop as PropName] = pickOne(value, propVar(node.id, prop));
 			}
-			return { ...node, props };
+			// Geometry too: a collapsed document that kept two positions would
+			// still be two designs after being reduced to one.
+			const frame = { ...node.frame };
+			for (const dim of DIMENSIONS) {
+				frame[dim] = pickOne(frame[dim], frameVar(node.id, dim));
+			}
+			return { ...node, props, frame };
 		}),
 		// A dimension is an assignment too, so collapsing has to reach it or the
 		// document would keep alternatives this universe already decided between.

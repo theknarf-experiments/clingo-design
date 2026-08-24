@@ -24,8 +24,11 @@ import {
 	collapseToPicks,
 	derivedNodes,
 	documentBounds,
+	FRAME_DIMS,
+	type Dimension,
 	flatten,
 	parseVariable,
+	sceneContext,
 	variableCounts,
 	reorderNodes,
 	ungroupNodes,
@@ -64,6 +67,9 @@ import styles from "./Studio.module.css";
 import tabStyles from "./tabs.module.css";
 
 const LIMIT = 24;
+
+/** Shared, so "no universe yet" is one object rather than a new one per render. */
+const NO_PICKS: Readonly<Record<string, number>> = {};
 
 /** Choices a multiverse caption names before it gives up and counts. */
 const CAPTION_PARTS = 3;
@@ -295,6 +301,19 @@ export function Studio({
 	const universes = exploration?.universes ?? [];
 	const primary = universes[0];
 	/**
+	 * The universe on screen, as something a frame can be resolved against.
+	 *
+	 * Geometry is a value now, so "where is this node" has no answer without a
+	 * universe: every edit that moves something writes to the alternative *this*
+	 * one picked, which is what keeps a node with two positions holding both.
+	 */
+	// Memoised on the universe, not spelled inline: `{}` is a fresh object every
+	// render, and everything downstream of the resolve context — the document's
+	// bounds, the artboard boxes, the culling — is memoised on its identity. An
+	// unstable one here is an infinite render loop, not merely wasted work.
+	const picks = useMemo(() => primary?.pick ?? NO_PICKS, [primary]);
+	const context = useMemo(() => sceneContext(scene, picks), [scene, picks]);
+	/**
 	 * Variables a rule minted, and sets a rule named.
 	 *
 	 * The document has no account of either, so the inspector's property rows and
@@ -320,7 +339,7 @@ export function Studio({
 	// Design shows one concrete universe to edit; multiverse shows the space.
 	const shown = view === "multiverse" ? universes : primary ? [primary] : [];
 	// Copies of the document are laid out by how much space it occupies.
-	const bounds = useMemo(() => documentBounds(scene), [scene]);
+	const bounds = useMemo(() => documentBounds(scene, context), [scene, context]);
 	const region = useMemo(
 		() => ({
 			x: bounds.x - PAD,
@@ -526,7 +545,7 @@ export function Studio({
 
 	function remove() {
 		if (selection.size === 0) return;
-		onSceneChange((prev) => deleteNodes(prev, [...selection]));
+		onSceneChange((prev) => deleteNodes(prev, [...selection], picks));
 		setSelection(new Set());
 	}
 
@@ -536,14 +555,14 @@ export function Studio({
 	}
 
 	function nudge(x: number, y: number) {
-		onSceneChange((prev) => moveNodes(prev, [...selection], x, y), "nudge");
+		onSceneChange((prev) => moveNodes(prev, [...selection], x, y, picks), "nudge");
 	}
 
 	function autoLayout() {
 		if (selection.size < 1) return;
 		let created: string | null = null;
 		onSceneChange((prev) => {
-			const result = wrapInLayout(prev, [...selection]);
+			const result = wrapInLayout(prev, [...selection], picks);
 			created = result.id;
 			return result.scene;
 		});
@@ -555,7 +574,7 @@ export function Studio({
 		if (selection.size === 0) return;
 		let created: string[] = [];
 		onSceneChange((prev) => {
-			const result = duplicateNodes(prev, [...selection]);
+			const result = duplicateNodes(prev, [...selection], 16, picks);
 			created = result.ids;
 			return result.scene;
 		});
@@ -588,7 +607,7 @@ export function Studio({
 		if (selection.size === 0) return;
 		let created: string | null = null;
 		onSceneChange((prev) => {
-			const result = groupNodes(prev, [...selection]);
+			const result = groupNodes(prev, [...selection], "Group", picks);
 			created = result.id;
 			return result.scene;
 		});
@@ -604,7 +623,7 @@ export function Studio({
 		if (selectedGroups.length === 0) return;
 		let freed: string[] = [];
 		onSceneChange((prev) => {
-			const result = ungroupNodes(prev, selectedGroups);
+			const result = ungroupNodes(prev, selectedGroups, picks);
 			freed = result.ids;
 			return result.scene;
 		});
@@ -729,6 +748,9 @@ export function Studio({
 			} else if (parsed.kind === "layout") {
 				const name = byId.get(parsed.node)?.name ?? parsed.node;
 				out.set(key, `${name} ${LAYOUT_PROPS[parsed.field as LayoutProp].label}`);
+			} else if (parsed.kind === "frame") {
+				const name = byId.get(parsed.node)?.name ?? parsed.node;
+				out.set(key, `${name} ${FRAME_DIMS[parsed.dim as Dimension].label}`);
 			} else {
 				const token = scene.tokens.find((t) => t.id === parsed.token);
 				out.set(key, token?.name ?? parsed.token);
@@ -1028,7 +1050,7 @@ export function Studio({
 								scene={scene}
 								selection={selection}
 								onSceneChange={onSceneChange}
-								picks={primary?.pick ?? {}}
+								picks={picks}
 								varying={varying}
 								solved={primary?.solved}
 								reach={reach}
@@ -1044,7 +1066,7 @@ export function Studio({
 							<Variables
 								scene={scene}
 								onSceneChange={onSceneChange}
-								picks={primary?.pick ?? {}}
+								picks={picks}
 								varying={varying}
 								reach={reach}
 								pins={pins}

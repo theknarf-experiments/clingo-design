@@ -14,6 +14,7 @@ import { buttons } from "./buttons.ts";
 import { card } from "./card.ts";
 import { pair } from "./pair.ts";
 import { palette } from "./palette.ts";
+import { places } from "./places.ts";
 import { rail } from "./rail.ts";
 import { sudoku } from "./sudoku.ts";
 
@@ -56,6 +57,13 @@ export const TEMPLATES: Template[] = [
 		description:
 			"A row of plates whose spacing is a variable, so the multiverse shows every size.",
 		create: rail,
+	},
+	{
+		id: "places",
+		name: "Two places",
+		description:
+			"One drawing whose panel sits on either side — a frame with two positions.",
+		create: places,
 	},
 	{
 		id: "sudoku",

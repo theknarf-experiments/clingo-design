@@ -333,16 +333,27 @@ export const constraintVar = (constraintId: string): string =>
  */
 export const layoutVar = (nodeId: string, field: string): string =>
 	`lval(${nodeId},${field})`;
+/**
+ * One of a node's four geometric dimensions — where it sits and how big it is.
+ *
+ * The last leaf to become a variable, and the one that turns "this sits here on
+ * desktop and there on mobile" into a universe rather than two documents. It is
+ * an ordinary variable in every respect: it picks, it resolves, it can name a
+ * token, and it is projected — so two positions really are two designs.
+ */
+export const frameVar = (nodeId: string, dim: string): string =>
+	`fval(${nodeId},${dim})`;
 
 /**
  * The inverse of {@link tokenVar} / {@link propVar} / {@link constraintVar} /
- * {@link layoutVar}.
+ * {@link layoutVar} / {@link frameVar}.
  */
 export type Variable =
 	| { kind: "token"; token: string }
 	| { kind: "prop"; node: string; prop: string }
 	| { kind: "constraint"; constraint: string }
-	| { kind: "layout"; node: string; field: string };
+	| { kind: "layout"; node: string; field: string }
+	| { kind: "frame"; node: string; dim: string };
 
 export function parseVariable(key: string): Variable | null {
 	// Parsed rather than matched: a node id may be a term, and `prop(cell(1,1),
@@ -360,6 +371,9 @@ export function parseVariable(key: string): Variable | null {
 	}
 	if (atom.name === "lval" && arity === 2) {
 		return { kind: "layout", node: a, field: b };
+	}
+	if (atom.name === "fval" && arity === 2) {
+		return { kind: "frame", node: a, dim: b };
 	}
 	return null;
 }
@@ -389,16 +403,33 @@ export function findToken(
 	return tokens.find((t) => t.id === id);
 }
 
+/**
+ * Which alternative of a value the given universe is using, as a position in
+ * the list. -1 for a value with no alternatives at all.
+ *
+ * With no pick — an unsolved preview, say — the first alternative stands in.
+ * Separate from {@link activeTerm} because an *edit* needs the position, not
+ * the term: writing a drag back has to replace one alternative and leave the
+ * rest of the list alone.
+ */
+export function activeIndex(
+	value: Value,
+	variable: string,
+	picks: Picks,
+): number {
+	if (value.length === 0) return -1;
+	const index = picks[variable];
+	return index !== undefined && index >= 0 && index < value.length ? index : 0;
+}
+
 /** The alternative currently active for a variable. */
 export function activeTerm(
 	value: Value,
 	variable: string,
 	picks: Picks,
 ): Term | undefined {
-	if (value.length === 0) return undefined;
-	const index = picks[variable];
-	// With no pick — an unsolved preview, say — the first alternative stands in.
-	return value[index !== undefined && index < value.length ? index : 0];
+	const index = activeIndex(value, variable, picks);
+	return index === -1 ? undefined : value[index];
 }
 
 /**

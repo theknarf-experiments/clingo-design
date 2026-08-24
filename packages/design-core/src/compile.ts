@@ -12,10 +12,13 @@
  *
  *     :- resolved(prop(a,fill), C), resolved(prop(b,fill), C).
  *
- * Geometry goes in as plain facts. Four atoms per node costs nothing; a
- * choosable coordinate would ground a domain of thousands. Where a coordinate
- * genuinely has to be worked out it is not a choice either — it is a variable
- * of the simplex solver, which costs one unknown rather than a domain.
+ * Geometry goes in as facts wherever the document holds one number per
+ * dimension, and as an ordinary variable wherever it holds a choice. Either way
+ * the program reads `frame/3`: what is never choosable is the *coordinate*, only
+ * the handful of alternatives somebody wrote down, so nothing here grounds a
+ * domain of thousands. Where a coordinate genuinely has to be worked out it is
+ * not a choice either — it is a variable of the simplex solver, which costs one
+ * unknown rather than a domain.
  */
 import { askedSize, measuredCount, naturalSize, type Measurements } from "./measure.ts";
 import {
@@ -23,12 +26,14 @@ import {
 	CONSTRAINT_KINDS,
 	CONSTRAINT_NAMES,
 	CONTAINER_PROPS,
+	DIMENSIONS,
 	EDGES,
 	EDGE_NAMES,
 	LAYOUT_PROPS,
 	LAYOUT_PROP_NAMES,
 	NODE_KINDS,
 	dimension,
+	frameDim,
 	isLaidOut,
 	layoutValueOf,
 	rangesOverGroup,
@@ -42,6 +47,7 @@ import {
 	type Term,
 	VALUE_TYPES,
 	constraintVar,
+	frameVar,
 	layoutVar,
 	numeralOf,
 	propVar,
@@ -397,6 +403,19 @@ const SCENE_DEFAULT_RULES = [
 	"#defined kind/2.",
 	"#defined order/2.",
 	"#defined frame/3.",
+	"#defined numeral/2.",
+	"% ---- geometry, per universe ----",
+	"% A dimension is a value like any other: picked per universe, and free to",
+	"% name a token. So `frame/3` is *derived* from the pick wherever a document",
+	"% wrote alternatives — which is what makes \"here on desktop, there on",
+	"% mobile\" one document — and stays a plain fact wherever it wrote one",
+	"% number, which is every rectangle nobody has asked to vary.",
+	"f_value(N,D,L) :- resolved(fval(N,D),L).",
+	"% Through numeral/2, so the number here is the same number the editor reads",
+	"% off the document: both round, so the canvas and hit testing agree exactly.",
+	"% A dimension that reads as no number at all derives nothing and falls to",
+	"% the default below, rather than meaning zero by accident.",
+	"frame(N,D,V) :- f_value(N,D,L), numeral(L,V).",
 	"kinded(N) :- kind(N,K), K != frame.",
 	"kind(N,frame) :- node(N), not kinded(N).",
 	"ordered(N) :- order(N,I), I != 1.",
@@ -523,6 +542,7 @@ export const CONTRACT = `% Predicates you can rely on:
 %   tok(Token)                  a token's own definition
 %   cval(C)                     the dimension a geometric constraint holds to
 %   lval(Node, Setting)         one input to an automatic layout
+%   fval(Node, x|y|width|height)  one of a node's own four dimensions
 %
 % alt/2 is a derivable predicate too, so a rule can mint a variable the
 % document never named, and it then picks, resolves, renders, greys and pins
@@ -547,7 +567,13 @@ export const CONTRACT = `% Predicates you can rely on:
 %   node(N)  kind(N, ${NODE_KINDS.join("|")})  child(Parent, Child)
 %   order(N, I)                 where N sits among its siblings, 1-based —
 %                               child/2 is a set, so this is the paint order
-%   frame(N, x|y|width|height, Pixels)   <- relative to the parent, if any
+%   frame(N, x|y|width|height, Pixels)   <- relative to the parent, if any.
+%                               A fact where the document holds one number for
+%                               a dimension; derived from f_value/3 where it
+%                               holds a choice, so a node can sit in one place
+%                               in one universe and elsewhere in another
+%   f_value(N, D, Lit)          derived: resolved(fval(N,D)) — projected, so
+%                               two positions really are two designs
 %   rendered(N, Prop, Lit)      what it draws with — an interned literal id, or
 %                               the text itself in quotes
 %   hidden(N)                   assert to remove a node
@@ -732,7 +758,7 @@ function emitAsked(
 	const alternatives = measuredCount(node, measurements);
 	if (alternatives > 1) {
 		for (let i = 0; i < alternatives; i++) {
-			const size = askedSize(node, measurements, i);
+			const size = askedSize(node, measurements, i, context);
 			lines.push(atom("ltsize", node.id, i, "width", Math.round(size.width)));
 			lines.push(atom("ltsize", node.id, i, "height", Math.round(size.height)));
 		}
@@ -816,12 +842,23 @@ export function compile(
 		nodeLines.push(atom("node", node.id));
 		nodeLines.push(atom("kind", node.id, node.kind));
 		nodeLines.push(atom("order", node.id, order.get(node.id) ?? 1));
-		nodeLines.push(atom("frame", node.id, "x", Math.round(node.frame.x)));
-		nodeLines.push(atom("frame", node.id, "y", Math.round(node.frame.y)));
-		nodeLines.push(atom("frame", node.id, "width", Math.round(node.frame.width)));
-		nodeLines.push(
-			atom("frame", node.id, "height", Math.round(node.frame.height)),
-		);
+		// Geometry, as a fact where the document holds one number and as a
+		// variable where it holds a choice.
+		//
+		// Both reach the same `frame/3`, so no rule and no reader ever learns
+		// which it was. The split is a cost decision and only that: a variable
+		// costs a `pick`, a projected `f_value` and a grounding of every
+		// dependent theory constraint per alternative, and paying that for the
+		// four dimensions of every rectangle in a document — none of which
+		// anyone asked to vary — would multiply the program for nothing.
+		for (const dim of DIMENSIONS) {
+			const value = node.frame[dim];
+			if (value.length === 1 && value[0].kind === "literal") {
+				nodeLines.push(atom("frame", node.id, dim, frameDim(node, dim)));
+				continue;
+			}
+			emitValue(frameVar(node.id, dim), value);
+		}
 		const parent = parents.get(node.id);
 		if (parent) nodeLines.push(atom("child", parent.id, node.id));
 
@@ -1096,6 +1133,14 @@ export function compile(
 			"% arrangement for a document that plainly holds two.",
 			"#defined l_value/3.",
 			"#project l_value/3.",
+			"% And a node's own four dimensions, which is the same case again and the",
+			"% one a designer meets first: a card at one position on a wide screen and",
+			"% another on a narrow one differs in nothing but geometry, so without this",
+			"% the two collapse into a single universe. Only the dimensions a document",
+			"% wrote a *choice* for produce any instances at all, so a document nobody",
+			"% has asked to vary pays nothing here.",
+			"#defined f_value/3.",
+			"#project f_value/3.",
 		]),
 	]
 		.filter(Boolean)
@@ -1121,6 +1166,14 @@ export function variableCounts(scene: Scene): Record<string, number> {
 	for (const node of flatten(scene.nodes)) {
 		for (const [prop, value] of Object.entries(node.props)) {
 			if (value && value.length > 0) out[propVar(node.id, prop)] = value.length;
+		}
+		// Only where the document wrote a choice, matching what `compile` emits:
+		// a lone literal is a fact there, and a variable nobody can pick between
+		// is not a variable anyone should be shown.
+		for (const dim of DIMENSIONS) {
+			const value = node.frame[dim];
+			if (value.length === 1 && value[0].kind === "literal") continue;
+			if (value.length > 0) out[frameVar(node.id, dim)] = value.length;
 		}
 		// A layout's settings only branch anything while the layout is on and
 		// has something to arrange, so an abandoned one is not a variable.

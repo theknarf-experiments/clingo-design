@@ -13,7 +13,7 @@ import {
 } from "./edits.ts";
 import { pathBounds, pathData, pointsBounds, scalePoints } from "./geometry.ts";
 import { normalizeScene } from "./project.ts";
-import { KINDS, type Scene, emptyScene, isPlotted } from "./scene.ts";
+import { KINDS, type Scene, emptyScene, frameOf, isPlotted } from "./scene.ts";
 import { findInTree, worldFrame } from "./tree.ts";
 
 /** A closed square drawn at (100,100), as the pen would hand it over. */
@@ -35,7 +35,7 @@ test("a path is drawn point by point and is not a shape-menu shape", () => {
 
 test("the frame is the bounding box and the points are relative to it", () => {
 	const node = makePath(SQUARE, true);
-	assert.deepEqual(node.frame, { x: 100, y: 100, width: 100, height: 80 });
+	assert.deepEqual(frameOf(node), { x: 100, y: 100, width: 100, height: 80 });
 	assert.deepEqual(node.points, [
 		{ x: 0, y: 0 },
 		{ x: 100, y: 0 },
@@ -97,7 +97,7 @@ test("a path lands inside a frame with its points untouched", () => {
 	const node = findInTree(scene.nodes, "p1");
 	// The frame is rebased into the parent; the geometry is the path's own
 	// business and must not move with it.
-	assert.deepEqual(node?.frame, { x: 40, y: 80, width: 100, height: 80 });
+	assert.deepEqual(node && frameOf(node), { x: 40, y: 80, width: 100, height: 80 });
 	assert.deepEqual(node?.points?.[1], { x: 100, y: 0 });
 	assert.deepEqual(worldFrame(scene.nodes, "p1"), {
 		x: 100,
@@ -219,13 +219,13 @@ test("editing a point re-derives the frame under the shape", () => {
 		),
 	);
 	const before = findInTree(scene.nodes, "p");
-	assert.deepEqual(before?.frame, { x: 100, y: 100, width: 40, height: 40 });
+	assert.deepEqual(before && frameOf(before), { x: 100, y: 100, width: 40, height: 40 });
 
 	// Drag the first vertex up and left, beyond the old box.
 	scene = movePathPoint(scene, "p", 0, { x: -20, y: -20 });
 	const after = findInTree(scene.nodes, "p");
 	assert.deepEqual(
-		after?.frame,
+		after && frameOf(after),
 		{ x: 80, y: 80, width: 60, height: 60 },
 		"the frame follows the points rather than clipping them",
 	);

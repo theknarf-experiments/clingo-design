@@ -13,7 +13,7 @@ import {
 	resizeSubtree,
 	ungroupNodes,
 } from "./edits.ts";
-import { type Scene, emptyScene } from "./scene.ts";
+import { type Scene, emptyScene, frameOf, makeFrame } from "./scene.ts";
 import {
 	ancestorsOf,
 	findInTree,
@@ -25,6 +25,12 @@ import {
 	selectionTargetOf,
 	worldFrame,
 } from "./tree.ts";
+
+/** A node's frame in one document, resolved — the shape assertions want. */
+function frameIn(scene: Scene, id: string) {
+	const node = findInTree(scene.nodes, id);
+	return node ? frameOf(node) : undefined;
+}
 
 function boxes(n: number): Scene {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
@@ -53,7 +59,7 @@ test("grouping wraps siblings and derives the frame from them", () => {
 	assert.equal(group?.kind, "group");
 	assert.deepEqual(group?.children?.map((c) => c.id), ["b0", "b1"]);
 	// b0 at x0..60, b1 at x100..160 -> bounds 0..160.
-	assert.deepEqual(group?.frame, { x: 0, y: 0, width: 160, height: 40 });
+	assert.deepEqual(group && frameOf(group), { x: 0, y: 0, width: 160, height: 40 });
 });
 
 test("grouping keeps the frontmost member's stacking position", () => {
@@ -127,9 +133,9 @@ test("moving a group carries its children without touching them", () => {
 	const moved = moveNodes(scene, [id!], 10, 5);
 
 	// Children are relative, so their own frames are untouched...
-	assert.deepEqual(findInTree(moved.nodes, "b0")?.frame, { x: 0, y: 0, width: 60, height: 40 });
-	assert.deepEqual(findInTree(moved.nodes, "b1")?.frame, { x: 100, y: 0, width: 60, height: 40 });
-	assert.deepEqual(findInTree(moved.nodes, id!)?.frame, { x: 10, y: 5, width: 160, height: 40 });
+	assert.deepEqual(frameIn(moved, "b0"), { x: 0, y: 0, width: 60, height: 40 });
+	assert.deepEqual(frameIn(moved, "b1"), { x: 100, y: 0, width: 60, height: 40 });
+	assert.deepEqual(frameIn(moved, id!), { x: 10, y: 5, width: 160, height: 40 });
 	// ...but they land in the right place on the canvas.
 	assert.deepEqual(worldFrame(moved.nodes, "b1"), { x: 110, y: 5, width: 60, height: 40 });
 });
@@ -138,15 +144,15 @@ test("moving a child re-derives the group frame", () => {
 	const { scene, id } = groupNodes(boxes(2), ["b0", "b1"]);
 	const moved = moveNodes(scene, ["b1"], 0, 100);
 	// The group grows to contain the child's new position.
-	assert.deepEqual(findInTree(moved.nodes, id!)?.frame, { x: 0, y: 0, width: 160, height: 140 });
+	assert.deepEqual(frameIn(moved, id!), { x: 0, y: 0, width: 160, height: 140 });
 });
 
 test("grouping rebases children into the group's space", () => {
 	const { scene, id } = groupNodes(boxes(2), ["b0", "b1"]);
 	const group = findInTree(scene.nodes, id!);
 	// The group sits where the members were; the members start at its origin.
-	assert.deepEqual(group?.frame, { x: 0, y: 0, width: 160, height: 40 });
-	assert.deepEqual(group?.children?.map((c) => c.frame.x), [0, 100]);
+	assert.deepEqual(group && frameOf(group), { x: 0, y: 0, width: 160, height: 40 });
+	assert.deepEqual(group?.children?.map((c) => frameOf(c).x), [0, 100]);
 });
 
 test("ungrouping lifts children back into the parent's space", () => {
@@ -155,22 +161,22 @@ test("ungrouping lifts children back into the parent's space", () => {
 	const { scene: grouped, id } = groupNodes(scene, ["b0", "b1"]);
 	const { scene: back } = ungroupNodes(grouped, [id!]);
 
-	assert.deepEqual(findInTree(back.nodes, "b0")?.frame, { x: 50, y: 20, width: 60, height: 40 });
-	assert.deepEqual(findInTree(back.nodes, "b1")?.frame, { x: 150, y: 20, width: 60, height: 40 });
+	assert.deepEqual(frameIn(back, "b0"), { x: 50, y: 20, width: 60, height: 40 });
+	assert.deepEqual(frameIn(back, "b1"), { x: 150, y: 20, width: 60, height: 40 });
 });
 
 test("resizing a group scales its contents", () => {
 	const { scene, id } = groupNodes(boxes(2), ["b0", "b1"]);
 	const resized = resizeSubtree(scene, id!, { x: 0, y: 0, width: 320, height: 40 });
 
-	assert.deepEqual(findInTree(resized.nodes, "b0")?.frame, { x: 0, y: 0, width: 120, height: 40 });
-	assert.deepEqual(findInTree(resized.nodes, "b1")?.frame, { x: 200, y: 0, width: 120, height: 40 });
+	assert.deepEqual(frameIn(resized, "b0"), { x: 0, y: 0, width: 120, height: 40 });
+	assert.deepEqual(frameIn(resized, "b1"), { x: 200, y: 0, width: 120, height: 40 });
 });
 
 test("a frame does not resize itself around its children", () => {
 	// Groups hug their contents; artboards are a fixed surface.
 	const scene = emptyScene();
-	const before = scene.nodes[0].frame;
+	const before = frameOf(scene.nodes[0]);
 	const grown = moveNodes(
 		{
 			...scene,
@@ -187,7 +193,7 @@ test("a frame does not resize itself around its children", () => {
 		2000,
 		2000,
 	);
-	assert.deepEqual(grown.nodes[0].frame, before);
+	assert.deepEqual(frameOf(grown.nodes[0]), before);
 });
 
 test("deleting a group removes its whole subtree", () => {
@@ -207,7 +213,7 @@ test("duplicating a group deep-copies it with fresh ids", () => {
 	const originals = new Set(["b0", "b1", id]);
 	for (const child of clone?.children ?? []) assert.ok(!originals.has(child.id));
 	// And the copy is offset.
-	assert.equal(clone?.frame.x, 16);
+	assert.equal(clone && frameOf(clone).x, 16);
 });
 
 test("z-order is scoped to the parent", () => {
@@ -238,7 +244,7 @@ test("hit testing works in canvas coordinates through nesting", () => {
 				id: "f",
 				kind: "frame",
 				name: "Frame",
-				frame: { x: 100, y: 100, width: 200, height: 200 },
+				frame: makeFrame({ x: 100, y: 100, width: 200, height: 200 }),
 				props: {},
 				children: [
 					makeNode("rect", { x: 20, y: 20, width: 60, height: 60 }, { id: "box" }),
@@ -268,7 +274,7 @@ test("clicking inside a frame selects the child, not the frame", () => {
 				id: "f",
 				kind: "frame",
 				name: "Frame",
-				frame: { x: 0, y: 0, width: 200, height: 200 },
+				frame: makeFrame({ x: 0, y: 0, width: 200, height: 200 }),
 				props: {},
 				children: [
 					makeNode("rect", { x: 10, y: 10, width: 50, height: 50 }, { id: "box" }),
@@ -290,7 +296,7 @@ test("a group inside a frame still selects as a whole", () => {
 				id: "f",
 				kind: "frame",
 				name: "Frame",
-				frame: { x: 0, y: 0, width: 300, height: 300 },
+				frame: makeFrame({ x: 0, y: 0, width: 300, height: 300 }),
 				props: {},
 				children: [
 					makeNode("rect", { x: 0, y: 0, width: 40, height: 40 }, { id: "a" }),
@@ -311,14 +317,14 @@ test("frameAt finds the innermost frame under a point", () => {
 				id: "outer",
 				kind: "frame",
 				name: "Outer",
-				frame: { x: 0, y: 0, width: 400, height: 400 },
+				frame: makeFrame({ x: 0, y: 0, width: 400, height: 400 }),
 				props: {},
 				children: [
 					{
 						id: "inner",
 						kind: "frame",
 						name: "Inner",
-						frame: { x: 100, y: 100, width: 100, height: 100 },
+						frame: makeFrame({ x: 100, y: 100, width: 100, height: 100 }),
 						props: {},
 						children: [],
 					},
@@ -339,7 +345,7 @@ test("addNodeTo rebases a canvas-space node into its new parent", () => {
 				id: "f",
 				kind: "frame",
 				name: "Frame",
-				frame: { x: 200, y: 100, width: 300, height: 300 },
+				frame: makeFrame({ x: 200, y: 100, width: 300, height: 300 }),
 				props: {},
 				children: [],
 			},
@@ -349,7 +355,9 @@ test("addNodeTo rebases a canvas-space node into its new parent", () => {
 	const node = makeNode("rect", { x: 250, y: 150, width: 40, height: 40 }, { id: "drawn" });
 	const next = addNodeTo(scene, "f", node);
 
-	assert.deepEqual(findInTree(next.nodes, "drawn")?.frame, {
+	const drawnNode = findInTree(next.nodes, "drawn");
+	assert.ok(drawnNode);
+	assert.deepEqual(frameOf(drawnNode), {
 		x: 50,
 		y: 50,
 		width: 40,

@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { directSolver } from "./directSolver.ts";
 import { explore, varyingVars } from "./explore.ts";
+import { frameOf, sceneContext } from "./scene.ts";
 import { flatten } from "./tree.ts";
 import { TEMPLATES, findTemplate } from "./templates/index.ts";
 
@@ -20,11 +21,13 @@ for (const template of TEMPLATES) {
 		assert.ok(result.count > 0, "expected at least one universe");
 
 		const all = flatten(scene.nodes);
+		const context = sceneContext(scene);
 		for (const node of all) {
 			assert.ok(result.universes[0].visible.has(node.id), `${node.id} should render`);
 			// Every node must have a real position and size.
-			assert.ok(node.frame.width > 0 && node.frame.height > 0, `${node.id} has no size`);
-			assert.ok(Number.isFinite(node.frame.x) && Number.isFinite(node.frame.y));
+			const box = frameOf(node, context);
+			assert.ok(box.width > 0 && box.height > 0, `${node.id} has no size`);
+			assert.ok(Number.isFinite(box.x) && Number.isFinite(box.y));
 		}
 		// Node ids must be unique or selection and hit testing break.
 		const ids = all.map((n) => n.id);
@@ -46,13 +49,15 @@ test("template contents stay inside their frame", () => {
 	for (const template of TEMPLATES) {
 		const scene = template.create();
 		const check = (parent: (typeof scene.nodes)[number]) => {
+			const outer = frameOf(parent);
 			for (const child of parent.children ?? []) {
 				// Coordinates are relative, so containment is a local check.
+				const box = frameOf(child);
 				assert.ok(
-					child.frame.x >= 0 &&
-						child.frame.y >= 0 &&
-						child.frame.x + child.frame.width <= parent.frame.width &&
-						child.frame.y + child.frame.height <= parent.frame.height,
+					box.x >= 0 &&
+						box.y >= 0 &&
+						box.x + box.width <= outer.width &&
+						box.y + box.height <= outer.height,
 					`${template.id}/${child.id} escapes ${parent.id}`,
 				);
 				check(child);

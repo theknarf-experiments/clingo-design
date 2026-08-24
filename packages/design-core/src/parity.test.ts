@@ -32,6 +32,7 @@ import {
 	type PropName,
 	type Scene,
 	type SceneNode,
+	frameOf,
 } from "./scene.ts";
 import { card } from "./templates/card.ts";
 import { TEMPLATES } from "./templates/index.ts";
@@ -80,8 +81,9 @@ function drawnFromDocument(
 				);
 				if (value !== undefined) paint[prop] = value;
 			}
+			const stored = frameOf(node, context);
 			out.set(node.id, {
-				frame: fixed ? { ...node.frame, ...fixed } : node.frame,
+				frame: fixed ? { ...stored, ...fixed } : stored,
 				paint,
 			});
 			if (node.children) walk(node.children);
@@ -170,15 +172,18 @@ for (const template of TEMPLATES) {
 					: Number(m[4].slice(0, slash)) / Number(m[4].slice(slash + 1));
 			(solved[m[2]] ??= {})[m[3] as "x"] = n;
 		}
-		for (const placed of placedNodes(scene.nodes, solved)) {
+		const { picks } = decisions(atoms);
+		const context = { tokens: scene.tokens, picks };
+		for (const placed of placedNodes(scene.nodes, solved, context)) {
 			if (!visible.has(placed.node.id)) continue;
 			const read = model.byId[placed.node.id];
 			assert.ok(read, `${placed.node.id} missing from the model`);
+			const stored = frameOf(placed.node, context);
 			assert.deepEqual(
 				read.frame,
 				solved[placed.node.id]
-					? { ...placed.node.frame, ...solved[placed.node.id] }
-					: placed.node.frame,
+					? { ...stored, ...solved[placed.node.id] }
+					: stored,
 				`${placed.node.id} sits somewhere else`,
 			);
 		}

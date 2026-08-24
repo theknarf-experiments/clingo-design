@@ -14,7 +14,7 @@ import {
 	setProp,
 	setText,
 } from "./edits.ts";
-import { type Scene, emptyScene } from "./scene.ts";
+import { type Scene, emptyScene, frameOf } from "./scene.ts";
 import { lit, propVar, ref, resolveValue, single } from "./values.ts";
 
 function withBoxes(n: number): Scene {
@@ -36,7 +36,7 @@ const ids = (scene: Scene) => scene.nodes.map((n) => n.id);
 test("makeNode gives a rect sensible defaults", () => {
 	const node = makeNode("rect", { x: 5.4, y: 5.6, width: 100, height: 80 });
 	assert.equal(node.kind, "rect");
-	assert.deepEqual(node.frame, { x: 5, y: 6, width: 100, height: 80 });
+	assert.deepEqual(frameOf(node), { x: 5, y: 6, width: 100, height: 80 });
 	assert.equal(node.props.fill?.[0]?.kind, "literal");
 	assert.ok(node.id.length > 0);
 });
@@ -66,26 +66,26 @@ test("add and delete", () => {
 
 test("moveNodes translates only the named nodes", () => {
 	const moved = moveNodes(withBoxes(3), ["b0", "b2"], 10, -5);
-	assert.deepEqual(moved.nodes[0].frame, { x: 10, y: -5, width: 40, height: 40 });
-	assert.deepEqual(moved.nodes[1].frame, { x: 50, y: 0, width: 40, height: 40 });
-	assert.deepEqual(moved.nodes[2].frame, { x: 110, y: -5, width: 40, height: 40 });
+	assert.deepEqual(frameOf(moved.nodes[0]), { x: 10, y: -5, width: 40, height: 40 });
+	assert.deepEqual(frameOf(moved.nodes[1]), { x: 50, y: 0, width: 40, height: 40 });
+	assert.deepEqual(frameOf(moved.nodes[2]), { x: 110, y: -5, width: 40, height: 40 });
 });
 
 test("moveNodes rounds to whole pixels", () => {
 	const moved = moveNodes(withBoxes(1), ["b0"], 0.4, 0.6);
-	assert.deepEqual(moved.nodes[0].frame, { x: 0, y: 1, width: 40, height: 40 });
+	assert.deepEqual(frameOf(moved.nodes[0]), { x: 0, y: 1, width: 40, height: 40 });
 });
 
 test("setFrame and setFrames enforce the minimum size", () => {
 	const one = setFrame(withBoxes(1), "b0", { x: 0, y: 0, width: 0, height: 0 });
-	assert.ok(one.nodes[0].frame.width >= 4);
+	assert.ok(frameOf(one.nodes[0]).width >= 4);
 
 	const many = setFrames(
 		withBoxes(2),
 		new Map([["b1", { x: 9, y: 9, width: 11, height: 12 }]]),
 	);
-	assert.deepEqual(many.nodes[1].frame, { x: 9, y: 9, width: 11, height: 12 });
-	assert.deepEqual(many.nodes[0].frame, { x: 0, y: 0, width: 40, height: 40 });
+	assert.deepEqual(frameOf(many.nodes[1]), { x: 9, y: 9, width: 11, height: 12 });
+	assert.deepEqual(frameOf(many.nodes[0]), { x: 0, y: 0, width: 40, height: 40 });
 });
 
 test("setProp replaces the whole list of alternatives", () => {
@@ -165,7 +165,9 @@ test("duplicate offsets the copies and reports their ids", () => {
 	assert.deepEqual(ids(next), ["b0", created[0], "b1"]);
 
 	const byId = (s: Scene, id: string) => s.nodes.find((n) => n.id === id);
-	assert.deepEqual(byId(next, created[0])?.frame, { x: 16, y: 16, width: 40, height: 40 });
+	const copy = byId(next, created[0]);
+	assert.ok(copy);
+	assert.deepEqual(frameOf(copy), { x: 16, y: 16, width: 40, height: 40 });
 	assert.notEqual(created[0], "b0");
 
 	// The copy is independent of the original.

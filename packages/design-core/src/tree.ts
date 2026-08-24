@@ -14,13 +14,23 @@ import {
 	type Edge,
 	EDGES,
 	type SceneNode,
+	frameDim,
+	frameOf,
 	isDrawable,
 	isLaidOut,
 	isSurface,
 	layoutWord,
+	withFrame,
 	wrapsChildren,
 } from "./scene.ts";
 import { type ResolveContext, type Value, propVar } from "./values.ts";
+
+/**
+ * What a frame resolves against when the caller has no universe in mind — the
+ * first alternative of every dimension, which is what an unsolved preview
+ * shows. Every entry point here takes a real one; this is the default.
+ */
+const NO_CONTEXT: ResolveContext = { tokens: [], picks: {} };
 
 /** Depth-first, parents before children — the order nodes are painted in. */
 export function flatten(nodes: readonly SceneNode[]): SceneNode[] {
@@ -93,13 +103,23 @@ export function parentMap(
 /* Absolute positions                                                  */
 /* ------------------------------------------------------------------ */
 
-/** Where a node's parent sits on the canvas. */
-export function worldOrigin(nodes: readonly SceneNode[], id: string): Point {
+/**
+ * Where a node's parent sits on the canvas.
+ *
+ * `context` is the universe being looked at: a dimension is a value now, so an
+ * ancestor may sit in one place in one design and elsewhere in another, and an
+ * absolute coordinate only means anything relative to one of them.
+ */
+export function worldOrigin(
+	nodes: readonly SceneNode[],
+	id: string,
+	context: ResolveContext = NO_CONTEXT,
+): Point {
 	let x = 0;
 	let y = 0;
 	for (const ancestor of ancestorsOf(nodes, id)) {
-		x += ancestor.frame.x;
-		y += ancestor.frame.y;
+		x += frameDim(ancestor, "x", context);
+		y += frameDim(ancestor, "y", context);
 	}
 	return { x, y };
 }
@@ -108,15 +128,17 @@ export function worldOrigin(nodes: readonly SceneNode[], id: string): Point {
 export function worldFrame(
 	nodes: readonly SceneNode[],
 	id: string,
+	context: ResolveContext = NO_CONTEXT,
 ): Frame | undefined {
 	const node = findInTree(nodes, id);
 	if (!node) return undefined;
-	const origin = worldOrigin(nodes, id);
+	const origin = worldOrigin(nodes, id, context);
+	const frame = frameOf(node, context);
 	return {
-		x: origin.x + node.frame.x,
-		y: origin.y + node.frame.y,
-		width: node.frame.width,
-		height: node.frame.height,
+		x: origin.x + frame.x,
+		y: origin.y + frame.y,
+		width: frame.width,
+		height: frame.height,
 	};
 }
 
@@ -132,8 +154,9 @@ export function edgeAt(
 	nodes: readonly SceneNode[],
 	id: string,
 	edge: Edge,
+	context: ResolveContext = NO_CONTEXT,
 ): number | undefined {
-	const frame = worldFrame(nodes, id);
+	const frame = worldFrame(nodes, id, context);
 	if (!frame) return undefined;
 	const spec = EDGES[edge];
 	const size = spec.axis === "x" ? frame.width : frame.height;
@@ -156,16 +179,23 @@ export interface Placed {
  * automatic layout. Hit testing, snapping and the selection outlines all go
  * through here, so passing it is what keeps the editor pointing at where
  * things actually are rather than where they are stored.
+ *
+ * `context` is the universe on screen. A node's four dimensions are values, so
+ * without one this reads the first alternative of each — which is right for an
+ * unsolved preview and wrong for a click, because the pointer has to land on
+ * the design the eye is looking at.
  */
 export function placedNodes(
 	nodes: readonly SceneNode[],
 	solved: Readonly<Record<string, Partial<Frame>>> = {},
+	context: ResolveContext = NO_CONTEXT,
 ): Placed[] {
 	const out: Placed[] = [];
 	const walk = (list: readonly SceneNode[], ox: number, oy: number) => {
 		for (const node of list) {
 			const fixed = solved[node.id];
-			const frame = fixed ? { ...node.frame, ...fixed } : node.frame;
+			const stored = frameOf(node, context);
+			const frame = fixed ? { ...stored, ...fixed } : stored;
 			const world = {
 				x: ox + frame.x,
 				y: oy + frame.y,
@@ -191,8 +221,11 @@ export function hitTestTree(
 	nodes: readonly SceneNode[],
 	point: Point,
 	solved: Readonly<Record<string, Partial<Frame>>> = {},
+	context: ResolveContext = NO_CONTEXT,
 ): Placed | undefined {
-	const placed = placedNodes(nodes, solved).filter((p) => isDrawable(p.node));
+	const placed = placedNodes(nodes, solved, context).filter((p) =>
+		isDrawable(p.node),
+	);
 	for (let i = placed.length - 1; i >= 0; i--) {
 		if (frameContains(placed[i].world, point)) return placed[i];
 	}
@@ -204,9 +237,10 @@ export function frameAt(
 	nodes: readonly SceneNode[],
 	point: Point,
 	solved: Readonly<Record<string, Partial<Frame>>> = {},
+	context: ResolveContext = NO_CONTEXT,
 ): Placed | undefined {
 	let found: Placed | undefined;
-	for (const placed of placedNodes(nodes, solved)) {
+	for (const placed of placedNodes(nodes, solved, context)) {
 		if (!isSurface(placed.node)) continue;
 		if (frameContains(placed.world, point)) found = placed;
 	}
@@ -242,9 +276,9 @@ export function dropTargetAt(
 	point: Point,
 	moving: ReadonlySet<string> = new Set(),
 	solved: Readonly<Record<string, Partial<Frame>>> = {},
-	context?: ResolveContext,
+	context: ResolveContext = NO_CONTEXT,
 ): DropTarget {
-	const placed = placedNodes(nodes, solved);
+	const placed = placedNodes(nodes, solved, context);
 	const lifted = new Set<string>();
 	for (const p of placed) {
 		if (moving.has(p.node.id)) for (const id of subtreeIds(p.node)) lifted.add(id);
@@ -268,7 +302,7 @@ export function dropTargetAt(
 	const at = row ? point.x : point.y;
 	let index = 0;
 	for (const child of staying) {
-		const frame = { ...child.frame, ...solved[child.id] };
+		const frame = { ...frameOf(child, context), ...solved[child.id] };
 		const middle = row
 			? host.world.x + frame.x + frame.width / 2
 			: host.world.y + frame.y + frame.height / 2;
@@ -397,9 +431,12 @@ export function locate(
 }
 
 /** A wrapper's frame in its parent's space: whatever its children occupy. */
-export function groupFrame(children: readonly SceneNode[]): Frame {
+export function groupFrame(
+	children: readonly SceneNode[],
+	context: ResolveContext = NO_CONTEXT,
+): Frame {
 	return (
-		boundsOf(children.map((c) => c.frame)) ?? {
+		boundsOf(children.map((c) => frameOf(c, context))) ?? {
 			x: 0,
 			y: 0,
 			width: 0,
@@ -413,34 +450,46 @@ export function groupFrame(children: readonly SceneNode[]): Frame {
  *
  * Surfaces are deliberately excluded: an artboard is a fixed thing, and having
  * it resize itself whenever something moved inside would be maddening.
+ *
+ * Both the reading and the writing happen in one universe — `context` — for the
+ * same reason a drag does: a group around a child that sits in two places has
+ * two honest bounding boxes, and the one worth re-fitting is the one on screen.
  */
-export function refreshGroups(nodes: readonly SceneNode[]): SceneNode[] {
+export function refreshGroups(
+	nodes: readonly SceneNode[],
+	context: ResolveContext = NO_CONTEXT,
+): SceneNode[] {
 	return nodes.map((node) => {
 		if (!node.children) return node;
-		const children = refreshGroups(node.children);
+		const children = refreshGroups(node.children, context);
 		if (!wrapsChildren(node) || children.length === 0) {
 			return { ...node, children };
 		}
 
-		const bounds = groupFrame(children);
+		const bounds = groupFrame(children, context);
 		// Children are relative to the group, so moving the group's own origin
 		// has to re-base them by the same amount.
-		return {
-			...node,
-			frame: {
-				x: node.frame.x + bounds.x,
-				y: node.frame.y + bounds.y,
+		return withFrame(
+			{
+				...node,
+				children: children.map((child) =>
+					withFrame(
+						child,
+						{
+							x: frameDim(child, "x", context) - bounds.x,
+							y: frameDim(child, "y", context) - bounds.y,
+						},
+						context,
+					),
+				),
+			},
+			{
+				x: frameDim(node, "x", context) + bounds.x,
+				y: frameDim(node, "y", context) + bounds.y,
 				width: bounds.width,
 				height: bounds.height,
 			},
-			children: children.map((child) => ({
-				...child,
-				frame: {
-					...child.frame,
-					x: child.frame.x - bounds.x,
-					y: child.frame.y - bounds.y,
-				},
-			})),
-		};
+			context,
+		);
 	});
 }

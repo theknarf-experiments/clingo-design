@@ -8,7 +8,7 @@
  * moved on the canvas without touching anything inside it.
  */
 import { makeNode } from "../edits.ts";
-import type { SceneNode } from "../scene.ts";
+import type { Dimension, SceneNode } from "../scene.ts";
 import { type Token, type Value, single } from "../values.ts";
 
 export type Box = [x: number, y: number, width: number, height: number];
@@ -58,6 +58,21 @@ export function text(
 			...props,
 		},
 	};
+}
+
+/**
+ * A node with one of its dimensions given several alternatives.
+ *
+ * Geometry arrives here as a plain box, because that is what almost every node
+ * wants; this is how a template says "and this one sits in two places", without
+ * every helper above growing a second way to spell a frame.
+ */
+export function spread(
+	node: SceneNode,
+	dim: Dimension,
+	values: Value,
+): SceneNode {
+	return { ...node, frame: { ...node.frame, [dim]: values } };
 }
 
 /** Replace one starter token's value. */

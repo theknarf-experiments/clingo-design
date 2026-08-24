@@ -11,6 +11,7 @@ import {
 	SHAPE_KINDS,
 	type Scene,
 	emptyScene,
+	frameOf,
 	propVar,
 } from "./index.ts";
 
@@ -44,7 +45,7 @@ test("an ellipse has a fill and nothing that needs corners", () => {
 test("a line is a box plus which way it leans", () => {
 	const down = makeNode("line", { x: 10, y: 20, width: 100, height: 60 });
 	assert.equal(down.diagonal, "down");
-	assert.deepEqual(down.frame, { x: 10, y: 20, width: 100, height: 60 });
+	assert.deepEqual(frameOf(down), { x: 10, y: 20, width: 100, height: 60 });
 	assert.equal(down.props.stroke?.[0]?.kind, "literal");
 	assert.equal(down.props.strokeWidth?.[0]?.kind, "literal");
 

@@ -11,6 +11,7 @@ import {
 	PROPS,
 	type SceneNode,
 	type Sizing,
+	frameOf,
 	isLaidOut,
 	layoutLength,
 	layoutValueOf,
@@ -66,12 +67,15 @@ export function askedSize(
 	node: SceneNode,
 	measured?: Measurements,
 	alternative = 0,
+	context?: ResolveContext,
 ): Size {
 	const sizes = autoSizes(node) ? measured?.[node.id] : undefined;
 	// Out of range falls back to the first: an alternative can be deleted
 	// between a measurement and the solve that reads it.
 	const size = sizes?.[alternative] ?? sizes?.[0];
-	return size ?? { width: node.frame.width, height: node.frame.height };
+	if (size) return size;
+	const frame = frameOf(node, context);
+	return { width: frame.width, height: frame.height };
 }
 
 /** How many measured sizes a node has — one per alternative of its content. */
@@ -112,7 +116,7 @@ export function naturalSize(
 		varies(layoutValueOf(node, "sizing")) ||
 		layoutWord(node, "sizing", context) !== "hug"
 	) {
-		return askedSize(node, measured);
+		return askedSize(node, measured, 0, context);
 	}
 	const children = (node.children ?? []).map((c) =>
 		naturalSize(c, measured, context),

@@ -2,15 +2,18 @@
  * The design document.
  *
  * Geometry is continuous and relative to the enclosing node — a node has
- * x/y/width/height the way a designer expects. It reaches ASP as *facts*, not
- * as choices: `frame(n1,x,120)` is four atoms, whereas making a coordinate
- * choosable would ground a domain of thousands per node.
+ * x/y/width/height the way a designer expects. Each of those four is a
+ * {@link Value} like everything else a renderer or solver reads as a leaf, so
+ * "this sits here on desktop and there on mobile" is one document with two
+ * universes rather than two documents. A dimension still reaches ASP as a
+ * number, not as a choosable domain: the *pick* is over the handful of
+ * alternatives written down, and `frame/3` is derived from it.
  *
- * Everything else is a {@link Value}: a list of alternatives, each a literal or
+ * Everything is a {@link Value}: a list of alternatives, each a literal or
  * a token reference. One alternative is an ordinary design; two or more is a
  * branch the solver explores.
  */
-import { type Frame, type PathPoint, boundsOf } from "./geometry.ts";
+import { type Frame, MIN_NODE_SIZE, type PathPoint, boundsOf } from "./geometry.ts";
 import {
 	type Picks,
 	type ResolveContext,
@@ -18,7 +21,9 @@ import {
 	VALUE_TYPES,
 	type Value,
 	type ValueType,
+	activeIndex,
 	constraintVar,
+	frameVar,
 	layoutVar,
 	lit,
 	numeralOf,
@@ -505,6 +510,175 @@ export function makeLayout(
 	return out;
 }
 
+/* ------------------------------------------------------------------ */
+/* Geometry                                                            */
+/* ------------------------------------------------------------------ */
+
+/** One of the four numbers that say where a node is and how big it is. */
+export type Dimension = "x" | "y" | "width" | "height";
+
+export interface DimensionSpec {
+	label: string;
+	type: ValueType;
+	/** Shown as the placeholder and used when adding an alternative. */
+	fallback: string;
+	/** A place along an axis, or an extent on it. */
+	role: "pos" | "span";
+}
+
+/**
+ * The four dimensions, in one place.
+ *
+ * They are {@link Value}s for the same reason a fill and a gap are: a design
+ * that puts the same card in one place on a wide screen and another on a narrow
+ * one is *one* design space, and a document that can hold only one number per
+ * dimension cannot say so. A dimension that names a `length` token is a
+ * position driven by a parameter — the thing a `pin` constraint could already
+ * reach indirectly, said directly.
+ *
+ * Not in {@link PROPS}: nothing paints a coordinate, and a per-kind property
+ * list is the wrong home for something every kind has exactly four of. What
+ * they share with a property is the part that matters — a variable key
+ * ({@link frameVar}), alternatives, tokens, and a pick per universe.
+ */
+export const FRAME_DIMS: Record<Dimension, DimensionSpec> = {
+	x: { label: "x", type: "length", fallback: "0px", role: "pos" },
+	y: { label: "y", type: "length", fallback: "0px", role: "pos" },
+	width: { label: "width", type: "length", fallback: "0px", role: "span" },
+	height: { label: "height", type: "length", fallback: "0px", role: "span" },
+};
+
+export const DIMENSIONS = Object.keys(FRAME_DIMS) as Dimension[];
+
+/** A node's geometry: four values, each free to hold alternatives. */
+export type FrameValue = Record<Dimension, Value>;
+
+/**
+ * A frame from plain numbers — the default a gesture or a template produces.
+ *
+ * **One alternative each.** Multiplicity is something a designer asks for, not
+ * something every rectangle on the canvas is born with: four varying dimensions
+ * per node would multiply the space past usefulness before anyone had made a
+ * decision.
+ *
+ * Rounded, because that rounding is load-bearing: `frame/3` reaches ASP through
+ * `numeral/2`, which rounds, so a fractional number stored here would put the
+ * canvas (which draws the atom) and hit testing (which reads the document) a
+ * sub-pixel apart. Every write goes through here or {@link withFrame}, so the
+ * whole document is on whole pixels by construction.
+ */
+export function makeFrame(frame: Frame): FrameValue {
+	return {
+		x: single(px(frame.x)),
+		y: single(px(frame.y)),
+		width: single(px(frame.width)),
+		height: single(px(frame.height)),
+	};
+}
+
+const px = (n: number): string => `${Math.round(n)}px`;
+
+/** Whatever a node stores for one dimension. */
+export const frameValueOf = (node: SceneNode, dim: Dimension): Value =>
+	node.frame[dim];
+
+/**
+ * What one dimension comes to, following whatever token it names.
+ *
+ * The same walk the generated program does through `resolved/2` and
+ * `numeral/2` — including the rounding, so the number here and the number in
+ * `frame/3` are the same number. `context.picks` is the universe being looked
+ * at; without one the first alternative stands in, which is what an unsolved
+ * preview should show.
+ *
+ * A dimension that resolves to no number at all is 0, exactly as the program's
+ * own default rule makes it, rather than being left unstated.
+ */
+export function frameDim(
+	node: SceneNode,
+	dim: Dimension,
+	context: ResolveContext = NO_CONTEXT,
+): number {
+	const resolved = resolveValue(
+		context,
+		node.frame[dim],
+		frameVar(node.id, dim),
+	);
+	const n = resolved === undefined ? undefined : numeralOf(resolved);
+	return Math.round(n ?? 0);
+}
+
+/** All four, as the plain rectangle every gesture and every renderer wants. */
+export function frameOf(
+	node: SceneNode,
+	context: ResolveContext = NO_CONTEXT,
+): Frame {
+	return {
+		x: frameDim(node, "x", context),
+		y: frameDim(node, "y", context),
+		width: frameDim(node, "width", context),
+		height: frameDim(node, "height", context),
+	};
+}
+
+/**
+ * A node with some of its geometry replaced by numbers.
+ *
+ * **This is the rule a drag obeys.** A gesture writes to *the alternative the
+ * visible universe picked* — the same thing typing into a token's value does
+ * while a universe is pinned — so a node with two positions keeps both and you
+ * move the one you can see. Nothing here ever shortens a list.
+ *
+ * An alternative that is a token reference or a derivation is left exactly as
+ * it is: that dimension is the token's to change, and quietly replacing the
+ * link with a literal would unwire a parameter the designer set up. The editor
+ * says so by refusing to drag such an axis; see `frameFrozen`.
+ */
+export function withFrame(
+	node: SceneNode,
+	patch: Partial<Frame>,
+	context: ResolveContext = NO_CONTEXT,
+): SceneNode {
+	let frame: FrameValue | undefined;
+	for (const dim of DIMENSIONS) {
+		const next = patch[dim];
+		if (next === undefined) continue;
+		const value = node.frame[dim];
+		const index = activeIndex(value, frameVar(node.id, dim), context.picks);
+		const term = index === -1 ? undefined : value[index];
+		if (term?.kind !== "literal") continue;
+		const written = px(
+			FRAME_DIMS[dim].role === "span" ? Math.max(MIN_NODE_SIZE, next) : next,
+		);
+		if (term.value === written) continue;
+		frame ??= { ...node.frame };
+		frame[dim] = value.map((t, i) => (i === index ? lit(written) : t));
+	}
+	return frame ? { ...node, frame } : node;
+}
+
+/**
+ * True when a drag cannot write this dimension: the alternative on screen is a
+ * link rather than a number, so the answer lives in the token.
+ */
+export function frameFrozen(
+	node: SceneNode,
+	dim: Dimension,
+	context: ResolveContext = NO_CONTEXT,
+): boolean {
+	const value = node.frame[dim];
+	const index = activeIndex(value, frameVar(node.id, dim), context.picks);
+	return index === -1 || value[index].kind !== "literal";
+}
+
+const NO_CONTEXT: ResolveContext = { tokens: [], picks: {} };
+
+/** A resolve context over a document, for the callers that hold a whole one. */
+export const sceneContext = (
+	scene: Scene,
+	picks: Picks = {},
+): ResolveContext => ({ tokens: scene.tokens, picks });
+
 export interface SceneNode {
 	id: string;
 	kind: NodeKind;
@@ -513,11 +687,13 @@ export interface SceneNode {
 	/**
 	 * Relative to the parent's origin — see the note in `tree.ts`.
 	 *
-	 * Under an {@link AutoLayout} parent this is not where the node sits: the
-	 * solver decides that. It stays as the size the node asks for, and as
-	 * where it returns to if the layout is removed.
+	 * Four {@link Value}s rather than four numbers, so a node can sit in one
+	 * place in one universe and another somewhere else; read it with
+	 * {@link frameOf}. Under an {@link AutoLayout} parent this is not where the
+	 * node sits: the solver decides that. It stays as the size the node asks
+	 * for, and as where it returns to if the layout is removed.
 	 */
-	frame: Frame;
+	frame: FrameValue;
 	/** Literal content for text nodes. */
 	/**
 	 * Which way a {@link KindSpec.diagonal} kind leans: "down" runs from the
@@ -1013,7 +1189,7 @@ export function emptyScene(): Scene {
 				id: "frame1",
 				kind: "frame",
 				name: "Frame 1",
-				frame: { x: 0, y: 0, ...DEFAULT_FRAME },
+				frame: makeFrame({ x: 0, y: 0, ...DEFAULT_FRAME }),
 				props: { fill: [ref("surface")] },
 				children: [],
 			},
@@ -1027,10 +1203,17 @@ export function emptyScene(): Scene {
  * The area the document occupies, used to lay out copies of it in the
  * multiverse. Falls back to a default-sized box for an empty document.
  */
-export function documentBounds(scene: Scene): Frame {
+export function documentBounds(
+	scene: Scene,
+	context: ResolveContext = NO_CONTEXT,
+): Frame {
 	// Only the roots matter: children are relative to them, so they are inside.
 	return (
-		boundsOf(scene.nodes.map((n) => n.frame)) ?? { x: 0, y: 0, ...DEFAULT_FRAME }
+		boundsOf(scene.nodes.map((n) => frameOf(n, context))) ?? {
+			x: 0,
+			y: 0,
+			...DEFAULT_FRAME,
+		}
 	);
 }
 

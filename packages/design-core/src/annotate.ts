@@ -21,6 +21,7 @@ import {
 	type Scene,
 } from "./scene.ts";
 import { placedNodes } from "./tree.ts";
+import type { ResolveContext } from "./values.ts";
 
 /**
  * One mark, in canvas coordinates.
@@ -87,10 +88,11 @@ export function annotate(
 	scene: Scene,
 	selection: ReadonlySet<string>,
 	solved: Readonly<Record<string, Partial<Frame>>> = {},
+	context?: ResolveContext,
 ): Annotation[] {
 	if (selection.size === 0) return [];
 	const world = new Map(
-		placedNodes(scene.nodes, solved).map((p) => [p.node.id, p.world]),
+		placedNodes(scene.nodes, solved, context).map((p) => [p.node.id, p.world]),
 	);
 	const out: Annotation[] = [];
 	for (const c of scene.constraints ?? []) {
