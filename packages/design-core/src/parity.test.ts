@@ -11,11 +11,19 @@
  * repaints it, the answer set is right and the document is stale, and one of
  * these assertions will fire on a document that meant it to. That is the point
  * at which the expectation, not the renderer, is what has to change.
+ *
+ * That day came: `sudoku` builds its 81 cells with a rule, so the answer set
+ * holds nodes the document has no account of and the two readings can only be
+ * held against each other where both have something to say. So the comparison
+ * runs over the document's own ids — which is the whole of what the swap
+ * promised not to disturb — and the surplus is asserted to be *derived*, rather
+ * than being quietly tolerated.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { PULL_ATOM, compile } from "./compile.ts";
+import { derivedNodes, documentIds } from "./derived.ts";
 import { directSolver } from "./directSolver.ts";
 import { explore } from "./explore.ts";
 import { readModel, type ModelNode, type ModelScene } from "./model.ts";
@@ -113,9 +121,17 @@ for (const template of TEMPLATES) {
 			const model: ModelScene = readModel(atoms);
 			const { picks, visible } = decisions(atoms);
 			const expected = drawnFromDocument(scene, picks, {}, visible);
-			const got = walkModel(model.roots);
+			const held = documentIds(scene);
+			const all = walkModel(model.roots);
+			const got = all.filter((n) => held.has(n.id));
 
-			// Same nodes, in the same paint order.
+			// Same nodes, in the same paint order. A node a rule derived was never
+			// drawn from the document, so it is held out here — and asserted to be
+			// exactly that, rather than quietly tolerated.
+			assert.deepEqual(
+				all.filter((n) => !held.has(n.id)).map((n) => n.id).sort(),
+				derivedNodes(model, held).map((d) => d.node.id).sort(),
+			);
 			assert.deepEqual(
 				got.map((n) => n.id),
 				[...expected.keys()],
@@ -166,9 +182,15 @@ for (const template of TEMPLATES) {
 				`${placed.node.id} sits somewhere else`,
 			);
 		}
-		// And nothing in the document is missing from the picture.
+		// And nothing in the document is missing from the picture. The other
+		// direction no longer holds: a rule may put more in it than the document
+		// has, which is what `derivedNodes` is for.
+		const held = documentIds(scene);
 		assert.deepEqual(
-			walkModel(model.roots).map((n) => n.id).sort(),
+			walkModel(model.roots)
+				.filter((n) => held.has(n.id))
+				.map((n) => n.id)
+				.sort(),
 			flatten(scene.nodes)
 				.filter((n) => visible.has(n.id))
 				.map((n) => n.id)

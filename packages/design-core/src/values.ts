@@ -10,6 +10,7 @@
  * any number of places can reference. It has no special powers; it is just a
  * value that happens to be shared.
  */
+import { parseAtom } from "./atoms.ts";
 
 export type ValueType =
 	| "color"
@@ -344,14 +345,22 @@ export type Variable =
 	| { kind: "layout"; node: string; field: string };
 
 export function parseVariable(key: string): Variable | null {
-	const prop = /^prop\(([^,]+),([^)]+)\)$/.exec(key);
-	if (prop) return { kind: "prop", node: prop[1], prop: prop[2] };
-	const token = /^tok\(([^)]+)\)$/.exec(key);
-	if (token) return { kind: "token", token: token[1] };
-	const constraint = /^cval\(([^)]+)\)$/.exec(key);
-	if (constraint) return { kind: "constraint", constraint: constraint[1] };
-	const layout = /^lval\(([^,]+),([^)]+)\)$/.exec(key);
-	if (layout) return { kind: "layout", node: layout[1], field: layout[2] };
+	// Parsed rather than matched: a node id may be a term, and `prop(cell(1,1),
+	// text)` has two commas of which only one separates arguments. A rule that
+	// mints a variable names it that way, and a regex over the argument list
+	// would read it as no variable at all.
+	const atom = parseAtom(key);
+	if (!atom) return null;
+	const [a, b] = atom.args;
+	const arity = atom.args.length;
+	if (atom.name === "prop" && arity === 2) return { kind: "prop", node: a, prop: b };
+	if (atom.name === "tok" && arity === 1) return { kind: "token", token: a };
+	if (atom.name === "cval" && arity === 1) {
+		return { kind: "constraint", constraint: a };
+	}
+	if (atom.name === "lval" && arity === 2) {
+		return { kind: "layout", node: a, field: b };
+	}
 	return null;
 }
 

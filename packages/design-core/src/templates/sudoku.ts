@@ -9,29 +9,35 @@ import {
 import { lit, ref, single } from "../values.ts";
 
 /**
- * A sudoku, as an ordinary document.
+ * A sudoku, as an ordinary document — most of which is not in the document at
+ * all.
  *
- * Nothing here is a sudoku feature. A cell is a text node whose wording holds
- * nine alternatives; a given is the same node with one. A row, a column and a
- * box are the `differ` rule the Rules panel already offers, over nine members
- * and the `text` property. That is the whole encoding — 81 nodes, 27 rules,
+ * Nothing here is a sudoku feature. The 81 cells are text nodes a rule brings
+ * into being; a cell's nine pencil marks are `alt/2`, which is the same
+ * predicate a property row compiles to, so they pick, resolve, render, grey and
+ * pin exactly like a fill with nine colours. The 27 groups are `group/1` and
+ * `member/2`, and each of the 27 rules in the Rules panel points at one of them
+ * rather than listing nine ids. That is the whole encoding — six kinds of atom,
  * no new kind of anything — and the solver comes back with exactly one
  * universe, which is to say the finished board is already on the canvas.
  *
- * It earns its place in this list because every part of the studio says
- * something true about it at once:
+ * It was written as 81 TypeScript nodes and 243 enumerated members first, and
+ * the difference is the point: what a rule creates used to be second-class,
+ * with nothing to select, no property row to grey and no rule a core could
+ * name. Every one of those now works on nodes the document does not hold.
+ *
+ * The three claims the template is in the list to make:
  *
  *   - the multiverse is the solution count: one for a proper puzzle, several
- *     the moment a given is deleted;
+ *     the moment a `given` is deleted from the rules;
  *   - the reachability marks in a cell's property row are pencil marks —
  *     nine alternatives with the impossible ones dimmed, narrowing live as
  *     other cells are pinned;
  *   - two givens that clash come back as an unsat core naming the one group
  *     of nine they clash in, out of twenty-seven.
  *
- * The digits are the *content* of the cells rather than nine colours, which
- * only became possible when copy stopped being a bare string and became a
- * value like any other.
+ * The puzzle itself is data in the rules, which is where a puzzle belongs:
+ * changing one `given` fact is how you open the board up or contradict it.
  */
 
 /** Wikipedia's example grid: 30 givens, and exactly one completion. */
@@ -47,55 +53,14 @@ const PUZZLE = [
 	"....8..79",
 ];
 
-const DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
-
-/** Nine alternatives — an empty cell is a variable with the full domain. */
-const PENCIL = DIGITS.map(lit);
-
 const CELL = 44;
 const BOARD = CELL * 9;
 const PAD = 24;
 /** Where the grid starts inside the frame, under the title. */
 const TOP = 72;
 
-const cellId = (row: number, col: number) => `r${row + 1}c${col + 1}`;
-const cellName = (row: number, col: number) => `R${row + 1}C${col + 1}`;
-
-/**
- * One cell.
- *
- * Fixed sizing rather than hugging: a sudoku cell is a square of the grid, not
- * a box the width of whatever digit landed in it — and a hugging cell would
- * also have every one of its nine wordings measured, which is 729 measurements
- * for a board that never moves.
- */
-function cell(row: number, col: number): SceneNode {
-	const given = PUZZLE[row][col];
-	const box: [number, number, number, number] = [
-		PAD + col * CELL,
-		TOP + row * CELL,
-		CELL,
-		CELL,
-	];
-	const node = text(
-		cellId(row, col),
-		cellName(row, col),
-		box,
-		given === "." ? PENCIL : given,
-		{
-			// A given is the designer's, a solved digit is the solver's, and the
-			// board says which is which the way a printed puzzle does.
-			ink: given === "." ? [ref("accent")] : [ref("ink")],
-			size: single("22px"),
-			weight: single(given === "." ? "500" : "700"),
-			align: single("center"),
-			// A line box exactly as tall as the cell is what centres the digit in
-			// it; there is no vertical alignment to ask for.
-			lineHeight: single("2"),
-		},
-	);
-	return { ...node, sizing: "fixed" };
-}
+/** The three families of nine, and how a member of each is named. */
+const FAMILIES = ["row", "col", "box"] as const;
 
 /** The 8 interior rules of the grid, thick every third one. */
 function gridLines(): SceneNode[] {
@@ -118,31 +83,117 @@ function gridLines(): SceneNode[] {
  *
  * Each is a plain constraint with its own switch, which is what makes a
  * contradiction attributable: the core names `row1` rather than "the sudoku".
+ * What each one ranges over is a *set the rules named* — nine members this
+ * document never enumerated and could not, since the cells are not in it.
  */
 function groups(): Constraint[] {
-	const out: Constraint[] = [];
-	const add = (id: string, nodes: string[]) =>
-		out.push({ id, kind: "differ", prop: "text", nodes, enabled: true });
-
-	for (let i = 0; i < 9; i++) {
-		add(`row${i + 1}`, DIGITS.map((_, c) => cellId(i, c)));
-		add(`col${i + 1}`, DIGITS.map((_, r) => cellId(r, i)));
-		add(
-			`box${i + 1}`,
-			DIGITS.map((_, k) =>
-				cellId(3 * Math.floor(i / 3) + Math.floor(k / 3), 3 * (i % 3) + (k % 3)),
-			),
-		);
-	}
-	return out;
+	return FAMILIES.flatMap((family) =>
+		Array.from({ length: 9 }, (_, i) => ({
+			id: `${family}${i + 1}`,
+			kind: "differ" as const,
+			prop: "text" as const,
+			nodes: [],
+			group: `${family}(${i + 1})`,
+			enabled: true,
+		})),
+	);
 }
 
-export function sudoku(): Scene {
-	const cells: SceneNode[] = [];
-	for (let row = 0; row < 9; row++) {
-		for (let col = 0; col < 9; col++) cells.push(cell(row, col));
-	}
+/** The puzzle, one fact per given. Delete one and the board opens up. */
+function givens(): string {
+	return PUZZLE.flatMap((row, r) => {
+		const line = [...row].flatMap((digit, c) =>
+			digit === "." ? [] : [`given(${r + 1},${c + 1},${digit}).`],
+		);
+		return line.length > 0 ? [line.join(" ")] : [];
+	}).join("\n");
+}
 
+/** Everything the page holds itself: the heading, the board, the grid rules. */
+function furniture(): SceneNode[] {
+	return [
+		text("title", "Title", [PAD, 20, BOARD, 26], "Sudoku", {
+			ink: [ref("ink")],
+			size: single("20px"),
+			weight: single("700"),
+		}),
+		text(
+			"caption",
+			"Caption",
+			[PAD, 48, BOARD, 16],
+			"81 cells and 27 groups, all of them derived by rules.",
+			{ ink: [ref("subtle")], size: single("12px"), weight: single("400") },
+		),
+		rect("board", "Board", [PAD, TOP, BOARD, BOARD], {
+			fill: [ref("surface")],
+			radius: single("2px"),
+			stroke: single("#0f172a"),
+			strokeWidth: single("2px"),
+		}),
+		...gridLines(),
+	];
+}
+
+const rules = (over: number) => `${RULES_HEADER}
+% ---- the puzzle ----
+% One fact per given. Delete one and the space opens up; change one so that two
+% givens clash and the core names the single group of nine they clash in.
+pos(1..9).
+digit(1..9).
+${givens()}
+open(R,C) :- pos(R), pos(C), not given(R,C,_).
+
+% ---- the 81 cells ----
+% node/1 is derivable, so these are on the canvas without being in the
+% document. Frames are relative to the page, which is what the grid is drawn on.
+node(cell(R,C)) :- pos(R), pos(C).
+kind(cell(R,C),text) :- pos(R), pos(C).
+child(page,cell(R,C)) :- pos(R), pos(C).
+frame(cell(R,C),x,X) :- pos(R), pos(C), X = ${PAD} + (C-1)*${CELL}.
+frame(cell(R,C),y,Y) :- pos(R), pos(C), Y = ${TOP} + (R-1)*${CELL}.
+frame(cell(R,C),width,${CELL}) :- pos(R), pos(C).
+frame(cell(R,C),height,${CELL}) :- pos(R), pos(C).
+% child/2 is a set, so paint order is order/2 and nothing else. The digits go
+% over the board and its grid rules, which are the ${over} layers the page holds.
+order(cell(R,C),I) :- pos(R), pos(C), I = ${over} + (R-1)*9 + C.
+
+% ---- what a cell says: nine pencil marks, or the one digit it was given ----
+% alt/2 is the same predicate a property row compiles to, so these are ordinary
+% variables: the solver picks one per cell, the inspector offers all nine and
+% dims the ones no board uses, and either can be pinned.
+literal(dig(1),"1"). literal(dig(2),"2"). literal(dig(3),"3").
+literal(dig(4),"4"). literal(dig(5),"5"). literal(dig(6),"6").
+literal(dig(7),"7"). literal(dig(8),"8"). literal(dig(9),"9").
+alt(prop(cell(R,C),text),D) :- open(R,C), digit(D).
+alt(prop(cell(R,C),text),D) :- given(R,C,D).
+alt_literal(prop(cell(R,C),text),D,dig(D)) :- alt(prop(cell(R,C),text),D).
+
+% ---- how a cell is drawn ----
+% A given is the designer's and a solved digit is the solver's, and the board
+% says which is which the way a printed puzzle does. The colours follow the
+% document's own variables, so recolouring 'accent' recolours the answers.
+% A line box exactly as tall as the cell is what centres the digit in it.
+rendered(cell(R,C),ink,L) :- given(R,C,_), resolved(tok(ink),L).
+rendered(cell(R,C),ink,L) :- open(R,C), resolved(tok(accent),L).
+rendered(cell(R,C),weight,"700") :- given(R,C,_).
+rendered(cell(R,C),weight,"500") :- open(R,C).
+rendered(cell(R,C),size,"22px") :- pos(R), pos(C).
+rendered(cell(R,C),align,"center") :- pos(R), pos(C).
+rendered(cell(R,C),lineHeight,"2") :- pos(R), pos(C).
+
+% ---- the 27 groups ----
+% Each is a set the Rules panel can point a constraint at. Twenty-seven rules
+% cover 243 memberships that nothing had to write down.
+group(row(R)) :- pos(R).
+group(col(C)) :- pos(C).
+group(box(B)) :- B = 1..9.
+member(row(R),cell(R,C)) :- pos(R), pos(C).
+member(col(C),cell(R,C)) :- pos(R), pos(C).
+member(box(B),cell(R,C)) :- pos(R), pos(C), B = 3*((R-1)/3) + (C-1)/3 + 1.
+`;
+
+export function sudoku(): Scene {
+	const page = furniture();
 	return {
 		tokens: starterTokens(),
 		nodes: [
@@ -151,31 +202,10 @@ export function sudoku(): Scene {
 				"Puzzle",
 				[0, 0, PAD * 2 + BOARD, TOP + BOARD + PAD],
 				{ fill: [ref("muted")] },
-				[
-					text("title", "Title", [PAD, 20, BOARD, 26], "Sudoku", {
-						ink: [ref("ink")],
-						size: single("20px"),
-						weight: single("700"),
-					}),
-					text(
-						"caption",
-						"Caption",
-						[PAD, 48, BOARD, 16],
-						"81 cells of nine digits, 27 rules, one universe.",
-						{ ink: [ref("subtle")], size: single("12px"), weight: single("400") },
-					),
-					rect("board", "Board", [PAD, TOP, BOARD, BOARD], {
-						fill: [ref("surface")],
-						radius: single("2px"),
-						stroke: single("#0f172a"),
-						strokeWidth: single("2px"),
-					}),
-					...gridLines(),
-					...cells,
-				],
+				page,
 			),
 		],
 		constraints: groups(),
-		rules: RULES_HEADER,
+		rules: rules(page.length),
 	};
 }

@@ -109,6 +109,27 @@ test("variable keys are stable ASP terms", () => {
 	assert.equal(propVar("n1", "fill"), "prop(n1,fill)");
 });
 
+test("a variable on a node a rule named reads back", () => {
+	// Node ids are terms, so a key can hold commas that are not argument
+	// separators. Reading one back with a regex over the argument list makes it
+	// no variable at all, and everything that captions or labels a variable then
+	// falls back to the raw key.
+	const key = propVar("cell(1,1)", "text");
+	assert.equal(key, "prop(cell(1,1),text)");
+	assert.deepEqual(parseVariable(key), {
+		kind: "prop",
+		node: "cell(1,1)",
+		prop: "text",
+	});
+	assert.deepEqual(parseVariable(layoutVar("row(3)", "gap")), {
+		kind: "layout",
+		node: "row(3)",
+		field: "gap",
+	});
+	assert.equal(parseVariable("prop(a)"), null, "wrong arity is not a variable");
+	assert.equal(parseVariable("nonsense(a,b)"), null);
+});
+
 test("wordOf reads the constant a literal stands for", () => {
 	assert.equal(wordOf("row"), "row");
 	assert.equal(wordOf("spaceBetween"), "spaceBetween");

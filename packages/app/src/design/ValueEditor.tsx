@@ -41,6 +41,22 @@ export interface ValueEditorProps {
 	pinned?: number;
 	/** Fix or release an alternative. Null releases. */
 	onPin?: (index: number | null) => void;
+	/**
+	 * The solver's own index for each alternative, where it is not the position.
+	 *
+	 * A variable a *rule* minted numbers its alternatives however the rule liked
+	 * — `alt(prop(cell(R,C),text),D) :- digit(D)` numbers them 1..9 — and it is
+	 * that number `pick/2` carries and a pin assumes. Absent for a document
+	 * value, whose alternatives are a list and so are numbered by position.
+	 */
+	indices?: readonly number[];
+	/**
+	 * The row shows a variable the document does not hold, so there is nothing to
+	 * type into, link or add to. Everything that *asks* the solver a question —
+	 * which alternative is live, which are ruled out, pinning one — still works,
+	 * because those are questions about the answer, not about the document.
+	 */
+	readOnly?: boolean;
 	fallback: string;
 	/** Layer names, so a derivation from another node reads as its name. */
 	names?: Readonly<Record<string, string>>;
@@ -88,10 +104,15 @@ export function ValueEditor({
 	reachable,
 	pinned,
 	onPin,
+	indices,
+	readOnly,
 	fallback,
 	names,
 	testId,
 }: ValueEditorProps) {
+	// Which alternative the solver calls this one. For a document value the
+	// position *is* the index, which is why nothing else in the row has to know.
+	const at = (position: number) => indices?.[position] ?? position;
 	const isColour = type === "color";
 	const multiline = VALUE_TYPES[type].multiline === true;
 	// A closed set of choices is a menu. Typing a font stack or a box-shadow by
@@ -111,10 +132,10 @@ export function ValueEditor({
 	 * produces nothing new. Either way it is not a live choice, but neither is
 	 * it impossible to write.
 	 */
-	const unused = (index: number) =>
-		reachable !== undefined && value.length > 1 && !reachable.has(index);
+	const unused = (position: number) =>
+		reachable !== undefined && value.length > 1 && !reachable.has(at(position));
 	const usedCount = reachable
-		? [...reachable].filter((i) => i < value.length).length
+		? value.filter((_, position) => reachable.has(at(position))).length
 		: value.length;
 	const narrowed = reachable !== undefined && usedCount < value.length;
 
@@ -160,9 +181,9 @@ export function ValueEditor({
 			<div className={styles.alts}>
 				{value.map((term, index) => {
 					const resolved = preview(term);
-					const isActive = value.length > 1 && index === active;
+					const isActive = value.length > 1 && at(index) === active;
 					const dead = unused(index);
-					const isPinned = pinned === index;
+					const isPinned = pinned === at(index);
 					return (
 						<div
 							key={index}
@@ -187,7 +208,7 @@ export function ValueEditor({
 									type="color"
 									className={styles.swatch}
 									data-role="swatch"
-									disabled={term.kind !== "literal"}
+									disabled={readOnly || term.kind !== "literal"}
 									value={/^#[0-9a-f]{6}$/i.test(resolved ?? "") ? resolved : "#94a3b8"}
 									onChange={(e) => replace(index, lit(e.target.value))}
 								/>
@@ -199,7 +220,15 @@ export function ValueEditor({
 								/>
 							)}
 
-							{term.kind === "literal" && options ? (
+							{readOnly ? (
+								// Nothing to type into: the rule that produced this is what
+								// says so, and the Rules panel is where the rule is.
+								<span className={styles.text} data-role="literal-readonly">
+									{term.kind === "literal"
+										? optionLabel(type, term.value)
+										: termLabel(tokens, term, names)}
+								</span>
+							) : term.kind === "literal" && options ? (
 								<select
 									className={styles.choice}
 									data-role="literal"
@@ -251,37 +280,39 @@ export function ValueEditor({
 								</span>
 							)}
 
-							<select
-								className={styles.link}
-								data-role="link"
-								title="Type a value, link it to a variable, or compute it from one"
-								value={optionValue(term)}
-								onChange={(e) =>
-									replace(index, termFor(e.target.value, resolved ?? fallback))
-								}
-							>
-								<option value="">Custom</option>
-								{tokens.length > 0 ? (
-									<optgroup label="Link to">
-										{tokens.map((t) => (
-											<option key={t.id} value={`ref:${t.id}`}>
-												{t.name}
-											</option>
-										))}
-									</optgroup>
-								) : null}
-								{tokens.length > 0
-									? derivations.map((via) => (
-											<optgroup key={via} label={DERIVATIONS[via].label}>
-												{tokens.map((t) => (
-													<option key={t.id} value={`via:${via}:${tokenVar(t.id)}`}>
-														{t.name}
-													</option>
-												))}
-											</optgroup>
-										))
-									: null}
-							</select>
+							{readOnly ? null : (
+								<select
+									className={styles.link}
+									data-role="link"
+									title="Type a value, link it to a variable, or compute it from one"
+									value={optionValue(term)}
+									onChange={(e) =>
+										replace(index, termFor(e.target.value, resolved ?? fallback))
+									}
+								>
+									<option value="">Custom</option>
+									{tokens.length > 0 ? (
+										<optgroup label="Link to">
+											{tokens.map((t) => (
+												<option key={t.id} value={`ref:${t.id}`}>
+													{t.name}
+												</option>
+											))}
+										</optgroup>
+									) : null}
+									{tokens.length > 0
+										? derivations.map((via) => (
+												<optgroup key={via} label={DERIVATIONS[via].label}>
+													{tokens.map((t) => (
+														<option key={t.id} value={`via:${via}:${tokenVar(t.id)}`}>
+															{t.name}
+														</option>
+													))}
+												</optgroup>
+											))
+										: null}
+								</select>
+							)}
 
 							{onPin && value.length > 1 ? (
 								<button
@@ -294,35 +325,39 @@ export function ValueEditor({
 											? "Release this value"
 											: "Show only designs that use this value"
 									}
-									onClick={() => onPin(isPinned ? null : index)}
+									onClick={() => onPin(isPinned ? null : at(index))}
 								>
 									{isPinned ? "◆" : "◇"}
 								</button>
 							) : null}
 
-							<button
-								type="button"
-								className={styles.remove}
-								data-role="remove-alt"
-								title="Remove this value"
-								disabled={value.length <= 1}
-								onClick={() => remove(index)}
-							>
-								×
-							</button>
+							{readOnly ? null : (
+								<button
+									type="button"
+									className={styles.remove}
+									data-role="remove-alt"
+									title="Remove this value"
+									disabled={value.length <= 1}
+									onClick={() => remove(index)}
+								>
+									×
+								</button>
+							)}
 						</div>
 					);
 				})}
 			</div>
 
-			<button
-				type="button"
-				className={styles.add}
-				data-role="add-alt"
-				onClick={add}
-			>
-				+ Add value
-			</button>
+			{readOnly ? null : (
+				<button
+					type="button"
+					className={styles.add}
+					data-role="add-alt"
+					onClick={add}
+				>
+					+ Add value
+				</button>
+			)}
 		</section>
 	);
 }

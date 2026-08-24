@@ -31,6 +31,7 @@ import {
 	dimension,
 	isLaidOut,
 	layoutValueOf,
+	rangesOverGroup,
 	type Scene,
 	type SceneNode,
 } from "./scene.ts";
@@ -508,6 +509,8 @@ export const CONTRACT = `% Predicates you can rely on:
 %   derived_of(Via, Src, Lit)   what Via turns Src into
 %   resolved(V, Lit)            V's final literal, following links and
 %                               derivations
+%   dvar(V)                     derived: V is a variable no *document* value
+%                               named — see below
 %   viol(C)                     constraint C is violated
 %   active(C)                   C is switched on (assumed while solving)
 %   rendered(Node, Prop, Lit)   what a node actually draws with
@@ -520,6 +523,20 @@ export const CONTRACT = `% Predicates you can rely on:
 %   tok(Token)                  a token's own definition
 %   cval(C)                     the dimension a geometric constraint holds to
 %   lval(Node, Setting)         one input to an automatic layout
+%
+% alt/2 is a derivable predicate too, so a rule can mint a variable the
+% document never named, and it then picks, resolves, renders, greys and pins
+% exactly like a property row. Give it a key the studio can read back — the
+% four forms above — and the inspector will show it as a row on the node it
+% belongs to:
+%
+%   alt(prop(cell(R,C),text), D) :- open(R,C), digit(D).
+%   alt_literal(prop(cell(R,C),text), D, dig(D)) :- alt(prop(cell(R,C),text),D).
+%   literal(dig(1),"1"). ... literal(dig(9),"9").
+%
+% Indices are yours: any integer, dense or not. What is offered as a row is
+% dvar/1 with its dalt/3 alternatives, both projected out of the answer set, so
+% only the alternatives a rule minted cost anything to report.
 %
 % Scene. These are ordinary predicates, not a fixed table: the document
 % supplies facts for them and your rules may derive more. A node the document
@@ -566,6 +583,13 @@ export const CONTRACT = `% Predicates you can rely on:
 %
 %   constraint(C)  c_kind(C, ${CONSTRAINT_NAMES.join("|")})
 %   c_node(C, N)                a member    c_slot(C, N, I)  which one
+%   c_group(C, G)               range over a set instead of listing members:
+%                               c_node(C,N) :- c_group(C,G), member(G,N)
+%   group(G)  member(G, N)      yours to derive. Every group/1 instance is
+%                               offered in the Rules panel as something a
+%                               constraint can be pointed at, so a rule that
+%                               builds nine cells can name the row they are in
+%                               and the rule that constrains it needs no ASP
 %   c_prop(C, Prop)             what a property rule is about
 %   c_edge(C, E)                what a geometric one is about
 %   c_value(C, Pixels)          derived: numeral(resolved(cval(C)))
@@ -835,11 +859,22 @@ export function compile(
 	const constraintLines: string[] = [];
 	const guards: string[] = [];
 	let geometric = false;
+	let grouped = false;
 	for (const c of scene.constraints ?? []) {
 		const spec = CONSTRAINT_KINDS[c.kind];
-		if (!c.enabled || c.nodes.length < spec.minNodes) continue;
+		// A group only means anything to a kind that reads its members as a set.
+		const group = c.group !== undefined && rangesOverGroup(c.kind) ? c.group : undefined;
+		if (!c.enabled) continue;
+		// How many members a group has is the rule's business, not the document's,
+		// so only a listed constraint can be too small to say anything.
+		if (group === undefined && c.nodes.length < spec.minNodes) continue;
+		if (group !== undefined) grouped = true;
 		constraintLines.push(atom("constraint", c.id));
 		constraintLines.push(atom("c_kind", c.id, c.kind));
+		// A group is the members, so it replaces them rather than adding to them:
+		// `c_node/2` is then *derived* from `member/2` by the generic rule below,
+		// which is what lets one constraint cover nine cells it never named.
+		if (group) constraintLines.push(atom("c_group", c.id, group));
 		// A geometric kind carries a property in the document only so that
 		// turning it back into a colour rule remembers one; the program has no
 		// use for it.
@@ -857,11 +892,15 @@ export function compile(
 			}
 		}
 		// Order matters to the kinds that read one member differently from
-		// another — which side of a gap, which node is the mirror.
-		c.nodes.forEach((node, index) => {
-			constraintLines.push(atom("c_node", c.id, node));
-			constraintLines.push(atom("c_slot", c.id, node, index + 1));
-		});
+		// another — which side of a gap, which node is the mirror. A group has no
+		// order to write down, and the kinds that could read one cannot take a
+		// group at all.
+		if (group === undefined) {
+			c.nodes.forEach((node, index) => {
+				constraintLines.push(atom("c_node", c.id, node));
+				constraintLines.push(atom("c_slot", c.id, node, index + 1));
+			});
+		}
 		guards.push(guardAtom(c.id));
 	}
 
@@ -913,6 +952,13 @@ export function compile(
 		section("choices", [
 			"var(V) :- alt(V,_).",
 			"1 { pick(V,I) : alt(V,I) } 1 :- var(V).",
+			"% Which variables the *document* named. alt/2 is derivable, so a rule",
+			"% can mint a variable of its own — `alt(prop(cell(R,C),text),D)` is 81",
+			"% pencil-mark cells — and it then picks, resolves, renders and pins",
+			"% exactly like a property row. The editor needs to know its",
+			"% alternatives to offer them, and it cannot read them off a document",
+			"% that does not hold them; see dvar/1 and dalt/3 in the output.",
+			...Object.keys(variables).map((key) => atom("docvar", key)),
 			"% Follow token links to a final literal. A dangling or cyclic",
 			"% reference simply derives nothing, so the renderer falls back.",
 			"resolved(V,L) :- pick(V,I), alt_literal(V,I,L).",
@@ -948,6 +994,19 @@ export function compile(
 					"% with a *core*: the smallest set of them that cannot hold together.",
 					"{ active(C) } :- constraint(C).",
 					":- viol(C), active(C).",
+					...(grouped
+						? [
+								"",
+								"% ---- members a rule named rather than the document ----",
+								"% A group is a set the document points at instead of listing:",
+								"% one constraint, nine members it never enumerated, and still",
+								"% one switch the core can name. Everything below reads c_node/2",
+								"% and so does not care which way the members arrived.",
+								"#defined c_group/2.",
+								"#defined member/2.",
+								"c_node(C,N) :- c_group(C,G), member(G,N).",
+							]
+						: []),
 					"",
 					"% ---- over a property ----",
 					"viol(C) :- c_kind(C,differ), c_prop(C,P), c_node(C,A), c_node(C,B), A<B,",
@@ -1000,6 +1059,23 @@ export function compile(
 			"% than a string match.",
 			"#show rendered/3.",
 			"#show literal/2.",
+			"% Variables a rule minted, and what they may say. A document variable's",
+			"% alternatives are already in the document, so only the others are worth",
+			"% the bytes: on a document with no such rule these two show nothing at",
+			"% all, and on the sudoku they are ~540 atoms that turn 51 derived cells",
+			"% into 51 pencil-mark rows the inspector can dim and pin.",
+			"#defined docvar/1.",
+			"dvar(V) :- var(V), not docvar(V).",
+			"dalt(V,I,L) :- dvar(V), alt_literal(V,I,L).",
+			"#show dvar/1.",
+			"#show dalt/3.",
+			"% Sets a rule named, so a constraint can be pointed at one without the",
+			"% document enumerating what is in it — and so the Rules panel can offer",
+			"% the groups that actually exist rather than asking for an ASP term.",
+			"#defined group/1.",
+			"#defined member/2.",
+			"#show group/1.",
+			"#show member/2.",
 			"% Projection is on what is *rendered*, not on which alternative was",
 			"% picked. Two ways to spell the same colour are one design, and a",
 			"% token nothing references does not create designs at all.",

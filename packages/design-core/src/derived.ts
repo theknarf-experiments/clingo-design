@@ -91,27 +91,34 @@ export function derivedAt(
 }
 
 /**
- * Whether `ancestor` is at or above `id` in the model tree.
+ * Which of two nodes the eye sees on top.
  *
- * The canvas needs this to settle a two-tree hit test: the document's own hit
- * testing knows nothing of derived nodes, so a click on one currently lands on
- * whichever document node encloses it. Preferring the derived node exactly
- * when that is the relationship keeps every existing gesture untouched.
+ * The canvas has two hit tests that do not know about each other: the
+ * document's, which cannot see a derived node at all, and {@link derivedAt}.
+ * Something has to settle which answer wins, and paint order is the only honest
+ * arbiter — what is drawn last is what the pointer gets, whichever tree it came
+ * from.
+ *
+ * The model tree is where that order lives: a pre-order walk of it is exactly
+ * the order the renderer emits, so a child always comes after its parent and a
+ * later sibling's whole subtree after an earlier one's. That subsumes the
+ * enclosing case this used to test — a derived node under a document node is
+ * painted after it — and also answers the case it got wrong, where a derived
+ * node is drawn over a document node that is not its ancestor.
+ *
+ * Unknown ids are not on top of anything.
  */
-export function encloses(
-	nodes: readonly DerivedNode[],
-	ancestor: string,
-	id: string,
-): boolean {
-	const parents = new Map(nodes.map((d) => [d.node.id, d.parent] as const));
-	const seen = new Set<string>();
-	for (let at: string | null = id; at !== null; at = parents.get(at) ?? null) {
-		if (at === ancestor) return true;
-		if (seen.has(at)) return false;
-		seen.add(at);
-		// The chain stops at the first node the document owns, whose own parent
-		// this reading does not carry — but a document node *is* the answer.
-		if (!parents.has(at)) return false;
-	}
-	return false;
+export function paintedOver(model: ModelScene, over: string, under: string): boolean {
+	if (over === under) return false;
+	let rank = 0;
+	let overAt = -1;
+	let underAt = -1;
+	const walk = (node: ModelNode): void => {
+		const at = rank++;
+		if (node.id === over) overAt = at;
+		else if (node.id === under) underAt = at;
+		for (const child of node.children) walk(child);
+	};
+	for (const root of model.roots) walk(root);
+	return overAt >= 0 && underAt >= 0 && overAt > underAt;
 }

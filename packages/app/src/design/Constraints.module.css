@@ -4,14 +4,18 @@
 	gap: 0.35rem;
 }
 
+/* The hint takes a line of its own so the two controls beside it keep their
+   width: the panel is 260px by default and three things do not fit across it. */
 .head {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	justify-content: space-between;
-	gap: 0.5rem;
+	justify-content: flex-end;
+	gap: 0.35rem;
 }
 
 .hint {
+	flex: 1 1 100%;
 	font-size: 0.72rem;
 	line-height: 1.4;
 	opacity: 0.5;
@@ -124,8 +128,31 @@
 	opacity: 1;
 }
 
+/* Where the members came from, chosen in the same place they always were: the
+   layers you picked, or a set your rules named. */
+.memberRow {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+	min-width: 0;
+}
+
+.over {
+	flex: 0 1 auto;
+	max-width: 9rem;
+	padding: 0.1rem 0.2rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
 /* Reads as a sentence naming the layers, and doubles as a way to find them. */
 .members {
+	flex: 1 1 auto;
+	min-width: 0;
 	padding: 0;
 	font: inherit;
 	font-size: 0.72rem;
@@ -138,9 +165,14 @@
 	cursor: pointer;
 }
 
-.members:hover {
+.members:hover:not(:disabled) {
 	opacity: 1;
 	text-decoration: underline;
+}
+
+.members:disabled {
+	cursor: default;
+	opacity: 0.4;
 }
 
 /* A dimension driven by a variable. It shows the name rather than a field:

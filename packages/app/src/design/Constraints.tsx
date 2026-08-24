@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
 	CONSTRAINT_KINDS,
 	CONSTRAINT_NAMES,
@@ -6,6 +7,7 @@ import {
 	type ConstraintSpec,
 	EDGES,
 	type Edge,
+	type ModelScene,
 	PROPS,
 	type PropName,
 	type Scene,
@@ -14,6 +16,8 @@ import {
 	deleteConstraint,
 	dimension,
 	findInTree,
+	groupProps,
+	rangesOverGroup,
 	ref,
 	retargetConstraint,
 	sharedProps,
@@ -33,6 +37,16 @@ export interface ConstraintsProps {
 	conflict: ReadonlySet<string>;
 	/** Select the nodes a constraint ranges over, so it can be seen. */
 	onSelectionChange: (ids: string[]) => void;
+	/**
+	 * The universe on screen, for the sets its rules named.
+	 *
+	 * A rule can put nodes on the canvas and say which of them belong together;
+	 * `model.groups` is that saying, and it is what a constraint is pointed at
+	 * instead of a list of ids. Reading it from the answer set rather than asking
+	 * the user for an ASP term is the whole authoring story: the groups on offer
+	 * are exactly the ones that exist.
+	 */
+	model?: ModelScene;
 }
 
 /**
@@ -144,22 +158,73 @@ export function Constraints({
 	selection,
 	conflict,
 	onSelectionChange,
+	model,
 }: ConstraintsProps) {
 	const selected = [...selection];
-	const available = sharedProps(scene, selected);
+	const groups = Object.keys(model?.groups ?? {}).sort();
+	/**
+	 * What a new rule will range over: the selected layers, or a set a rule
+	 * named.
+	 *
+	 * One control, in the place the members were always chosen, because these are
+	 * alternatives to each other and not two ways of adding a rule.
+	 */
+	const [target, setTarget] = useState("");
+	// A group that has since stopped existing must not silently keep taking new
+	// rules; falling back to the selection is what the panel did before.
+	const over = groups.includes(target) ? target : "";
+	const membersOf = (group: string) => model?.groups[group] ?? [];
+	const propsOf = (c: Constraint): PropName[] =>
+		c.group !== undefined && model
+			? groupProps(model, membersOf(c.group))
+			: sharedProps(scene, c.nodes);
+	const available = over
+		? model
+			? groupProps(model, membersOf(over))
+			: []
+		: sharedProps(scene, selected);
 
 	/**
 	 * A property rule also needs something to talk *about*; a geometric one
 	 * always has geometry to talk about, so it only needs enough members.
+	 *
+	 * A group supplies the members, so what it needs instead is a kind that reads
+	 * them as a set — a gap has a near side and a far side, and a set has neither.
 	 */
 	const offered = (kind: ConstraintKind): boolean => {
 		const spec = CONSTRAINT_KINDS[kind];
+		if (over) return rangesOverGroup(kind) && (spec.geometric || available.length > 0);
 		if (selected.length < spec.minNodes) return false;
 		return spec.geometric || available.length > 0;
 	};
 	const canAdd = CONSTRAINT_NAMES.some(offered);
 
 	const nameOf = (id: string) => findInTree(scene.nodes, id)?.name ?? id;
+
+	/** The "what it ranges over" control, for the head and for each rule. */
+	function overSelect(
+		value: string,
+		onPick: (group: string | undefined) => void,
+		role: string,
+	) {
+		if (groups.length === 0) return null;
+		return (
+			<select
+				className={styles.over}
+				data-role={role}
+				title="Range over the selected layers, or over a set your rules named"
+				value={value}
+				onChange={(e) => onPick(e.target.value || undefined)}
+			>
+				<option value="">Selected layers</option>
+				{groups.map((group) => (
+					<option key={group} value={group}>
+						{group} ({membersOf(group).length})
+					</option>
+				))}
+			</select>
+		);
+	}
 
 	/** A driven dimension reads as the variable's name, not as today's number. */
 	function dimensionOf(c: Constraint): string {
@@ -181,8 +246,11 @@ export function Constraints({
 		<div className={styles.constraints} data-role="constraints">
 			<div className={styles.head}>
 				<span className={styles.hint}>
-					Rules the design must obey. Select layers to add one.
+					{groups.length > 0
+						? "Rules the design must obey. Add one over the selected layers, or over a set your rules named."
+						: "Rules the design must obey. Select layers to add one."}
 				</span>
+				{overSelect(over, (group) => setTarget(group ?? ""), "new-constraint-over")}
 				<select
 					className={styles.add}
 					data-role="add-constraint"
@@ -190,13 +258,27 @@ export function Constraints({
 					disabled={!canAdd}
 					title={
 						canAdd
-							? "Constrain the selected layers"
-							: "Select layers that share a property, or two to relate by geometry"
+							? over
+								? `Constrain every member of ${over}`
+								: "Constrain the selected layers"
+							: over
+								? "This set has nothing its members all share"
+								: "Select layers that share a property, or two to relate by geometry"
 					}
 					onChange={(e) => {
 						const kind = e.target.value as ConstraintKind;
 						if (!kind) return;
-						onSceneChange((prev) => addConstraint(prev, kind, selected).scene);
+						onSceneChange(
+							(prev) =>
+								addConstraint(
+									prev,
+									kind,
+									over ? [] : selected,
+									over ? available[0] : undefined,
+									undefined,
+									over || undefined,
+								).scene,
+						);
 					}}
 				>
 					<option value="">+ New</option>
@@ -224,7 +306,8 @@ export function Constraints({
 
 			{scene.constraints.map((c) => {
 				const spec = CONSTRAINT_KINDS[c.kind];
-				const props = sharedProps(scene, c.nodes);
+				const props = propsOf(c);
+				const members = c.group === undefined ? c.nodes : membersOf(c.group);
 				return (
 					<div
 						key={c.id}
@@ -277,7 +360,7 @@ export function Constraints({
 									className={styles.limit}
 									data-role="constraint-limit"
 									min={1}
-									max={Math.max(1, c.nodes.length)}
+									max={Math.max(1, members.length)}
 									value={c.limit ?? 1}
 									onChange={(e) =>
 										onSceneChange((prev) =>
@@ -349,15 +432,40 @@ export function Constraints({
 							</button>
 						</div>
 
-						<button
-							type="button"
-							className={styles.members}
-							data-role="constraint-members"
-							title="Select these layers"
-							onClick={() => onSelectionChange(c.nodes)}
-						>
-							{c.nodes.map(nameOf).join(", ")} {describe(c)}
-						</button>
+						<div className={styles.memberRow}>
+							{/* Members, chosen where they were always chosen. A group is
+							    a set the rules named, so the choice is between "the ones
+							    I picked" and "the ones a rule says belong together". */}
+							{overSelect(
+								c.group ?? "",
+								(group) =>
+									onSceneChange((prev) =>
+										retargetConstraint(prev, c.id, { group }),
+									),
+								"constraint-over",
+							)}
+							<button
+								type="button"
+								className={styles.members}
+								data-role="constraint-members"
+								data-group={c.group}
+								title={
+									c.group === undefined
+										? "Select these layers"
+										: `Select the ${members.length} members of ${c.group}`
+								}
+								disabled={members.length === 0}
+								onClick={() => onSelectionChange([...members])}
+							>
+								{c.group === undefined
+									? `${c.nodes.map(nameOf).join(", ")} ${describe(c)}`
+									: members.length === 0
+										? // No answer to read them out of — an unsatisfiable
+											// document has none, and that is when this is read.
+											`${c.group} ${describe(c)}`
+										: `${members.length} in ${c.group} ${describe(c)}`}
+							</button>
+						</div>
 					</div>
 				);
 			})}

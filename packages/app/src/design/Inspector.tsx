@@ -7,8 +7,10 @@ import {
 	type Sizing,
 	KINDS,
 	PROPS,
+	type ModelAlternative,
 	type ModelNode,
 	type Picks,
+	type PropName,
 	type Scene,
 	type SceneNode,
 	type Term,
@@ -18,6 +20,7 @@ import {
 	findInTree,
 	isPinned,
 	isMeasured,
+	lit,
 	layoutValueOf,
 	layoutVar,
 	layoutWord,
@@ -70,6 +73,13 @@ export interface InspectorProps {
 	known?: ReadonlySet<string>;
 	/** Derived ids every universe has. */
 	everywhere?: ReadonlySet<string>;
+	/**
+	 * Variables a rule minted, by key — see `ModelScene.variables`.
+	 *
+	 * The document cannot say what these hold, so a derived node's property row
+	 * has to read its alternatives out of the answer set instead.
+	 */
+	variables?: Readonly<Record<string, readonly ModelAlternative[]>>;
 }
 
 const AXES = ["x", "y", "width", "height"] as const;
@@ -112,14 +122,23 @@ function NumberField({
 }
 
 /**
- * What a node a rule derived amounts to — read-only, and saying why.
+ * What a node a rule derived amounts to — and, where the rule left it a choice,
+ * what that choice is.
  *
  * The analogy that makes this bearable is a spreadsheet: a typed cell and a
  * formula cell sit side by side and behave completely differently, and the
  * whole of what keeps that usable is that you can always tell which is which.
  * So this panel looks like the inspector and is inert everywhere the inspector
- * is live: the name is the ASP term, the geometry is what the answer set said,
- * and every property is the text the node actually drew with.
+ * edits the document: the name is the ASP term and the geometry is what the
+ * answer set said.
+ *
+ * It is *not* inert about the answer, though, and that is the distinction worth
+ * keeping. A rule that writes `alt(prop(cell(R,C),text),D) :- digit(D)` has
+ * created a variable, and a variable's alternatives can be greyed where no
+ * design uses them and pinned to ask for the designs that do — neither of which
+ * is an edit to the document. So a derived property with a choice behind it gets
+ * the same row a document property gets, with the halves that would write back
+ * to a document taken away.
  *
  * Writing an edit back into the rule that produced the node is a research
  * problem and is deliberately not attempted. The rule is the place to change
@@ -130,13 +149,67 @@ function DerivedPanel({
 	node,
 	parent,
 	everywhere,
+	variables,
+	picks,
+	reach,
+	pins,
+	onPin,
 }: {
 	id: string;
 	/** Absent when the universe on screen does not have this node. */
 	node: ModelNode | undefined;
 	parent: string | null;
 	everywhere: boolean;
+	/** Variables a rule minted, by key — see `ModelScene.variables`. */
+	variables: Readonly<Record<string, readonly ModelAlternative[]>>;
+	picks: Picks;
+	reach?: Readonly<Record<string, Set<number>>>;
+	pins: Readonly<Record<string, number>>;
+	onPin: (variable: string, index: number | null) => void;
 }) {
+	/**
+	 * One property of a derived node, as a row.
+	 *
+	 * A choice the rule left open is the interesting case and gets the ordinary
+	 * property row; anything the rule simply stated has one value and is reported
+	 * as the text it drew with.
+	 */
+	function propRow(prop: PropName, drawn: string) {
+		const variable = propVar(id, prop);
+		const alternatives = variables[variable];
+		if (!alternatives || alternatives.length === 0) {
+			return (
+				<div key={prop} className={styles.resolved} data-resolved={prop}>
+					<span className={styles.fieldLabel}>{PROPS[prop].label}</span>
+					<span className={styles.resolvedValue}>{drawn}</span>
+				</div>
+			);
+		}
+		const spec = PROPS[prop];
+		const reachable = reach?.[variable];
+		return (
+			<ValueEditor
+				key={prop}
+				testId={prop}
+				label={spec.label}
+				type={spec.type}
+				value={alternatives.map((alt) => lit(alt.text))}
+				indices={alternatives.map((alt) => alt.index)}
+				readOnly
+				// Nothing to link to and nothing to write back: the rule decides.
+				tokens={[]}
+				fallback={spec.fallback}
+				active={picks[variable]}
+				varying={(reachable?.size ?? alternatives.length) > 1}
+				reachable={reachable}
+				pinned={pins[variable]}
+				onPin={(index) => onPin(variable, index)}
+				preview={(term: Term) => (term.kind === "literal" ? term.value : undefined)}
+				onChange={() => {}}
+			/>
+		);
+	}
+
 	return (
 		<div className={styles.inspector} data-role="inspector" data-derived={id}>
 			<div className={styles.derivedName} data-role="node-name">
@@ -190,21 +263,11 @@ function DerivedPanel({
 						{KINDS[node.kind].label}
 					</p>
 
-					{Object.keys(node.rendered).length > 0 ? <h3>Resolved</h3> : null}
+					{Object.keys(node.rendered).length > 0 ? <h3>Appearance</h3> : null}
 					<div className={styles.props}>
 						{KINDS[node.kind].props.map((prop) => {
 							const value = node.rendered[prop];
-							if (value === undefined) return null;
-							return (
-								<div
-									key={prop}
-									className={styles.resolved}
-									data-resolved={prop}
-								>
-									<span className={styles.fieldLabel}>{PROPS[prop].label}</span>
-									<span className={styles.resolvedValue}>{value}</span>
-								</div>
-							);
+							return value === undefined ? null : propRow(prop, value);
 						})}
 					</div>
 				</>
@@ -235,6 +298,7 @@ export function Inspector({
 	derived = [],
 	known,
 	everywhere,
+	variables = {},
 }: InspectorProps) {
 	const selected = [...selection]
 		.map((id) => findInTree(scene.nodes, id))
@@ -253,6 +317,11 @@ export function Inspector({
 					node={found?.node}
 					parent={found?.parent ?? null}
 					everywhere={everywhere === undefined || everywhere.has(lone)}
+					variables={variables}
+					picks={picks}
+					reach={reach}
+					pins={pins}
+					onPin={onPin}
 				/>
 			);
 		}

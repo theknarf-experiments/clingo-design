@@ -15,7 +15,13 @@
  */
 import { parseAtom, unquote } from "./atoms.ts";
 import type { Frame } from "./geometry.ts";
-import { KINDS, type NodeKind, PROPS, type PropName } from "./scene.ts";
+import {
+	KINDS,
+	type NodeKind,
+	PROPS,
+	type PropName,
+	sharedPropsOfKinds,
+} from "./scene.ts";
 
 export interface ModelNode {
 	id: string;
@@ -33,11 +39,40 @@ export interface ModelNode {
 	children: ModelNode[];
 }
 
+/** One alternative of a variable a rule minted. */
+export interface ModelAlternative {
+	/**
+	 * The solver's own index for it — what `pick/2` carries and what a pin
+	 * assumes. A rule numbers its alternatives however it likes, so this is not
+	 * the position in the list.
+	 */
+	index: number;
+	/** What it says, with the literal table already followed. */
+	text: string;
+}
+
 export interface ModelScene {
 	/** Top-level nodes, in paint order. */
 	roots: ModelNode[];
 	/** Every node in the tree, by id. */
 	byId: Record<string, ModelNode>;
+	/**
+	 * Sets a rule named, with their members: `group/1` and `member/2`.
+	 *
+	 * A constraint can be pointed at one instead of listing ids, which is the
+	 * only way to constrain nine nodes a rule brought into being. The editor
+	 * offers these where it offers node ids; see {@link Constraint.group}.
+	 */
+	groups: Record<string, string[]>;
+	/**
+	 * Variables a rule minted, by key, with their alternatives in index order.
+	 *
+	 * `alt/2` is derivable, so a document is not the only thing that can create
+	 * a choice. The document knows its own variables' alternatives; these are
+	 * the ones it cannot know, and without them a derived node's property row
+	 * would have nothing to offer, dim or pin.
+	 */
+	variables: Record<string, ModelAlternative[]>;
 }
 
 /**
@@ -92,6 +127,9 @@ interface Facts {
 	rendered: Map<string, Map<PropName, string>>;
 	literal: Map<string, string>;
 	visible: Set<string>;
+	groups: Map<string, string[]>;
+	/** variable key -> solver index -> literal id */
+	variables: Map<string, Map<number, string>>;
 }
 
 function collect(atoms: readonly string[]): Facts {
@@ -104,6 +142,8 @@ function collect(atoms: readonly string[]): Facts {
 		rendered: new Map(),
 		literal: new Map(),
 		visible: new Set(),
+		groups: new Map(),
+		variables: new Map(),
 	};
 	for (const text of atoms) {
 		const atom = parseAtom(text);
@@ -149,6 +189,31 @@ function collect(atoms: readonly string[]): Facts {
 			case "visible/1":
 				facts.visible.add(a);
 				break;
+			case "group/1":
+				// A group with no members is still a group: it is offered, and a
+				// constraint over it simply says nothing yet.
+				if (!facts.groups.has(a)) facts.groups.set(a, []);
+				break;
+			case "member/2": {
+				const members = facts.groups.get(a);
+				if (members) members.push(b);
+				else facts.groups.set(a, [b]);
+				break;
+			}
+			// A variable no document value named. Its alternatives are worth
+			// collecting for exactly one reason: the editor cannot look them up
+			// anywhere else.
+			case "dvar/1":
+				if (!facts.variables.has(a)) facts.variables.set(a, new Map());
+				break;
+			case "dalt/3": {
+				const index = Number(b);
+				if (!Number.isFinite(index)) break;
+				let alts = facts.variables.get(a);
+				if (!alts) facts.variables.set(a, (alts = new Map()));
+				alts.set(index, c);
+				break;
+			}
 		}
 	}
 	return facts;
@@ -234,5 +299,39 @@ export function readModel(atoms: readonly string[]): ModelScene {
 	roots.sort(byOrder);
 	for (const node of Object.values(byId)) node.children.sort(byOrder);
 
-	return { roots, byId };
+	const groups: Record<string, string[]> = {};
+	for (const [id, members] of facts.groups) groups[id] = members.sort();
+	const variables: Record<string, ModelAlternative[]> = {};
+	for (const [key, alts] of facts.variables) {
+		variables[key] = [...alts]
+			.sort(([a], [b]) => a - b)
+			// A dangling literal id is not an empty alternative; drop it, the way
+			// a rendered property with no text is dropped above.
+			.flatMap(([index, literal]) => {
+				const text = literal.startsWith('"')
+					? unquote(literal)
+					: facts.literal.get(literal);
+				return text === undefined ? [] : [{ index, text }];
+			});
+	}
+
+	return { roots, byId, groups, variables };
+}
+
+/**
+ * Properties every member of a group holds — what a rule over it may be about.
+ *
+ * The group's members are nodes of the answer set rather than of the document,
+ * so the question is the same one {@link sharedProps} answers and the source of
+ * the kinds is the only difference.
+ */
+export function groupProps(
+	model: ModelScene,
+	members: readonly string[],
+): PropName[] {
+	const kinds = members.flatMap((id) => {
+		const node = model.byId[id];
+		return node ? [node.kind] : [];
+	});
+	return sharedPropsOfKinds(kinds);
 }

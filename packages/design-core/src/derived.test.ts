@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { PULL_ATOM, compile } from "./compile.ts";
-import { derivedAt, derivedNodes, documentIds, encloses } from "./derived.ts";
+import { derivedAt, derivedNodes, documentIds, paintedOver } from "./derived.ts";
 import { directSolver } from "./directSolver.ts";
 import { makeNode } from "./edits.ts";
 import { readModel } from "./model.ts";
@@ -228,13 +228,45 @@ rendered(a,ink,"#0f172a").
 
 test("the canvas can find a derived node under the pointer", async () => {
 	const scene = board(GRID);
-	const derived = derivedNodes(readModel((await models(scene))[0]), documentIds(scene));
+	const model = readModel((await models(scene))[0]);
+	const derived = derivedNodes(model, documentIds(scene));
 
 	assert.equal(derivedAt(derived, { x: 100, y: 100 })?.node.id, "cell(2,2)");
 	// Between two cells is the frame's own ground, which the document owns.
 	assert.equal(derivedAt(derived, { x: 80, y: 80 }), null);
 	// The document node the pointer would otherwise have hit is the one the
-	// cell hangs from, which is exactly when the cell should win instead.
-	assert.equal(encloses(derived, "board", "cell(2,2)"), true);
-	assert.equal(encloses(derived, "cell(1,1)", "cell(2,2)"), false);
+	// cell hangs from, so the cell is drawn over it and wins.
+	assert.equal(paintedOver(model, "cell(2,2)", "board"), true);
+	assert.equal(paintedOver(model, "board", "cell(2,2)"), false);
+	// Two derived siblings: later in the paint order is on top.
+	assert.equal(paintedOver(model, "cell(3,3)", "cell(1,1)"), true);
+	assert.equal(paintedOver(model, "cell(1,1)", "cell(3,3)"), false);
+	assert.equal(paintedOver(model, "cell(1,1)", "cell(1,1)"), false);
+	assert.equal(paintedOver(model, "cell(1,1)", "nobody"), false);
+});
+
+test("a derived node over a document node that is not its parent still wins", async () => {
+	// The case that used to be unreachable: something the document holds sits
+	// between the frame and the cells, and the pointer lands on *it*. Paint
+	// order is what settles it, and the cells are painted last.
+	const scene = board(`
+${GRID}
+order(cell(R,C),I) :- pos(R), pos(C), I = 10 + (R-1)*3 + C.
+`);
+	scene.nodes[0].children = [
+		{
+			...makeNode("rect", { x: 0, y: 0, width: 300, height: 300 }, {
+				id: "sheet",
+				name: "Sheet",
+			}),
+			props: { fill: [lit("#f1f5f9")] },
+		},
+	];
+	const model = readModel((await models(scene))[0]);
+	const derived = derivedNodes(model, documentIds(scene));
+	assert.equal(derivedAt(derived, { x: 100, y: 100 })?.node.id, "cell(2,2)");
+	// `sheet` covers the whole frame, so it is what the document's own hit test
+	// answers — and the cell is still what the eye sees.
+	assert.equal(paintedOver(model, "cell(2,2)", "sheet"), true);
+	assert.equal(paintedOver(model, "sheet", "cell(2,2)"), false);
 });

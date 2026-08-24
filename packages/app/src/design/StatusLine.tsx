@@ -11,7 +11,13 @@ export interface StatusLineProps {
 	exploration: Exploration | null;
 	error: string | null;
 	solving: boolean;
-	/** How many assignments hold more than one value. */
+	/**
+	 * How many assignments the solver has left a choice about.
+	 *
+	 * The solver's count rather than the document's, because it sits next to the
+	 * universe count and the two have to agree: "5 universes · fully settled" is
+	 * a sentence that contradicts itself.
+	 */
 	varyingCount: number;
 	/** Nodes currently selected on the canvas. */
 	selectionCount?: number;

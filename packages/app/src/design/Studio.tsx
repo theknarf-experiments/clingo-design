@@ -9,6 +9,7 @@ import {
 	type Edge,
 	KINDS,
 	type NodeKind,
+	type PropName,
 	SHAPE_KINDS,
 	type Frame,
 	type ReorderTo,
@@ -29,6 +30,8 @@ import {
 	reorderNodes,
 	ungroupNodes,
 	varyingVariables,
+	varyingVars,
+	type ModelScene,
 	wrapInLayout,
 	wrapsChildren,
 } from "@clingo-design/design-core";
@@ -61,6 +64,9 @@ import styles from "./Studio.module.css";
 import tabStyles from "./tabs.module.css";
 
 const LIMIT = 24;
+
+/** Choices a multiverse caption names before it gives up and counts. */
+const CAPTION_PARTS = 3;
 
 /**
  * How far past the document the editable surface reaches, so new frames can be
@@ -221,18 +227,29 @@ export function Studio({
 	const clearPins = useCallback(() => setPins({}), []);
 	const pinCount = Object.keys(pins).length;
 
-	// A pin on a variable the document no longer has — or on an alternative
-	// that has since been deleted — would make every solve unsatisfiable for a
-	// reason the user cannot see.
+	// A pin on a variable that no longer exists — or on an alternative that has
+	// since been deleted — would make every solve unsatisfiable for a reason the
+	// user cannot see.
+	//
+	// The document is no longer the only thing that names variables: a rule can
+	// mint one, and the only place its existence is recorded is the last answer.
+	// So a pin survives if the document offers it *or* the solver last said it
+	// was there — and while there is no answer at all, nothing is dropped, since
+	// an unsatisfiable set of pins is exactly the state the user has to be able
+	// to see in order to clear it.
 	useEffect(() => {
 		const counts = variableCounts(scene);
+		const answered = exploration?.brave.pick;
+		if (!answered) return;
 		setPins((prev) => {
 			const next = Object.fromEntries(
-				Object.entries(prev).filter(([v, i]) => i < (counts[v] ?? 0)),
+				Object.entries(prev).filter(
+					([v, i]) => i < (counts[v] ?? 0) || v in answered,
+				),
 			);
 			return Object.keys(next).length === Object.keys(prev).length ? prev : next;
 		});
-	}, [scene]);
+	}, [scene, exploration]);
 	const canvas = useRef<CanvasApi | null>(null);
 	const host = useRef<HTMLElement | null>(null);
 
@@ -250,12 +267,55 @@ export function Studio({
 	 * Read from the document rather than from the answer sets: projection
 	 * collapses universes that render alike, so an assignment can legitimately
 	 * be multi-valued while the solver only ever shows one outcome for it. The
-	 * panel should still say so.
+	 * panel should still say so — a row that offers two colours and gets one is
+	 * something you wrote, and hiding that would be hiding the document.
 	 */
 	const varying = useMemo(() => new Set(varyingVariables(scene)), [scene]);
 
+	/**
+	 * Which assignments the *solver* left a choice about.
+	 *
+	 * The other reading of the same question, and the right one for a mark drawn
+	 * on the canvas: what is dashed there is a claim about the design in front of
+	 * you, and "you typed two values here" is not that claim. On a settled
+	 * document — a sudoku with one answer — the document's reading marks all 51
+	 * open cells and the solver's marks none, which is correct, because there is
+	 * exactly one picture and nothing in it could be otherwise.
+	 *
+	 * It follows the pins too: hold a value and what depended on it stops being
+	 * marked, which is the same statement one step narrower. Until the first
+	 * answer is in, the document's coarser reading stands in rather than the
+	 * marks blinking out.
+	 */
+	const unsettled = useMemo(
+		() => (exploration ? new Set(varyingVars(exploration)) : varying),
+		[exploration, varying],
+	);
+
 	const universes = exploration?.universes ?? [];
 	const primary = universes[0];
+	/**
+	 * Variables a rule minted, and sets a rule named.
+	 *
+	 * The document has no account of either, so the inspector's property rows and
+	 * the Rules panel's member lists read them out of the universe on screen.
+	 */
+	const minted = primary?.model.variables ?? {};
+	/**
+	 * The last answer that existed, so the panels keep their footing when the
+	 * document momentarily has none.
+	 *
+	 * A set a rule named only exists in an answer set, and an unsatisfiable
+	 * document has no answer set at all — which is exactly the moment the Rules
+	 * panel has to be readable, because it is where the core is reported. Naming
+	 * nine members as zero while the user reads why they cannot hold would be the
+	 * panel going blank at the only interesting moment.
+	 */
+	const [remembered, setRemembered] = useState<ModelScene | undefined>(undefined);
+	useEffect(() => {
+		if (primary) setRemembered(primary.model);
+	}, [primary]);
+	const answer = primary?.model ?? remembered;
 
 	// Design shows one concrete universe to edit; multiverse shows the space.
 	const shown = view === "multiverse" ? universes : primary ? [primary] : [];
@@ -365,12 +425,20 @@ export function Studio({
 	 * Clicking a design used to collapse the document onto it, which threw the
 	 * other designs away on what is really just a click to look closer. Pinning
 	 * shows the same thing and is undone by clearing.
+	 *
+	 * What is held is every choice that is still open, which is the solver's list
+	 * and not the document's. Filtering by the document's used to make this a dead
+	 * click on any multiverse whose members differ only by something a rule chose
+	 * — there was nothing to pin, so the click pinned nothing.
 	 */
 	function pinUniverse(universe: Universe) {
-		const varyingOnly = Object.fromEntries(
-			Object.entries(universe.pick).filter(([variable]) => varying.has(variable)),
+		setPins(
+			Object.fromEntries(
+				Object.entries(universe.pick).filter(([variable]) =>
+					unsettled.has(variable),
+				),
+			),
 		);
-		setPins(varyingOnly);
 		setView("design");
 	}
 
@@ -613,23 +681,44 @@ export function Studio({
 		];
 	}
 
-	/** A short description of what this universe chose, for the grid caption. */
+	/**
+	 * A short description of what this universe chose, for the grid caption.
+	 *
+	 * Over what the *solver* left open, not what the document typed: on a sudoku
+	 * whose cells are a rule's own choice the document has nothing to list, and
+	 * five plainly different boards captioned "settled" is a caption that lies.
+	 * The two readings agree on every template that has no such rule.
+	 *
+	 * Capped, because a rule can open dozens of choices at once and a caption is
+	 * a caption. What a rule-minted choice shows is the text it actually drew
+	 * with, since its alternatives are numbered by the rule rather than by a list
+	 * anyone could count along.
+	 */
 	function captionFor(universe: Universe) {
-		const parts = [...varying]
-			.map((variable) => {
-				const index = universe.pick[variable];
-				return index === undefined
-					? null
-					: `${labels.get(variable) ?? variable} ${index + 1}`;
-			})
-			.filter(Boolean);
+		const parts: string[] = [];
+		let more = 0;
+		for (const variable of unsettled) {
+			const index = universe.pick[variable];
+			if (index === undefined) continue;
+			if (parts.length === CAPTION_PARTS) {
+				more++;
+				continue;
+			}
+			const parsed = parseVariable(variable);
+			const drawn =
+				parsed?.kind === "prop" && !byId.has(parsed.node)
+					? universe.model.byId[parsed.node]?.rendered[parsed.prop as PropName]
+					: undefined;
+			parts.push(`${labels.get(variable) ?? variable} ${drawn ?? index + 1}`);
+		}
+		if (more > 0) parts.push(`+${more} more`);
 		return parts.join(" · ") || "settled";
 	}
 
 	/** `prop(card,fill)` reads better as `card fill`. */
 	const labels = useMemo(() => {
 		const out = new Map<string, string>();
-		for (const key of varying) {
+		for (const key of unsettled) {
 			const parsed = parseVariable(key);
 			if (!parsed) out.set(key, key);
 			else if (parsed.kind === "prop") {
@@ -646,7 +735,7 @@ export function Studio({
 			}
 		}
 		return out;
-	}, [varying, byId, scene.tokens, scene.constraints]);
+	}, [unsettled, byId, scene.tokens, scene.constraints]);
 
 	return (
 		<div className={styles.studio}>
@@ -729,7 +818,7 @@ export function Studio({
 											onToolChange={setTool}
 											getScale={() => camera.get().scale}
 											origin={{ x: region.x, y: region.y }}
-											varying={varying}
+											varying={unsettled}
 											freedom={freedom}
 											derived={derived}
 											onContextMenu={(at) => {
@@ -949,6 +1038,7 @@ export function Studio({
 								derived={derived}
 								known={known}
 								everywhere={everywhere}
+								variables={minted}
 							/>
 						) : panel === "variables" ? (
 							<Variables
@@ -967,6 +1057,7 @@ export function Studio({
 								selection={selection}
 								conflict={blamed}
 								onSelectionChange={selectionIds}
+									model={answer}
 							/>
 						)}
 					</div>
@@ -984,7 +1075,7 @@ export function Studio({
 							exploration={exploration}
 							error={error}
 							solving={solving}
-							varyingCount={varying.size}
+							varyingCount={unsettled.size}
 							selectionCount={selection.size}
 							freedom={freedom}
 							probing={probing}

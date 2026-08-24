@@ -36,6 +36,8 @@ import {
 	dimension,
 	edgeOn,
 	makeLayout,
+	rangesOverGroup,
+	sharedPropsOfKinds,
 	uniqueName,
 	wrapsChildren,
 } from "./scene.ts";
@@ -858,6 +860,8 @@ export function addConstraint(
 	nodes: readonly string[],
 	prop?: PropName,
 	edge?: Edge,
+	/** A set a rule named, ranged over instead of `nodes`. */
+	group?: string,
 ): { scene: Scene; id: string } {
 	const constraint: Constraint = {
 		id: newNodeId().replace("n_", "k_"),
@@ -865,6 +869,7 @@ export function addConstraint(
 		...shapeFor(scene, kind, nodes, {
 			prop: prop ?? sharedProps(scene, nodes)[0] ?? "fill",
 			edge,
+			group,
 		}),
 	};
 	return {
@@ -935,7 +940,11 @@ export function distributeNodes(
 export function retargetConstraint(
 	scene: Scene,
 	id: string,
-	patch: { kind?: ConstraintKind; edge?: Edge },
+	/**
+	 * `group` present and undefined means "back to the listed members"; absent
+	 * means "leave whichever it ranges over alone".
+	 */
+	patch: { kind?: ConstraintKind; edge?: Edge; group?: string },
 ): Scene {
 	const current = scene.constraints.find((c) => c.id === id);
 	if (!current) return scene;
@@ -948,6 +957,7 @@ export function retargetConstraint(
 			prop: current.prop,
 			edge: patch.edge ?? current.edge,
 			limit: current.limit,
+			group: "group" in patch ? patch.group : current.group,
 		}),
 	};
 	return {
@@ -961,7 +971,7 @@ function shapeFor(
 	scene: Scene,
 	kind: ConstraintKind,
 	nodes: readonly string[],
-	from: { prop: PropName; edge?: Edge; limit?: number },
+	from: { prop: PropName; edge?: Edge; limit?: number; group?: string },
 ): Omit<Constraint, "id" | "enabled"> {
 	const spec = CONSTRAINT_KINDS[kind];
 	// Extra members would have nowhere to go: a gap has two sides, a pin one
@@ -969,10 +979,15 @@ function shapeFor(
 	const members = nodes.slice(0, spec.maxNodes);
 	const kept = from.edge && spec.edges.includes(from.edge) ? from.edge : undefined;
 	const edge = kept ?? quietestEdge(scene, spec, members);
+	// A kind that reads its members by position cannot take a set, so becoming
+	// one drops the group rather than keeping it as dead data — and the listed
+	// members, which were never thrown away, are what it falls back to.
+	const group = from.group !== undefined && rangesOverGroup(kind) ? from.group : undefined;
 	return {
 		kind,
 		prop: from.prop,
 		nodes: [...members],
+		...(group === undefined ? {} : { group }),
 		...(spec.counted ? { limit: from.limit ?? 1 } : {}),
 		...(spec.geometric ? { edge } : {}),
 		...(spec.valueType
@@ -1081,10 +1096,7 @@ export function sharedProps(
 	const found = nodes
 		.map((id) => findInTree(scene.nodes, id))
 		.filter((n): n is SceneNode => n !== undefined);
-	if (found.length === 0) return [];
-	return KINDS[found[0].kind].props.filter((prop) =>
-		found.every((n) => KINDS[n.kind].props.includes(prop)),
-	);
+	return sharedPropsOfKinds(found.map((n) => n.kind));
 }
 
 /**
@@ -1099,7 +1111,11 @@ export function pruneConstraints(scene: Scene): Scene {
 	const next: Constraint[] = [];
 	for (const c of scene.constraints) {
 		const nodes = c.nodes.filter((id) => alive.has(id));
-		if (nodes.length < CONSTRAINT_KINDS[c.kind].minNodes) continue;
+		// A group's members are the rule's business: deleting a document node
+		// says nothing about them, and a constraint over one is never a ghost.
+		if (c.group === undefined && nodes.length < CONSTRAINT_KINDS[c.kind].minNodes) {
+			continue;
+		}
 		next.push(nodes.length === c.nodes.length ? c : { ...c, nodes });
 	}
 	return next.length === scene.constraints.length &&

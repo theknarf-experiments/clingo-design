@@ -885,6 +885,33 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 export const CONSTRAINT_NAMES = Object.keys(CONSTRAINT_KINDS) as ConstraintKind[];
 
 /**
+ * True when a kind can range over a set it never enumerated — see
+ * {@link Constraint.group}.
+ *
+ * Read off the table rather than listed here: a kind that takes any number of
+ * members treats them as a set, while one with a ceiling reads them *by
+ * position* — which side of a gap, which node is the mirror — and a set has no
+ * positions to read. So an unbounded kind is exactly the kind a group can fill.
+ */
+export const rangesOverGroup = (kind: ConstraintKind): boolean =>
+	CONSTRAINT_KINDS[kind].maxNodes === Number.POSITIVE_INFINITY;
+
+/**
+ * Properties every one of these kinds holds — what a rule over them may be
+ * about.
+ *
+ * Two callers with the same question and no business knowing which properties
+ * belong to which kind: the document's own nodes, and the members of a
+ * rule-named group, which exist only in the answer set.
+ */
+export function sharedPropsOfKinds(kinds: readonly NodeKind[]): PropName[] {
+	if (kinds.length === 0) return [];
+	return KINDS[kinds[0]].props.filter((prop) =>
+		kinds.every((kind) => KINDS[kind].props.includes(prop)),
+	);
+}
+
+/**
  * A rule the design must obey, expressed over a property of several nodes.
  *
  * Constraints are what turn a list of alternatives into a design *space*:
@@ -899,6 +926,21 @@ export interface Constraint {
 	prop: PropName;
 	/** Nodes it ranges over, in the order they were named. */
 	nodes: string[];
+	/**
+	 * A set a rule named, ranged over instead of {@link nodes}.
+	 *
+	 * `group(row(1)). member(row(1), cell(1,C)) :- pos(C).` is nine members the
+	 * document never enumerated, and this is one constraint over all of them —
+	 * with its own enable switch and its own name in an unsat core, exactly like
+	 * a constraint that listed them. The value is the ASP term naming the group,
+	 * so it is picked from the `group/1` instances the answer set holds rather
+	 * than typed.
+	 *
+	 * Only the kinds that treat their members as a set can take one; see
+	 * {@link rangesOverGroup}. When it is set, `nodes` is ignored by the
+	 * compiler and kept only so that switching back remembers the old list.
+	 */
+	group?: string;
 	/** Distinct-value budget, for the counted kinds. */
 	limit?: number;
 	/** Which quantity, for the geometric kinds. */

@@ -21,7 +21,6 @@ import {
 	clampTo,
 	derivedAt,
 	dropTargetAt,
-	encloses,
 	frameAncestorOf,
 	frameAt,
 	frameFromPoints,
@@ -36,6 +35,7 @@ import {
 	managedNodes,
 	narrow,
 	normaliseFrame,
+	paintedOver,
 	parentMap,
 	findInTree,
 	movePathPoint,
@@ -308,15 +308,19 @@ export function Editor({
 	/**
 	 * The derived node a click should go to, if any.
 	 *
-	 * Only when the document's own answer is the node the derived one hangs
-	 * from, or when the document has no answer at all: a document node painted
-	 * over a derived one is still the thing you clicked.
+	 * Two hit tests that cannot see each other's nodes, settled by paint order:
+	 * whichever is drawn on top is the thing you clicked. A document node over a
+	 * derived one still wins, which is what keeps every existing gesture
+	 * untouched.
 	 */
 	function derivedUnder(point: Point, documentHit: string | null): string | null {
 		if (derived.length === 0) return null;
 		const found = derivedAt(derived, point);
 		if (!found) return null;
-		if (documentHit !== null && !encloses(derived, documentHit, found.node.id)) {
+		if (
+			documentHit !== null &&
+			!paintedOver(universe.model, found.node.id, documentHit)
+		) {
 			return null;
 		}
 		return found.node.id;
@@ -394,11 +398,10 @@ export function Editor({
 
 		const hit = hitTestTree(scene.nodes, point, universe.solved);
 		// A derived node is drawn but is not in the document, so the document's
-		// own hit testing cannot see it and the click lands on whatever encloses
-		// it instead. Handing it to the derived node exactly in that case leaves
-		// every existing gesture untouched — and the gesture stops there, because
-		// there is nothing in the document to move. Same rule a fully constrained
-		// node already follows: selectable, immovable.
+		// own hit testing cannot see it and the click would land on whatever it
+		// is drawn over. Paint order settles that, and the gesture then stops
+		// there, because there is nothing in the document to move. Same rule a
+		// fully constrained node already follows: selectable, immovable.
 		const under = derivedUnder(point, hit?.node.id ?? null);
 		if (under) {
 			onSelectionChange([under]);
