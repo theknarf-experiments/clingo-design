@@ -3,9 +3,9 @@
 	position: absolute;
 	inset: 0;
 	pointer-events: none;
-	/* Documents define their own colours; never inherit the app's theme. */
-	color: #0f172a;
-	font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+	/* A document never inherits the app's theme. What it does inherit is
+	   DOCUMENT_BASE, applied inline — the exporter needs the same declarations
+	   and a stylesheet is not somewhere it can read them from. */
 }
 
 .node {

@@ -1,0 +1,107 @@
+.export {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.controls {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.35rem 0.75rem;
+	border-bottom: 1px solid var(--dc-line);
+	font-size: 0.76rem;
+}
+
+.field {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+	opacity: 0.75;
+}
+
+.select {
+	max-width: 22rem;
+	padding: 0.1rem 0.25rem;
+	font: inherit;
+	font-size: 0.76rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.check {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+	opacity: 0.75;
+	cursor: pointer;
+}
+
+.copy {
+	margin-left: auto;
+	padding: 0.15rem 0.5rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+/* The panel is short, so the text and what it costs sit side by side rather
+   than stacked — a note nobody scrolls to is a note nobody reads. */
+.split {
+	display: flex;
+	flex: 1;
+	min-height: 0;
+}
+
+.text {
+	flex: 1;
+	margin: 0;
+	padding: 0.6rem 0.75rem;
+	overflow: auto;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+	line-height: 1.5;
+	background: var(--dc-sunken);
+	color: var(--dc-syn-plain);
+	white-space: pre;
+	tab-size: 2;
+}
+
+.aside {
+	flex: 0 0 20rem;
+	padding: 0.5rem 0.75rem;
+	overflow: auto;
+	border-left: 1px solid var(--dc-line);
+	font-size: 0.72rem;
+	line-height: 1.45;
+}
+
+.note {
+	margin: 0 0 0.5rem;
+	opacity: 0.85;
+}
+
+.lostHead {
+	margin: 0 0 0.25rem;
+	font-size: 0.68rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.45;
+}
+
+.lost {
+	margin: 0;
+	padding-left: 1rem;
+	opacity: 0.6;
+}
+
+.lost li {
+	margin-bottom: 0.25rem;
+}

@@ -1,57 +1,23 @@
 import { type CSSProperties, type ReactNode, memo, useMemo } from "react";
 import {
 	type Frame,
-	KINDS,
 	type ModelNode,
 	type NodeKind,
-	type PropName,
 	type Scene,
 	type SceneNode,
 	type Universe,
+	DOCUMENT_BASE,
+	arrowHead,
+	diagonalRun,
 	flatten,
 	frameOf,
-	isSurface,
+	paintOf,
 	pathData,
 	propVar,
 	scalePoints,
 } from "@clingo-design/design-core";
 
 import styles from "./Artboard.module.css";
-
-/**
- * How each property reaches CSS.
- *
- * Keyed by property rather than by node kind, so the renderer follows
- * `KINDS[kind].props` and a new kind needs no change here at all.
- */
-const PAINT: Partial<Record<PropName, (value: string) => CSSProperties>> = {
-	fill: (value) => ({ background: value }),
-	radius: (value) => ({ borderRadius: value }),
-	// A stroke on a box is a border. The stroked kinds draw an SVG instead and
-	// override this — see {@link INHERITED_STROKE}. Both halves declare the
-	// style so setting either one alone still shows an edge.
-	stroke: (value) => ({ borderColor: value, borderStyle: "solid" }),
-	strokeWidth: (value) => ({ borderWidth: value, borderStyle: "solid" }),
-	shadow: (value) => ({ boxShadow: value }),
-	opacity: (value) => ({ opacity: value }),
-	ink: (value) => ({ color: value }),
-	fontFamily: (value) => ({ fontFamily: value }),
-	size: (value) => ({ fontSize: value }),
-	weight: (value) => ({ fontWeight: value }),
-	lineHeight: (value) => ({ lineHeight: value }),
-	align: (value) => ({ textAlign: value as CSSProperties["textAlign"] }),
-};
-
-/**
- * Stroke as SVG paints it, for the kinds whose content is an `<svg>`.
- *
- * Both properties inherit in CSS, so the shape inside picks them up from the
- * box on its own rather than being handed them.
- */
-const INHERITED_STROKE = {
-	stroke: (value: string) => ({ stroke: value }),
-	strokeWidth: (value: string) => ({ strokeWidth: value }),
-};
 
 /**
  * The two things the answer set does not carry, with the box they were authored
@@ -68,57 +34,31 @@ interface DocShape {
 	authored: Frame;
 }
 
-interface ShapeSpec {
-	/** Merged into the box before the node's own properties paint over it. */
-	box?: CSSProperties;
-	/** Overrides {@link PAINT} where a kind takes a property somewhere else. */
-	paint?: Partial<Record<PropName, (value: string) => CSSProperties>>;
-	/**
-	 * Drawn inside the box.
-	 *
-	 * `node` is the answer set's account of it; `doc` is the document node it
-	 * came from, present only for the vertices and the lean — see
-	 * {@link Artboard}.
-	 */
-	content?: (
-		node: ModelNode,
-		frame: Frame,
-		doc: DocShape | undefined,
-	) => ReactNode;
-}
-
 /**
- * What each kind draws beyond a coloured box.
+ * What each kind draws *inside* its box.
  *
- * One table, for the same reason `KINDS` is one: a kind that needs its own
- * markup gets an entry, and everything else falls through to the plain box.
+ * How a box is painted is no longer here: that mapping is shared with the
+ * exporter and lives in design-core's `paint.ts`, because a second copy of
+ * "a fill is a background" is a copy that drifts from the canvas. What stays is
+ * the markup, which is React on this side and a string on the other and has
+ * nothing to factor out.
+ *
+ * `node` is the answer set's account of it; `doc` is the document node it came
+ * from, present only for the vertices and the lean — see {@link Artboard}.
  */
-const SHAPES: Partial<Record<NodeKind, ShapeSpec>> = {
-	text: {
-		box: { lineHeight: 1.35, overflow: "hidden", whiteSpace: "pre-wrap" },
-		// Content is a property like any other, so it arrives resolved for this
-		// universe with everything else — which is what lets a headline differ
-		// between them.
-		content: (node) => node.rendered.text,
-	},
-	// Fully rounded corners *are* an ellipse; an SVG for it would only add a
-	// second way to size the same box.
-	ellipse: { box: { borderRadius: "50%" } },
-	line: {
-		paint: INHERITED_STROKE,
-		content: (_node, frame, doc) => <Stroke frame={frame} doc={doc} />,
-	},
-	arrow: {
-		paint: INHERITED_STROKE,
-		content: (_node, frame, doc) => <Stroke frame={frame} doc={doc} head />,
-	},
-	path: {
-		// A path's fill belongs to the polygon, not to the box around it: the
-		// box is only the vertices' bounding rectangle and painting it would
-		// show a shape the document does not contain.
-		paint: { ...INHERITED_STROKE, fill: (value) => ({ fill: value }) },
-		content: (_node, frame, doc) => <Plot frame={frame} doc={doc} />,
-	},
+const CONTENT: Partial<
+	Record<
+		NodeKind,
+		(node: ModelNode, frame: Frame, doc: DocShape | undefined) => ReactNode
+	>
+> = {
+	// Content is a property like any other, so it arrives resolved for this
+	// universe with everything else — which is what lets a headline differ
+	// between them.
+	text: (node) => node.rendered.text,
+	line: (_node, frame, doc) => <Stroke frame={frame} doc={doc} />,
+	arrow: (_node, frame, doc) => <Stroke frame={frame} doc={doc} head />,
+	path: (_node, frame, doc) => <Plot frame={frame} doc={doc} />,
 };
 
 /**
@@ -132,9 +72,7 @@ function Stroke({
 	doc,
 	head,
 }: { frame: Frame; doc: DocShape | undefined; head?: boolean }) {
-	const up = doc?.node.diagonal === "up";
-	const y1 = up ? frame.height : 0;
-	const y2 = up ? 0 : frame.height;
+	const { y1, y2 } = diagonalRun(frame, doc?.node.diagonal);
 	return (
 		<svg className={styles.stroke} aria-hidden="true">
 			<line
@@ -184,26 +122,6 @@ function Plot({ frame, doc }: { frame: Frame; doc: DocShape | undefined }) {
 			/>
 		</svg>
 	);
-}
-
-/**
- * The two barbs at the far end of an arrow, as a polyline.
- *
- * A `<marker>` would be the textbook answer, but a marker needs an id per node
- * and does not inherit the stroke it is attached to; two more stroked segments
- * take the colour and thickness from the same place the line does.
- */
-function arrowHead(x1: number, y1: number, x2: number, y2: number): string {
-	const length = Math.hypot(x2 - x1, y2 - y1);
-	if (length === 0) return "";
-	const ux = (x2 - x1) / length;
-	const uy = (y2 - y1) / length;
-	const back = Math.min(Math.max(length * 0.3, 8), 24);
-	const half = back * 0.45;
-	// The tip is the line's far end; the barbs sit back along it, either side.
-	const bx = x2 - ux * back;
-	const by = y2 - uy * back;
-	return `${bx - uy * half},${by + ux * half} ${x2},${y2} ${bx + uy * half},${by - ux * half}`;
 }
 
 export interface ArtboardProps {
@@ -280,26 +198,10 @@ export const Artboard = memo(function Artboard({
 			width: frame.width,
 			height: frame.height,
 			boxSizing: "border-box",
+			// The ground, the kind's own box and every property it paints, from
+			// the one table the exporter reads too.
+			...(paintOf(node) as CSSProperties),
 		};
-
-		// A surface is something you put things on: it has a ground, and it
-		// clips whatever hangs over the edge.
-		if (isSurface(node)) {
-			box.background = "#ffffff";
-			box.overflow = "hidden";
-		}
-		const shape = SHAPES[node.kind];
-		if (shape?.box) Object.assign(box, shape.box);
-
-		// `rendered/3` carries every property the node holds; a kind paints the
-		// ones its table entry lists and leaves the rest alone.
-		for (const prop of KINDS[node.kind].props) {
-			const value = node.rendered[prop];
-			if (value === undefined) continue;
-			// Content is not something CSS paints; it is what goes inside.
-			const paint = shape?.paint?.[prop] ?? PAINT[prop];
-			if (paint) Object.assign(box, paint(value));
-		}
 
 		return (
 			<div
@@ -311,7 +213,7 @@ export const Artboard = memo(function Artboard({
 				style={box}
 				title={unsettled ? "This property has more than one value" : undefined}
 			>
-				{shape?.content?.(node, frame, docNodes.get(node.id))}
+				{CONTENT[node.kind]?.(node, frame, docNodes.get(node.id))}
 				{node.children.map(render)}
 			</div>
 		);
@@ -320,7 +222,7 @@ export const Artboard = memo(function Artboard({
 	return (
 		<div
 			className={className ? `${styles.artboard} ${className}` : styles.artboard}
-			style={style}
+			style={{ ...(DOCUMENT_BASE as CSSProperties), ...style }}
 			data-artboard=""
 		>
 			{universe.model.roots.map(render)}

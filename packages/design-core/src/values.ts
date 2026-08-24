@@ -261,8 +261,13 @@ export interface DerivationSpec {
 const INK_DARK = "#0f172a";
 const INK_LIGHT = "#ffffff";
 
-/** Perceived luminance, for picking readable text over an arbitrary fill. */
-function luminance(hex: string): number | undefined {
+/**
+ * Perceived luminance, for picking readable text over an arbitrary fill — and
+ * for deciding which of two colours is the dark one, which is the only thing
+ * `prefers-color-scheme` is actually about. Nothing for a colour it cannot
+ * read, so a caller falls back rather than treating a font stack as black.
+ */
+export function luminance(hex: string): number | undefined {
 	const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
 	if (!m) return undefined;
 	const n = Number.parseInt(m[1], 16);

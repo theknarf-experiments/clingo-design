@@ -56,12 +56,19 @@ export function parseAtom(text: string): Atom | null {
  *
  * Anything unquoted is returned as it came, since a constant is already its
  * own text.
+ *
+ * `\n` is a line break rather than the letter n — a clingo string cannot hold
+ * a raw newline, so a paragraph of body copy reaches the program escaped and
+ * has to come back the same way. Every other escape is the character it
+ * shields, which is what the quote and the backslash need.
  */
 export function unquote(argument: string): string {
 	if (argument.length < 2 || !argument.startsWith('"') || !argument.endsWith('"')) {
 		return argument;
 	}
-	return argument.slice(1, -1).replace(/\\(.)/g, "$1");
+	return argument
+		.slice(1, -1)
+		.replace(/\\(.)/g, (_whole, ch: string) => (ch === "n" ? "\n" : ch));
 }
 
 /**

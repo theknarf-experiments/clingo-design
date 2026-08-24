@@ -1,7 +1,8 @@
 import { type ReactNode, useRef, useState } from "react";
-import { CONTRACT, type Scene } from "@clingo-design/design-core";
+import { CONTRACT, type Scene, type Universe } from "@clingo-design/design-core";
 
 import { Code } from "./Code";
+import { ExportPanel } from "./ExportPanel";
 import styles from "./ProgramPanel.module.css";
 import tabStyles from "./tabs.module.css";
 import { cx } from "./cx";
@@ -11,22 +12,29 @@ export interface ProgramPanelProps {
 	generated: string;
 	onChange: (next: Scene) => void;
 	error: string | null;
+	/** The space as it stands, for the export tab. */
+	universes: readonly Universe[];
+	projectName: string;
 	/** Right-aligned slot in the tab strip — the studio puts its status there. */
 	status?: ReactNode;
 }
 
-type Tab = "rules" | "generated" | "contract";
+type Tab = "rules" | "generated" | "contract" | "export";
 
 const TABS: Array<{ id: Tab; label: string }> = [
 	{ id: "rules", label: "Your rules" },
 	{ id: "generated", label: "Generated" },
 	{ id: "contract", label: "Predicates" },
+	{ id: "export", label: "Export" },
 ];
 
 /**
- * The power-user escape hatch. The generated half is read-only — it is a
- * projection of the document, so editing it would have nowhere to go — while
- * the rules half is free-form ASP appended to it.
+ * The power-user escape hatch, and the way out.
+ *
+ * The generated half is read-only — it is a projection of the document, so
+ * editing it would have nowhere to go — while the rules half is free-form ASP
+ * appended to it. Export sits alongside them because it is the same kind of
+ * thing: a rendering of the document into text you take somewhere else.
  *
  * The tab strip sits at the bottom with the content above it. Clicking the
  * active tab collapses the panel to just that strip; clicking any other tab
@@ -37,6 +45,8 @@ export function ProgramPanel({
 	generated,
 	onChange,
 	error,
+	universes,
+	projectName,
 	status,
 }: ProgramPanelProps) {
 	const [tab, setTab] = useState<Tab>("rules");
@@ -62,7 +72,13 @@ export function ProgramPanel({
 		>
 			{open ? (
 				<>
-					{tab === "rules" ? (
+					{tab === "export" ? (
+						<ExportPanel
+							scene={scene}
+							universes={universes}
+							projectName={projectName}
+						/>
+					) : tab === "rules" ? (
 						<div className={styles.editor}>
 							<pre
 								ref={paint}

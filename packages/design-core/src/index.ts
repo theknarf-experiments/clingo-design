@@ -19,3 +19,5 @@ export * from "./derived.ts";
 export * from "./sampling.ts";
 export * from "./freedom.ts";
 export * from "./explore.ts";
+export * from "./paint.ts";
+export * from "./export.ts";

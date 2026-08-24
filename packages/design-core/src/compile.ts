@@ -796,9 +796,18 @@ function section(title: string, lines: string[]): string {
 	return `% ---- ${title} ----\n${lines.join("\n")}\n`;
 }
 
-/** ASP string literals need their quotes and backslashes escaped. */
+/**
+ * ASP string literals need their quotes and backslashes escaped — and their
+ * line breaks, which a clingo string cannot hold at all. Text is a property
+ * like any other and the editor gives it a box you can type a paragraph into,
+ * so a raw newline reaching the lexer is an ordinary document, not an edge
+ * case. `unquote` puts it back.
+ */
 function quote(text: string): string {
-	return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+	return `"${text
+		.replace(/\\/g, "\\\\")
+		.replace(/"/g, '\\"')
+		.replace(/\r?\n/g, "\\n")}"`;
 }
 
 export interface CompileResult {
