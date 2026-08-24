@@ -3,7 +3,8 @@ import { test } from "node:test";
 
 import { directSolver } from "./directSolver.ts";
 import { updateConstraint } from "./edits.ts";
-import { compareCosts, explore, varyingVars } from "./explore.ts";
+import { explore, varyingVars } from "./explore.ts";
+import { compareCosts } from "./sampling.ts";
 import { frameOf, sceneContext } from "./scene.ts";
 import { flatten } from "./tree.ts";
 import { TEMPLATES, findTemplate } from "./templates/index.ts";

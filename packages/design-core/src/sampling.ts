@@ -21,11 +21,20 @@ import type { Candidate } from "./explore.ts";
  * How the shown universes were chosen.
  *
  * `first` is enumeration order — biased, and only honest when it *is* the whole
- * space. `diverse` is the two mechanisms above. `ranked` is neither: the
- * document expresses a preference, so the designs are ordered by what they cost
- * and the best of them are shown. Nothing is sampled there, and nothing may be:
- * showing a diverse spread of a ranked space would put a bad design next to the
- * best one with no way to tell which was which.
+ * space. `diverse` is the two mechanisms above. `ranked` is both mechanisms
+ * *under a cost ceiling*: the document expresses a preference, so only designs
+ * within the bound are candidates at all, and they are shown cheapest first.
+ *
+ * That last strategy used to sample nothing, on the argument that a diverse
+ * spread of a ranked space would put a bad design next to the best one with no
+ * way to tell which was which. The argument was right and the conclusion was
+ * wrong. Ranking does not order the near-optimal designs into a queue; it sorts
+ * them into a handful of *tiers*, and inside a tier every design is exactly as
+ * good as every other. Measured on a 729-design space with one soft rule, all
+ * 24 designs shown were tied at cost 0 while 243 designs shared that cost — so
+ * search order, not the preference, was choosing 24 of the 243. Diversity
+ * *inside a tier* costs the ranking nothing, and {@link selectSpread} is where
+ * that is made precise.
  */
 export type SampleStrategy = "first" | "diverse" | "ranked";
 
@@ -104,6 +113,78 @@ export function selectDiverse<T extends Candidate>(
 		for (let i = 0; i < remaining.length; i++) {
 			nearest[i] = Math.min(nearest[i], distance(remaining[i], picked));
 		}
+	}
+	return chosen;
+}
+
+/**
+ * Lexicographic order on cost vectors: the first level they differ at decides,
+ * and a shorter vector is padded with zeros.
+ *
+ * This is what `@` levels *mean*, and it is why the ordering is done here at
+ * all: a bounded enumeration comes back in search order, and on every program
+ * tried the optimum was the last model of the run.
+ *
+ * It lives beside the selection rather than beside the solving because the only
+ * thing it decides is which designs earn a slot — see {@link selectSpread},
+ * whose whole argument is that "equal cost" is a bigger equivalence class than
+ * it looks.
+ */
+export function compareCosts(a: readonly number[], b: readonly number[]): number {
+	const n = Math.max(a.length, b.length);
+	for (let i = 0; i < n; i++) {
+		const d = (a[i] ?? 0) - (b[i] ?? 0);
+		if (d !== 0) return d;
+	}
+	return 0;
+}
+
+/**
+ * The k designs to show: a spread of the *good* ones.
+ *
+ * Diversity and ranking pull against each other — the most diverse two dozen
+ * are not the best two dozen — and this is where the pull is resolved. Not by
+ * trading one off against the other, which would need a weight nobody can
+ * choose honestly, but by noticing that the conflict is mostly imaginary. A
+ * cost vector is a *tier*, not a place in a queue: two designs with equal cost
+ * are equally good by the only measure the document states, and which of them
+ * gets a slot is a question preference has no opinion about. So the tiers are
+ * filled cheapest first, and the choice *within* the tier that runs out of room
+ * is the one that shows the most contrast.
+ *
+ * What that buys is exact, and worth stating as a guarantee: the multiset of
+ * costs this returns is identical to what sorting the pool and taking the first
+ * k returns. No design shown here is worse than a design the old code would
+ * have shown. Diversity is bought for nothing.
+ *
+ * With no preferences in the document every cost vector is empty, every design
+ * is in one tier, and this *is* {@link selectDiverse} — which is why both paths
+ * call this one function. There must be one answer to "which designs earn a
+ * slot".
+ */
+export function selectSpread<T extends Candidate>(
+	pool: readonly T[],
+	k: number,
+): T[] {
+	// Stable, so a tie group keeps the pool's order and the greedy selection
+	// inside it starts where the pool meant it to.
+	const sorted = [...pool].sort((a, b) => compareCosts(a.costs, b.costs));
+	const chosen: T[] = [];
+	let i = 0;
+	while (i < sorted.length && chosen.length < k) {
+		let end = i;
+		while (
+			end < sorted.length &&
+			compareCosts(sorted[end].costs, sorted[i].costs) === 0
+		) {
+			end++;
+		}
+		const tier = sorted.slice(i, end);
+		const room = k - chosen.length;
+		// A tier that fits goes in whole; only the one that overflows is selected
+		// from, and that is the only place diversity gets a say.
+		chosen.push(...(tier.length <= room ? tier : selectDiverse(tier, room)));
+		i = end;
 	}
 	return chosen;
 }

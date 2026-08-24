@@ -1242,11 +1242,12 @@ export function Studio({
 								</button>
 							</div>
 						) : null}
-						{/* A ranked space has no sample to redraw: the designs shown are the
-						    best ones, and a different seed would return the same list. */}
-						{exploration?.sampling.sampled &&
-						!exploration.optimized &&
-						view === "multiverse" ? (
+						{/* Offered wherever anything was sampled, ranked or not. A ranked
+						    space used to be excluded on the argument that the designs
+						    shown are simply the best ones — but a cost is a tier, not a
+						    place in a queue, and which of the designs tied at a tier get
+						    the slots is exactly what a reshuffle changes. */}
+						{exploration?.sampling.sampled && view === "multiverse" ? (
 							<button
 								type="button"
 								className={styles.tool}

@@ -30,7 +30,7 @@ import {
 	type SampleStrategy,
 	makeRng,
 	randomAssumptions,
-	selectDiverse,
+	selectSpread,
 	universeKey,
 } from "./sampling.ts";
 import { type Explanation, type Question, explain, questionAtom } from "./why.ts";
@@ -411,23 +411,6 @@ function interpret(
 			return (scene ??= readModel(atoms));
 		},
 	};
-}
-
-/**
- * Lexicographic order on cost vectors: the first level they differ at decides,
- * and a shorter vector is padded with zeros.
- *
- * This is what `@` levels *mean*, and it is why the ordering is done here at
- * all: a bounded enumeration comes back in search order, and on every program
- * tried the optimum was the last model of the run.
- */
-export function compareCosts(a: readonly number[], b: readonly number[]): number {
-	const n = Math.max(a.length, b.length);
-	for (let i = 0; i < n; i++) {
-		const d = (a[i] ?? 0) - (b[i] ?? 0);
-		if (d !== 0) return d;
-	}
-	return 0;
 }
 
 /**
@@ -820,6 +803,9 @@ export class Explorer {
 				limit,
 				slack,
 				owned,
+				poolSize,
+				seed,
+				countLimit,
 			);
 			solves += ranked.solves;
 			if (ranked.exploration) {
@@ -902,7 +888,10 @@ export class Explorer {
 					...sampled.candidates,
 					...enumeratedUniverses,
 				]);
-				const chosen = selectDiverse(pool, limit);
+				// Nothing in this pool has a cost, so this is plain farthest-point
+				// selection. The same function does the ranked path's choosing, so
+				// there is one answer to which designs earn a slot.
+				const chosen = selectSpread(pool, limit);
 				const hydrated = await this.#hydrate(session, chosen, withPicture);
 				solves += hydrated.solves;
 				universes = hydrated.universes;
@@ -940,19 +929,35 @@ export class Explorer {
 	/**
 	 * The near-optimal designs, best first — a document with a preference in it.
 	 *
-	 * Two solves, and the shape of them is the whole design decision of this
-	 * feature. `optN` alone would answer with the proven optima and nothing
-	 * else, which on most documents is a single design: a tool for holding
-	 * several at once would become a tool that shows you one, and the preference
-	 * a designer just wrote down would have deleted their design space. So the
-	 * optimum is only the first question. The second is *bounded suboptimality*:
-	 * every design within {@link rankedBound} of it, which clingo answers
-	 * natively through `--opt-mode=enum,<bound>` — confirmed against this build,
-	 * including that the bound is lexicographic and that the models come back in
-	 * search order rather than best first.
+	 * `optN` alone would answer with the proven optima and nothing else, which on
+	 * most documents is a single design: a tool for holding several at once would
+	 * become a tool that shows you one, and the preference a designer just wrote
+	 * down would have deleted their design space. So the optimum is only the
+	 * first question. The second is *bounded suboptimality*: every design within
+	 * {@link rankedBound} of it, which clingo answers natively through
+	 * `--opt-mode=enum,<bound>` — confirmed against this build, including that
+	 * the bound is lexicographic and that the models come back in search order
+	 * rather than best first.
 	 *
-	 * Both solves are bare. What comes back is candidates with costs; the ones
-	 * that earn a slot are drawn afterwards by the same `#hydrate` a sampled
+	 * And then the same question the unranked path asks, because a bounded region
+	 * that does not fit the grid has the same problem the whole space has and it
+	 * was hiding here for a while: enumeration order is not a sample. Measured on
+	 * a 729-design document with one soft rule, the bounded enumeration's first
+	 * 200 models left one of six fills at a single value — so `brave` reported a
+	 * colour as *settled across every good design* when all three of its values
+	 * occur in designs that cost exactly the same, and the 24 shown had a mean
+	 * pairwise distance of 2.26 against the 4.06 the unranked path gets on the
+	 * same document. So the region is sampled too, with the same assumption
+	 * sampling and now under the cost ceiling, and the consequences are asked of
+	 * the solver *under the bound* rather than read off a truncated pool.
+	 *
+	 * The cheap case stays cheap. When the bounded enumeration exhausted and the
+	 * whole region fits on the grid — the `ranked` template, and any document
+	 * whose preference narrows things down hard — there is nothing to sample and
+	 * nothing to select, and this is the two solves it always was.
+	 *
+	 * Every solve here is bare. What comes back is candidates with costs; the
+	 * ones that earn a slot are drawn afterwards by the same `#hydrate` a sampled
 	 * exploration uses, and a hydrating solve ignores the weak constraints
 	 * entirely — the picks it assumes already name one design, so there is
 	 * nothing left to rank.
@@ -970,6 +975,9 @@ export class Explorer {
 		limit: number,
 		slack: number,
 		owned: readonly Switch[],
+		poolSize: number,
+		seed: number,
+		countLimit: number,
 	): Promise<{ exploration: Omit<Exploration, keyof Common> | null; solves: number }> {
 		const best = await session.solve({
 			models: 1,
@@ -1000,16 +1008,60 @@ export class Explorer {
 		// The optimum first, because a capped enumeration can miss it: measured,
 		// `enum` walks the bounded region in search order and the best design was
 		// the last model of every run. Prepended rather than appended so `dedupe`
-		// keeps it at the front.
-		const pool = dedupe<Candidate>([
+		// keeps it at the front — and so the design `optN` actually proved optimal
+		// heads its own tier and is therefore the first artboard.
+		const enumerated = dedupe<Candidate>([
 			readCandidate(optimum, best.costs),
 			...within.models.map((atoms, i) =>
 				readCandidate(atoms, within.modelCosts[i] ?? []),
 			),
 		]);
-		pool.sort((a, b) => compareCosts(a.costs, b.costs));
 
-		const chosen = pool.slice(0, limit);
+		let pool = enumerated;
+		let brave: Consequences;
+		let cautious: Consequences;
+		let total: number | null;
+		let sampled = false;
+
+		if (within.exhausted && enumerated.length <= limit) {
+			// The enumeration *is* the near-optimal region, and all of it fits. The
+			// consequences follow from it directly, exactly as they do when the
+			// whole space fits in the unranked path.
+			brave = unionOf(enumerated);
+			cautious = intersectionOf(enumerated);
+			total = enumerated.length;
+		} else {
+			// All three under the bound, which this build honours for brave,
+			// cautious and counting alike — verified. Asked of the solver rather
+			// than read off the pool because the pool is 200 models of a region
+			// that has more, and a union over a truncated enumeration reports
+			// variety as settled.
+			const [braveOut, cautiousOut, countOut] = await Promise.all([
+				session.solve({ models: 0, mode: "brave", bound, assumptions: bare }),
+				session.solve({ models: 0, mode: "cautious", bound, assumptions: bare }),
+				session.solve({ models: countLimit, countOnly: true, bound, assumptions: bare }),
+			]);
+			solves += 3;
+			brave = accumulate(braveOut.models.at(-1) ?? []);
+			cautious = accumulate(cautiousOut.models.at(-1) ?? []);
+			total = countOut.exhausted ? countOut.count : null;
+
+			const drawn = await this.#sample(session, brave, poolSize, seed, bare, bound);
+			solves += drawn.solves;
+			// Sampled before enumerated, as in the unranked path: `selectSpread`
+			// sorts stably, so a tie group keeps this order and the greedy
+			// selection inside it starts away from the top of the search tree.
+			// The optimum stays first of all — it is the one design here that was
+			// *proved* to be as good as the document allows.
+			pool = dedupe<Candidate>([
+				enumerated[0],
+				...drawn.candidates,
+				...enumerated.slice(1),
+			]);
+			sampled = true;
+		}
+
+		const chosen = selectSpread(pool, limit);
 		const hydrated = await this.#hydrate(session, chosen, withPicture);
 		solves += hydrated.solves;
 
@@ -1020,16 +1072,16 @@ export class Explorer {
 		return {
 			exploration: {
 				universes: hydrated.universes,
-				brave: unionOf(pool),
-				cautious: intersectionOf(pool),
-				truncated: pool.length > limit || !within.exhausted,
+				brave,
+				cautious,
+				truncated: total === null || total > hydrated.universes.length,
 				count: hydrated.universes.length,
-				total: within.exhausted ? pool.length : null,
+				total,
 				sampling: {
 					strategy: "ranked",
 					pool: pool.length,
-					seed: 0,
-					sampled: pool.length > limit,
+					seed,
+					sampled,
 				},
 				optimized: true,
 				costs: best.costs,
@@ -1046,6 +1098,12 @@ export class Explorer {
 	 * Leaving some tokens free is what keeps this robust: when constraints rule
 	 * a combination out, the solver still has room to find a nearby legal one
 	 * instead of simply returning UNSAT.
+	 *
+	 * `bound` makes the same mechanism serve a ranked document: every drawn
+	 * candidate is then a design *within the cost ceiling*, and it arrives
+	 * carrying its own cost so the selection can tier it. Without the bound the
+	 * weak constraints are ignored and every candidate would come back costing
+	 * nothing, which would sort the whole sample above the proven optimum.
 	 */
 	async #sample(
 		session: SolverSession,
@@ -1053,6 +1111,7 @@ export class Explorer {
 		poolSize: number,
 		seed: number,
 		guards: ReadonlyArray<Assumption>,
+		bound?: readonly number[],
 	): Promise<{ candidates: Candidate[]; solves: number }> {
 		const varying = new Map<string, string[]>();
 		for (const [variable, indices] of Object.entries(brave.pick)) {
@@ -1076,18 +1135,20 @@ export class Explorer {
 			// exploration and reads nothing but the picks.
 			const outcome = await session.solve({
 				models: 1,
+				bound,
 				assumptions: [...guards, ...assumptions],
 			});
 			solves++;
 
 			const first = outcome.models[0];
 			if (outcome.result !== "SATISFIABLE" || !first) {
-				// Too much was assumed for the constraints to allow; ask for less.
+				// Too much was assumed for the constraints to allow — or, under a
+				// bound, for any design that cheap to exist. Ask for less.
 				misses++;
 				coverage = Math.max(0.2, coverage * 0.7);
 				continue;
 			}
-			const candidate = readCandidate(first);
+			const candidate = readCandidate(first, outcome.modelCosts[0] ?? []);
 			const key = universeKey(candidate);
 			if (seen.has(key)) {
 				misses++;

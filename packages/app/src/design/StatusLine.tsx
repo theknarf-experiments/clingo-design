@@ -113,10 +113,14 @@ export function StatusLine({
 						</>
 					) : null}{" "}
 					universe{exploration.count === 1 ? "" : "s"}
-					{exploration.sampling.sampled && !exploration.optimized ? (
+					{exploration.sampling.sampled ? (
 						<span
 							className={styles.tag}
-							title="Enumeration order is biased; these are sampled across every varying token."
+							title={
+								exploration.optimized
+									? "Enumeration order is biased, so the designs tied at each cost are sampled across every varying token. Nothing shown is worse for it."
+									: "Enumeration order is biased; these are sampled across every varying token."
+							}
 						>
 							sampled
 						</span>

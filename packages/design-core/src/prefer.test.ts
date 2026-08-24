@@ -21,11 +21,11 @@ import {
 } from "./edits.ts";
 import {
 	type Exploration,
-	compareCosts,
 	describeCosts,
 	explore,
 	rankedBound,
 } from "./explore.ts";
+import { compareCosts } from "./sampling.ts";
 import { STRENGTHS, emptyScene, type Scene } from "./scene.ts";
 import { lit, single } from "./values.ts";
 
