@@ -100,6 +100,79 @@
 	border-radius: 4px;
 }
 
+/* A rule with no members is named rather than pointed at something, and the
+   name is the term its author types into their own ASP — so it sits exactly
+   where every other kind's subject sits, and reads as code. */
+.name {
+	flex: 1 1 auto;
+	min-width: 0;
+	padding: 0.1rem 0.25rem;
+	font-family: var(--dc-mono, ui-monospace, monospace);
+	font-size: 0.72rem;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.bad {
+	color: var(--dc-bad, #fca5a5);
+	border-color: var(--dc-bad, #fca5a5);
+}
+
+/* The line to write, offered rather than described. */
+.term {
+	display: flex;
+	flex: 1 1 auto;
+	align-items: baseline;
+	gap: 0.35rem;
+	min-width: 0;
+	padding: 0;
+	font: inherit;
+	text-align: left;
+	color: inherit;
+	background: none;
+	border: none;
+	cursor: pointer;
+}
+
+.term code {
+	flex: 0 1 auto;
+	overflow: hidden;
+	font-family: var(--dc-mono, ui-monospace, monospace);
+	font-size: 0.72rem;
+	color: var(--dc-accent);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.copy {
+	flex: 0 0 auto;
+	font-size: 0.64rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0;
+}
+
+.term:hover .copy,
+.term:focus-visible .copy {
+	opacity: 0.55;
+}
+
+/* What the rule comes to as things stand: nothing has been written against it
+   yet, or something has. Not a warning either way — an unwritten rule is an
+   ordinary halfway state, and saying so in red would be a lie. */
+.note {
+	margin: 0;
+	font-size: 0.7rem;
+	line-height: 1.4;
+	opacity: 0.55;
+}
+
+.note.bad {
+	opacity: 1;
+}
+
 .limit {
 	width: 2.6rem;
 	padding: 0.1rem 0.2rem;

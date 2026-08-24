@@ -1165,8 +1165,10 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 	custom: {
 		label: "Custom rule",
 		// No placeholders: there is nothing in the document to fill them from, and
-		// what this rule means is in the ASP the user wrote.
-		summary: "holds unless your rules say viol(...)",
+		// what this rule means is in the ASP the user wrote. The editor shows this
+		// where a rule with members shows its members — which is to say, while
+		// nothing has been written it is the truth about the rule.
+		summary: "holds until one of your rules says otherwise",
 		counted: false,
 		// Zero either way: it is not too small to say anything without members —
 		// it says whatever its rule says — and it has nowhere to put one.
@@ -1194,6 +1196,21 @@ export const rangesOverGroup = (kind: ConstraintKind): boolean =>
 	CONSTRAINT_KINDS[kind].maxNodes === Number.POSITIVE_INFINITY;
 
 /**
+ * True when a kind has a subject in the document at all.
+ *
+ * A kind with nowhere to put a member is not a rule about *these nodes*; it is
+ * a rule about whatever its author's ASP is about. So it needs no selection to
+ * be worth adding, has no property and no edge to be about, and its whole
+ * content is the term it reaches ASP as — which is why the editor puts a name
+ * field where every other kind puts a subject.
+ *
+ * `maxNodes` rather than `minNodes`, and off the table rather than listed: a
+ * kind that can hold no members is the only kind that can have no subject.
+ */
+export const takesMembers = (kind: ConstraintKind): boolean =>
+	CONSTRAINT_KINDS[kind].maxNodes > 0;
+
+/**
  * True when a kind is about a *property* of its members — which is what
  * `c_prop/2` says and what the `differ`/`match`/`atMost` rules read.
  *
@@ -1203,7 +1220,7 @@ export const rangesOverGroup = (kind: ConstraintKind): boolean =>
  * `custom` needs no case here — a rule with no subject cannot have a property.
  */
 export const constrainsProp = (kind: ConstraintKind): boolean =>
-	!CONSTRAINT_KINDS[kind].geometric && CONSTRAINT_KINDS[kind].maxNodes > 0;
+	!CONSTRAINT_KINDS[kind].geometric && takesMembers(kind);
 
 /**
  * Words a constraint id may not be.

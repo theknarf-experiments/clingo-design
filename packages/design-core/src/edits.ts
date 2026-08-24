@@ -1070,13 +1070,10 @@ export function renameConstraint(
 		return { scene, rewritten: 0 };
 	}
 	let rewritten = 0;
-	const rules = scene.rules.replace(
-		new RegExp(`viol\\(\\s*${escapeTerm(id)}\\s*\\)`, "g"),
-		() => {
-			rewritten += 1;
-			return `viol(${name})`;
-		},
-	);
+	const rules = scene.rules.replace(violPattern(id), () => {
+		rewritten += 1;
+		return `viol(${name})`;
+	});
 	return {
 		scene: {
 			...scene,
@@ -1088,6 +1085,31 @@ export function renameConstraint(
 		rewritten,
 	};
 }
+
+/**
+ * Where the user's rules name a constraint: `viol(id)`, with the whitespace a
+ * person types.
+ *
+ * One definition for two questions that have to have the same answer — what a
+ * rename is able to carry, and what the editor counts as "written". If they
+ * disagreed, the panel would call a rule written and the rename would then
+ * quietly orphan it.
+ */
+const violPattern = (id: string): RegExp =>
+	new RegExp(`viol\\(\\s*${escapeTerm(id)}\\s*\\)`, "g");
+
+/**
+ * How many times the user's rules say `viol(id)`.
+ *
+ * The cheapest honest answer to "has this rule been written yet?": a substring
+ * search rather than a solve, and honest only about what it measures. A rule
+ * reached indirectly — `viol(C) :- mine(C).` — counts zero here and still
+ * fires, so zero means "nothing here names it", never "it is broken". Which is
+ * the same thing `renameConstraint`'s `rewritten: 0` is warning about, from the
+ * same regex, which is the point of sharing one.
+ */
+export const violRefs = (rules: string, id: string): number =>
+	rules.match(violPattern(id))?.length ?? 0;
 
 /**
  * A legal id needs no escaping, but an id from a document nobody validated

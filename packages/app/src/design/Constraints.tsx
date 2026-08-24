@@ -12,6 +12,9 @@ import {
 	type PropName,
 	type Scene,
 	addConstraint,
+	addCustomConstraint,
+	constrainsProp,
+	constraintTermError,
 	constraintValue,
 	deleteConstraint,
 	dimension,
@@ -19,11 +22,14 @@ import {
 	groupProps,
 	rangesOverGroup,
 	ref,
+	renameConstraint,
 	retargetConstraint,
 	sharedProps,
+	takesMembers,
 	termLabel,
 	tokensOfType,
 	updateConstraint,
+	violRefs,
 } from "@clingo-design/design-core";
 
 import styles from "./Constraints.module.css";
@@ -163,6 +169,17 @@ export function Constraints({
 	const selected = [...selection];
 	const groups = Object.keys(model?.groups ?? {}).sort();
 	/**
+	 * The rule whose name is being typed, and what has been typed so far.
+	 *
+	 * A rename carries the user's ASP with it, so it is committed on blur or
+	 * Enter rather than per keystroke — half a name is not a name, and renaming
+	 * through `n`, `no`, `no_` would drag `viol(...)` along for the ride. One slot
+	 * rather than a draft per row because only one field can have the caret.
+	 */
+	const [naming, setNaming] = useState<{ id: string; text: string } | null>(null);
+	/** The rule whose `viol(...)` line was last put on the clipboard. */
+	const [copied, setCopied] = useState<string | null>(null);
+	/**
 	 * What a new rule will range over: the selected layers, or a set a rule
 	 * named.
 	 *
@@ -190,14 +207,22 @@ export function Constraints({
 	 *
 	 * A group supplies the members, so what it needs instead is a kind that reads
 	 * them as a set — a gap has a near side and a far side, and a set has neither.
+	 *
+	 * A kind with no subject at all asks for neither: its condition is ASP the
+	 * user writes, and there is nothing in the document for a selection to
+	 * supply. So it is always on offer, which is why the menu itself is never
+	 * disabled any more — the truth about the *other* kinds is carried per
+	 * option, where it always was.
 	 */
 	const offered = (kind: ConstraintKind): boolean => {
 		const spec = CONSTRAINT_KINDS[kind];
+		if (!takesMembers(kind)) return true;
 		if (over) return rangesOverGroup(kind) && (spec.geometric || available.length > 0);
 		if (selected.length < spec.minNodes) return false;
 		return spec.geometric || available.length > 0;
 	};
-	const canAdd = CONSTRAINT_NAMES.some(offered);
+	/** Whether anything can be added *about what is selected*, for the tooltip. */
+	const canTarget = CONSTRAINT_NAMES.some((k) => takesMembers(k) && offered(k));
 
 	const nameOf = (id: string) => findInTree(scene.nodes, id)?.name ?? id;
 
@@ -247,37 +272,41 @@ export function Constraints({
 			<div className={styles.head}>
 				<span className={styles.hint}>
 					{groups.length > 0
-						? "Rules the design must obey. Add one over the selected layers, or over a set your rules named."
-						: "Rules the design must obey. Select layers to add one."}
+						? "Rules the design must obey. Add one over the selected layers, over a set your rules named, or write your own."
+						: "Rules the design must obey. Select layers to add one, or write your own."}
 				</span>
 				{overSelect(over, (group) => setTarget(group ?? ""), "new-constraint-over")}
 				<select
 					className={styles.add}
 					data-role="add-constraint"
 					value=""
-					disabled={!canAdd}
 					title={
-						canAdd
+						canTarget
 							? over
 								? `Constrain every member of ${over}`
 								: "Constrain the selected layers"
 							: over
-								? "This set has nothing its members all share"
-								: "Select layers that share a property, or two to relate by geometry"
+								? "This set has nothing its members all share — but a rule you write yourself needs nothing"
+								: "Select layers that share a property, or two to relate by geometry — or write your own rule"
 					}
 					onChange={(e) => {
 						const kind = e.target.value as ConstraintKind;
 						if (!kind) return;
-						onSceneChange(
-							(prev) =>
-								addConstraint(
-									prev,
-									kind,
-									over ? [] : selected,
-									over ? available[0] : undefined,
-									undefined,
-									over || undefined,
-								).scene,
+						onSceneChange((prev) =>
+							// A kind with no subject is named rather than pointed at
+							// something, and the name is what its author has to type into
+							// their own ASP — so it starts out readable (`rule`, `rule_2`)
+							// instead of as an opaque handle.
+							takesMembers(kind)
+								? addConstraint(
+										prev,
+										kind,
+										over ? [] : selected,
+										over ? available[0] : undefined,
+										undefined,
+										over || undefined,
+									).scene
+								: addCustomConstraint(prev).scene,
 						);
 					}}
 				>
@@ -308,6 +337,18 @@ export function Constraints({
 				const spec = CONSTRAINT_KINDS[c.kind];
 				const props = propsOf(c);
 				const members = c.group === undefined ? c.nodes : membersOf(c.group);
+				// A rule with no subject: its name is the whole of it, so the name is
+				// what the row edits and the line to write is what the row shows.
+				const named = naming?.id === c.id ? naming : null;
+				const nameError =
+					named && named.text !== c.id
+						? constraintTermError(scene, named.text, c.id)
+						: undefined;
+				// The cheapest honest signal, and phrased as what it measured: a rule
+				// reached through `viol(C) :- mine(C).` counts zero and still fires, so
+				// zero says "nothing here names it", not "this is broken".
+				const refs = violRefs(scene.rules, c.id);
+				const stub = `viol(${c.id}) :- `;
 				return (
 					<div
 						key={c.id}
@@ -372,6 +413,8 @@ export function Constraints({
 								/>
 							) : null}
 
+							{/* What the rule is about: where its members are, how they look,
+							    or — for a rule with no members — nothing but its own name. */}
 							{spec.geometric ? (
 								<select
 									className={styles.prop}
@@ -391,7 +434,7 @@ export function Constraints({
 										</option>
 									))}
 								</select>
-							) : (
+							) : constrainsProp(c.kind) ? (
 								<select
 									className={styles.prop}
 									data-role="constraint-prop"
@@ -410,6 +453,32 @@ export function Constraints({
 										</option>
 									))}
 								</select>
+							) : (
+								<input
+									className={cx(styles.name, nameError && styles.bad)}
+									data-role="constraint-name"
+									spellCheck={false}
+									value={named ? named.text : c.id}
+									aria-invalid={nameError ? true : undefined}
+									title="The term your rule writes in viol(...), and the name a conflict is reported under"
+									onChange={(e) => setNaming({ id: c.id, text: e.target.value })}
+									// Committed on the way out, not per keystroke: the rename
+									// rewrites the user's `viol(...)` and half a name is not a
+									// name. Escape drops the draft without blurring, so the
+									// blur that follows sees no draft to commit.
+									onBlur={() => {
+										if (named && !nameError && named.text !== c.id) {
+											onSceneChange((prev) =>
+												renameConstraint(prev, c.id, named.text).scene,
+											);
+										}
+										setNaming(null);
+									}}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") e.currentTarget.blur();
+										if (e.key === "Escape") setNaming(null);
+									}}
+								/>
 							)}
 
 							<Dimension
@@ -432,40 +501,92 @@ export function Constraints({
 							</button>
 						</div>
 
-						<div className={styles.memberRow}>
-							{/* Members, chosen where they were always chosen. A group is
-							    a set the rules named, so the choice is between "the ones
-							    I picked" and "the ones a rule says belong together". */}
-							{overSelect(
-								c.group ?? "",
-								(group) =>
-									onSceneChange((prev) =>
-										retargetConstraint(prev, c.id, { group }),
-									),
-								"constraint-over",
-							)}
-							<button
-								type="button"
-								className={styles.members}
-								data-role="constraint-members"
-								data-group={c.group}
-								title={
-									c.group === undefined
-										? "Select these layers"
-										: `Select the ${members.length} members of ${c.group}`
+						{takesMembers(c.kind) ? (
+							<div className={styles.memberRow}>
+								{/* Members, chosen where they were always chosen. A group is
+								    a set the rules named, so the choice is between "the ones
+								    I picked" and "the ones a rule says belong together". */}
+								{overSelect(
+									c.group ?? "",
+									(group) =>
+										onSceneChange((prev) =>
+											retargetConstraint(prev, c.id, { group }),
+										),
+									"constraint-over",
+								)}
+								<button
+									type="button"
+									className={styles.members}
+									data-role="constraint-members"
+									data-group={c.group}
+									title={
+										c.group === undefined
+											? "Select these layers"
+											: `Select the ${members.length} members of ${c.group}`
+									}
+									disabled={members.length === 0}
+									onClick={() => onSelectionChange([...members])}
+								>
+									{c.group === undefined
+										? `${c.nodes.map(nameOf).join(", ")} ${describe(c)}`
+										: members.length === 0
+											? // No answer to read them out of — an unsatisfiable
+												// document has none, and that is when this is read.
+												`${c.group} ${describe(c)}`
+											: `${members.length} in ${c.group} ${describe(c)}`}
+								</button>
+							</div>
+						) : (
+							<div className={styles.memberRow}>
+								{/* The line the designer has to write, spelled out. The panel
+								    already knows the term — it *is* the id — so making
+								    somebody work it out from a name field would be gratuitous.
+								    Copying rather than inserting: an unfinished rule appended
+								    to the panel is a syntax error, and a syntax error is the
+								    whole document gone. */}
+								<button
+									type="button"
+									className={styles.term}
+									data-role="constraint-term"
+									title="Copy this, then finish it in the Your rules panel"
+									onClick={() => {
+										navigator.clipboard?.writeText(stub).then(
+											() => {
+												setCopied(c.id);
+												setTimeout(
+													() => setCopied((was) => (was === c.id ? null : was)),
+													1500,
+												);
+											},
+											() => setCopied(null),
+										);
+									}}
+								>
+									<code>{stub}…</code>
+									<span className={styles.copy}>
+										{copied === c.id ? "copied" : "copy"}
+									</span>
+								</button>
+							</div>
+						)}
+
+						{takesMembers(c.kind) ? null : (
+							<p
+								className={cx(styles.note, nameError && styles.bad)}
+								data-role={
+									nameError
+										? "constraint-name-error"
+										: refs === 0
+											? "constraint-unwritten"
+											: "constraint-written"
 								}
-								disabled={members.length === 0}
-								onClick={() => onSelectionChange([...members])}
 							>
-								{c.group === undefined
-									? `${c.nodes.map(nameOf).join(", ")} ${describe(c)}`
-									: members.length === 0
-										? // No answer to read them out of — an unsatisfiable
-											// document has none, and that is when this is read.
-											`${c.group} ${describe(c)}`
-										: `${members.length} in ${c.group} ${describe(c)}`}
-							</button>
-						</div>
+								{nameError ??
+									(refs === 0
+										? describe(c)
+										: `named ${refs === 1 ? "once" : `${refs} times`} in your rules`)}
+							</p>
+						)}
 					</div>
 				);
 			})}

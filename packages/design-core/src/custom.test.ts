@@ -24,9 +24,19 @@ import {
 	retargetConstraint,
 	setProp,
 	updateConstraint,
+	violRefs,
 } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
-import { RULES_HEADER, type Scene, emptyScene } from "./scene.ts";
+import {
+	CONSTRAINT_KINDS,
+	CONSTRAINT_NAMES,
+	RULES_HEADER,
+	type Scene,
+	constrainsProp,
+	emptyScene,
+	rangesOverGroup,
+	takesMembers,
+} from "./scene.ts";
 import { lit } from "./values.ts";
 
 const RED = "#ff0000";
@@ -351,6 +361,79 @@ test("a rename to an illegal or taken term changes nothing", () => {
 	assert.equal(renameConstraint(scene, "mine", "mine").rewritten, 0);
 	// And an id no constraint holds is not a rename at all.
 	assert.equal(renameConstraint(scene, "nobody", "somebody").scene, scene);
+});
+
+/* ------------------------------------------------------------------ */
+/* What the panel can ask about it                                     */
+/* ------------------------------------------------------------------ */
+
+test("a kind with nowhere to put a member is the kind with no subject", () => {
+	// Read off the table, so a new kind answers this by describing itself. The
+	// editor uses it for three decisions — offer the kind whatever is selected,
+	// put a name field where the subject would go, and show the line to write
+	// instead of a member list — and all three want the same one question.
+	assert.deepEqual(
+		CONSTRAINT_NAMES.filter((k) => !takesMembers(k)),
+		["custom"],
+	);
+	for (const kind of CONSTRAINT_NAMES) {
+		const spec = CONSTRAINT_KINDS[kind];
+		if (takesMembers(kind)) continue;
+		// Nothing a member would have supplied: no property, no edge, no value —
+		// so nothing for the row's middle to show but the name.
+		assert.equal(constrainsProp(kind), false, kind);
+		assert.deepEqual(spec.edges, [], kind);
+		assert.equal(spec.valueType, undefined, kind);
+		assert.equal(rangesOverGroup(kind), false, kind);
+	}
+});
+
+test("violRefs counts exactly what a rename can carry", () => {
+	const added = addCustomConstraint(threeBoxes(), "no_red_a");
+	const scene = withRules(added.scene, [
+		`viol(no_red_a) :- rendered(a,fill,L), literal(L,"${RED}").`,
+		"viol( no_red_a ) :- 1 = 2.",
+	].join("\n"));
+	// The two questions the editor and the rename ask are the same question, so
+	// the panel can never call a rule written that the rename would then orphan.
+	assert.equal(violRefs(scene.rules, "no_red_a"), 2);
+	assert.equal(renameConstraint(scene, "no_red_a", "cool").rewritten, 2);
+	assert.equal(violRefs(scene.rules, "cool"), 0, "before the rename");
+	assert.equal(
+		violRefs(renameConstraint(scene, "no_red_a", "cool").scene.rules, "cool"),
+		2,
+		"and after it",
+	);
+});
+
+test("zero references means nothing names it, not that it is broken", async () => {
+	// Which is why the panel says so quietly rather than in red: this rule fires,
+	// and the count is 0 because the reference is indirect.
+	const added = addCustomConstraint(threeBoxes(), "no_red_a");
+	const scene = withRules(added.scene, [
+		"mine(no_red_a).",
+		`viol(C) :- mine(C), rendered(a,fill,L), literal(L,"${RED}").`,
+	].join("\n"));
+	assert.equal(violRefs(scene.rules, "no_red_a"), 0);
+	assert.equal(await universes(scene), 18, "and yet it holds the space down");
+
+	// A near miss counts as nothing, which is the case the signal is for.
+	const typo = withRules(added.scene, "viol(no_red_b) :- 1 = 1.");
+	assert.equal(violRefs(typo.rules, "no_red_a"), 0);
+	assert.equal(await universes(typo), 27, "nothing guards the typo's head");
+});
+
+test("a fresh unnamed rule reads as unwritten, and naming it does not change that", () => {
+	// The two halves of the row: the term to write, and whether anything says it.
+	const first = addCustomConstraint(emptyScene());
+	assert.equal(first.id, "rule");
+	assert.equal(violRefs(first.scene.rules, "rule"), 0);
+	const renamed = renameConstraint(first.scene, "rule", "no_wide_gaps");
+	assert.equal(renamed.rewritten, 0);
+	assert.equal(violRefs(renamed.scene.rules, "no_wide_gaps"), 0);
+	// And the id is what the line has to say, which is all the panel needs to
+	// spell it out.
+	assert.equal(renamed.scene.constraints[0].id, "no_wide_gaps");
 });
 
 test("renaming works on a generated id too, so there is no per-kind path", () => {
