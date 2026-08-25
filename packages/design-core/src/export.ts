@@ -26,6 +26,12 @@
  * A rule-minted node that links to a token is therefore exported with the
  * literal rather than the name; the document has no account of it to read. That
  * is the only place tokens do not survive, and it is named in {@link ExportResult.lost}.
+ *
+ * A style is the one thing here that is not a translation but an *identity*: a
+ * style is a shared bundle of declarations under a name, and so is a CSS class.
+ * So it comes out as one — see {@link styleClasses} — and a wearer's rule holds
+ * only what it says for itself. That is the whole of why the HTML target got
+ * smaller and readable at the same time; nothing else in this file changed.
  */
 import type { Frame } from "./geometry.ts";
 import { pathData, scalePoints } from "./geometry.ts";
@@ -54,8 +60,13 @@ import {
 	type PropName,
 	type Scene,
 	type SceneNode,
+	type Style,
 	findStyle,
 	frameOf,
+	propValueOf,
+	styleProps,
+	variantLabel,
+	wornProps,
 } from "./scene.ts";
 import { flatten } from "./tree.ts";
 import {
@@ -67,6 +78,7 @@ import {
 	frameVar,
 	layoutVar,
 	luminance,
+	numeralOf,
 	parseVariable,
 	propVar,
 	resolveValue,
@@ -117,6 +129,7 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 		mime: "image/svg+xml",
 		language: "svg",
 		loses: [
+			"A style is not a class here. An SVG is read by things that apply the presentation attributes and skip the stylesheet, so every wearer carries the treatment inlined: the correlation is in the picture, but it is not in the file.",
 			"Shadows are dropped — SVG needs a filter per elevation, and a filter is not the declaration a designer wrote.",
 			"Text does not wrap. Each line of the document's own text becomes a tspan; a line the canvas broke because the box was narrow comes out unbroken.",
 			"A text baseline is computed from the font size rather than measured, so a face with unusual metrics sits a pixel or two off.",
@@ -206,6 +219,35 @@ function customNames(tokens: readonly Token[]): Map<string, string> {
 	return out;
 }
 
+/** Class names the output uses for itself, which a style may not take. */
+const RESERVED_CLASSES = new Set(["design", "s"]);
+
+/**
+ * Class names for every style: `Prose` becomes `.prose`.
+ *
+ * The user's own name, because that is the point — a class called `.prose` is
+ * what makes the stylesheet editable afterwards, and `.s7` would not be. Kept
+ * clear of the generated names as well as of each other: a node's rule is
+ * `.n3`, so a style called "n3" gets `n3-2` rather than quietly restyling the
+ * fourth node in the document.
+ */
+function styleClassNames(styles: readonly Style[]): Map<string, string> {
+	const out = new Map<string, string>();
+	const taken = new Set<string>();
+	for (const style of styles) {
+		// Lower case, unlike a token's custom property: a class is read as CSS a
+		// person writes, and `.prose` is what they would have written.
+		const base = slug(style.name || style.id).toLowerCase();
+		let name = base;
+		for (let n = 2; taken.has(name) || RESERVED_CLASSES.has(name) || /^n\d+$/.test(name); n++) {
+			name = `${base}-${n}`;
+		}
+		taken.add(name);
+		out.set(style.id, name);
+	}
+	return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* Reading the document for what the atoms do not carry                */
 /* ------------------------------------------------------------------ */
@@ -215,6 +257,8 @@ interface DocIndex {
 	scene: Scene;
 	byId: Map<string, SceneNode>;
 	custom: Map<string, string>;
+	/** Class name per style id — see {@link styleClassNames}. */
+	styleClass: Map<string, string>;
 }
 
 function indexDocument(scene: Scene): DocIndex {
@@ -222,6 +266,7 @@ function indexDocument(scene: Scene): DocIndex {
 		scene,
 		byId: new Map(flatten(scene.nodes).map((n) => [n.id, n] as const)),
 		custom: customNames(scene.tokens),
+		styleClass: styleClassNames(scene.styles ?? []),
 	};
 }
 
@@ -239,15 +284,30 @@ function docNode(index: DocIndex, id: string): SceneNode | undefined {
 	return part ? index.byId.get(part.node) : undefined;
 }
 
-/** Whatever the document stores for a variable, if it stores anything. */
-function documentValue(index: DocIndex, variable: string): Value | undefined {
+/**
+ * Whatever the document stores for a variable, if it stores anything.
+ *
+ * A property goes through {@link propValueOf} rather than straight to
+ * `node.props`, so a property a *style* decides is read from the variant the
+ * universe picked. Without that a styled fill naming `accent` would come out as
+ * the hex — the one thing this file exists to avoid — and it would be a class
+ * full of hex codes, which is worse than an inline one.
+ */
+function documentValue(
+	index: DocIndex,
+	variable: string,
+	picks: Picks,
+): Value | undefined {
 	const parsed = parseVariable(variable);
 	if (!parsed) return undefined;
 	if (parsed.kind === "token") {
 		return findToken(index.scene.tokens, parsed.token)?.value;
 	}
 	if (parsed.kind === "prop") {
-		return docNode(index, parsed.node)?.props[parsed.prop as PropName];
+		const node = docNode(index, parsed.node);
+		return node
+			? propValueOf(index.scene, node, parsed.prop as PropName, picks)
+			: undefined;
 	}
 	if (parsed.kind === "frame") {
 		return docNode(index, parsed.node)?.frame[parsed.dim as Dimension];
@@ -267,7 +327,7 @@ function tokenNamed(
 	picks: Picks,
 	variable: string,
 ): Token | undefined {
-	const value = documentValue(index, variable);
+	const value = documentValue(index, variable, picks);
 	if (!value) return undefined;
 	const term = activeTerm(value, variable, picks);
 	return term?.kind === "token"
@@ -334,6 +394,152 @@ function modelBounds(model: ModelScene): Frame {
 /** Coordinates are exact rationals upstream; four places is well past a pixel. */
 const round = (n: number): number => Math.round(n * 10000) / 10000;
 const px = (n: number): string => `${round(n)}px`;
+
+/* ------------------------------------------------------------------ */
+/* A style, as a class                                                 */
+/* ------------------------------------------------------------------ */
+
+/** Which function turns this property into declarations for this kind, if any. */
+function paintFor(
+	kind: NodeKind,
+	prop: PropName,
+): ((value: string) => Declarations) | undefined {
+	if (!KINDS[kind].props.includes(prop)) return undefined;
+	return SHAPE_PAINT[kind]?.paint?.[prop] ?? PAINT[prop];
+}
+
+/**
+ * One style, and the class it comes out as.
+ *
+ * Not every property a style holds can go in the class, and the three filters
+ * in {@link styleClasses} are why this is a record rather than the style
+ * itself: what a class may say is a question about the *wearers*, and the
+ * answer is a subset.
+ */
+interface StyleClass {
+	/** The class name — `prose`, from the style's own name. */
+	name: string;
+	/** The properties the class carries, in table order. */
+	props: PropName[];
+	/** Wearers drawn in this universe, by node id, in document order. */
+	wearers: string[];
+	/** Per wearer, the properties it takes from the style rather than states. */
+	worn: Map<string, Set<PropName>>;
+}
+
+/**
+ * The document's styles, as the classes the output shares between wearers.
+ *
+ * A style *is* a class: a named bundle of declarations several elements point
+ * at. So the translation is an identity rather than an approximation, and the
+ * only real work is deciding which of the style's properties may go in the
+ * shared block. Three filters, and each rules out a way the class could paint
+ * something the answer set did not:
+ *
+ *   - **every wearer draws it, the same way.** A text style that also holds a
+ *     fill, worn by a text node, must not put a background on the text: the
+ *     canvas paints only what `KINDS[kind].props` lists. A property two wearers
+ *     of different kinds take to *different* declarations — a stroke is a
+ *     border on a box and a `stroke` on a line — is out for the same reason.
+ *   - **every wearer draws it in this universe.** A field one variant fills in
+ *     and another leaves out is still one of the style's properties, and in the
+ *     universe that picked the silent variant there is nothing to say.
+ *   - **the wearers that take it agree about what it says.** They always do —
+ *     one pick, one variant, one literal — but a hand-written rule may derive
+ *     `resolved(prop(N,P))` for one node and not another, and then the shared
+ *     block would be a claim about both.
+ *
+ * A wearer that states its own value for a property is *not* excluded: it keeps
+ * that one declaration in its own rule, and its own rule beats the class —
+ * see the `:where()` in `readLayer`. That is exactly what an override is, and
+ * writing it as the cascade rather than as an absence is what makes the output
+ * editable: change `.prose` and everything that did not override follows.
+ *
+ * Read off the *document*, because that is where wearing lives: `sty_wears/3`
+ * is a predicate a rule may assert too, and the answer set does not report it
+ * back. Those nodes come out with the properties inlined, exactly as a
+ * rule-minted node's token link comes out as a literal, and for the same
+ * reason. Named in {@link ExportResult.lost}.
+ */
+function styleClasses(index: DocIndex, base: Layer): StyleClass[] {
+	const model = base.universe.model;
+	const out: StyleClass[] = [];
+	for (const style of index.scene.styles ?? []) {
+		const worn = new Map<string, Set<PropName>>();
+		const wearers: string[] = [];
+		for (const node of flatten(index.scene.nodes)) {
+			if (node.style !== style.id || !model.byId[node.id]) continue;
+			wearers.push(node.id);
+			worn.set(node.id, new Set(wornProps(index.scene, node)));
+		}
+		if (wearers.length === 0) continue;
+		const props = styleProps(style).filter((prop) => {
+			const paints = new Set(wearers.map((id) => paintFor(model.byId[id].kind, prop)));
+			if (paints.size !== 1 || paints.has(undefined)) return false;
+			if (wearers.some((id) => model.byId[id].rendered[prop] === undefined)) return false;
+			const said = new Set(
+				wearers
+					.filter((id) => worn.get(id)?.has(prop))
+					.map((id) => model.byId[id].rendered[prop]),
+			);
+			return said.size === 1;
+		});
+		if (props.length === 0) continue;
+		out.push({
+			name: index.styleClass.get(style.id) ?? slug(style.id),
+			props,
+			wearers,
+			worn,
+		});
+	}
+	return out;
+}
+
+/** One class's declarations in one layer, and which keys each property wrote. */
+interface ClassRule {
+	declarations: Declarations;
+	keys: Map<PropName, string[]>;
+}
+
+/**
+ * What a class says in one layer.
+ *
+ * The value comes from a wearer that actually *takes* the property from the
+ * style, and through the same `tokenNamed` walk a node's own declaration takes
+ * — so a variant that says `size: ref("lg")` reaches the class as
+ * `var(--lg)`, and the class is a design system rather than a pile of numbers.
+ *
+ * The property set is decided once, on the base layer, and every layer answers
+ * for exactly that set. A layer that hoisted a different set would emit
+ * `unset` on a wearer's own rule *after* the class it was meant to defer to,
+ * and the cascade would then drop a declaration the picture needs.
+ */
+function classRule(
+	index: DocIndex,
+	layer: Layer,
+	cls: StyleClass,
+	useTokens: boolean,
+	used: Set<string>,
+): ClassRule {
+	const declarations: Declarations = {};
+	const keys = new Map<PropName, string[]>();
+	for (const prop of cls.props) {
+		const from = cls.wearers.find((id) => cls.worn.get(id)?.has(prop));
+		const node = from === undefined ? undefined : layer.universe.model.byId[from];
+		const value = node?.rendered[prop];
+		if (node === undefined || value === undefined) continue;
+		const paint = paintFor(node.kind, prop);
+		if (!paint) continue;
+		const token = useTokens
+			? tokenNamed(index, layer.universe.pick, propVar(node.id, prop))
+			: undefined;
+		if (token) used.add(token.id);
+		const said = paint(token ? `var(--${index.custom.get(token.id)})` : value);
+		Object.assign(declarations, said);
+		keys.set(prop, Object.keys(said));
+	}
+	return { declarations, keys };
+}
 
 /* ------------------------------------------------------------------ */
 /* HTML + CSS                                                          */
@@ -403,7 +609,7 @@ function declarationsFor(
 	for (const prop of KINDS[node.kind].props) {
 		const value = node.rendered[prop];
 		if (value === undefined) continue;
-		const paint = shape?.paint?.[prop] ?? PAINT[prop];
+		const paint = paintFor(node.kind, prop);
 		if (!paint) continue;
 		const token = tokenNamed(index, layer.universe.pick, propVar(node.id, prop));
 		if (token) {
@@ -453,6 +659,22 @@ function rule(selector: string, declarations: Declarations, indent: string): str
 	return body === "" ? "" : `${indent}${selector} {\n${body}\n${indent}}`;
 }
 
+/**
+ * One selector, as a layer under an extra one writes it.
+ *
+ * Three cases, and each is a different question. `:root` is where the custom
+ * properties live, so a scoped layer *replaces* it with its own selector rather
+ * than redefining the document's. A style's class is wrapped in `:where()` and
+ * has to stay wrapped, or the scoping would give the theme's copy more weight
+ * than a node that overrode the style. Everything else is a plain descendant.
+ */
+function scope(selector: string, under: string | null): string {
+	if (under === null) return selector;
+	if (selector === ":root") return under;
+	const inner = /^:where\((.*)\)$/.exec(selector);
+	return inner ? `:where(${under} ${inner[1]})` : `${under} ${selector}`;
+}
+
 /** Everything in `next` that `base` does not already say. */
 function diff(base: Declarations, next: Declarations): Declarations {
 	const out: Declarations = {};
@@ -492,13 +714,21 @@ ${cssText(DOCUMENT_BASE, "\t")}
 const keepsWhitespace = (kind: NodeKind): boolean =>
 	SHAPE_PAINT[kind]?.box?.whiteSpace?.startsWith("pre") === true;
 
-function htmlBody(index: DocIndex, slots: readonly Slot[], layer: Layer): string {
+function htmlBody(
+	index: DocIndex,
+	slots: readonly Slot[],
+	layer: Layer,
+	/** The style class each wearer carries beside its own, if any. */
+	wearing: Map<string, string>,
+): string {
 	const byId = new Map(slots.map((s) => [s.id, s] as const));
 	const render = (node: ModelNode, depth: number, pretty: boolean): string => {
 		const slot = byId.get(node.id);
 		if (!slot) return "";
 		const pad = pretty ? "\t".repeat(depth + 2) : "";
-		const open = `${pad}<div class="${slot.className}" data-node="${escapeAttr(node.id)}" data-kind="${node.kind}">`;
+		const worn = wearing.get(node.id);
+		const names = worn === undefined ? slot.className : `${slot.className} ${worn}`;
+		const open = `${pad}<div class="${names}" data-node="${escapeAttr(node.id)}" data-kind="${node.kind}">`;
 		const content = htmlContent(index, layer, node);
 		const nested = !keepsWhitespace(node.kind) && node.children.length > 0;
 		const kids = node.children
@@ -515,15 +745,28 @@ function htmlBody(index: DocIndex, slots: readonly Slot[], layer: Layer): string
 		.join("\n");
 }
 
+/** The file, and what it turned out to hold — see {@link ExportResult.lost}. */
+interface Emitted {
+	text: string;
+	/** The styles that came out as classes. */
+	classes: StyleClass[];
+}
+
 function htmlExport(
 	index: DocIndex,
 	layers: readonly Layer[],
 	options: ExportOptions,
-): string {
+): Emitted {
 	const useTokens = options.tokens !== false;
 	const base = layers[0];
 	const slots = slotsOf(base.universe.model);
 	const used = new Set<string>();
+	const classes = styleClasses(index, base);
+	/** Which class a wearer carries, for the markup. */
+	const wearing = new Map<string, string>();
+	for (const cls of classes) {
+		for (const id of cls.wearers) wearing.set(id, cls.name);
+	}
 
 	/** Every declaration one layer makes, keyed by selector. */
 	const readLayer = (layer: Layer): Map<string, Declarations> => {
@@ -533,14 +776,40 @@ function htmlExport(
 			width: px(origin.width),
 			height: px(origin.height),
 		});
+		// `:where()`, so a class weighs nothing at all.
+		//
+		// Source order would be enough for one layer — put the classes first and a
+		// wearer's own rule wins — and it is *not* enough for two: a class
+		// redefined inside a media query sits after every node's rule, and would
+		// beat the node that overrode it above the breakpoint. Zero specificity
+		// makes "the node's own value wins" true by construction, in every layer
+		// and in both directions, which is what an override has to mean.
+		const shared = new Map<string, Set<string>>();
+		for (const cls of classes) {
+			const rule = classRule(index, layer, cls, useTokens, used);
+			out.set(`:where(.${cls.name})`, rule.declarations);
+			for (const id of cls.wearers) {
+				const taken = new Set<string>();
+				for (const prop of cls.worn.get(id) ?? []) {
+					for (const key of rule.keys.get(prop) ?? []) taken.add(key);
+				}
+				shared.set(id, taken);
+			}
+		}
 		const byId = new Map(slots.map((s) => [s.id, s] as const));
 		const walk = (node: ModelNode, root: boolean): void => {
 			const slot = byId.get(node.id);
 			if (slot) {
-				out.set(`.${slot.className}`, {
+				const own: Declarations = {
 					...geometry(index, layer, node, root, origin, useTokens, used),
 					...declarationsFor(index, layer, node, useTokens, used),
-				});
+				};
+				// Whatever the class already says for a property this node takes
+				// from it. Decided by which property it is rather than by comparing
+				// the two values, so that turning token names off cannot change the
+				// shape of the output — only what the declarations read as.
+				for (const key of shared.get(node.id) ?? []) delete own[key];
+				out.set(`.${slot.className}`, own);
 			}
 			for (const child of node.children) walk(child, false);
 		};
@@ -575,15 +844,7 @@ function htmlExport(
 		for (const [selector, declarations] of rules) {
 			const changed = diff(baseRules.get(selector) ?? {}, declarations);
 			if (Object.keys(changed).length === 0) continue;
-			// `:root` is where the custom properties live; a scoped layer moves
-			// them onto its own selector rather than redefining the document's.
-			const scoped =
-				layer.under === null
-					? selector
-					: selector === ":root"
-						? layer.under
-						: `${layer.under} ${selector}`;
-			const block = rule(scoped, changed, indent);
+			const block = rule(scope(selector, layer.under), changed, indent);
 			if (block) inner.push(block);
 		}
 		if (inner.length === 0) continue;
@@ -594,7 +855,9 @@ function htmlExport(
 	}
 
 	const title = escapeText(options.title ?? "Design");
-	return `<!doctype html>
+	return {
+		classes,
+		text: `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -606,11 +869,12 @@ ${css.join("\n")}
 </head>
 <body>
 \t<div class="design">
-${htmlBody(index, slots, base)}
+${htmlBody(index, slots, base, wearing)}
 \t</div>
 </body>
 </html>
-`;
+`,
+	};
 }
 
 /* ------------------------------------------------------------------ */
@@ -777,11 +1041,26 @@ function svgNode(
 	return `${pad}<g transform="translate(${round(frame.x)},${round(frame.y)})" data-node="${escapeAttr(node.id)}" data-kind="${node.kind}">${own}${kids}\n${pad}</g>`;
 }
 
+/**
+ * SVG, with everything on the element.
+ *
+ * **A style stays inlined here, and it is not an oversight.** SVG has the
+ * cascade — a `<style>` element and a `class` attribute both work in a browser —
+ * but an SVG file is read by more than browsers, and the moment one of them
+ * (an editor, a rasteriser, a paste into another document) applies the
+ * presentation attributes and skips the stylesheet, a class is the difference
+ * between a picture and a wireframe. This target's promise is that the file
+ * *is* the picture, which is why a shadow is dropped rather than approximated
+ * with a filter; a class that might not be applied is the same bargain the
+ * other way round. So a style's properties are written onto every element that
+ * wears it, the correlation is in the picture and not in the file, and
+ * {@link EXPORT_TARGETS} says so out loud.
+ */
 function svgExport(
 	index: DocIndex,
 	layers: readonly Layer[],
 	options: ExportOptions,
-): string {
+): Emitted {
 	const useTokens = options.tokens !== false;
 	const base = layers[0];
 	const bounds = modelBounds(base.universe.model);
@@ -821,10 +1100,13 @@ function svgExport(
 
 	const w = round(bounds.width);
 	const h = round(bounds.height);
-	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" fill="#0f172a">${title}${style}${defs}
+	return {
+		classes: [],
+		text: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" fill="#0f172a">${title}${style}${defs}
 ${body}
 </svg>
-`;
+`,
+	};
 }
 
 /* ------------------------------------------------------------------ */
@@ -884,16 +1166,134 @@ function disagreements(universes: readonly ExportUniverse[]): string[] {
 }
 
 /**
+ * Where the markup itself carries geometry, and so cannot be shared.
+ *
+ * A line, an arrow and a path draw *inside* their box: the numbers are in the
+ * `<line>`'s coordinates and the `<path>`'s `d`, not in a declaration. The
+ * markup is emitted once, from the base layer, so a layer that moved one of
+ * these would show the base's shape in this layer's frame. Read off
+ * `KINDS` — `diagonal` and `plotted` are exactly the two kinds of "its real
+ * geometry is not its frame" — so a new kind of either sort is covered without
+ * an entry here.
+ */
+function drawnGeometry(model: ModelScene): ModelNode[] {
+	return Object.values(model.byId).filter(
+		(node) => KINDS[node.kind].diagonal || KINDS[node.kind].plotted,
+	);
+}
+
+/**
+ * One artefact, themed: the base plus one conditional layer per remaining
+ * universe.
+ *
+ * Two universes are light and dark, because that is the one thing
+ * `prefers-color-scheme` asks for, and the caller has already put the lighter
+ * one first. More than two has no light and dark to be, so they are named
+ * themes instead — calling the third one "dark" would be a lie.
+ *
+ * Shared by a colour token and a colour-only style, which are the same artefact
+ * with the declarations in a different place: a custom property for the token,
+ * a class for the style. Both are switched by exactly this selector.
+ */
+function themeCollapse(
+	variable: string,
+	label: string,
+	ordered: readonly ExportUniverse[],
+	subject: string,
+): Collapse {
+	if (ordered.length === 2) {
+		const [light, dark] = ordered;
+		return {
+			kind: "theme",
+			variable,
+			label,
+			// The preference is a *default*, so it goes on the media query alone;
+			// the attribute is the same universe again, so that a page can force
+			// either way whatever the browser says.
+			layers: [
+				{ universe: light, media: null, under: null, label: `${label}: the light value` },
+				{
+					universe: dark,
+					media: "(prefers-color-scheme: dark)",
+					under: null,
+					label: `${label}: the darker value, when the reader prefers a dark scheme`,
+				},
+				{
+					universe: dark,
+					media: null,
+					under: '[data-theme="dark"]',
+					label: `${label}: the darker value, forced`,
+				},
+			],
+			note: `One artefact, themed on ${subject}: the darker value under prefers-color-scheme: dark, or forced with data-theme="dark".`,
+		};
+	}
+	return {
+		kind: "theme",
+		variable,
+		label,
+		layers: ordered.map((universe, i) => ({
+			universe,
+			media: null,
+			under: i === 0 ? null : `[data-theme="alt-${i}"]`,
+			label: i === 0 ? `${label}: the default` : `${label}: [data-theme="alt-${i}"]`,
+		})),
+		note: `One artefact with ${ordered.length} themes on ${subject}, selected with data-theme.`,
+	};
+}
+
+/**
+ * One artefact with a breakpoint: mobile first, the wide design under a query.
+ *
+ * The width is the one the wide design actually occupies, which is the only
+ * number in the document that means anything here — and the same number the
+ * direction collapse uses, because it is the same question.
+ */
+function breakpointCollapse(
+	variable: string,
+	label: string,
+	narrow: ExportUniverse,
+	wide: ExportUniverse,
+	narrowLabel: string,
+	wideLabel: string,
+): Collapse {
+	const width = Math.ceil(modelBounds(wide.model).width);
+	return {
+		kind: "breakpoint",
+		variable,
+		label,
+		layers: [
+			{
+				universe: narrow,
+				media: null,
+				under: null,
+				label: `${narrowLabel}: the narrow design, and the base`,
+			},
+			{
+				universe: wide,
+				media: `(min-width: ${width}px)`,
+				under: null,
+				label: `${wideLabel}: from ${width}px, the width the wide design actually needs`,
+			},
+		],
+		note: `One artefact with a breakpoint on ${label}: ${narrowLabel} below ${width}px and ${wideLabel} at or above it.`,
+	};
+}
+
+/**
  * Whether this space is one artefact rather than N designs.
  *
  * The claim being tested is narrow and worth stating exactly. A document whose
  * universes differ only by layout `direction` *is* a media query; one whose
- * universes differ only by colour *is* a theme. Both are true, and both stop
- * being true the moment anything else differs — so the test is:
+ * universes differ only by colour *is* a theme; one whose universes differ only
+ * by a *style* is whichever of the two the treatment says — see
+ * {@link styleCollapse}. All are true, and all stop being true the moment
+ * anything else differs — so the test is:
  *
  *   1. the universes differ in exactly one variable;
  *   2. that variable has a meaning the target understands, which today means
- *      a colour token (a theme) or a container's direction (a breakpoint);
+ *      a colour token (a theme), a container's direction (a breakpoint), or a
+ *      style (either, depending on what its variants disagree about);
  *   3. everything the target cannot express as a variable is identical: the
  *      tree, the paint order, and the text.
  *
@@ -909,6 +1309,12 @@ function disagreements(universes: readonly ExportUniverse[]): string[] {
  * a colour moves nothing — but it is checked rather than assumed, because the
  * check is three lines and the failure mode is an export that silently drops
  * half the positions.
+ *
+ * A breakpoint, by contrast, is *expected* to move things, and that is sound
+ * because every layer re-emits its own boxes: what a layer holds is the diff
+ * against the base, so a node that moved arrives as the coordinates the solver
+ * worked out for that layer. The one thing a layer cannot re-emit is markup,
+ * which is why {@link drawnGeometry} is checked for every collapse.
  */
 export function collapseSpace(
 	scene: Scene,
@@ -938,6 +1344,18 @@ export function collapseSpace(
 			};
 		}
 	}
+	for (const node of drawnGeometry(base.model)) {
+		const moved = universes
+			.slice(1)
+			.some((u) =>
+				DIMENSIONS.some((dim) => u.model.byId[node.id]?.frame[dim] !== node.frame[dim]),
+			);
+		if (moved) {
+			return {
+				reason: `${KINDS[node.kind].label} “${node.id}” is a different size in these designs, and it draws its own geometry inside its box — that markup is written once, so one file cannot hold both. Export a single design instead.`,
+			};
+		}
+	}
 
 	if (parsed?.kind === "token") {
 		const token = findToken(scene.tokens, parsed.token);
@@ -956,50 +1374,13 @@ export function collapseSpace(
 		}
 		// Two colours are light and dark, and which is which is not the solver's
 		// enumeration order — it is which one is darker, because that is the whole
-		// of what `prefers-color-scheme: dark` asks for. More than two has no
-		// light and dark to be, and calling the third one "dark" would be a lie.
-		if (universes.length === 2) {
-			const [light, dark] = byBrightness(scene, universes, parsed.token);
-			return {
-				kind: "theme",
-				variable,
-				label: token.name,
-				// The preference is a *default*, so it goes on the media query
-				// alone; the attribute is the same universe again, so that a page
-				// can force either way whatever the browser says.
-				layers: [
-					{ universe: light, media: null, under: null, label: `${token.name}: the light value` },
-					{
-						universe: dark,
-						media: "(prefers-color-scheme: dark)",
-						under: null,
-						label: `${token.name}: the darker value, when the reader prefers a dark scheme`,
-					},
-					{
-						universe: dark,
-						media: null,
-						under: '[data-theme="dark"]',
-						label: `${token.name}: the darker value, forced`,
-					},
-				],
-				note: `One artefact, themed on “${token.name}”: the darker value under prefers-color-scheme: dark, or forced with data-theme="dark".`,
-			};
-		}
-		return {
-			kind: "theme",
+		// of what `prefers-color-scheme: dark` asks for.
+		return themeCollapse(
 			variable,
-			label: token.name,
-			layers: universes.map((universe, i) => ({
-				universe,
-				media: null,
-				under: i === 0 ? null : `[data-theme="alt-${i}"]`,
-				label:
-					i === 0
-						? `${token.name}: the default`
-						: `${token.name}: [data-theme="alt-${i}"]`,
-			})),
-			note: `One artefact with ${universes.length} themes on “${token.name}”, selected with data-theme.`,
-		};
+			token.name,
+			universes.length === 2 ? byBrightness(scene, universes, parsed.token) : universes,
+			`“${token.name}”`,
+		);
 	}
 
 	if (parsed?.kind === "layout" && parsed.field === "direction") {
@@ -1020,33 +1401,206 @@ export function collapseSpace(
 		}
 		// Mobile first: the column is the base, and the row arrives at the width
 		// it actually needs.
-		const wideWidth = Math.ceil(modelBounds(universes[wide].model).width);
-		const layers: Layer[] = [
-			{
-				universe: universes[narrow],
-				media: null,
-				under: null,
-				label: "Column: the narrow layout, and the base",
-			},
-			{
-				universe: universes[wide],
-				media: `(min-width: ${wideWidth}px)`,
-				under: null,
-				label: `Row: from ${wideWidth}px, the width the row actually needs`,
-			},
-		];
-		return {
-			kind: "breakpoint",
+		return breakpointCollapse(
 			variable,
-			label: LAYOUT_PROPS.direction.label,
-			layers,
-			note: `One artefact with a breakpoint: the column layout below ${wideWidth}px and the row at or above it.`,
-		};
+			LAYOUT_PROPS.direction.label,
+			universes[narrow],
+			universes[wide],
+			"Column",
+			"Row",
+		);
+	}
+
+	if (parsed?.kind === "style") {
+		return styleCollapse(scene, parsed.style, variable, universes);
 	}
 
 	return {
 		reason: `These designs differ only in ${describe(scene, variable)}, and no target has a mechanism for that — a stylesheet has no way to know which of the values is the narrow screen, or the dark one. Export a single design instead.`,
 	};
+}
+
+/** One property a style's variants disagree about, as the answer sets rendered it. */
+interface StyleChange {
+	prop: PropName;
+	/** The node the reading came from — one that takes this property from the style. */
+	node: string;
+	/** What it drew with, per universe, in the order they came in. */
+	values: string[];
+}
+
+/**
+ * What the variants of one style actually disagree about, read off the answer
+ * sets rather than off the document.
+ *
+ * A variant's field is a {@link Term}: it may name a token, or be derived, and
+ * two variants naming two tokens that resolve to the same colour do not
+ * disagree about anything. `rendered/3` has already settled all of that, so the
+ * comparison is between what was *drawn* — and it is taken from a node that
+ * takes the property from the style, because a node that overrides it draws its
+ * own value and would report no change at all.
+ */
+function styleChanges(
+	scene: Scene,
+	style: Style,
+	universes: readonly ExportUniverse[],
+): StyleChange[] {
+	const wearers = flatten(scene.nodes).filter((n) => n.style === style.id);
+	const out: StyleChange[] = [];
+	for (const prop of styleProps(style)) {
+		for (const node of wearers) {
+			if (!wornProps(scene, node).includes(prop)) continue;
+			const values = universes.map((u) => u.model.byId[node.id]?.rendered[prop]);
+			if (values.some((v) => v === undefined)) continue;
+			const said = values as string[];
+			if (new Set(said).size > 1) out.push({ prop, node: node.id, values: said });
+			break;
+		}
+	}
+	return out;
+}
+
+/**
+ * A style as one artefact — the interesting half of this file.
+ *
+ * A bare length token is refused as a collapse, and a style whose variants
+ * differ in lengths is admitted. That is not a double standard, and the three
+ * reasons are worth stating because each of them is checkable:
+ *
+ *   1. **A style cannot be a coordinate.** `STYLE_PROPS` is the styleable
+ *      *properties*, and a property is never a frame dimension nor a layout
+ *      setting — so the variable that varies here appears in the output only
+ *      inside a class's declarations, never inside a `left`, a `top` or a
+ *      `width`. A token can be all of those: point one at a dimension and the
+ *      stylesheet would have to re-derive a solved layout from a custom
+ *      property, which is exactly the thing CSS cannot do. Every coordinate in
+ *      every layer of a style collapse is a literal pixel the solver worked out
+ *      *for that layer*.
+ *   2. **The treatment is complete.** A variant is one record naming every
+ *      field it decides, so both sides of the breakpoint are designs somebody
+ *      authored, and the switch is one class redefinition plus the boxes that
+ *      moved. Switching one loose length gives a design nobody wrote down.
+ *   3. **The document states the order.** One variant's lengths are all smaller
+ *      than the other's, and the tighter type scale is the narrow screen —
+ *      which is what every responsive type ramp there has ever been means. Where
+ *      the lengths disagree about which variant is the tighter one, there is no
+ *      narrow design to pick and this refuses.
+ *
+ * And where the variants differ only in colour, the same argument makes it a
+ * theme instead, ordered by the ground it paints.
+ *
+ * The limits, all of them:
+ *
+ *   - two variants for a breakpoint. A third has no pair of screens to be, the
+ *     same way a third direction would not;
+ *   - at least one length has to differ, and the lengths have to agree. A style
+ *     that varies only its weight, its family or its leading carries no claim
+ *     about screen width, and is refused rather than guessed at;
+ *   - a wearer that states its own value for a property does not change across
+ *     the breakpoint. That is what an override means, and it is visible in the
+ *     output: the declaration sits in the node's own rule, not in the class;
+ *   - HTML only, like every collapse — see {@link exportSpace}.
+ */
+function styleCollapse(
+	scene: Scene,
+	styleId: string,
+	variable: string,
+	universes: readonly ExportUniverse[],
+): Collapse | NotCollapsible {
+	const style = findStyle(scene.styles, styleId);
+	if (!style) {
+		return { reason: "The varying style is no longer in the document." };
+	}
+	const changes = styleChanges(scene, style, universes);
+	if (changes.length === 0) {
+		return {
+			reason: `Nothing drawn takes anything from “${style.name}” that its variants disagree about, so these designs differ in a decision no stylesheet can see.`,
+		};
+	}
+	const subject = `the style “${style.name}”`;
+
+	// Colour only: a treatment that changes nothing but colour is a theme, and it
+	// is the class that is themed rather than a custom property.
+	if (changes.every((change) => PROPS[change.prop].type === "color")) {
+		if (universes.slice(1).some((u) => !sameGeometry(universes[0].model, u.model))) {
+			return {
+				reason: `“${style.name}” moves things as well as colouring them, so the designs are not one artefact in two states.`,
+			};
+		}
+		return themeCollapse(
+			variable,
+			style.name,
+			universes.length === 2 ? byTreatment(changes, universes) : universes,
+			subject,
+		);
+	}
+
+	// Otherwise the lengths decide, if they agree.
+	const lengths = changes.filter(
+		(change) => PROPS[change.prop].type === "length" && readable(change),
+	);
+	if (lengths.length === 0) {
+		const named = changes
+			.map((change) => PROPS[change.prop].label.toLowerCase())
+			.join(", ");
+		return {
+			reason: `The variants of “${style.name}” differ in ${named}, and none of that is a length. A stylesheet has no way to know which of two weights or two families is the narrow screen, so this exports as one design at a time.`,
+		};
+	}
+	if (universes.length !== 2) {
+		return {
+			reason: `“${style.name}” has ${universes.length} treatments in play and a breakpoint has two sides, so there is no pair of screens to map them onto.`,
+		};
+	}
+	const ways = new Set(
+		lengths.map((change) => Math.sign(numeral(change.values[1]) - numeral(change.values[0]))),
+	);
+	if (ways.size !== 1) {
+		return {
+			reason: `The lengths in “${style.name}” disagree about which treatment is the tighter one — one of them grows where another shrinks — so neither variant is the narrow screen.`,
+		};
+	}
+	const [narrow, wide] = ways.has(1) ? [0, 1] : [1, 0];
+	return breakpointCollapse(
+		variable,
+		style.name,
+		universes[narrow],
+		universes[wide],
+		variantLabel(style, universes[narrow].pick[variable] ?? 0),
+		variantLabel(style, universes[wide].pick[variable] ?? 0),
+	);
+}
+
+/** The number a rendered length reads as, and 0 where it reads as nothing. */
+const numeral = (text: string): number => numeralOf(text) ?? 0;
+
+/** True where every universe's value for this property is a number. */
+const readable = (change: StyleChange): boolean =>
+	change.values.every((value) => numeralOf(value) !== undefined);
+
+/**
+ * Two universes, the lighter treatment first.
+ *
+ * The *ground* decides where the treatment paints one, and which property is
+ * the ground is read off the paint table rather than named here: it is
+ * whichever one becomes a `background`. Absent a ground the ink decides, and it
+ * reads the other way round — a dark theme is dark behind *light* text, so the
+ * variant with the brighter ink is the dark one. Getting that inversion wrong
+ * would put the light design under `prefers-color-scheme: dark`, which is the
+ * one failure this function exists to prevent.
+ */
+function byTreatment(
+	changes: readonly StyleChange[],
+	universes: readonly ExportUniverse[],
+): readonly ExportUniverse[] {
+	const ground = changes.find((change) => {
+		const paint = PAINT[change.prop];
+		return paint !== undefined && "background" in paint("");
+	});
+	const [a, b] = (ground ?? changes[0]).values.map(luminance);
+	if (a === undefined || b === undefined) return universes;
+	const brighter = b > a ? [universes[1], universes[0]] : universes;
+	return ground ? brighter : [brighter[1], brighter[0]];
 }
 
 /**
@@ -1121,11 +1675,13 @@ function emit(
 	layers: readonly Layer[],
 	options: ExportOptions,
 	note: string,
+	/** The variable the layers switch between, where they switch one. */
+	varying?: string,
 ): ExportResult {
 	const spec = EXPORT_TARGETS[options.target];
-	const text =
+	const out: Emitted =
 		layers.length === 0
-			? ""
+			? { text: "", classes: [] }
 			: options.target === "svg"
 				? svgExport(index, layers, options)
 				: htmlExport(index, layers, options);
@@ -1139,10 +1695,28 @@ function emit(
 		lost[0] =
 			"The rest of the space. This artefact holds the one variable that separates these designs; any other design in the document is not in it.";
 	}
+	// A style is the one thing here that does *not* flatten: it comes out as the
+	// class it already was, so what a class loses is not the treatment but the
+	// *choice* — which variant. Unless the variant is exactly what the layers
+	// switch, in which case both of them are in the file and the loss would be a
+	// lie.
+	if (out.classes.length > 0) {
+		const names = out.classes.map((c) => `.${c.name}`).join(", ");
+		const switched =
+			varying !== undefined && parseVariable(varying)?.kind === "style";
+		lost.push(
+			switched
+				? `Every variant but two. ${names} came out as ${out.classes.length === 1 ? "a class" : "classes"} and the layers switch between the two treatments these designs picked; a third variant would not be in the file.`
+				: `Which treatment. ${names} came out as ${out.classes.length === 1 ? "a class" : "classes"} — one place to edit, and every wearer follows — but a class holds one variant, and the style's others are not in the file.`,
+		);
+		lost.push(
+			"A style a rule handed a node. Wearing is read from the document, so a node dressed by an asserted sty_wears/3 carries its properties inlined and shares no class.",
+		);
+	}
 	return {
 		target: options.target,
 		filename: `${slug(options.title ?? "design")}.${spec.extension}`,
-		text,
+		text: out.text,
 		lost,
 		note,
 	};
@@ -1192,5 +1766,5 @@ export function exportSpace(
 			reason,
 		);
 	}
-	return emit(index, collapsed.layers, options, collapsed.note);
+	return emit(index, collapsed.layers, options, collapsed.note, collapsed.variable);
 }

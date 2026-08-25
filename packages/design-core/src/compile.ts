@@ -748,6 +748,25 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               node that states its own value keeps it — assert
 %                               it yourself to dress nodes your rules created
 %
+% A style is the one variable the way out keeps as a variable: the HTML export
+% writes it as a CSS class, so the properties every wearer takes from it are one
+% shared block under the style's own name and a wearer's rule holds only what it
+% overrides. Two consequences worth knowing when you write rules over one:
+%
+%   - a class can only say what every wearer *draws*, so a style holding both a
+%     fill and a size, worn by a rectangle and by some text, shares neither. Two
+%     styles is the way to say that, and it is also what it means;
+%   - wearing is read from the document. A node your rule dressed by asserting
+%     sty_wears/3 is exported with the properties inlined and shares no class,
+%     the same way a rule-minted node's token link exports as the literal.
+%
+% Where the *only* thing a document's universes disagree about is sty(S), that
+% export is one file with both treatments in it: a media query where the
+% variants differ in lengths — the tighter type scale is the narrow screen — and
+% prefers-color-scheme where they differ only in colour. A style may do that and
+% a loose length token may not, because a property is never a coordinate: no
+% class can end up standing in for a \`left\` that the solver worked out.
+%
 % alt/2 is a derivable predicate too, so a rule can mint a variable the
 % document never named, and it then picks, resolves, renders, greys and pins
 % exactly like a property row. Give it a key the studio can read back — the

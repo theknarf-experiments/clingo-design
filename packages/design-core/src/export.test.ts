@@ -27,6 +27,7 @@ import {
 	KINDS,
 	RULES_HEADER,
 	type Scene,
+	type Style,
 	makeLayout,
 	starterTokens,
 } from "./scene.ts";
@@ -35,7 +36,8 @@ import { card } from "./templates/card.ts";
 import { pair } from "./templates/pair.ts";
 import { places } from "./templates/places.ts";
 import { rail } from "./templates/rail.ts";
-import { frame, rect, text, withToken } from "./templates/shared.ts";
+import { typography } from "./templates/typography.ts";
+import { frame, rect, text, wearing, withToken } from "./templates/shared.ts";
 import { lit, ref, single } from "./values.ts";
 
 /** A document whose universes differ only by a container's direction. */
@@ -369,6 +371,243 @@ test("a collapsible space still exports as one design in SVG", async () => {
 	const out = exportSpace(scene, exploration.universes, { target: "svg" });
 	assert.match(out.note, /no media queries/);
 	assert.equal(out.text.match(/data-node="mHero"/g)?.length, 1);
+});
+
+/* ------------------------------------------------------------------ */
+/* A style is a class                                                  */
+/* ------------------------------------------------------------------ */
+
+/** A document whose style is worn by two nodes of the given kind. */
+function dressed(
+	variants: readonly Style["variants"][number][],
+	boxes = false,
+): Scene {
+	const style: Style = { id: "panel", name: "Panel", variants: [...variants] };
+	const worn = boxes
+		? [
+				wearing(rect("a", "A", [20, 20, 80, 40], {}), style.id),
+				wearing(rect("b", "B", [20, 80, 80, 40], {}), style.id),
+			]
+		: [
+				wearing(text("a", "A", [20, 20, 200, 24], "Alpha", {}), style.id),
+				wearing(text("b", "B", [20, 60, 200, 24], "Beta", {}), style.id),
+			];
+	return {
+		styles: [style],
+		tokens: starterTokens(),
+		nodes: [
+			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, worn),
+		],
+		constraints: [],
+		rules: RULES_HEADER,
+	};
+}
+
+/** The body of one CSS rule in the export, or undefined where it has none. */
+function block(text: string, selector: string): string | undefined {
+	const at = text.indexOf(`\n${selector} {\n`);
+	if (at === -1) return undefined;
+	const from = at + selector.length + 4;
+	return text.slice(from, text.indexOf("\n}", from));
+}
+
+test("a style comes out as a class, and only overrides stay on the node", async () => {
+	const scene = typography();
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const out = exportUniverse(scene, exploration.universes[0], {
+		target: "html",
+		title: "typography",
+	});
+
+	// The class is the style, under the style's own name.
+	const prose = block(out.text, ":where(.prose)");
+	assert.ok(prose, "expected a .prose rule");
+	assert.match(prose, /font-family: system-ui/);
+	assert.match(prose, /font-size: 15px;/);
+	assert.match(prose, /font-weight: 450;/);
+	assert.match(prose, /line-height: 1.3;/);
+
+	// Every wearer points at it, and the class name is on the element beside its
+	// own — which is what makes the file editable rather than merely smaller.
+	assert.equal(out.text.match(/ prose"/g)?.length, 6);
+
+	// The title states its own size and weight, so those two declarations are on
+	// its rule and nowhere else. The paragraphs state nothing, so their rules
+	// hold no type at all.
+	const title = [...out.text.matchAll(/\.(n\d+) \{\n([^}]*)\}/g)];
+	const of = (id: string): string => {
+		const cls = new RegExp(`class="(n\\d+) prose" data-node="${id}"`).exec(out.text);
+		assert.ok(cls, `no element for ${id}`);
+		return title.find((m) => m[1] === cls[1])?.[2] ?? "";
+	};
+	assert.match(of("title"), /font-size: 34px;/);
+	assert.match(of("title"), /font-weight: 700;/);
+	assert.doesNotMatch(of("title"), /font-family|line-height/);
+	assert.doesNotMatch(of("deck"), /font-size|font-weight|font-family|line-height/);
+
+	// And SVG keeps inlining, which is the honest half of the same feature.
+	const svg = exportUniverse(scene, exploration.universes[0], { target: "svg" });
+	assert.doesNotMatch(svg.text, /class="prose"/);
+	assert.equal(svg.text.match(/font-size: 15px/g)?.length, 4);
+	assert.ok(
+		svg.lost.some((line) => /A style is not a class here/.test(line)),
+		"SVG has to say that it inlined the treatment",
+	);
+});
+
+test("a class holds the token a variant named, not the hex", async () => {
+	const scene = dressed([{ name: "Loud", parts: { ink: [ref("accent")][0] } }]);
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const universe = exploration.universes[0];
+	const out = exportUniverse(scene, universe, { target: "html" });
+	assert.equal(block(out.text, ":where(.panel)"), "\tcolor: var(--accent);");
+	// The name stands for what the answer set drew, and for nothing else.
+	assert.match(out.text, new RegExp(`--accent: ${universe.model.byId.a.rendered.ink};`));
+});
+
+test("a class carries only what every wearer draws", async () => {
+	// A rectangle has corners and an ellipse has not, so a style holding a fill
+	// and a radius shares the fill and leaves the radius on the rectangle. A
+	// shared radius would round the ellipse's box, which the canvas does not.
+	const style: Style = {
+		id: "both",
+		name: "Both",
+		variants: [{ parts: { fill: lit("#abcdef"), radius: lit("12px") } }],
+	};
+	const scene: Scene = {
+		styles: [style],
+		tokens: starterTokens(),
+		nodes: [
+			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, [
+				wearing(rect("r", "R", [20, 20, 80, 40], {}), style.id),
+				wearing(
+					{ ...rect("e", "E", [20, 80, 80, 40], {}), kind: "ellipse" },
+					style.id,
+				),
+			]),
+		],
+		constraints: [],
+		rules: RULES_HEADER,
+	};
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const out = exportUniverse(scene, exploration.universes[0], { target: "html" });
+	assert.equal(block(out.text, ":where(.both)"), "\tbackground: #abcdef;");
+	assert.equal(out.text.match(/background: #abcdef;/g)?.length, 1, "the fill is shared");
+	assert.equal(out.text.match(/border-radius: 12px;/g)?.length, 1, "the radius is not");
+	assert.match(out.text, /border-radius: 50%;/, "and the ellipse is still an ellipse");
+
+	// Two kinds with no styleable property in common share nothing, so there is
+	// no class at all rather than an empty one.
+	const apart: Scene = {
+		...scene,
+		styles: [{ ...style, id: "apart", name: "Apart" }],
+		nodes: [
+			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, [
+				wearing(text("t", "T", [20, 20, 200, 24], "Alpha", {}), "apart"),
+				wearing(rect("r", "R", [20, 60, 80, 40], {}), "apart"),
+			]),
+		],
+	};
+	const second = await explore(apart, directSolver, { limit: 4 });
+	const bare = exportUniverse(apart, second.universes[0], { target: "html" });
+	assert.equal(block(bare.text, ":where(.apart)"), undefined);
+	assert.doesNotMatch(bare.text, / apart"/);
+	assert.match(bare.text, /background: #abcdef;/, "the rectangle still takes its fill");
+});
+
+test("universes that differ only by a style are one artefact with a breakpoint", async () => {
+	const scene = typography();
+	const exploration = await explore(scene, directSolver, { limit: 8 });
+	assert.equal(exploration.universes.length, 2);
+	const verdict = collapseSpace(scene, exploration.universes);
+	assert.ok(!("reason" in verdict), "expected the space to collapse");
+	assert.equal(verdict.kind, "breakpoint");
+	assert.equal(verdict.label, "Prose");
+	// Mobile first: the tighter treatment is the base, and the variants' own
+	// names are what the file calls them.
+	assert.match(verdict.note, /Compact below \d+px and Comfortable at or above it/);
+
+	const out = exportSpace(scene, exploration.universes, {
+		target: "html",
+		title: "typography",
+	});
+	const media = /@media \(min-width: (\d+)px\) \{\n([\s\S]*?)\n\}/.exec(out.text);
+	assert.ok(media, "expected a media query");
+	// One class redefinition is the whole of the switch — that is the claim.
+	assert.match(media[2], /:where\(\.prose\) \{/);
+	assert.match(media[2], /font-size: 18px;/);
+	assert.match(media[2], /font-weight: 400;/);
+	assert.match(media[2], /Georgia/);
+	// The DOM is shared, and a node that overrides the style does not move with
+	// the breakpoint: its own declaration is outside the query.
+	assert.equal(out.text.match(/data-node="title"/g)?.length, 1);
+	assert.doesNotMatch(media[2], /font-size: 34px/);
+	assert.ok(
+		out.lost.some((line) => /Every variant but two/.test(line)),
+		"a collapsed style holds both treatments, and the list has to say so",
+	);
+});
+
+test("a style that varies only in colour is a theme instead", async () => {
+	const scene = dressed([
+		{ name: "Day", parts: { ink: lit("#0f172a") } },
+		{ name: "Night", parts: { ink: lit("#f8fafc") } },
+	]);
+	const exploration = await explore(scene, directSolver, { limit: 8 });
+	assert.equal(exploration.universes.length, 2);
+	const verdict = collapseSpace(scene, exploration.universes);
+	assert.ok(!("reason" in verdict), "expected the space to collapse");
+	assert.equal(verdict.kind, "theme");
+	const out = exportSpace(scene, exploration.universes, { target: "html" });
+	// The light treatment is the base whatever order the solver enumerated in,
+	// and the dark one is the class under the preference.
+	assert.match(block(out.text, ":where(.panel)") ?? "", /color: #0f172a;/);
+	assert.match(
+		out.text,
+		/@media \(prefers-color-scheme: dark\) \{\n\t:where\(\.panel\) \{\n\t\tcolor: #f8fafc;/,
+	);
+	// Scoped, and still weightless: a node that overrode the treatment has to
+	// keep its own colour in the dark theme too.
+	assert.match(
+		out.text,
+		/:where\(\[data-theme="dark"\] \.panel\) \{\n\tcolor: #f8fafc;/,
+	);
+});
+
+test("a style with no length, or with lengths that disagree, is refused", async () => {
+	for (const [variants, expected, boxes] of [
+		// A weight is not a distance: nothing says which of two is the narrow
+		// screen, so this is the same refusal a bare token gets.
+		[
+			[
+				{ name: "Book", parts: { weight: lit("400") } },
+				{ name: "Bold", parts: { weight: lit("700") } },
+			],
+			/none of that is a length/,
+			false,
+		],
+		// One length grows where the other shrinks, so neither treatment is the
+		// tighter one.
+		[
+			[
+				{ name: "A", parts: { radius: lit("4px"), strokeWidth: lit("4px") } },
+				{ name: "B", parts: { radius: lit("8px"), strokeWidth: lit("2px") } },
+			],
+			/disagree about which treatment is the tighter one/,
+			true,
+		],
+	] as const) {
+		const scene = dressed(variants, boxes);
+		const exploration = await explore(scene, directSolver, { limit: 8 });
+		assert.equal(exploration.universes.length, 2);
+		const verdict = collapseSpace(scene, exploration.universes);
+		assert.ok("reason" in verdict, "expected a refusal");
+		assert.match(verdict.reason, expected);
+		// And it still exports one design, with the reason attached.
+		const out = exportSpace(scene, exploration.universes, { target: "html" });
+		assert.equal(out.note, verdict.reason);
+		assert.doesNotMatch(out.text, /@media/);
+	}
 });
 
 test("a surface clips, in both targets", async () => {
