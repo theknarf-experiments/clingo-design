@@ -41,6 +41,7 @@ import { lit, ref, single } from "./values.ts";
 /** A document whose universes differ only by a container's direction. */
 function flow(): Scene {
 	return {
+		styles: [],
 		tokens: starterTokens(),
 		nodes: [
 			frame("page", "Page", [0, 0, 520, 360], { fill: [ref("muted")] }, [
@@ -73,6 +74,7 @@ function parametric(): Scene {
 		[lit("#3b82f6")],
 	);
 	return {
+		styles: [],
 		tokens,
 		nodes: [
 			frame("page", "Page", [0, 0, 400, 240], { fill: [ref("muted")] }, [
@@ -195,6 +197,7 @@ test("every kind the studio can draw reaches both targets", async () => {
 	// an arrow, and a target that silently drops one of them would pass every
 	// other test in this file.
 	const scene: Scene = {
+		styles: [],
 		tokens: starterTokens(),
 		nodes: [
 			frame("page", "Page", [0, 0, 400, 300], { fill: [ref("surface")] }, [
@@ -371,6 +374,7 @@ test("a collapsible space still exports as one design in SVG", async () => {
 test("a surface clips, in both targets", async () => {
 	// The child hangs over the frame's right edge, which the canvas clips.
 	const scene: Scene = {
+		styles: [],
 		tokens: starterTokens(),
 		nodes: [
 			frame("page", "Page", [0, 0, 200, 100], { fill: [ref("surface")] }, [

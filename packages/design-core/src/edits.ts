@@ -32,12 +32,16 @@ import {
 	type Edge,
 	KINDS,
 	type NodeKind,
+	PROPS,
 	type PropName,
 	type Scene,
 	type SceneNode,
 	type Sizing,
+	type Style,
+	type StyleVariant,
 	dimension,
 	edgeOn,
+	findStyle,
 	frameDim,
 	frameOf,
 	isConstraintTerm,
@@ -48,21 +52,25 @@ import {
 	sharedPropsOfKinds,
 	uniqueName,
 	withFrame,
+	wornProps,
 	wrapsChildren,
 } from "./scene.ts";
 import {
 	type Picks,
 	type ResolveContext,
+	type Term,
 	type Token,
 	VALUE_TYPES,
 	type Value,
 	type ValueType,
+	activeIndex,
 	constraintVar,
 	frameVar,
 	lit,
 	propVar,
 	resolveValue,
 	single,
+	styleVar,
 	tokenVar,
 	wouldCycle,
 } from "./values.ts";
@@ -1469,6 +1477,221 @@ export function deleteToken(scene: Scene, id: string): Scene {
 	};
 }
 
+/* ------------------------------------------------------------------ */
+/* Styles                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A fresh style, with one empty variant.
+ *
+ * One rather than two, and empty rather than seeded: a style begins as the
+ * ordinary named bundle every other tool has, and becomes a design space the
+ * moment somebody adds a second variant. Starting with two would be asserting a
+ * correlation nobody has stated yet.
+ *
+ * The id has to be spellable as an ASP constant, because `sty(S)` is a term in
+ * the generated program and in every answer set. Generated rather than typed,
+ * so unlike a constraint id there is nothing for the user to get wrong; the
+ * *name* is what they type, and it is unique for the same reason a token's is.
+ */
+export function addStyle(
+	scene: Scene,
+	options: { name?: string; variants?: StyleVariant[] } = {},
+): { scene: Scene; id: string } {
+	const style: Style = {
+		id: newNodeId().replace("n_", "s_"),
+		name: uniqueName(
+			scene.styles.map((s) => s.name),
+			options.name?.trim() || "style",
+			"-",
+		),
+		variants:
+			options.variants && options.variants.length > 0
+				? options.variants
+				: [{ parts: {} }],
+	};
+	return { scene: { ...scene, styles: [...scene.styles, style] }, id: style.id };
+}
+
+/** Replaces one style, if the document holds it. */
+function mapStyle(scene: Scene, id: string, fn: (style: Style) => Style): Scene {
+	const styles = scene.styles.map((s) => (s.id === id ? fn(s) : s));
+	return styles.some((s, i) => s !== scene.styles[i]) ? { ...scene, styles } : scene;
+}
+
+export function renameStyle(scene: Scene, id: string, name: string): Scene {
+	const trimmed = name.trim();
+	if (!trimmed) return scene;
+	return mapStyle(scene, id, (s) => ({ ...s, name: trimmed }));
+}
+
+/**
+ * Sets — or clears — one field of one variant.
+ *
+ * A {@link Term} rather than a {@link Value}, and that is the type doing the
+ * arguing: a variant is *one* answer per property, because a list of
+ * alternatives here would branch on its own and reintroduce the cross product
+ * the style exists to collapse. Somebody who wants a size that varies
+ * independently of the weight already has tokens for that.
+ *
+ * Clearing is how a variant says nothing about a property, which is not the
+ * same as saying the fallback: the wearer then keeps whatever it holds itself.
+ */
+export function setStylePart(
+	scene: Scene,
+	id: string,
+	variant: number,
+	prop: PropName,
+	term: Term | undefined,
+): Scene {
+	if (!PROPS[prop].styleable) return scene;
+	return mapStyle(scene, id, (style) => {
+		if (variant < 0 || variant >= style.variants.length) return style;
+		const current = style.variants[variant];
+		if (current.parts[prop] === term) return style;
+		const parts = { ...current.parts };
+		if (term === undefined) delete parts[prop];
+		else parts[prop] = term;
+		return {
+			...style,
+			variants: style.variants.map((v, i) =>
+				i === variant ? { ...v, parts } : v,
+			),
+		};
+	});
+}
+
+export function renameStyleVariant(
+	scene: Scene,
+	id: string,
+	variant: number,
+	name: string,
+): Scene {
+	return mapStyle(scene, id, (style) =>
+		variant < 0 || variant >= style.variants.length
+			? style
+			: {
+					...style,
+					variants: style.variants.map((v, i) =>
+						i === variant ? { ...v, name: name.trim() } : v,
+					),
+				},
+	);
+}
+
+/**
+ * Adds a variant, copied from an existing one.
+ *
+ * A copy rather than a blank, because that is how the correlation gets stated:
+ * you duplicate the treatment you have and change the two fields that differ.
+ * A blank second variant would mean "or say nothing at all", which is a real
+ * thing to want and one clearing every field of the copy expresses.
+ */
+export function addStyleVariant(scene: Scene, id: string, from?: number): Scene {
+	return mapStyle(scene, id, (style) => {
+		const source =
+			style.variants[from ?? style.variants.length - 1] ?? { parts: {} };
+		return {
+			...style,
+			variants: [
+				...style.variants,
+				{ parts: { ...source.parts } },
+			],
+		};
+	});
+}
+
+/**
+ * Removes a variant. The last one stays: a style with none is a variable with
+ * no alternatives, which is not a degenerate design space but an impossible
+ * document — see `compile`, which drops such a style rather than emit it.
+ *
+ * Deleting from the middle renumbers everything after it, and indices are what
+ * a pin and an instance's held picks are counted in. Nothing is repaired here,
+ * for the same reason nothing is repaired when an alternative is deleted from a
+ * token: a pin is a question about the universe on screen, not a reference.
+ */
+export function deleteStyleVariant(
+	scene: Scene,
+	id: string,
+	variant: number,
+): Scene {
+	return mapStyle(scene, id, (style) =>
+		style.variants.length <= 1 || variant < 0 || variant >= style.variants.length
+			? style
+			: { ...style, variants: style.variants.filter((_, i) => i !== variant) },
+	);
+}
+
+/**
+ * Puts a style on some nodes, or takes it off with `undefined`.
+ *
+ * Nothing is copied into the nodes and nothing is copied out. Wearing a style
+ * means the properties it decides are *derived* per universe from the style's
+ * pick — so editing the style changes every wearer with nothing to propagate,
+ * and taking it off leaves the node with exactly what it always held itself.
+ * A node that wants to keep the look wants {@link deleteStyle}'s baking, or its
+ * own values.
+ */
+export function setStyle(
+	scene: Scene,
+	ids: readonly string[],
+	styleId: string | undefined,
+): Scene {
+	if (styleId !== undefined && !findStyle(scene.styles, styleId)) return scene;
+	return mapSelected(scene, ids, (node) => {
+		if (node.style === styleId) return node;
+		if (styleId === undefined) {
+			const { style: _gone, ...rest } = node;
+			return rest as SceneNode;
+		}
+		return { ...node, style: styleId };
+	});
+}
+
+/**
+ * Deletes a style and bakes it into its wearers, so the design does not
+ * visibly change.
+ *
+ * The same bargain {@link deleteToken} strikes, and the same caveat: a style
+ * with two variants *is* two designs, and one document cannot hold both once
+ * the variable is gone. So `picks` decides which one survives — the universe on
+ * screen, if the caller has one — and without it the first variant does, which
+ * is what an unsolved preview was showing anyway.
+ *
+ * A part that names a token is baked as the link, not as the colour it
+ * currently resolves to: the token is not going anywhere, so freezing it would
+ * unwire a parameter for nothing.
+ */
+export function deleteStyle(
+	scene: Scene,
+	id: string,
+	picks: Picks = {},
+): Scene {
+	const style = findStyle(scene.styles, id);
+	if (!style) return scene;
+	const index = activeIndex(style.variants, styleVar(id), picks);
+	const baked = index === -1 ? {} : style.variants[index].parts;
+
+	return {
+		...scene,
+		styles: scene.styles.filter((s) => s.id !== id),
+		nodes: mapTree(scene.nodes, (node) => {
+			if (node.style !== id) return node;
+			const props = { ...node.props };
+			// Only what the node was actually taking from it: a property it
+			// already stated is untouched, and one its kind cannot draw was never
+			// worn in the first place.
+			for (const prop of wornProps(scene, node)) {
+				const term = baked[prop];
+				if (term) props[prop] = [term];
+			}
+			const { style: _gone, ...rest } = node;
+			return { ...rest, props } as SceneNode;
+		}),
+	};
+}
+
 /**
  * An instance's held picks after a collapse, or undefined to leave it alone.
  *
@@ -1515,6 +1738,16 @@ export function collapseToPicks(
 			...t,
 			value: pickOne(t.value, tokenVar(t.id)),
 		})),
+		// A style's variants are a list of alternatives like any other, so
+		// collapsing has to shorten it too — otherwise Keep would leave a
+		// document that still branches on the decision it just recorded.
+		styles: scene.styles.map((s) => {
+			if (s.variants.length <= 1) return s;
+			const index = picks[styleVar(s.id)];
+			return index !== undefined && index < s.variants.length
+				? { ...s, variants: [s.variants[index]] }
+				: s;
+		}),
 		nodes: mapTree(scene.nodes, (node) => {
 			const props: SceneNode["props"] = {};
 			for (const [prop, value] of Object.entries(node.props)) {

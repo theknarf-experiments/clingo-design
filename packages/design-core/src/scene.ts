@@ -30,6 +30,8 @@ import {
 	ref,
 	resolveValue,
 	single,
+	styleVar,
+	type Term,
 	wordOf,
 } from "./values.ts";
 
@@ -53,46 +55,128 @@ export interface PropSpec {
 	type: ValueType;
 	/** Shown as the placeholder and used when adding an alternative. */
 	fallback: string;
+	/**
+	 * A {@link Style} may decide it — see {@link STYLE_PROPS}.
+	 *
+	 * Required rather than optional, so adding a property is a decision made
+	 * once here rather than a list somewhere else that quietly falls behind.
+	 * Two things are out, and for different reasons:
+	 *
+	 *   - `text` is content, not treatment. A style that decided what a heading
+	 *     said would make every heading wearing it say the same thing, which is
+	 *     not what "these headings look alike" means.
+	 *   - `opacity` is a state a node is *in* rather than part of how it is
+	 *     drawn: a faded copy of a heading is the same treatment at half
+	 *     strength, and a style that owned it would have to be duplicated to say
+	 *     so. It composes with a style; it is not one of its fields.
+	 */
+	styleable: boolean;
 }
 
 export const PROPS: Record<PropName, PropSpec> = {
 	// Content is a property like any other: a headline that reads one way or
 	// another is a design decision, and the machinery for "one of these" is
 	// already here. Nothing about a string made it special except history.
-	text: { label: "Text", type: "text", fallback: VALUE_TYPES.text.fallback },
-	fill: { label: "Fill", type: "color", fallback: VALUE_TYPES.color.fallback },
+	text: {
+		label: "Text",
+		type: "text",
+		fallback: VALUE_TYPES.text.fallback,
+		styleable: false,
+	},
+	fill: {
+		label: "Fill",
+		type: "color",
+		fallback: VALUE_TYPES.color.fallback,
+		styleable: true,
+	},
 	radius: {
 		label: "Corner radius",
 		type: "length",
 		fallback: VALUE_TYPES.length.fallback,
+		styleable: true,
 	},
-	stroke: { label: "Stroke", type: "color", fallback: "#0f172a" },
-	strokeWidth: { label: "Thickness", type: "length", fallback: "2px" },
+	stroke: {
+		label: "Stroke",
+		type: "color",
+		fallback: "#0f172a",
+		styleable: true,
+	},
+	strokeWidth: {
+		label: "Thickness",
+		type: "length",
+		fallback: "2px",
+		styleable: true,
+	},
 	shadow: {
 		label: "Shadow",
 		type: "shadow",
 		fallback: VALUE_TYPES.shadow.fallback,
+		styleable: true,
 	},
-	opacity: { label: "Opacity", type: "number", fallback: "1" },
-	ink: { label: "Colour", type: "color", fallback: "#0f172a" },
+	opacity: {
+		label: "Opacity",
+		type: "number",
+		fallback: "1",
+		styleable: false,
+	},
+	ink: {
+		label: "Colour",
+		type: "color",
+		fallback: "#0f172a",
+		styleable: true,
+	},
 	fontFamily: {
 		label: "Font",
 		type: "font",
 		fallback: VALUE_TYPES.font.fallback,
+		styleable: true,
 	},
-	size: { label: "Size", type: "length", fallback: "16px" },
+	size: {
+		label: "Size",
+		type: "length",
+		fallback: "16px",
+		styleable: true,
+	},
 	weight: {
 		label: "Weight",
 		type: "weight",
 		fallback: VALUE_TYPES.weight.fallback,
+		styleable: true,
 	},
-	lineHeight: { label: "Line height", type: "number", fallback: "1.35" },
+	lineHeight: {
+		label: "Line height",
+		type: "number",
+		fallback: "1.35",
+		styleable: true,
+	},
+	// In, deliberately. Alignment is part of a typographic treatment the way
+	// weight is — "display: large, heavy, centred" against "body: small,
+	// regular, left" is one decision, not two — and it is a closed menu like
+	// every other field of one. Leaving it out would have been the arbitrary
+	// choice, not putting it in.
 	align: {
 		label: "Alignment",
 		type: "align",
 		fallback: VALUE_TYPES.align.fallback,
+		styleable: true,
 	},
 };
+
+export const PROP_NAMES = Object.keys(PROPS) as PropName[];
+
+/**
+ * The properties a {@link Style} may decide, read off the one table that says
+ * what a property is.
+ *
+ * Generic over the property set rather than a typographic feature with a
+ * typographic table: the mechanism for "size and weight move together" is
+ * character for character the mechanism for "fill, radius and shadow move
+ * together", and a surface style is therefore not a thing to build later. What
+ * makes a style a *text* style is which of these fields it happens to fill in,
+ * plus the fact that only a text node has anywhere to put them — see
+ * {@link styleProps}.
+ */
+export const STYLE_PROPS = PROP_NAMES.filter((p) => PROPS[p].styleable);
 
 export type NodeKind =
 	| "frame"
@@ -771,6 +855,17 @@ export interface SceneNode {
 	 */
 	sizing?: Sizing;
 	props: Partial<Record<PropName, Value>>;
+	/**
+	 * The id of the {@link Style} this node wears, if any.
+	 *
+	 * One slot rather than a list: two styles could both decide `size`, and then
+	 * which one wins is an ordering question the document would have to answer
+	 * every time anybody looked. One style, and anything it does not decide is
+	 * the node's own — see {@link wornProps}.
+	 *
+	 * A dangling id decides nothing, the way {@link instanceOf} derives nothing.
+	 */
+	style?: string;
 	/** Present on the container kinds. */
 	children?: SceneNode[];
 	/** Set on a container to lay its children out automatically. */
@@ -1421,9 +1516,175 @@ export interface Constraint {
 export const strengthOfLevel = (level: number): Strength | undefined =>
 	STRENGTH_NAMES.find((s) => STRENGTHS[s].level === level);
 
+/* ------------------------------------------------------------------ */
+/* Styles                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One complete treatment: the fields of the record a style's pick chooses.
+ *
+ * Each field is a {@link Term} rather than a {@link Value}, and that is the
+ * point. A value is a list of alternatives and would branch on its own, which
+ * is the cross product a style exists to collapse — a variant is *one* answer
+ * for every property it mentions. Branching is what the list of variants is
+ * for, and there is exactly one list.
+ *
+ * A term rather than a string so a field can name a token or be derived:
+ * `size: ref("lg")` keeps one source of truth for the scale, and the same
+ * resolution the rest of the document gets applies here — see `compile.ts`.
+ */
+export interface StyleVariant {
+	/**
+	 * What to call it. "Compact" and "Comfortable" are the reason a style is
+	 * worth having, and they are not derivable from the parts: an ordinary
+	 * alternative prints itself — `#3b82f6` — while a whole record has no
+	 * printable value, only a summary. Optional so a document written without
+	 * one still reads; see {@link variantLabel}.
+	 */
+	name?: string;
+	parts: Partial<Record<PropName, Term>>;
+}
+
+/**
+ * **One variable whose alternatives are whole records.**
+ *
+ * Not a {@link Token}, and the difference is not cosmetic. A token is
+ * `{ type, value }` — a scalar whose legality is `PROPS[prop].type ===
+ * token.type`, linkable to one property at a time. Link a size to one token and
+ * a weight to another and the solver picks them *independently*: two
+ * two-alternative tokens are four designs, of which two are incoherent. That is
+ * the one thing the scalar model cannot express, and writing it out as N tokens
+ * plus a `match` constraint per pair is unwritable.
+ *
+ * A style fixes exactly that. One pick decides size AND weight AND line height
+ * together, so "compact versus comfortable typography across a whole page" is
+ * one variable with two alternatives rather than four tokens with sixteen
+ * combinations. It collapses a cross product into a correlation.
+ *
+ * Beside the tokens on {@link Scene} rather than among them, and `sty(S)` is a
+ * variable key of its own — see {@link styleVar}. Everything downstream then
+ * applies to it because it cannot tell the difference: it picks, it is pinnable,
+ * it is greyed when unreachable, and a rule can name it.
+ */
+export interface Style {
+	id: string;
+	/** User-facing, like a token's. */
+	name: string;
+	/**
+	 * Each entry is one complete treatment; a pick chooses between them.
+	 *
+	 * One entry is the ordinary named style — a bundle with no branching, which
+	 * is what a style is in every other tool. Two or more is the design space.
+	 */
+	variants: StyleVariant[];
+}
+
+/** What a variant is called, falling back to its position. */
+export const variantLabel = (style: Style, index: number): string =>
+	style.variants[index]?.name?.trim() || `Variant ${index + 1}`;
+
+export const findStyle = (
+	styles: readonly Style[],
+	id: string | undefined,
+): Style | undefined => (id === undefined ? undefined : styles.find((s) => s.id === id));
+
+/**
+ * The style a node wears, if the document still holds it.
+ *
+ * A dangling reference resolves to nothing rather than failing, exactly as
+ * {@link SceneNode.instanceOf} does: deleting a style out from under a wearer
+ * leaves a node that decides its own appearance, not a broken program.
+ */
+export const styleOf = (scene: Scene, node: SceneNode): Style | undefined =>
+	findStyle(scene.styles, node.style);
+
+/**
+ * Every property this style says something about, in table order.
+ *
+ * The union across its variants, filtered to {@link STYLE_PROPS} — so a field
+ * one variant fills in and another leaves out is still one of the style's
+ * properties, and a property no style may decide is dropped however it got
+ * stored.
+ */
+export function styleProps(style: Style): PropName[] {
+	return STYLE_PROPS.filter((prop) =>
+		style.variants.some((v) => v.parts[prop] !== undefined),
+	);
+}
+
+/**
+ * The properties a style actually decides *for this node* — which is where
+ * precedence is resolved, and it is resolved here rather than in ASP.
+ *
+ * Three filters, and each is a different question:
+ *
+ *   - the style says something about it at all;
+ *   - the node's kind has somewhere to put it, so a text style worn by a
+ *     rectangle decides nothing about the rectangle rather than painting a
+ *     property it does not draw;
+ *   - **the node does not state its own value.** A node wearing a style but
+ *     differing in one property is the ordinary case, and the node wins. Doing
+ *     this in the generated program would mean a rule whose body negates its own
+ *     head predicate, which is the shape that has no stable model; the
+ *     alternative — negating `var/1` — works, but `alt/2` is the one predicate
+ *     hand-written rules are invited to derive, so a negative dependency on it
+ *     is a loop waiting to happen. TypeScript knows the answer already.
+ */
+export function wornProps(scene: Scene, node: SceneNode): PropName[] {
+	const style = styleOf(scene, node);
+	if (!style) return [];
+	const offered = KINDS[node.kind].props;
+	return styleProps(style).filter(
+		(prop) =>
+			offered.includes(prop) && (node.props[prop]?.length ?? 0) === 0,
+	);
+}
+
+/**
+ * What the *document* says a node's property is: its own value, or the part its
+ * style contributes.
+ *
+ * The same precedence the generated program applies, for the callers on this
+ * side that have to know before there is any answer to read — measuring a text
+ * node against the font it will actually be drawn in, above all. `picks` is the
+ * universe being looked at; without one the first variant stands in, which is
+ * what an unsolved preview should show.
+ *
+ * A single-term value, because a variant holds one answer per property. Nothing
+ * here ever lengthens a list, so a caller can resolve it with the node's own
+ * `prop(N,P)` key and get the same literal the solver derived.
+ */
+export function propValueOf(
+	scene: Scene,
+	node: SceneNode,
+	prop: PropName,
+	picks: Picks = {},
+): Value | undefined {
+	const own = node.props[prop];
+	if (own && own.length > 0) return own;
+	const style = styleOf(scene, node);
+	if (!style || !KINDS[node.kind].props.includes(prop)) return undefined;
+	const index = activeIndex(
+		style.variants,
+		styleVar(style.id),
+		picks,
+	);
+	const term = index === -1 ? undefined : style.variants[index].parts[prop];
+	return term ? [term] : undefined;
+}
+
 export interface Scene {
 	/** Named values, referenced from anywhere. Like CSS custom properties. */
 	tokens: Token[];
+	/**
+	 * Correlated bundles of properties, worn by nodes — see {@link Style}.
+	 *
+	 * Beside the tokens rather than among them: a token is a scalar with a type,
+	 * a style is a record with variants, and forcing one into the other's shape
+	 * would give every style a `ValueType` that means nothing and every token a
+	 * variant list of one.
+	 */
+	styles: Style[];
 	/**
 	 * Paint order: later nodes sit on top. Top-level nodes are normally
 	 * frames — the artboards — but nothing enforces that.
@@ -1470,6 +1731,10 @@ export function starterTokens(): Token[] {
 export function emptyScene(): Scene {
 	return {
 		tokens: starterTokens(),
+		// No starter styles. A palette is a reasonable thing to hand somebody
+		// before they have drawn anything; a treatment for text that does not
+		// exist yet is not.
+		styles: [],
 		nodes: [
 			{
 				id: "frame1",

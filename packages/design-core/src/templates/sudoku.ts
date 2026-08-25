@@ -214,6 +214,7 @@ export function sudoku(): Scene {
 	const page = furniture();
 	return {
 		tokens: starterTokens(),
+		styles: [],
 		nodes: [
 			frame(
 				"page",

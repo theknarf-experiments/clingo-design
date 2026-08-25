@@ -26,6 +26,7 @@ export function palette(): Scene {
 
 	return {
 		tokens: starterTokens(),
+		styles: [],
 		nodes: [
 			frame("page", "Page", [0, 0, 680, 260], { fill: [ref("surface")] }, [
 				text("heading", "Heading", [32, 36, 400, 30], "Pick a plan", {

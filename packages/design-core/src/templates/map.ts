@@ -245,6 +245,7 @@ export function map(): Scene {
 	const page = furniture();
 	return {
 		tokens: starterTokens(),
+		styles: [],
 		nodes: [
 			frame(
 				"page",

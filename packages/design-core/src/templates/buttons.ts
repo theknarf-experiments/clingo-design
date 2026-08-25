@@ -28,6 +28,7 @@ export function buttons(): Scene {
 
 	return {
 		tokens: starterTokens(),
+		styles: [],
 		nodes: [
 			frame("page", "Page", [0, 0, 640, 260], { fill: [ref("muted")] }, [
 				...button("one", "Primary", 64, 96, 90),

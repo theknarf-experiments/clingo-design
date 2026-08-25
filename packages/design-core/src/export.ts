@@ -54,6 +54,7 @@ import {
 	type PropName,
 	type Scene,
 	type SceneNode,
+	findStyle,
 	frameOf,
 } from "./scene.ts";
 import { flatten } from "./tree.ts";
@@ -1104,6 +1105,9 @@ function describe(scene: Scene, variable: string): string {
 	}
 	if (parsed.kind === "layout") {
 		return `${parsed.node}’s ${LAYOUT_PROPS[parsed.field as LayoutProp]?.label.toLowerCase() ?? parsed.field}`;
+	}
+	if (parsed.kind === "style") {
+		return `the style “${findStyle(scene.styles, parsed.style)?.name ?? parsed.style}”`;
 	}
 	return `the value of rule ${parsed.constraint}`;
 }

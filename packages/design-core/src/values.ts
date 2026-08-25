@@ -348,17 +348,51 @@ export const layoutVar = (nodeId: string, field: string): string =>
  */
 export const frameVar = (nodeId: string, dim: string): string =>
 	`fval(${nodeId},${dim})`;
+/**
+ * Which *treatment* a style is wearing — the fifth variable key, and the only
+ * one whose alternatives are not values.
+ *
+ * Every other variable picks between literals: one string, one property. This
+ * one picks between whole records, and that is the whole of what a style is for.
+ * A size token and a weight token are picked independently and give the cross
+ * product, of which half is incoherent — 32px at weight 300. One `sty(S)` pick
+ * decides size *and* weight *and* line height together, so two coherent
+ * treatments are two designs rather than four combinations. See
+ * {@link stylePartVar} for where the record's fields live.
+ */
+export const styleVar = (styleId: string): string => `sty(${styleId})`;
+/**
+ * One field of one variant of a style: `spart(heading,0,size)`.
+ *
+ * A variable rather than a fact so that a part can name a token or be derived
+ * and *resolve* like anything else — `size: ref("lg")` keeps one source of
+ * truth for a scale. It holds exactly one alternative, so it is never a choice
+ * anyone makes; the choice is `sty(S)`, and the generated program joins the two.
+ * Only emitted where the part is not a plain literal, exactly as a frame
+ * dimension is a fact where the document wrote one number.
+ */
+export const stylePartVar = (
+	styleId: string,
+	variant: number,
+	prop: string,
+): string => `spart(${styleId},${variant},${prop})`;
 
 /**
  * The inverse of {@link tokenVar} / {@link propVar} / {@link constraintVar} /
- * {@link layoutVar} / {@link frameVar}.
+ * {@link layoutVar} / {@link frameVar} / {@link styleVar}.
+ *
+ * {@link stylePartVar} is deliberately absent. A part holds one alternative, so
+ * it is never unsettled, never pinned and never shown — the callers that read a
+ * variable key back are all asking about something a designer can choose, and a
+ * sixth case none of them could act on would be a case they all had to handle.
  */
 export type Variable =
 	| { kind: "token"; token: string }
 	| { kind: "prop"; node: string; prop: string }
 	| { kind: "constraint"; constraint: string }
 	| { kind: "layout"; node: string; field: string }
-	| { kind: "frame"; node: string; dim: string };
+	| { kind: "frame"; node: string; dim: string }
+	| { kind: "style"; style: string };
 
 export function parseVariable(key: string): Variable | null {
 	// Parsed rather than matched: a node id may be a term, and `prop(cell(1,1),
@@ -380,6 +414,7 @@ export function parseVariable(key: string): Variable | null {
 	if (atom.name === "fval" && arity === 2) {
 		return { kind: "frame", node: a, dim: b };
 	}
+	if (atom.name === "sty" && arity === 1) return { kind: "style", style: a };
 	return null;
 }
 
@@ -418,7 +453,13 @@ export function findToken(
  * rest of the list alone.
  */
 export function activeIndex(
-	value: Value,
+	/**
+	 * Any list of alternatives. Only its length is read, so a style's variants
+	 * are indexed by exactly this function rather than by a copy of it — which
+	 * is the whole claim about `sty(S)` being an ordinary variable, made in the
+	 * one place that could have said otherwise.
+	 */
+	value: readonly unknown[],
 	variable: string,
 	picks: Picks,
 ): number {

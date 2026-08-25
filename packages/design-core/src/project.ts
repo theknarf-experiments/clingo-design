@@ -6,7 +6,7 @@
  * A project used to be an entry in one JSON blob, which is why the reader for
  * that blob still lives at the bottom of this file.
  */
-import { type Value, single } from "./values.ts";
+import { type Term, type Value, single } from "./values.ts";
 import {
 	type AutoLayout,
 	CHILD_PROPS,
@@ -22,8 +22,11 @@ import {
 	PROPS,
 	RULES_HEADER,
 	STRENGTHS,
+	STYLE_PROPS,
 	type Scene,
 	type SceneNode,
+	type Style,
+	type StyleVariant,
 	dimension,
 	emptyScene,
 	makeFrame,
@@ -115,6 +118,14 @@ export function normalizeScene(input: unknown): Scene {
 			Array.isArray(input.tokens) && input.tokens.every(isToken)
 				? (input.tokens as Scene["tokens"])
 				: starterTokens(),
+		// Documents written before styles existed simply have none, which is
+		// what every document written before them *was*. Unlike the tokens this
+		// filters rather than rejecting wholesale: one malformed style is one
+		// style to drop, and a node wearing it then decides its own appearance,
+		// which is exactly what a dangling reference already means.
+		styles: Array.isArray(input.styles)
+			? input.styles.filter(isStyle).map(normalizeStyle)
+			: [],
 		// Nodes from a document written before absolute geometry existed have
 		// no frame, and would render at 0x0. Dropping them is better than
 		// showing an invisible layer list.
@@ -206,6 +217,61 @@ function isToken(value: unknown): boolean {
 			((term.kind === "literal" && typeof term.value === "string") ||
 				(term.kind === "token" && typeof term.token === "string")),
 	);
+}
+
+/**
+ * A style needs an id, a name and at least one variant.
+ *
+ * A style with no variants is not a degenerate style, it is a variable with no
+ * alternatives: the choice rule would demand a pick and there would be none, so
+ * this is the one shape that has to be rejected rather than normalised.
+ */
+function isStyle(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	if (typeof value.id !== "string" || !value.id) return false;
+	if (typeof value.name !== "string") return false;
+	if (!Array.isArray(value.variants) || value.variants.length === 0) return false;
+	return value.variants.every(
+		(v) => isRecord(v) && (v.parts === undefined || isRecord(v.parts)),
+	);
+}
+
+/**
+ * Drops whatever a stored style says that this code would not have written: a
+ * part naming a property no style may decide, and a part that is not a term.
+ *
+ * A variant left with nothing is kept, not dropped. "This treatment says
+ * nothing" is a real alternative — it is how "styled or plain" is one
+ * variable — and silently deleting it would renumber every variant after it,
+ * which is what a pin and an instance's held picks are counted in.
+ */
+function normalizeStyle(value: unknown): Style {
+	const raw = value as {
+		id: string;
+		name: string;
+		variants: Array<Record<string, unknown>>;
+	};
+	return {
+		id: raw.id,
+		name: raw.name,
+		variants: raw.variants.map((variant) => {
+			const stored = isRecord(variant.parts) ? variant.parts : {};
+			const parts: StyleVariant["parts"] = {};
+			for (const prop of STYLE_PROPS) {
+				const term = stored[prop];
+				if (isTerm(term)) parts[prop] = term as Term;
+			}
+			const name = variant.name;
+			return typeof name === "string" ? { name, parts } : { parts };
+		}),
+	};
+}
+
+function isTerm(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	if (value.kind === "literal") return typeof value.value === "string";
+	if (value.kind === "token") return typeof value.token === "string";
+	return value.kind === "derived" && typeof value.from === "string";
 }
 
 /** A node is usable only if it carries a frame with all four dimensions. */
@@ -331,6 +397,13 @@ function pruneNodes(list: readonly unknown[]): SceneNode[] {
 			if (setting === fixed[prop]) continue;
 			const { [prop]: _old, ...rest } = fixed;
 			fixed = setting ? { ...rest, [prop]: setting } : (rest as SceneNode);
+		}
+		// A style reference is an id and nothing else. Anything else is dropped
+		// rather than carried, so `styleOf` is asking a string-or-nothing
+		// question everywhere downstream.
+		if (fixed.style !== undefined && typeof fixed.style !== "string") {
+			const { style: _dropped, ...rest } = fixed;
+			fixed = rest as SceneNode;
 		}
 		out.push(
 			fixed.children ? { ...fixed, children: pruneNodes(fixed.children) } : fixed,

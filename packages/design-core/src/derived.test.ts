@@ -20,6 +20,7 @@ import { lit } from "./values.ts";
 /** A document of one white frame, plus whatever rules the test is about. */
 function board(rules: string): Scene {
 	return {
+		styles: [],
 		tokens: [],
 		constraints: [],
 		nodes: [

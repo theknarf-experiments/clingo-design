@@ -75,6 +75,7 @@ test("paint order survives, even when the ids sort the other way", async () => {
 		props: { fill: single("#000000") },
 	});
 	const scene: Scene = {
+		styles: [],
 		tokens: [],
 		nodes: [
 			{
@@ -135,6 +136,7 @@ test("text with a comma in it survives the round trip", async () => {
 	// The atom `literal(l0,"Fast, quiet")` has a comma that is not an argument
 	// separator, which is the whole reason `parseAtom` knows about quotes.
 	const scene: Scene = {
+		styles: [],
 		tokens: [],
 		nodes: [
 			{
@@ -171,6 +173,7 @@ test("solved geometry wins over the stored frame", async () => {
 		props: { fill: single("#000000") },
 	});
 	const scene: Scene = {
+		styles: [],
 		tokens: [],
 		nodes: [
 			{
@@ -221,6 +224,7 @@ test("a scene predicate a rule asserts is read like any other", async () => {
 
 test("a scene with alternatives reads differently in different universes", async () => {
 	const scene: Scene = {
+		styles: [],
 		tokens: [
 			{ id: "accent", name: "accent", type: "color", value: [lit("#111111"), lit("#222222")] },
 		],

@@ -33,6 +33,7 @@ import {
 	LAYOUT_PROPS,
 	LAYOUT_PROP_NAMES,
 	NODE_KINDS,
+	STYLE_PROPS,
 	constrainsProp,
 	dimension,
 	frameDim,
@@ -43,6 +44,7 @@ import {
 	type Scene,
 	type SceneNode,
 	weightOf,
+	wornProps,
 } from "./scene.ts";
 import {
 	DERIVATIONS,
@@ -55,6 +57,8 @@ import {
 	layoutVar,
 	numeralOf,
 	propVar,
+	stylePartVar,
+	styleVar,
 	tokenVar,
 	wordOf,
 } from "./values.ts";
@@ -518,6 +522,48 @@ const COMPONENT_RULES = [
 ]
 
 /**
+ * Styles, as two rules over the facts a style and its wearers emit.
+ *
+ * Short, because a style is not new machinery: it is one more variable, and its
+ * alternatives happen to be records. `sty(S)` picks exactly like `tok(T)` does,
+ * and everything downstream — pinning, brave and cautious reachability, being
+ * named by a rule, projection — applies to it because none of them can tell the
+ * difference.
+ *
+ * What is new is only the join, and it is the second rule. A style's variant
+ * decides several properties *at once*, so the pick lands on a whole record
+ * rather than on a literal, and one pick then writes into several
+ * `resolved(prop(N,P))`. That is the entire content of the feature: it turns a
+ * cross product into a correlation. Two two-alternative tokens linked to size
+ * and weight give four designs of which two are incoherent; one two-variant
+ * style gives two, and both are coherent by construction.
+ *
+ * Emitted always, like the geometry and component rules and for the same
+ * reason: `sty_wears/3` and `alt(sty(S),I)` are things a hand-written rule may
+ * assert — "every node in this row wears the compact treatment" is one rule —
+ * and a contract that quietly does nothing on some documents is not one.
+ */
+const STYLE_RULES = [
+	"#defined sty_wears/3.",
+	"% What one variant says about one property, in this universe.",
+	"%",
+	"% A part is a value in every sense but one — it holds a single alternative,",
+	"% because branching is what the *list of variants* is for — so it resolves",
+	"% through the same rules a fill does, token links and derivations included.",
+	"% `sty_lit/4` is a plain fact wherever the document wrote a bare literal and",
+	"% a resolved variable wherever it wrote a link, exactly as `frame/3` is: the",
+	"% split is a cost decision and only that, and no rule can tell which it was.",
+	"sty_lit(S,I,P,L) :- resolved(spart(S,I,P),L).",
+	"% The join. `sty_wears/3` is per node *per property*, which is where",
+	"% precedence lives: a node that states its own value for a property is",
+	"% simply not in it, so there is nothing to prefer here and no negation to",
+	"% write. See `wornProps`, which also drops a property the node's kind has",
+	"% nowhere to put — a text style worn by a rectangle decides nothing about",
+	"% the rectangle.",
+	"resolved(prop(N,P),L) :- sty_wears(N,S,P), pick(sty(S),I), sty_lit(S,I,P,L).",
+]
+
+/**
  * The geometric vocabulary, as facts. Written out of the one table that says
  * what an edge is, so no rule ever names an edge.
  */
@@ -638,6 +684,26 @@ export const CONTRACT = `% Predicates you can rely on:
 %   cval(C)                     the dimension a geometric constraint holds to
 %   lval(Node, Setting)         one input to an automatic layout
 %   fval(Node, x|y|width|height)  one of a node's own four dimensions
+%   sty(Style)                  which treatment a style is wearing — the one
+%                               variable whose alternatives are whole records
+%
+% Styles. One pick decides several properties together, which is the one thing
+% linking each property to its own token cannot express: two 2-alternative
+% tokens are four designs, of which half pair a display size with a body
+% weight. A style is a variable over *variants*, and a variant is a complete
+% answer for every property it mentions.
+%
+%   style(S)  style_name(S, "name")
+%   alt(sty(S), I)              variant I exists. No alt_literal beside it: a
+%                               variant is a record, not a literal, so
+%                               resolved(sty(S),_) is never derived
+%   sty_lit(S, I, Prop, Lit)    what variant I says about Prop, this universe.
+%                               A fact where the document wrote a literal;
+%                               derived from resolved(spart(S,I,Prop)) where it
+%                               wrote a token link or a derivation
+%   sty_wears(N, S, Prop)       N takes Prop from S. Per property, because a
+%                               node that states its own value keeps it — assert
+%                               it yourself to dress nodes your rules created
 %
 % alt/2 is a derivable predicate too, so a rule can mint a variable the
 % document never named, and it then picks, resolves, renders, greys and pins
@@ -997,6 +1063,54 @@ export function compile(
 		emitValue(tokenVar(token.id), token.value);
 	}
 
+	/**
+	 * Styles: the one variable whose alternatives are whole records.
+	 *
+	 * A style with no variants emits nothing at all rather than a variable the
+	 * choice rule would demand a pick for and find none of — which is the one
+	 * degenerate shape that is not merely uninteresting but unsatisfiable.
+	 */
+	const styleLines: string[] = [];
+	for (const style of scene.styles ?? []) {
+		if (style.variants.length === 0) continue;
+		styleLines.push(atom("style", style.id));
+		styleLines.push(atom("style_name", style.id, quote(style.name)));
+		// Not `emitValue`: the alternatives are records, not terms, so there is
+		// no `alt_literal` to write beside them and `resolved(sty(S),_)` is
+		// never derived. That is the whole of how a style differs from every
+		// other variable, and nothing reads it — what the pick decides is read
+		// through `sty_lit/4`. Recorded in `variables` all the same, so it is a
+		// `docvar` and not mistaken for a choice a rule minted.
+		variables[styleVar(style.id)] = style.variants.length;
+		style.variants.forEach((variant, index) => {
+			styleLines.push(atom("alt", styleVar(style.id), index));
+			for (const prop of STYLE_PROPS) {
+				const term = variant.parts[prop];
+				if (term === undefined) continue;
+				// A bare literal is a fact, a link is a variable — the same trade
+				// a frame dimension makes, for the same reason. A part holds one
+				// alternative either way, so nobody ever picks between them; the
+				// variable exists only so that `resolved/2` will follow a token
+				// reference or compute a derivation for it.
+				if (term.kind === "literal") {
+					styleLines.push(
+						atom("sty_lit", style.id, index, prop, literals.id(term.value)),
+					);
+					continue;
+				}
+				emitValue(stylePartVar(style.id, index, prop), [term]);
+			}
+		});
+	}
+	/**
+	 * Which properties each wearer actually takes from its style.
+	 *
+	 * Per node per property, not per node: precedence is resolved here rather
+	 * than in the program, so a node wearing a heading style but with its own
+	 * colour is simply absent from the `ink` row. See {@link wornProps}.
+	 */
+	const wearLines: string[] = [];
+
 	const nodeLines: string[] = [];
 	// Facts describing every automatic layout. The rules that interpret them
 	// are generic, so a document never changes the shape of the program.
@@ -1079,6 +1193,13 @@ export function compile(
 		}
 		for (const [prop, value] of Object.entries(node.props)) {
 			if (value) emitValue(propVar(node.id, prop), value);
+		}
+		// After the node's own properties, which is also the order the argument
+		// runs in: what the style contributes is what is left over.
+		if (node.style !== undefined) {
+			for (const prop of wornProps(scene, node)) {
+				wearLines.push(atom("sty_wears", node.id, node.style, prop));
+			}
 		}
 	}
 
@@ -1239,6 +1360,11 @@ export function compile(
 			"% What a node actually draws with — the only thing an onlooker sees.",
 			"rendered(N,P,L) :- resolved(prop(N,P),L).",
 		]),
+		section("styles", [...styleLines, ...wearLines]),
+		// Always emitted, like the geometry and component rules: a hand-written
+		// rule may dress nodes it brought into being. After the choice rules,
+		// which is where `resolved/2` is said.
+		section("style rules", STYLE_RULES),
 		section("derivations", derivedLines),
 		section("layout", laidOut ? [...LAYOUT_OPTIONS, ...layoutLines] : layoutLines),
 		laidOut ? section("layout rules", LAYOUT_RULES) : "",
@@ -1461,6 +1587,15 @@ export function variableCounts(scene: Scene): Record<string, number> {
 	const out: Record<string, number> = {};
 	for (const token of scene.tokens) {
 		if (token.value.length > 0) out[tokenVar(token.id)] = token.value.length;
+	}
+	// A style's variants, and only those. Its *parts* are variables in the
+	// program too, but each holds exactly one alternative — a variable nobody can
+	// pick between is not a variable anyone should be shown, which is the same
+	// line a single-literal frame dimension is on.
+	for (const style of scene.styles ?? []) {
+		if (style.variants.length > 0) {
+			out[styleVar(style.id)] = style.variants.length;
+		}
 	}
 	for (const node of flatten(scene.nodes)) {
 		for (const [prop, value] of Object.entries(node.props)) {

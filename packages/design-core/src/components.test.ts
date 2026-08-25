@@ -67,6 +67,7 @@ function buttons(uses: Array<{ id: string; holds?: Record<string, number> }>): S
 		component: true,
 	};
 	return {
+		styles: [],
 		tokens: [],
 		constraints: [],
 		rules: "",

@@ -53,6 +53,7 @@ const over = (group: string | undefined, nodes: string[] = []): Constraint => ({
 
 function scene(count: number, constraint: Constraint): Scene {
 	return {
+		styles: [],
 		tokens: starterTokens(),
 		nodes: [
 			{

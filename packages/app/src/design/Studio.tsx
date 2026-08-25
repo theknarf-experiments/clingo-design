@@ -32,6 +32,7 @@ import {
 	partLabel,
 	FRAME_DIMS,
 	type Dimension,
+	findStyle,
 	flatten,
 	parseVariable,
 	sceneContext,
@@ -548,6 +549,12 @@ export function Studio({
 			}
 			if (parsed.kind === "frame") {
 				return `${nameOf(parsed.node)} ${FRAME_DIMS[parsed.dim as Dimension].label}`;
+			}
+			if (parsed.kind === "style") {
+				// The style's own name. Which *variant* is showing is what the
+				// caption is about, and a variant has a name of its own — see
+				// `variantLabel`, which the styles panel will want next.
+				return findStyle(scene.styles, parsed.style)?.name ?? parsed.style;
 			}
 			return scene.tokens.find((t) => t.id === parsed.token)?.name ?? parsed.token;
 		},
