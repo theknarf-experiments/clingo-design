@@ -19,6 +19,7 @@ export * from "./derived.ts";
 export * from "./sampling.ts";
 export * from "./freedom.ts";
 export * from "./relax.ts";
+export * from "./stuck.ts";
 export * from "./why.ts";
 export * from "./explore.ts";
 export * from "./paint.ts";

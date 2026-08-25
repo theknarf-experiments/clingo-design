@@ -49,6 +49,8 @@ export interface StylesProps {
 	/** Variable keys the solver reports as unsettled. */
 	varying: ReadonlySet<string>;
 	reach?: Readonly<Record<string, Set<number>>>;
+	/** Variables nothing consults — see `unreadVariables`. */
+	unread: ReadonlySet<string>;
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
 	why?: (variable: string) => WhyRow | undefined;
@@ -209,6 +211,7 @@ function StyleTable({
 	picks,
 	varying,
 	reach,
+	unread,
 	pins,
 	onPin,
 	why,
@@ -220,6 +223,7 @@ function StyleTable({
 	picks: Picks;
 	varying: ReadonlySet<string>;
 	reach?: Readonly<Record<string, Set<number>>>;
+	unread: ReadonlySet<string>;
 	pins: Readonly<Record<string, number>>;
 	onPin: StylesProps["onPin"];
 	why?: StylesProps["why"];
@@ -242,8 +246,14 @@ function StyleTable({
 	 * claim a rule ruled it out. Nothing did: no design uses *any* of them yet.
 	 * So a style with no wearers is drawn plain, and "worn by nothing" beside its
 	 * name is the honest version of the same news.
+	 *
+	 * Read off `unread` rather than counted here, because this panel is not the
+	 * only row that asks: a token nothing links to sat behind the same collapse
+	 * and greyed its own alternatives for want of the same gate. It is also the
+	 * stricter reading — a node may wear a style and then state every property
+	 * the style mentions, and then the style is worn and still decides nothing.
 	 */
-	const answered = wearers.length > 0 && branches;
+	const answered = branches && !unread.has(variable);
 
 	/** A field the variants agree on is not part of the decision. */
 	const same = (prop: PropName): boolean => {
@@ -538,6 +548,7 @@ export function Styles({
 	picks,
 	varying,
 	reach,
+	unread,
 	pins,
 	onPin,
 	why,
@@ -576,6 +587,7 @@ export function Styles({
 					picks={picks}
 					varying={varying}
 					reach={reach}
+					unread={unread}
 					pins={pins}
 					onPin={onPin}
 					why={why}

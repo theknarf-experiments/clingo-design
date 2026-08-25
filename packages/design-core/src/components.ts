@@ -313,6 +313,14 @@ export function isFullyHeld(def: ComponentDef, instance: SceneNode): boolean {
  * A hold naming a variable the definition no longer has, or an alternative it
  * no longer offers, is dropped rather than assumed: a definition edited down to
  * one fill should leave its instances legal, not unsatisfiable.
+ *
+ * A *definition* may hold its own variables too, and for the same reason an
+ * instance may hold its copies of them: the subtree is a design as well as a
+ * space, it sits on the canvas being one of its variants, and which one is a
+ * decision the document can remember. That is what lets `collapseToPicks` write
+ * down a whole universe without shortening the very lists its instances index
+ * into — see the note there. The keys are the definition's own, because for a
+ * definition part definition space *is* document space.
  */
 export function heldPicks(scene: Scene): Record<string, number> {
 	const out: Record<string, number> = {};
@@ -320,6 +328,14 @@ export function heldPicks(scene: Scene): Record<string, number> {
 	// of a hundred instances is an ordinary document, and this runs on every
 	// solve.
 	const defs = new Map(componentDefs(scene).map((d) => [d.root.id, d] as const));
+	for (const def of defs.values()) {
+		if (!def.root.holds) continue;
+		for (const v of openVariables(def)) {
+			const index = def.root.holds[v.variable];
+			if (index === undefined || index < 0 || index >= v.value.length) continue;
+			out[v.variable] = index;
+		}
+	}
 	for (const instance of instanceNodes(scene)) {
 		const def = defs.get(instance.instanceOf ?? "");
 		if (!def || !instance.holds) continue;

@@ -36,6 +36,7 @@ import {
 	variantLabel,
 	flatten,
 	parseVariable,
+	reachableAlternatives,
 	sceneContext,
 	takesMembers,
 	variableCounts,
@@ -43,6 +44,7 @@ import {
 	ungroupNodes,
 	varyingVariables,
 	updateConstraint,
+	unreadVariables,
 	varyingVars,
 	type ModelScene,
 	wrapInLayout,
@@ -230,8 +232,21 @@ export function Studio({
 	} = useExploration(scene, LIMIT, seed, pins, measurements, probeIds);
 	const blamed = useMemo(() => new Set(conflict), [conflict]);
 	const badPins = useMemo(() => new Set(pinConflict), [pinConflict]);
-	/** Which alternatives are still reachable, per variable. */
-	const reach = exploration?.brave.pick;
+	/**
+	 * Which alternatives are still reachable, per variable.
+	 *
+	 * Filtered rather than taken raw: projection collapses the universes that
+	 * differ only in a variable nothing consults, so brave consequences report
+	 * one alternative for an unreferenced token and every row downstream would
+	 * grey the others and blame a rule. `reachableAlternatives` drops those
+	 * entries, which is what lets six rows and two panels read an absent entry as
+	 * "no answer about this" rather than each having to know why.
+	 */
+	const unread = useMemo(() => unreadVariables(scene), [scene]);
+	const reach = useMemo(
+		() => reachableAlternatives(scene, exploration?.brave.pick),
+		[scene, exploration],
+	);
 
 	const pin = useCallback((variable: string, index: number | null) => {
 		setPins((prev) => {
@@ -1381,6 +1396,7 @@ export function Studio({
 								picks={picks}
 								varying={varying}
 								reach={reach}
+								unread={unread}
 								pins={pins}
 								onPin={pin}
 								why={whyFor}

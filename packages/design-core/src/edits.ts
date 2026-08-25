@@ -8,7 +8,12 @@
  * Frames are relative to their parent, so an operation on a node needs to say
  * nothing about its descendants: they come along on their own.
  */
-import { componentDef, instanceVariable, openVariables } from "./components.ts";
+import {
+	componentDef,
+	componentDefs,
+	instanceVariable,
+	openVariables,
+} from "./components.ts";
 import {
 	type Frame,
 	MIN_NODE_SIZE,
@@ -1743,24 +1748,33 @@ export function deleteStyle(
 }
 
 /**
- * An instance's held picks after a collapse, or undefined to leave it alone.
+ * Held picks after a collapse, or undefined to leave the node alone.
  *
  * Kept out of {@link collapseToPicks} because it is the one part of that walk
- * that is not "shorten this list": an instance's variables are the definition's
- * minted again and the document holds no list of them, so what a pick collapses
- * *to* is an override.
+ * that is not "shorten this list": a component's variables are minted once per
+ * instance and the document holds no list of *those*, so what a pick collapses
+ * to is a hold.
+ *
+ * Both ends of the relationship come through here. An instance holds the
+ * definition's variables under its own copies' picks; a definition root holds
+ * them under its own. Which is the whole of why a definition's lists survive a
+ * collapse — see the note at the call site.
  */
 function collapseHolds(
 	scene: Scene,
 	node: SceneNode,
 	picks: Readonly<Record<string, number>>,
 ): Record<string, number> | undefined {
-	const def = componentDef(scene, node.instanceOf);
+	const def = node.component
+		? componentDef(scene, node.id)
+		: componentDef(scene, node.instanceOf);
 	if (!def) return undefined;
+	const own = def.root.id === node.id;
 	const holds = { ...node.holds };
 	let changed = false;
 	for (const v of openVariables(def)) {
-		const index = picks[instanceVariable(node.id, v.node.id, v.prop)];
+		const index =
+			picks[own ? v.variable : instanceVariable(node.id, v.node.id, v.prop)];
 		if (index === undefined || holds[v.variable] === index) continue;
 		holds[v.variable] = index;
 		changed = true;
@@ -1782,6 +1796,27 @@ export function collapseToPicks(
 		return index !== undefined && index < value.length ? [value[index]] : value;
 	};
 
+	/**
+	 * Nodes inside a component definition, whose property lists survive this.
+	 *
+	 * A definition's property list is not only its own design: it is the space
+	 * every instance of it indexes into, and an instance's override *is* an index
+	 * into it. Shortening it to the alternative the definition took therefore
+	 * destroyed the choice the instances were making — so Keep wrote each
+	 * instance's override and, in the same pass, deleted the list that gave it
+	 * meaning. Every override it recorded was dead on arrival, and a universe in
+	 * which an instance differed from its definition came back as a different
+	 * design than the one on screen.
+	 *
+	 * So the lists stay, and the definition records its own pick the way its
+	 * instances record theirs. The document is still one design afterwards —
+	 * every one of those variables is held — and it is still a component, which
+	 * pressing Keep has no business taking away.
+	 */
+	const inDefinition = new Set(
+		componentDefs(scene).flatMap((def) => def.parts.map((part) => part.id)),
+	);
+
 	return {
 		...scene,
 		tokens: scene.tokens.map((t) => ({
@@ -1799,21 +1834,29 @@ export function collapseToPicks(
 				: s;
 		}),
 		nodes: mapTree(scene.nodes, (node) => {
+			const keep = inDefinition.has(node.id);
 			const props: SceneNode["props"] = {};
 			for (const [prop, value] of Object.entries(node.props)) {
-				if (value) props[prop as PropName] = pickOne(value, propVar(node.id, prop));
+				if (value) {
+					props[prop as PropName] = keep
+						? value
+						: pickOne(value, propVar(node.id, prop));
+				}
 			}
 			// Geometry too: a collapsed document that kept two positions would
-			// still be two designs after being reduced to one.
+			// still be two designs after being reduced to one. A definition's
+			// geometry is not re-minted per instance, so it collapses like anyone's.
 			const frame = { ...node.frame };
 			for (const dim of DIMENSIONS) {
 				frame[dim] = pickOne(frame[dim], frameVar(node.id, dim));
 			}
-			// An instance's variables live nowhere in the document, so there is no
-			// list here to shorten — but there is somewhere for the decision to go,
-			// and it is the same place an override goes. This is what makes pinning
-			// a universe in the multiverse and pressing Keep leave the instances
-			// remembering the variant they were showing.
+			// A component's variables live nowhere in the document as a list this
+			// pass could shorten — an instance's are minted per instance, and a
+			// definition's have to survive for those to mean anything — but there
+			// is somewhere for the decision to go, and it is the same place an
+			// override goes. This is what makes pinning a universe in the
+			// multiverse and pressing Keep leave the definition and every instance
+			// showing exactly the variant they were showing.
 			const holds = collapseHolds(scene, node, picks);
 			return holds ? { ...node, props, frame, holds } : { ...node, props, frame };
 		}),

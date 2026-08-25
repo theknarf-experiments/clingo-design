@@ -370,3 +370,36 @@
 	border: 1px solid var(--dc-line);
 	border-radius: 4px;
 }
+
+/* Why a blamed rule cannot hold, where the document itself can say. Above the
+   ways out and styled as prose rather than as a control, because it is the
+   diagnosis and the buttons below it are the treatment. */
+.knots {
+	margin: 0.35rem 0 0.5rem;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.knot {
+	display: block;
+	width: 100%;
+	padding: 0.3rem 0.4rem;
+	font: inherit;
+	font-size: 0.7rem;
+	line-height: 1.4;
+	text-align: left;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 0;
+	border-left: 2px solid color-mix(in srgb, var(--dc-bad, #fca5a5) 60%, transparent);
+	border-radius: 3px;
+	cursor: pointer;
+	opacity: 0.85;
+}
+
+.knot:hover {
+	opacity: 1;
+}

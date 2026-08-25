@@ -29,13 +29,27 @@ export type Declarations = Record<string, string>;
  * browser's 16px instead. So the inherited properties are declared here, once,
  * and both the canvas and the exporter apply them.
  *
- * The font size is `PROPS.size.fallback` rather than a number typed twice: it
- * is exactly the size a text node with nothing said about it means.
+ * Which properties belong here is not a judgement call: it is every property
+ * CSS *inherits*, because those and only those are the ones a node that says
+ * nothing about them takes from its surroundings. `PROPS[p].inherited` says
+ * which, and a test walks the table and insists each one is declared — line
+ * height used to be missing, which drew nothing on the canvas only because
+ * every text kind sets its own, and came out as the browser's `normal` in an
+ * exported file.
+ *
+ * The values are `PROPS[...].fallback` rather than numbers typed twice: they are
+ * exactly what a node with nothing said about them means. The font stack is the
+ * exception and deliberately so — it is the *artboard's* stack, mirrored by
+ * `ARTBOARD_FONT` in the studio's text measurement, and measuring against one
+ * list while painting with another would be off by whole characters.
  */
 export const DOCUMENT_BASE: Declarations = {
 	color: PROPS.ink.fallback,
 	fontFamily: "system-ui, -apple-system, \"Segoe UI\", sans-serif",
 	fontSize: PROPS.size.fallback,
+	fontWeight: PROPS.weight.fallback,
+	lineHeight: PROPS.lineHeight.fallback,
+	textAlign: PROPS.align.fallback,
 };
 
 /**
@@ -87,7 +101,13 @@ export interface ShapePaint {
  * gets an entry, and everything else falls through to the plain box.
  */
 export const SHAPE_PAINT: Partial<Record<NodeKind, ShapePaint>> = {
-	text: { box: { lineHeight: "1.35", overflow: "hidden", whiteSpace: "pre-wrap" } },
+	text: {
+		box: {
+			lineHeight: PROPS.lineHeight.fallback,
+			overflow: "hidden",
+			whiteSpace: "pre-wrap",
+		},
+	},
 	// Fully rounded corners *are* an ellipse; an SVG for it would only add a
 	// second way to size the same box.
 	ellipse: { box: { borderRadius: "50%" } },

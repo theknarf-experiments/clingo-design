@@ -23,8 +23,11 @@ import {
 	exportSpace,
 	exportUniverse,
 } from "./export.ts";
+import { DOCUMENT_BASE, PAINT, cssName } from "./paint.ts";
 import {
 	KINDS,
+	PROPS,
+	PROP_NAMES,
 	RULES_HEADER,
 	type Scene,
 	type Style,
@@ -634,4 +637,44 @@ test("a surface clips, in both targets", async () => {
 		exportUniverse(scene, universe, { target: "svg" }).text,
 		/<clipPath id="clip0">/,
 	);
+});
+
+test("a document declares every property it would otherwise inherit", async () => {
+	// The claim DOCUMENT_BASE exists to make: a design looks the same wherever it
+	// is drawn, so nothing about its appearance may be left to the page around
+	// it. Read off the table rather than listed here, which is what would have
+	// caught line-height — declared by every text kind, and so invisible on the
+	// canvas, while an exported file took the browser's `normal`.
+	const inherited = PROP_NAMES.filter((prop) => PROPS[prop].inherited);
+	assert.ok(inherited.length > 0);
+	for (const prop of inherited) {
+		const paint = PAINT[prop];
+		assert.ok(paint, `${prop} inherits but paints nothing`);
+		for (const key of Object.keys(paint(PROPS[prop].fallback))) {
+			assert.ok(
+				key in DOCUMENT_BASE,
+				`${prop} reaches CSS as ${key}, which inherits, so the document has to say it`,
+			);
+		}
+	}
+	// And the other half: what it declares is what an exported file carries.
+	const scene: Scene = {
+		styles: [],
+		tokens: starterTokens(),
+		nodes: [frame("page", "Page", [0, 0, 200, 100], {}, [])],
+		constraints: [],
+		rules: RULES_HEADER,
+	};
+	const exploration = await explore(scene, directSolver, { limit: 1 });
+	const design = block(
+		exportUniverse(scene, exploration.universes[0], { target: "html" }).text,
+		".design",
+	);
+	assert.ok(design, "expected a .design rule");
+	for (const [key, value] of Object.entries(DOCUMENT_BASE)) {
+		assert.ok(
+			design.includes(`${cssName(key)}: ${value};`),
+			`.design is missing ${cssName(key)}`,
+		);
+	}
 });

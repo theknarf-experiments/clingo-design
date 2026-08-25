@@ -52,6 +52,7 @@ import {
 	tokensFor,
 	varies,
 	type ComponentDef,
+	type ComponentVar,
 	addInstance,
 	definitionOf,
 	isFullyHeld,
@@ -469,11 +470,21 @@ function ComponentSection({
 	const { variants, truncated } = variantsOf(scene, real);
 	const open = openVariables(real);
 	const shown = shownVariant(variants, real, node.id, picks);
-	const chosen = isInstance
-		? variants.findIndex((v) =>
-				open.every((o) => node.holds?.[o.variable] === v.picks[o.variable]),
-			)
-		: -1;
+	/**
+	 * The variant this node has made up its mind about, if it has.
+	 *
+	 * Asked of a definition as well as an instance, because a definition holds
+	 * its own variables in exactly the way an instance holds its copies of them
+	 * — see `SceneNode.holds`. Without it, pressing Keep on a universe writes a
+	 * decision onto the definition that nothing in the panel could see or undo,
+	 * while greying every alternative it did not take.
+	 */
+	const chosen = variants.findIndex((v) =>
+		open.every((o) => node.holds?.[o.variable] === v.picks[o.variable]),
+	);
+	/** Definition space is document space for a definition's own parts. */
+	const liveVar = (v: ComponentVar) =>
+		isInstance ? instanceVariable(node.id, v.node.id, v.prop) : v.variable;
 	const names = nodeNames(scene.nodes);
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 
@@ -499,7 +510,8 @@ function ComponentSection({
 				<p className={styles.note} data-role="definition-note">
 					A definition: this subtree is a design space rather than one design.
 					Every instance is a point in it, free wherever a property here holds
-					more than one value.
+					more than one value — and so is the definition itself, which may be
+					held to one of them like any of its uses.
 				</p>
 			)}
 
@@ -508,90 +520,89 @@ function ComponentSection({
 				variants={variants}
 				truncated={truncated}
 				shown={shown}
-				chosen={isInstance && chosen >= 0 ? chosen : undefined}
-				onChoose={
-					isInstance
-						? (at) =>
-								onSceneChange((prev) => setVariant(prev, node.id, variants[at].picks))
-						: undefined
+				chosen={chosen >= 0 ? chosen : undefined}
+				onChoose={(at) =>
+					onSceneChange((prev) => setVariant(prev, node.id, variants[at].picks))
 				}
 			/>
 
-			{isInstance ? (
-				<>
-					{node.holds ? (
-						<button
-							type="button"
-							className={styles.follow}
-							data-role="release-holds"
-							title="Hand every choice back to the solver"
-							onClick={() => onSceneChange((prev) => setVariant(prev, node.id, null))}
-						>
-							{isFullyHeld(real, node)
-								? "Let the solver choose"
-								: "Release every choice"}
-						</button>
-					) : null}
+			{node.holds ? (
+				<button
+					type="button"
+					className={styles.follow}
+					data-role="release-holds"
+					title="Hand every choice back to the solver"
+					onClick={() => onSceneChange((prev) => setVariant(prev, node.id, null))}
+				>
+					{isFullyHeld(real, node)
+						? "Let the solver choose"
+						: "Release every choice"}
+				</button>
+			) : null}
 
-					{open.length > 0 ? <h3>Overrides</h3> : null}
-					{open.map((v) => {
-						const variable = instanceVariable(node.id, v.node.id, v.prop);
-						const held = node.holds?.[v.variable];
-						const live = picks[variable];
-						const reachable = reach?.[variable];
-						return (
-							<div key={v.variable} className={styles.override} data-override={v.variable}>
-								<span className={styles.fieldLabel}>{varLabel(v)}</span>
-								<div className={styles.variants}>
-									{v.value.map((term, at) => {
-										const dead =
-											reachable !== undefined && !reachable.has(at);
-										return (
-											<button
-												key={at}
-												type="button"
-												data-alt={at}
-												data-held={at === held ? "" : undefined}
-												data-active={at === live ? "" : undefined}
-												data-impossible={dead ? "" : undefined}
-												aria-pressed={at === held}
-												className={cx(
-													styles.variant,
-													at === live && styles.variantShown,
-													at === held && styles.variantChosen,
-													dead && styles.variantDead,
-												)}
-												title={
-													at === held
-														? "Hand this choice back to the solver"
-														: "Hold this instance at this value"
-												}
-												onClick={() =>
-													onSceneChange((prev) =>
-														setHold(prev, node.id, v.variable, at === held ? null : at),
-													)
-												}
-											>
-												{resolveValue(context, [term], v.variable) &&
-												PROPS[v.prop].type === "color" ? (
-													<span
-														className={styles.chip}
-														style={{
-															background: resolveValue(context, [term], v.variable),
-														}}
-														aria-hidden="true"
-													/>
-												) : null}
-												{termLabel(scene.tokens, term, names)}
-											</button>
-										);
-									})}
-								</div>
-							</div>
-						);
-					})}
-				</>
-			) : (
+			{open.length > 0 ? (
+				<h3>{isInstance ? "Overrides" : "Held here"}</h3>
+			) : null}
+			{open.map((v) => {
+				const variable = liveVar(v);
+				const held = node.holds?.[v.variable];
+				const live = picks[variable];
+				const reachable = reach?.[variable];
+				return (
+					<div key={v.variable} className={styles.override} data-override={v.variable}>
+						<span className={styles.fieldLabel}>{varLabel(v)}</span>
+						<div className={styles.variants}>
+							{v.value.map((term, at) => {
+								const dead =
+									reachable !== undefined && !reachable.has(at);
+								return (
+									<button
+										key={at}
+										type="button"
+										data-alt={at}
+										data-held={at === held ? "" : undefined}
+										data-active={at === live ? "" : undefined}
+										data-impossible={dead ? "" : undefined}
+										aria-pressed={at === held}
+										className={cx(
+											styles.variant,
+											at === live && styles.variantShown,
+											at === held && styles.variantChosen,
+											dead && styles.variantDead,
+										)}
+										title={
+											at === held
+												? "Hand this choice back to the solver"
+												: isInstance
+													? "Hold this instance at this value"
+													: "Hold the definition itself at this value"
+										}
+										onClick={() =>
+											onSceneChange((prev) =>
+												setHold(prev, node.id, v.variable, at === held ? null : at),
+											)
+										}
+									>
+										{resolveValue(context, [term], v.variable) &&
+										PROPS[v.prop].type === "color" ? (
+											<span
+												className={styles.chip}
+												style={{
+													background: resolveValue(context, [term], v.variable),
+												}}
+												aria-hidden="true"
+											/>
+										) : null}
+										{termLabel(scene.tokens, term, names)}
+									</button>
+								);
+							})}
+						</div>
+					</div>
+				);
+			})}
+
+			{isInstance ? null : (
 				<div className={styles.defActions}>
 					<button
 						type="button"

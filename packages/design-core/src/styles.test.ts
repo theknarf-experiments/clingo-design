@@ -32,12 +32,14 @@ import {
 	setStylePart,
 	wearStyle,
 } from "./edits.ts";
-import { explore } from "./explore.ts";
+import { UnsatisfiableError, explore } from "./explore.ts";
 import { normalizeScene } from "./project.ts";
 import { readModel } from "./model.ts";
+import { deadlock } from "./stuck.ts";
 import {
 	PROPS,
 	STYLE_PROPS,
+	type Constraint,
 	type Scene,
 	type SceneNode,
 	type Style,
@@ -713,6 +715,137 @@ test("two nodes wearing one style cannot be made to differ — the correlation b
 	await assert.rejects(() => explore(scene, directSolver, { limit: 4 }), {
 		name: "UnsatisfiableError",
 	});
+});
+
+test("and the panel is told why, not just that", async () => {
+	// The other half of the test above, and the reason it needed one. What the
+	// solver can say about that document is "this rule cannot hold as things
+	// stand", and the only way out it finds is *switch the rule off* — measured,
+	// below, so the message and the offer are known to agree. Both are true and
+	// neither is the news: nothing is wrong with the rule, the two nodes share a
+	// treatment, and no search over any number of designs can produce two values
+	// where the document holds one.
+	let scene = page(2);
+	scene = {
+		...scene,
+		styles: [
+			style("h", [
+				{ parts: { size: lit("32px") } },
+				{ parts: { size: lit("16px") } },
+			]),
+		],
+		constraints: [
+			{
+				id: "distinct",
+				kind: "differ",
+				prop: "size",
+				nodes: ["t1", "t2"],
+				enabled: true,
+			},
+		],
+	};
+	scene = wear(scene, ["t1", "t2"], "h");
+
+	const stuck = deadlock(scene, scene.constraints[0]);
+	assert.ok(stuck);
+	assert.deepEqual(stuck.nodes, ["t1", "t2"]);
+	assert.equal(stuck.prop, "size");
+	assert.match(stuck.said, /take their size from h/);
+	assert.match(stuck.said, /can never hold/);
+
+	// And what the relaxation machinery offers for the same document, so the two
+	// are read together rather than one being written against a guess about the
+	// other. It is not empty and it is not a way out that does not exist: it is
+	// the one real way out there is, and it is an edit.
+	await assert.rejects(
+		() => explore(scene, directSolver, { limit: 4 }),
+		(error: unknown) => {
+			assert.ok(error instanceof UnsatisfiableError);
+			assert.deepEqual(error.conflict, ["distinct"]);
+			assert.equal(error.relaxations.length, 1);
+			assert.deepEqual(error.relaxations[0].rules, ["distinct"]);
+			assert.equal(error.relaxations[0].free, false, "an edit, not a pin");
+			return true;
+		},
+	);
+});
+
+test("the same knot ties two nodes sharing one token, or one stated value", async () => {
+	// Not a style problem — a *one source* problem, so the reading is about what
+	// decides the property and not about what kind of thing is doing the
+	// deciding. Each of these is unsatisfiable for the same reason and each is
+	// solved for here, because a sentence in the panel claiming a document is
+	// hopeless has to be right.
+	const differ = {
+		id: "distinct",
+		kind: "differ" as const,
+		prop: "size" as const,
+		nodes: ["t1", "t2"],
+		enabled: true,
+	};
+	const sized = (scene: Scene, value: Term[]): Scene =>
+		setProp(scene, ["t1", "t2"], "size", value);
+
+	const token: Scene = {
+		...sized(page(2), [ref("lg")]),
+		tokens: [
+			{ id: "lg", name: "Large", type: "length", value: [lit("32px"), lit("20px")] },
+		],
+		constraints: [differ],
+	};
+	const viaToken = deadlock(token, differ);
+	assert.ok(viaToken);
+	assert.match(viaToken.said, /take their size from Large/);
+	await assert.rejects(() => explore(token, directSolver, { limit: 4 }), {
+		name: "UnsatisfiableError",
+	});
+
+	const literal: Scene = { ...sized(page(2), [lit("24px")]), constraints: [differ] };
+	const viaLiteral = deadlock(literal, differ);
+	assert.ok(viaLiteral);
+	assert.match(viaLiteral.said, /are both 24px/);
+	await assert.rejects(() => explore(literal, directSolver, { limit: 4 }), {
+		name: "UnsatisfiableError",
+	});
+
+	// And the control, which is the assertion that matters most: a document that
+	// *can* satisfy the rule is never told it cannot.
+	const free: Scene = {
+		...sized(page(2), [lit("24px"), lit("30px")]),
+		constraints: [differ],
+	};
+	assert.equal(deadlock(free, differ), undefined);
+	const found = await explore(free, directSolver, { limit: 8 });
+	assert.ok(found.universes.length > 0);
+
+	// One alternative each, but different ones: nothing ties them, and the
+	// document is satisfiable, so there is nothing to report.
+	let apart = setProp(page(2), ["t1"], "size", [lit("24px")]);
+	apart = setProp(apart, ["t2"], "size", [lit("30px")]);
+	assert.equal(deadlock({ ...apart, constraints: [differ] }, differ), undefined);
+});
+
+test("a knot is only reported where a rule demands difference, and only on document members", () => {
+	// Three boundaries, each of which would be a wrong sentence in the panel.
+	const base = { ...setProp(page(2), ["t1", "t2"], "size", [lit("24px")]) };
+	const stuck = (c: Constraint) => deadlock({ ...base, constraints: [c] }, c);
+	const differ: Constraint = {
+		id: "distinct",
+		kind: "differ",
+		prop: "size",
+		nodes: ["t1", "t2"],
+		enabled: true,
+	};
+	assert.ok(stuck(differ));
+	// `match` wants them the *same*, which one source guarantees rather than
+	// forbids. Read off `CONSTRAINT_KINDS.distinct`, not off the kind's name.
+	assert.equal(stuck({ ...differ, kind: "match" }), undefined);
+	// Switched off, it is out of the program and cannot fail.
+	assert.equal(stuck({ ...differ, enabled: false }), undefined);
+	// A group's members come from the answer set; there is nothing here to walk.
+	assert.equal(stuck({ ...differ, group: "row(1)" }), undefined);
+	// A member the document no longer holds is skipped rather than paired with.
+	assert.equal(stuck({ ...differ, nodes: ["t1", "gone"] }), undefined);
 });
 
 test("a hand-written rule can dress nodes it created", async () => {

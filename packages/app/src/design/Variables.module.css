@@ -73,6 +73,14 @@
 	letter-spacing: 0.04em;
 }
 
+/* Nothing links to it, so the solver's answer about it is not news. The same
+   weight as a style's "worn by nothing", because it is the same statement. */
+.unused {
+	flex: none;
+	font-size: 0.64rem;
+	opacity: 0.35;
+}
+
 .delete {
 	flex: none;
 	width: 18px;

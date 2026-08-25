@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CONTRACT, compile, varyingVariables } from "./compile.ts";
+import {
+	CONTRACT,
+	compile,
+	reachableAlternatives,
+	unreadVariables,
+	varyingVariables,
+} from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
 import {
 	addNode,
@@ -12,11 +18,20 @@ import {
 	renameToken,
 	setProp,
 	setTokenValue,
+	wearStyle,
 } from "./edits.ts";
 import { Explorer, explore, varyingVars } from "./explore.ts";
 import { findTemplate } from "./templates/index.ts";
 import { type Scene, emptyScene } from "./scene.ts";
-import { lit, propVar, ref, resolveValue, single, tokenVar } from "./values.ts";
+import {
+	lit,
+	propVar,
+	ref,
+	resolveValue,
+	single,
+	styleVar,
+	tokenVar,
+} from "./values.ts";
 
 const card = () => findTemplate("card")!.create();
 const run = (scene: Scene, limit = 64) =>
@@ -270,4 +285,127 @@ test("genuinely different alternatives still branch", async () => {
 	scene = setTokenValue(scene, "accent", [lit("#111111"), lit("#222222")]);
 	const result = await run(scene);
 	assert.equal(result.count, 3, "#111111, #222222 or #00ff00");
+});
+
+/* ------------------------------------------------------------------ */
+/* Variables nothing consults                                          */
+/* ------------------------------------------------------------------ */
+
+test("a variable nothing consults is not reported as narrowed", async () => {
+	// PROJECTION MAKES AN UNUSED VARIABLE LOOK RULED OUT. The program projects on
+	// what a design renders, so every universe that differs only in a pick nobody
+	// reads collapses into one, and brave consequences come back naming a single
+	// reachable alternative. A row that greys the rest is claiming a rule forbade
+	// them; nothing did, and nothing asked.
+	//
+	// This is asserted against the real solver in both directions on one document,
+	// because the failure is not "the wrong number" — it is a true answer to a
+	// question that was never worth asking, and only the contrast says so.
+	let scene = boxScene([lit("#f00")]);
+	scene = setTokenValue(scene, "accent", [lit("#111111"), lit("#222222")]);
+	const spare = tokenVar("accent");
+	const found = await run(scene);
+	assert.deepEqual([...(found.brave.pick[spare] ?? [])].sort(), [1], "collapsed");
+
+	// So the panel is handed an answer with that entry taken out, and an absent
+	// entry is what every row already reads as "nothing to say".
+	const reach = reachableAlternatives(scene, found.brave.pick);
+	assert.equal(reach?.[spare], undefined);
+	assert.ok(unreadVariables(scene).has(spare));
+	// The document still holds the branch, and the panel still says so: which
+	// alternatives are *reachable* and whether the assignment *varies* are two
+	// different questions, and only the first one has no answer here.
+	assert.ok(varyingVariables(scene).includes(spare));
+
+	// And the control, on the same token: link the box to it and the answer means
+	// something again, so nothing above is a blanket exemption for tokens.
+	const linked = setProp(scene, ["box"], "fill", [ref("accent")]);
+	const after = await run(linked);
+	assert.deepEqual([...(after.brave.pick[spare] ?? [])].sort(), [0, 1]);
+	assert.equal(unreadVariables(linked).has(spare), false);
+	assert.deepEqual(
+		reachableAlternatives(linked, after.brave.pick)?.[spare],
+		new Set([0, 1]),
+	);
+});
+
+test("an unworn style, and a token only an unworn style names, are both unread", async () => {
+	// The three ways this bites, in one document. `Styles` had a gate of its own
+	// and the token rows had none, which is why the answer now comes from one
+	// place: the question is "does anything consult this", and a token reached
+	// only through something nothing consults is not consulted either.
+	let scene = boxScene([lit("#f00")]);
+	scene = setTokenValue(scene, "accent", [lit("#111111"), lit("#222222")]);
+	scene = {
+		...scene,
+		styles: [
+			{
+				id: "h",
+				name: "Heading",
+				variants: [
+					{ parts: { fill: ref("accent") } },
+					{ parts: { fill: lit("#333333") } },
+				],
+			},
+		],
+	};
+	const unread = unreadVariables(scene);
+	assert.ok(unread.has(styleVar("h")), "nothing wears it");
+	assert.ok(unread.has(tokenVar("accent")), "only the unworn style names it");
+	// Both really do come back collapsed, so the greying really would have lied.
+	const found = await run(scene);
+	assert.equal(found.brave.pick[styleVar("h")]?.size, 1);
+	assert.equal(found.brave.pick[tokenVar("accent")]?.size, 1);
+
+	// Wear it and both become consulted, in one step: the style decides `fill`,
+	// and the variant that decides it links to the token.
+	const worn = wearStyle(scene, ["box"], "h");
+	const wornUnread = unreadVariables(worn);
+	assert.equal(wornUnread.has(styleVar("h")), false);
+	assert.equal(wornUnread.has(tokenVar("accent")), false);
+	const answer = await run(worn);
+	assert.deepEqual([...(answer.brave.pick[styleVar("h")] ?? [])].sort(), [0, 1]);
+});
+
+test("a style is unread when its wearer decides everything the style mentions", () => {
+	// Stricter than counting wearers, which is what the panel used to do. A node
+	// may wear a style and state every property the style talks about, and then
+	// the style is worn and still decides nothing — `wornProps` is the precedence
+	// the compiler applies, so it is the precedence this reads.
+	let scene = boxScene([lit("#f00")]);
+	scene = {
+		...scene,
+		styles: [
+			{
+				id: "h",
+				name: "Heading",
+				variants: [
+					{ parts: { fill: lit("#111111") } },
+					{ parts: { fill: lit("#222222") } },
+				],
+			},
+		],
+	};
+	const worn = wearStyle(scene, ["box"], "h");
+	// `wearStyle` clears what the style decides, which is what makes the gesture
+	// visible — so the style is consulted.
+	assert.equal(unreadVariables(worn).has(styleVar("h")), false);
+	// Say it again on the node itself and the node wins, so the style is left
+	// deciding nothing at all.
+	const overridden = setProp(worn, ["box"], "fill", [lit("#abcdef")]);
+	assert.ok(unreadVariables(overridden).has(styleVar("h")));
+});
+
+test("a hand-written rule naming a token is enough to count as consulting it", () => {
+	// Over-reporting is the dangerous direction: calling a variable unread when a
+	// rule reads it would hide a real ban. Nothing here can know what a rule wants
+	// with `tok(accent)`, so a mention is taken at its word.
+	let scene = boxScene([lit("#f00")]);
+	scene = setTokenValue(scene, "accent", [lit("#111111"), lit("#222222")]);
+	assert.ok(unreadVariables(scene).has(tokenVar("accent")));
+	const consulted = { ...scene, rules: "mine :- resolved(tok(accent),L), L != nothing." };
+	assert.equal(unreadVariables(consulted).has(tokenVar("accent")), false);
+	// A name that merely *contains* the id is not a mention of it.
+	const other = { ...scene, rules: "mine :- resolved(tok(accenting),L)." };
+	assert.ok(unreadVariables(other).has(tokenVar("accent")));
 });

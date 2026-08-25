@@ -22,6 +22,7 @@ import {
 	constrainsProp,
 	constraintTermError,
 	constraintValue,
+	deadlock,
 	deleteConstraint,
 	dimension,
 	findInTree,
@@ -197,6 +198,21 @@ export function Constraints({
 	const selected = [...selection];
 	const groups = Object.keys(model?.groups ?? {}).sort();
 	/**
+	 * Blamed rules the *document* can explain, which is a different question from
+	 * the one the core answers.
+	 *
+	 * Only the blamed ones: a satisfiable document may still hold a rule whose
+	 * members are tied together — it might be soft, or its own violation might be
+	 * what the design is paying for — and volunteering "this can never hold" about
+	 * a design that is on the screen would be the panel arguing with the canvas.
+	 */
+	const knots = scene.constraints
+		.filter((c) => conflict.has(c.id))
+		.map((c) => ({ id: c.id, stuck: deadlock(scene, c) }))
+		.filter((k): k is { id: string; stuck: NonNullable<typeof k.stuck> } =>
+			k.stuck !== undefined,
+		);
+	/**
 	 * The rule whose name is being typed, and what has been typed so far.
 	 *
 	 * A rename carries the user's ASP with it, so it is committed on blur or
@@ -369,6 +385,33 @@ export function Constraints({
 						? "Turn one off, or widen a property so there are more values to go around."
 						: null}
 				</p>
+			) : null}
+
+			{/* Why, where the document can say why. A core names which rules cannot
+			    hold together and the ways out say what to do about it, and for the
+			    commonest impossible document there is — two nodes that share a
+			    treatment and a rule that says they must differ — both are true and
+			    neither is the news. Nothing is wrong with the rule; the two members
+			    are one value, and no search can make them two. The only way out on
+			    offer is "delete your rule", so without this the panel's whole answer
+			    is bad advice. See `deadlock`. */}
+			{knots.length > 0 ? (
+				<ul className={styles.knots} data-role="deadlocks">
+					{knots.map((knot) => (
+						<li key={knot.id}>
+							<button
+								type="button"
+								className={styles.knot}
+								data-role="deadlock"
+								data-constraint={knot.id}
+								title="Select the two that cannot be told apart"
+								onClick={() => onSelectionChange([...knot.stuck.nodes])}
+							>
+								{knot.stuck.said}
+							</button>
+						</li>
+					))}
+				</ul>
 			) : null}
 
 			{/* The other half of the answer. A core says what is wrong; this says

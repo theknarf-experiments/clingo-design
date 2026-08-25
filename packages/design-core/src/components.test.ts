@@ -246,6 +246,48 @@ test("an instance cannot differ where the definition decided", async () => {
 	assert.deepEqual(answer.brave.pick[propVar("inst(one,btn)", "fill")], new Set([0, 1]));
 });
 
+test("an alternative that links or computes is in the row like any other", async () => {
+	// An instance's properties are variables no *document* value named, so the
+	// only account of their alternatives is `dalt/3` in the answer set. It used to
+	// report the literal ones and stop, which showed a definition that offers a
+	// hex or a token as a row with one alternative in it: the pencil marks were
+	// short by exactly the interesting one, and nothing said so.
+	const base = buttons([{ id: "one" }]);
+	const scene: Scene = {
+		...base,
+		tokens: [{ id: "brand", name: "Brand", type: "color", value: [lit("#ef4444")] }],
+		nodes: [
+			{
+				...base.nodes[0],
+				children: base.nodes[0].children?.map((n) =>
+					n.id === "btn"
+						? { ...n, props: { ...n.props, fill: [lit("#3b82f6"), ref("brand")] } }
+						: n,
+				),
+			},
+		],
+	};
+	const answer = await explore(scene, directSolver, { limit: 40 });
+	const fill = propVar("inst(one,btn)", "fill");
+	const ink = propVar("inst(one,label)", "ink");
+	assert.deepEqual(answer.brave.pick[fill], new Set([0, 1]), "both are reachable");
+	for (const universe of answer.universes) {
+		// Reported as what it comes to, which for a link is the token's value and
+		// for a derivation is whatever this universe's source made it.
+		assert.deepEqual(universe.model.variables[fill], [
+			{ index: 0, text: "#3b82f6" },
+			{ index: 1, text: "#ef4444" },
+		]);
+		assert.deepEqual(universe.model.variables[ink], [
+			{ index: 0, text: "#ffffff" },
+		]);
+		// And the row's own alternative is the one the design drew with.
+		const drawn = universe.model.byId["inst(one,btn)"].rendered.fill;
+		const at = universe.pick[fill];
+		assert.equal(universe.model.variables[fill][at].text, drawn);
+	}
+});
+
 test("a derivation inside a definition follows the instance's own copy", async () => {
 	const scene = buttons([{ id: "one" }, { id: "two" }]);
 	const answer = await explore(scene, directSolver, { limit: 200 });
@@ -371,13 +413,63 @@ test("keeping a pinned universe writes an instance's picks as overrides", async 
 	assert.ok(universe);
 	// What the multiverse's "Keep" does: the picks of the design on screen,
 	// written into the document. An instance's variables are nowhere in the
-	// document to be shortened, so they land where an override lives.
+	// document to be shortened, so they land where an override lives — and the
+	// definition's lists are what those overrides index into, so they stay.
 	const kept = collapseToPicks(scene, universe.pick);
 	const one = kept.nodes[0].children?.find((n) => n.id === "one");
 	assert.equal(one?.holds?.[FILL], 1);
+	const def = kept.nodes[0].children?.find((n) => n.id === "btn");
+	assert.equal(def?.props.fill?.length, 2, "the space an override indexes into");
+	assert.equal(def?.holds?.[FILL], universe.pick[FILL]);
 	const after = await explore(kept, directSolver, { limit: 200 });
 	for (const u of after.universes) {
 		assert.equal(u.model.byId["inst(one,btn)"].rendered.fill, "#0f172a");
+	}
+});
+
+test("Keep reproduces every universe it could be pressed on, exactly", async () => {
+	// The general claim, and the one that would have caught this: pressing Keep
+	// on the design in front of you leaves a document that is that design and
+	// nothing else. `find`-ing one universe and checking it was not enough —
+	// which universe came back first turned out to depend on how much the
+	// program reported, and the case that failed was the interesting one.
+	//
+	// It failed because a component's definition is two things at once: it is a
+	// design, and it is the list every instance's override indexes into.
+	// Collapsing that list to the alternative the definition took removed the
+	// choice the instances were making, so every override Keep had just written
+	// was out of range and dropped, and a universe in which an instance differed
+	// from its definition came back as a different design.
+	const scene = buttons([{ id: "one" }, { id: "two" }]);
+	const answer = await explore(scene, directSolver, { limit: 200 });
+	const drawn = (universe: (typeof answer.universes)[number]) =>
+		["btn", "inst(one,btn)", "inst(two,btn)", "inst(one,label)", "inst(two,label)"]
+			.map(
+				(id) =>
+					`${id}=${universe.model.byId[id].rendered.fill ?? ""}` +
+					`/${universe.model.byId[id].rendered.text ?? ""}`,
+			)
+			.join(" ");
+	// Every combination of the three fills and the three texts, minus the ones
+	// that render alike — enough universes that a lucky first one proves nothing.
+	assert.ok(answer.universes.length >= 16);
+	// Two differing instances have to be in there, or the claim is untested.
+	assert.ok(
+		answer.universes.some(
+			(u) =>
+				u.model.byId["inst(one,btn)"].rendered.fill !==
+				u.model.byId.btn.rendered.fill,
+		),
+		"an instance that differs from its definition",
+	);
+	for (const universe of answer.universes) {
+		const kept = collapseToPicks(scene, universe.pick);
+		const after = await explore(kept, directSolver, { limit: 8 });
+		assert.equal(after.universes.length, 1, `one design: ${drawn(universe)}`);
+		assert.equal(drawn(after.universes[0]), drawn(universe));
+		// And it is still a component: Keep records a decision, it does not
+		// delete the space the decision was made in.
+		assert.ok(componentDef(kept, "btn"));
 	}
 });
 

@@ -24,6 +24,14 @@ export interface VariablesProps {
 	picks: Picks;
 	varying: ReadonlySet<string>;
 	reach?: Readonly<Record<string, Set<number>>>;
+	/**
+	 * Variables nothing in the document consults — see `unreadVariables`.
+	 *
+	 * Not the same as "no answer yet", which is what an absent `reach` entry
+	 * means on its own, and the two want saying differently: a token nobody
+	 * links to is news the panel should carry, the way an unworn style is.
+	 */
+	unread: ReadonlySet<string>;
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
 	/** The why-probe, per variable — see `Inspector`. */
@@ -60,6 +68,7 @@ export function Variables({
 	picks,
 	varying,
 	reach,
+	unread,
 	pins,
 	onPin,
 	why,
@@ -76,6 +85,7 @@ export function Variables({
 				picks={picks}
 				varying={varying}
 				reach={reach}
+				unread={unread}
 				pins={pins}
 				onPin={onPin}
 				why={why}
@@ -131,6 +141,14 @@ export function Variables({
 								}
 							/>
 							<span className={styles.type}>{VALUE_TYPES[token.type].label}</span>
+						{/* The honest half of the greying that no longer happens here: a
+						    token nothing links to has no answer to show, and saying why
+						    is better than a row that has quietly stopped marking. */}
+						{unread.has(variable) ? (
+							<span className={styles.unused} data-role="token-unused">
+								used by nothing
+							</span>
+						) : null}
 							<button
 								type="button"
 								className={styles.delete}

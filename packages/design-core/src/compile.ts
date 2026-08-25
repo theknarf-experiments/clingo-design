@@ -64,9 +64,11 @@ import {
 	layoutVar,
 	numeralOf,
 	propVar,
+	referencedTokens,
 	stylePartVar,
 	styleVar,
 	tokenVar,
+	type Value,
 	wordOf,
 } from "./values.ts";
 import { flatten, parentMap } from "./tree.ts";
@@ -779,7 +781,10 @@ export const CONTRACT = `% Predicates you can rely on:
 %
 % Indices are yours: any integer, dense or not. What is offered as a row is
 % dvar/1 with its dalt/3 alternatives, both projected out of the answer set, so
-% only the alternatives a rule minted cost anything to report.
+% only the alternatives a rule minted cost anything to report. An alternative
+% that links to a token or computes itself from one is reported as the literal it
+% comes to *in this universe*, which is the only literal it has — what the row
+% loses is the name it named, not the alternative.
 %
 % Scene. These are ordinary predicates, not a fixed table: the document
 % supplies facts for them and your rules may derive more. A node the document
@@ -1635,6 +1640,18 @@ export function compile(
 			"#defined docvar/1.",
 			"dvar(V) :- var(V), not docvar(V).",
 			"dalt(V,I,L) :- dvar(V), alt_literal(V,I,L).",
+			"% An alternative that *links* rather than states, reported as what it",
+			"% comes to in this universe. Three rules where one would do, because a",
+			"% row that showed only the literal alternatives showed an incomplete",
+			"% list and said nothing about it: a component instance whose definition",
+			"% links a fill to a token is the ordinary case, and its property row had",
+			"% one alternative in it where the space has two. `pick/2` is deliberately",
+			"% absent from all three — the question is what the alternatives *are*,",
+			"% not which one this design took, and the answer follows the token or the",
+			"% source wherever it varies exactly as `resolved/2` does.",
+			"dalt(V,I,L) :- dvar(V), alt_token(V,I,T), resolved(tok(T),L).",
+			"dalt(V,I,L) :- dvar(V), alt_derived(V,I,Via,S), resolved(S,Src),",
+			"               derived_of(Via,Src,L).",
 			"#show dvar(V) : dvar(V), scenery.",
 			"#show dalt(V,I,L) : dalt(V,I,L), scenery.",
 			"% Sets a rule named, so a constraint can be pointed at one without the",
@@ -1758,4 +1775,108 @@ export function varyingVariables(scene: Scene): string[] {
 	return Object.entries(variableCounts(scene))
 		.filter(([, count]) => count > 1)
 		.map(([variable]) => variable);
+}
+
+/**
+ * Variables the document holds that no design consults — so the solver's answer
+ * about them is arithmetic rather than news.
+ *
+ * **Projection makes an unconsulted variable look ruled out.** The program
+ * projects on what a design *renders*, which is the whole reason two spellings
+ * of one colour are one universe. A variable nothing reads changes nothing that
+ * is projected, so every universe that differs only in its pick collapses into
+ * one, and brave consequences come back naming exactly one reachable
+ * alternative. An inspector row that greys the rest is then making a claim
+ * nothing supports: no rule forbade them, nothing asked.
+ *
+ * Two things in a document can be held without being consulted, and they are
+ * the two the document declares centrally rather than on a node:
+ *
+ *   - a **token** nothing links to. Transitively: a token referenced only from
+ *     an unworn style, or only from a switched-off rule, is not read either.
+ *   - a **style** nothing wears. Precisely: nothing takes any of its properties
+ *     *from* it, which is not the same as nothing naming it — a node that
+ *     wears a style and then states every property the style mentions decides
+ *     the lot itself, and the style is left deciding nothing. `wornProps` is the
+ *     same precedence the compiler applies.
+ *
+ * Everything else is consulted by construction. A node's properties and frame
+ * reach `rendered/3` and `frame/3`, which is what a design *is*; and the
+ * compiler already declines to emit a variable for a layout nobody arranges or
+ * for a constraint with too few members to say anything, so those never reach a
+ * panel to be greyed in the first place — measured, not assumed.
+ *
+ * Over-reporting is the dangerous direction: calling a variable unread when
+ * something reads it hides a real ban. So every uncertain case counts as read —
+ * a mention anywhere in the user's rules included, since a hand-written rule may
+ * consult `tok(accent)` or `sty_wears(N,body,size)` and nothing here can know
+ * what for.
+ */
+export function unreadVariables(scene: Scene): Set<string> {
+	const out = new Set<string>();
+	/** Ids the user's own rules name, which is enough to count as read. */
+	const named = (id: string): boolean =>
+		new RegExp(`(^|[^0-9A-Z_a-z])${id}([^0-9A-Z_a-z]|$)`).test(scene.rules ?? "");
+
+	// Which styles decide something, and the values every reader holds. One walk:
+	// a token is read when a read value references it, and the styles are exactly
+	// the readers whose own readership is in question.
+	const worn = new Set<string>();
+	const read: Array<Value | undefined> = [];
+	for (const node of flatten(scene.nodes)) {
+		if (node.style !== undefined && wornProps(scene, node).length > 0) {
+			worn.add(node.style);
+		}
+		read.push(...Object.values(node.props), ...DIMENSIONS.map((d) => node.frame[d]));
+		if (isLaidOut(node)) {
+			read.push(...CONTAINER_PROPS.map((p) => layoutValueOf(node, p)));
+			for (const child of node.children ?? []) {
+				read.push(...CHILD_PROPS.map((p) => layoutValueOf(child, p)));
+			}
+		}
+	}
+	// A switched-off constraint is out of the program, so what it links to is not
+	// read *through it* — the same reading the compiler applies by not emitting it.
+	for (const c of scene.constraints ?? []) {
+		if (c.enabled) read.push(c.value);
+	}
+	for (const style of scene.styles ?? []) {
+		if (!worn.has(style.id) && !named(style.id)) {
+			out.add(styleVar(style.id));
+			continue;
+		}
+		for (const variant of style.variants) {
+			read.push(...Object.values(variant.parts).map((term) => term && [term]));
+		}
+	}
+	// Transitive by construction: `referencedTokens` walks through the value of
+	// every token it reaches, so a token read only by another read token is read.
+	const seen = new Set<string>();
+	for (const value of read) referencedTokens(scene.tokens, value, seen);
+	for (const token of scene.tokens) {
+		if (!seen.has(token.id) && !named(token.id)) out.add(tokenVar(token.id));
+	}
+	return out;
+}
+
+/**
+ * Brave consequences with the unconsulted variables taken out, so a panel can
+ * read `reach[variable] === undefined` as "the answer says nothing about this"
+ * and never as "everything but one is impossible".
+ *
+ * Here rather than in each panel because it was in one panel — `Styles` gated on
+ * having wearers and the rest did not, so an unreferenced token greyed its own
+ * alternatives and blamed a rule for it. One question, one answer, six rows that
+ * ask it.
+ */
+export function reachableAlternatives(
+	scene: Scene,
+	brave: Readonly<Record<string, Set<number>>> | undefined,
+): Readonly<Record<string, Set<number>>> | undefined {
+	if (!brave) return undefined;
+	const unread = unreadVariables(scene);
+	if (unread.size === 0) return brave;
+	return Object.fromEntries(
+		Object.entries(brave).filter(([variable]) => !unread.has(variable)),
+	);
 }

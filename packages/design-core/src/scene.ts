@@ -71,6 +71,20 @@ export interface PropSpec {
 	 *     so. It composes with a style; it is not one of its fields.
 	 */
 	styleable: boolean;
+	/**
+	 * True when the CSS this property becomes is *inherited* — so a node that
+	 * says nothing about it takes whatever its surroundings say.
+	 *
+	 * Which makes it the document's business rather than the node's: a design
+	 * must look the same on the canvas and in an exported file, and an inherited
+	 * property nobody declares is one the host page gets to decide. Every
+	 * property marked here is declared once on the document itself — see
+	 * `DOCUMENT_BASE` in paint.ts, and the test that holds the two in step.
+	 *
+	 * Required rather than optional, for the same reason {@link styleable} is:
+	 * the answer is a fact about the property and belongs beside it.
+	 */
+	inherited: boolean;
 }
 
 export const PROPS: Record<PropName, PropSpec> = {
@@ -82,72 +96,84 @@ export const PROPS: Record<PropName, PropSpec> = {
 		type: "text",
 		fallback: VALUE_TYPES.text.fallback,
 		styleable: false,
+		inherited: false,
 	},
 	fill: {
 		label: "Fill",
 		type: "color",
 		fallback: VALUE_TYPES.color.fallback,
 		styleable: true,
+		inherited: false,
 	},
 	radius: {
 		label: "Corner radius",
 		type: "length",
 		fallback: VALUE_TYPES.length.fallback,
 		styleable: true,
+		inherited: false,
 	},
 	stroke: {
 		label: "Stroke",
 		type: "color",
 		fallback: "#0f172a",
 		styleable: true,
+		inherited: false,
 	},
 	strokeWidth: {
 		label: "Thickness",
 		type: "length",
 		fallback: "2px",
 		styleable: true,
+		inherited: false,
 	},
 	shadow: {
 		label: "Shadow",
 		type: "shadow",
 		fallback: VALUE_TYPES.shadow.fallback,
 		styleable: true,
+		inherited: false,
 	},
 	opacity: {
 		label: "Opacity",
 		type: "number",
 		fallback: "1",
 		styleable: false,
+		inherited: false,
 	},
 	ink: {
 		label: "Colour",
 		type: "color",
 		fallback: "#0f172a",
 		styleable: true,
+		inherited: true,
 	},
 	fontFamily: {
 		label: "Font",
 		type: "font",
 		fallback: VALUE_TYPES.font.fallback,
 		styleable: true,
+		inherited: true,
 	},
 	size: {
 		label: "Size",
 		type: "length",
 		fallback: "16px",
 		styleable: true,
+		inherited: true,
 	},
 	weight: {
 		label: "Weight",
 		type: "weight",
 		fallback: VALUE_TYPES.weight.fallback,
 		styleable: true,
+		inherited: true,
 	},
 	lineHeight: {
 		label: "Line height",
 		type: "number",
 		fallback: "1.35",
 		styleable: true,
+		inherited: true,
 	},
 	// In, deliberately. Alignment is part of a typographic treatment the way
 	// weight is — "display: large, heavy, centred" against "body: small,
@@ -159,6 +185,7 @@ export const PROPS: Record<PropName, PropSpec> = {
 		type: "align",
 		fallback: VALUE_TYPES.align.fallback,
 		styleable: true,
+		inherited: true,
 	},
 };
 
@@ -898,8 +925,8 @@ export interface SceneNode {
 	 */
 	instanceOf?: string;
 	/**
-	 * On an `instance` kind: the choices this instance has made up its mind
-	 * about, as *definition-space* variable key -> alternative index.
+	 * The choices this node has made up its mind about, as *definition-space*
+	 * variable key -> alternative index.
 	 *
 	 * These are held picks, not values. An instance can only differ from its
 	 * definition where the definition wrote more than one alternative, so an
@@ -908,6 +935,13 @@ export interface SceneNode {
 	 * something that could narrow it. Definition-space keys rather than the
 	 * instance's own so that a variant carries over from one instance to
 	 * another unchanged.
+	 *
+	 * On an `instance` kind it is an override. On a {@link component} root it is
+	 * the definition holding *itself* to one of its variants, which is the same
+	 * act: a definition is a design as well as a space, and for its own parts
+	 * definition space is document space, so the keys mean the same thing. That
+	 * is the only place a whole universe can be written down without shortening
+	 * the lists its instances index into — see `collapseToPicks`.
 	 */
 	holds?: Readonly<Record<string, number>>;
 }
@@ -1097,6 +1131,17 @@ export interface ConstraintSpec {
 	/** Most it can use. Extra members would have nowhere to go. */
 	maxNodes: number;
 	/**
+	 * True when the kind demands its members take *pairwise different* values.
+	 *
+	 * Which is the one shape a document can make impossible without any rule
+	 * conflicting with any other: two members whose property the document ties to
+	 * one source can never be told apart, so the rule cannot hold however the
+	 * solver searches. Read off here rather than tested at the use site — see
+	 * `deadlock` in `stuck.ts`, which is the only reader and would otherwise be a
+	 * `kind === "differ"`.
+	 */
+	distinct: boolean;
+	/**
 	 * True when the kind talks about *where a node is* rather than about one of
 	 * its properties.
 	 *
@@ -1135,6 +1180,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		label: "All different",
 		summary: "no two share a {prop}",
 		counted: false,
+		distinct: true,
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
@@ -1146,6 +1192,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		label: "All the same",
 		summary: "share one {prop}",
 		counted: false,
+		distinct: false,
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
@@ -1157,6 +1204,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		label: "At most N distinct",
 		summary: "use at most {n} distinct {prop}",
 		counted: true,
+		distinct: false,
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
@@ -1168,6 +1216,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		label: "Align",
 		summary: "share a {edge}",
 		counted: false,
+		distinct: false,
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: true,
@@ -1181,6 +1230,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		label: "Gap",
 		summary: "sit {v} apart, {edge}",
 		counted: false,
+		distinct: false,
 		minNodes: 2,
 		maxNodes: 2,
 		geometric: true,
@@ -1197,6 +1247,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		label: "Same size",
 		summary: "share a {edge}",
 		counted: false,
+		distinct: false,
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: true,
@@ -1211,6 +1262,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		label: "Symmetric",
 		summary: "mirror each other {edge}",
 		counted: false,
+		distinct: false,
 		minNodes: 2,
 		maxNodes: 3,
 		geometric: true,
@@ -1227,6 +1279,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		label: "Pin",
 		summary: "hold a {edge} at {v}",
 		counted: false,
+		distinct: false,
 		minNodes: 1,
 		maxNodes: 1,
 		geometric: true,
@@ -1265,6 +1318,7 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		// nothing has been written it is the truth about the rule.
 		summary: "holds until one of your rules says otherwise",
 		counted: false,
+		distinct: false,
 		// Zero either way: it is not too small to say anything without members —
 		// it says whatever its rule says — and it has nowhere to put one.
 		minNodes: 0,
