@@ -75,6 +75,17 @@ export function spread(
 	return { ...node, frame: { ...node.frame, [dim]: values } };
 }
 
+/**
+ * A node wearing a style.
+ *
+ * Nothing is copied in: wearing one means the properties it decides are derived
+ * per universe from the style's pick, so a template says which treatment a node
+ * takes and says nothing about what that treatment is.
+ */
+export function wearing(node: SceneNode, style: string): SceneNode {
+	return { ...node, style };
+}
+
 /** Replace one starter token's value. */
 export function withToken(tokens: Token[], id: string, value: Value): Token[] {
 	return tokens.map((t) => (t.id === id ? { ...t, value } : t));

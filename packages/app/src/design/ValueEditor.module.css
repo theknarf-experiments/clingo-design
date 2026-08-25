@@ -95,6 +95,14 @@
 	text-overflow: ellipsis;
 }
 
+/* A value this row does not own — a derived node's, or one a style decides — is
+   a `span` in the slot an `input` would take, so without this it looks exactly
+   as typeable as the one above it. Losing the field's ground is the whole
+   difference: it reads as a reading rather than as an edit. */
+span.text {
+	background: none;
+}
+
 /* An enumerated type is a menu rather than a field, but it takes the same slot. */
 .choice {
 	display: block;

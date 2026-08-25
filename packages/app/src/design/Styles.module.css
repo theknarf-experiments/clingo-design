@@ -1,0 +1,440 @@
+.styles {
+	display: flex;
+	flex-direction: column;
+	gap: 0.4rem;
+}
+
+.head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 0.5rem;
+}
+
+.head .add {
+	flex: none;
+	white-space: nowrap;
+}
+
+.hint {
+	font-size: 0.72rem;
+	line-height: 1.4;
+	opacity: 0.5;
+}
+
+.empty {
+	margin: 0;
+	font-size: 0.74rem;
+	line-height: 1.45;
+	opacity: 0.5;
+}
+
+.style {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+	padding: 0.3rem;
+	border: 1px solid var(--dc-line);
+	border-radius: 6px;
+}
+
+.styleHead {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.name {
+	flex: 1;
+	min-width: 0;
+	padding: 0.15rem 0.3rem;
+	font: inherit;
+	font-size: 0.78rem;
+	font-weight: 600;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+}
+
+.name:focus {
+	background: var(--dc-raised);
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+/* Who is wearing it, and a way to go and look at them. */
+.wearers {
+	flex: none;
+	padding: 0 0.2rem;
+	font: inherit;
+	font-size: 0.64rem;
+	color: inherit;
+	background: none;
+	border: 0;
+	opacity: 0.55;
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+.wearers:hover {
+	opacity: 1;
+}
+
+.unworn {
+	flex: none;
+	font-size: 0.64rem;
+	opacity: 0.35;
+}
+
+.delete {
+	flex: none;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	font: inherit;
+	line-height: 1;
+	color: inherit;
+	opacity: 0.4;
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.delete:hover {
+	opacity: 1;
+	color: #dc2626;
+}
+
+/* The table: a column per variant, a row per property. Read across a row and
+   it is what the pick decides; the whole feature is that this is one glance. */
+.table {
+	display: grid;
+	/* Two variants is the case the feature exists for — compact against
+	   comfortable — so two columns plus their labels have to fit the panel at its
+	   default width without scrolling. Three and up scroll, and that is the right
+	   trade: a correlation you cannot see both sides of at once is not one. */
+	grid-template-columns: minmax(3.4rem, auto) repeat(var(--variants), minmax(4.6rem, 1fr));
+	gap: 2px;
+	padding: 0.2rem;
+	border-radius: 6px;
+	background: var(--dc-sunken);
+	/* Six variants do not fit a side panel; they scroll rather than squash. */
+	overflow-x: auto;
+}
+
+.table[data-varying] {
+	outline: 1px solid var(--dc-accent-soft);
+}
+
+.corner {
+	display: flex;
+	align-items: flex-end;
+	font-size: 0.62rem;
+	opacity: 0.4;
+	font-variant-numeric: tabular-nums;
+}
+
+/* The name gets the column to itself and the annotations wrap under it: a
+   variant called "Comfortable" in a 40px slot is a variant nobody can read. */
+.variantHead {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	align-items: center;
+	gap: 1px;
+	padding: 1px;
+	border: 1px solid transparent;
+	border-radius: 5px;
+	min-width: 0;
+}
+
+/* The treatment the artboard on screen is wearing. */
+.active {
+	border-color: var(--dc-accent);
+	background: color-mix(in srgb, var(--dc-accent) 10%, transparent);
+}
+
+/* No legal design wears it — the same claim a property alternative makes. */
+.impossible {
+	opacity: 0.4;
+}
+
+.pinnedHead {
+	border-color: color-mix(in srgb, var(--dc-accent) 55%, transparent);
+}
+
+.variantName {
+	flex: 1 1 100%;
+	min-width: 0;
+	padding: 0.1rem 0.2rem;
+	font: inherit;
+	font-size: 0.7rem;
+	font-weight: 600;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+}
+
+.variantName:focus {
+	background: var(--dc-raised);
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+.rowLabel {
+	display: flex;
+	align-items: center;
+	gap: 0.1rem;
+	min-width: 0;
+}
+
+.propLabel {
+	flex: 1;
+	min-width: 0;
+	font-size: 0.68rem;
+	opacity: 0.6;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* A field every variant agrees on is in the style but not in the decision. */
+.agreed {
+	opacity: 0.3;
+	font-style: italic;
+}
+
+.cell {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+}
+
+.text,
+.choice,
+.linked {
+	width: 100%;
+	min-width: 0;
+	display: flex;
+	align-items: baseline;
+	gap: 0.25rem;
+	padding: 0.1rem 0.25rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	box-sizing: border-box;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.choice {
+	display: block;
+	cursor: pointer;
+}
+
+.colour {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	min-width: 0;
+}
+
+.swatch {
+	flex: none;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	background: transparent;
+	cursor: pointer;
+}
+
+.resolved {
+	margin-left: auto;
+	font-size: 0.62rem;
+	opacity: 0.45;
+}
+
+.broken {
+	margin-left: auto;
+	font-size: 0.62rem;
+	color: #dc2626;
+}
+
+/* This variant says nothing here, which is a real alternative rather than a
+   gap — a wearer then draws nothing for the property. */
+.hole {
+	width: 100%;
+	padding: 0.1rem 0.25rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	opacity: 0.35;
+	background: none;
+	border: 1px dashed var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.hole:hover {
+	opacity: 0.9;
+}
+
+.cellFoot {
+	display: flex;
+	align-items: center;
+	gap: 1px;
+	min-width: 0;
+}
+
+.link {
+	flex: 1;
+	min-width: 0;
+	padding: 0 0.1rem;
+	font: inherit;
+	font-size: 0.62rem;
+	color: inherit;
+	opacity: 0.55;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.link:hover {
+	opacity: 1;
+	border-color: var(--dc-line);
+}
+
+.clear {
+	flex: none;
+	width: 15px;
+	height: 15px;
+	padding: 0;
+	font: inherit;
+	font-size: 0.72rem;
+	line-height: 1;
+	color: inherit;
+	opacity: 0.3;
+	background: none;
+	border: 0;
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+.clear:hover:not(:disabled) {
+	opacity: 1;
+	background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.clear:disabled {
+	opacity: 0.12;
+	cursor: default;
+}
+
+/* Pinning and asking are questions about the answer, not edits, so they read
+   as annotations here exactly as they do on a property row. */
+.pin {
+	flex: none;
+	padding: 0 0.1rem;
+	font: inherit;
+	font-size: 0.72rem;
+	line-height: 1;
+	color: inherit;
+	background: none;
+	border: none;
+	opacity: 0.35;
+	cursor: pointer;
+}
+
+.pin:hover {
+	opacity: 0.85;
+}
+
+.pinOn {
+	color: var(--dc-accent);
+	opacity: 1;
+}
+
+.ask {
+	flex: none;
+	padding: 0 0.1rem;
+	font: inherit;
+	font-size: 0.7rem;
+	line-height: 1;
+	color: inherit;
+	background: none;
+	border: none;
+	opacity: 0.3;
+	cursor: help;
+}
+
+.ask:hover {
+	opacity: 0.85;
+}
+
+.asking {
+	color: var(--dc-accent);
+	opacity: 1;
+}
+
+.styleFoot {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+}
+
+.add {
+	padding: 0.1rem 0.3rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	opacity: 0.6;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.add:hover {
+	opacity: 1;
+}
+
+/* The solver's own words, as on a property row. */
+.why {
+	margin: 0.2rem 0 0.1rem;
+	padding: 0.3rem 0.4rem;
+	font-size: 0.7rem;
+	line-height: 1.45;
+	white-space: pre-line;
+	background: var(--dc-raised);
+	border-left: 2px solid var(--dc-accent);
+	border-radius: 0 4px 4px 0;
+}
+
+.why[data-verdict="possible"],
+.why[data-verdict="unattributable"] {
+	border-left-color: var(--dc-line);
+}
+
+.why[data-pending] {
+	opacity: 0.55;
+	border-left-color: var(--dc-line);
+}
+
+.cost {
+	display: block;
+	margin-top: 0.15rem;
+	font-size: 0.62rem;
+	opacity: 0.45;
+	font-variant-numeric: tabular-nums;
+}

@@ -307,8 +307,13 @@ const LAYOUT_RULES = [
 	"&sum{ lv(N,X); lsz(N,S); -lsz(C,S) } = T :- lca(C,N,end),",
 	"                                            lcross(C,X), lcrosssz(C,S),",
 	"                                            lpad(C,P), T = -P.",
-	"#show lv/2.",
-	"#show lsz/2.",
+	"% `lv/2` and `lsz/2` are theory variables, never atoms: their values reach a",
+	"% model through clingo-lpx as `__lpx(lv(n,x),\"12\")` and arrive under",
+	"% `ShowType::Theory` rather than as shown atoms. So they are declared, not",
+	"% shown — a `#show` of a signature nothing grounds is an info message in the",
+	"% diagnostics panel on every document that has a layout.",
+	"#defined lv/2.",
+	"#defined lsz/2.",
 ]
 
 /**

@@ -109,13 +109,18 @@ export interface ValueEditorProps {
  * other, not independent settings: a value is typed in, linked, or computed —
  * never two at once.
  */
-function optionValue(term: Term): string {
+export function optionValue(term: Term): string {
 	if (term.kind === "token") return `ref:${term.token}`;
 	if (term.kind === "derived") return `via:${term.via}:${term.from}`;
 	return "";
 }
 
-function termFor(option: string, fallback: string): Term {
+/**
+ * The inverse. Exported with {@link optionValue} because a style's variant is
+ * edited a term at a time rather than a list at a time — see `Styles` — and
+ * "typed in, linked, or computed" has to mean the same thing in both panels.
+ */
+export function termFor(option: string, fallback: string): Term {
 	const link = /^ref:(.+)$/.exec(option);
 	if (link) return ref(link[1]);
 	const derived = /^via:([^:]+):(.+)$/.exec(option);

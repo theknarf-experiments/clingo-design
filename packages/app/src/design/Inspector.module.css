@@ -280,3 +280,46 @@
 	cursor: pointer;
 	text-decoration: underline;
 }
+
+/* Wearing a style, or not. A select because a node wears one. */
+.wear {
+	width: 100%;
+	padding: 0.2rem 0.3rem;
+	font: inherit;
+	font-size: 0.75rem;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	box-sizing: border-box;
+	cursor: pointer;
+}
+
+/* A property something outside this node decides. The rule on the left is the
+   whole signal: it is not a local value, however editable the row looks. */
+.styled {
+	border-left: 2px solid var(--dc-accent-soft);
+	border-radius: 0 6px 6px 0;
+}
+
+/* And the other side of it: a property the node took back off the style. */
+.overriding {
+	border-left: 2px dashed var(--dc-accent-soft);
+	border-radius: 0 6px 6px 0;
+}
+
+.styledFoot {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+	padding: 0 0 0.1rem 0.5rem;
+}
+
+.styledBy {
+	font-size: 0.64rem;
+	opacity: 0.5;
+}
+
+.styledFoot .follow {
+	margin: 0 0 0 auto;
+}

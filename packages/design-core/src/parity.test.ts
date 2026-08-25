@@ -33,6 +33,7 @@ import {
 	type Scene,
 	type SceneNode,
 	frameOf,
+	propValueOf,
 } from "./scene.ts";
 import { card } from "./templates/card.ts";
 import { TEMPLATES } from "./templates/index.ts";
@@ -74,9 +75,12 @@ function drawnFromDocument(
 			const fixed = solved[node.id];
 			const paint: Record<string, string> = {};
 			for (const prop of KINDS[node.kind].props) {
+				// Through `propValueOf`, so a node wearing a style is read the way
+				// the generated program resolves it: its own value where it has
+				// one, and this universe's variant where it does not.
 				const value = resolveValue(
 					context,
-					node.props[prop],
+					propValueOf(scene, node, prop, picks),
 					propVar(node.id, prop),
 				);
 				if (value !== undefined) paint[prop] = value;

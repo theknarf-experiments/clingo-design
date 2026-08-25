@@ -14,6 +14,7 @@ import {
 	tokenVar,
 } from "@clingo-design/design-core";
 
+import { Styles } from "./Styles";
 import { ValueEditor, type WhyRow } from "./ValueEditor";
 import styles from "./Variables.module.css";
 
@@ -27,14 +28,31 @@ export interface VariablesProps {
 	onPin: (variable: string, index: number | null) => void;
 	/** The why-probe, per variable — see `Inspector`. */
 	why?: (variable: string) => WhyRow | undefined;
+	/** So a style can put its wearers in the inspector — see `Styles`. */
+	onSelectionChange?: (ids: string[]) => void;
 }
 
 /**
- * Named values, referenced from anywhere — CSS custom properties, essentially.
+ * The document's variables: treatments, then named values.
  *
  * A token has no multiplicity of its own beyond what its *value* holds: give
  * it two alternatives and every reference branches together. That is the
  * difference from a per-reference list, which branches independently.
+ *
+ * Two sections rather than one list, because a style is a different shape and
+ * not a token with extra fields. A token is a scalar picked independently of
+ * every other, so linking a size to one and a weight to another gives the cross
+ * product; a style is one pick over whole records, which is the only way to say
+ * that two properties move together. Bending either into the other's row would
+ * hide exactly the difference that matters.
+ *
+ * Styles first, against the dependency order — a style's field may link to a
+ * token and never the reverse. The token list has no bound, so "under the
+ * tokens" means "off the bottom of a scroll", and the typography template put
+ * its one style there: six colours and a radius stood between the panel and the
+ * only variable in the document that was actually varying. One style row also
+ * carries more of the design than the whole list above it, since one pick moves
+ * four properties on six layers.
  */
 export function Variables({
 	scene,
@@ -45,11 +63,26 @@ export function Variables({
 	pins,
 	onPin,
 	why,
+	onSelectionChange,
 }: VariablesProps) {
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 
 	return (
 		<div className={styles.variables} data-role="variables">
+			<h3 className={styles.section}>Styles</h3>
+			<Styles
+				scene={scene}
+				onSceneChange={onSceneChange}
+				picks={picks}
+				varying={varying}
+				reach={reach}
+				pins={pins}
+				onPin={onPin}
+				why={why}
+				onSelectionChange={onSelectionChange}
+			/>
+
+			<h3 className={styles.section}>Values</h3>
 			<div className={styles.head}>
 				<span className={styles.hint}>
 					Named values, referenced from anywhere.

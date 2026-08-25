@@ -5,9 +5,10 @@ import { directSolver } from "./directSolver.ts";
 import { updateConstraint } from "./edits.ts";
 import { explore, varyingVars } from "./explore.ts";
 import { compareCosts } from "./sampling.ts";
-import { frameOf, sceneContext } from "./scene.ts";
-import { flatten } from "./tree.ts";
+import { frameOf, sceneContext, wornProps } from "./scene.ts";
+import { findInTree, flatten } from "./tree.ts";
 import { TEMPLATES, findTemplate } from "./templates/index.ts";
+import { styleVar } from "./values.ts";
 
 test("every template has a unique id and a findable entry", () => {
 	const ids = TEMPLATES.map((t) => t.id);
@@ -148,4 +149,38 @@ test("two frames share one accent variable", async () => {
 	// One shared token, so both frames move together: three designs, not nine.
 	assert.equal(result.count, 3);
 	assert.deepEqual(varyingVars(result), ["tok(accent)"]);
+});
+
+test("two typographies is one variable, and both of its designs are coherent", async () => {
+	// The template exists to make one argument, so this is that argument as an
+	// assertion. Four correlated fields — family, size, weight, leading — held
+	// as four two-value tokens would be sixteen designs and fourteen of them
+	// incoherent; held as one style they are two.
+	const scene = findTemplate("typography")!.create();
+	const out = await explore(scene, directSolver, { limit: 24 });
+	assert.deepEqual(varyingVars(out), [styleVar("prose")], "one variable");
+	assert.equal(out.count, 2, "two designs");
+
+	const body = ["deck", "first", "second", "footnote"];
+	const treatments = out.universes
+		.map((u) => {
+			const n = u.model.byId.deck;
+			return [n.rendered.size, n.rendered.weight, n.rendered.lineHeight].join("/");
+		})
+		.sort();
+	assert.deepEqual(treatments, ["15px/450/1.3", "18px/400/1.75"]);
+	for (const universe of out.universes) {
+		// The correlation, per universe: one pick, and every wearer took the
+		// same whole record from it.
+		for (const prop of ["size", "weight", "lineHeight", "fontFamily"] as const) {
+			const values = new Set(body.map((id) => universe.model.byId[id].rendered[prop]));
+			assert.equal(values.size, 1, `${prop} agrees across the page`);
+		}
+	}
+
+	// And the heading is the ordinary case rather than the pure one: it states
+	// its own size and weight and takes the family and the leading.
+	const title = findInTree(scene.nodes, "title");
+	assert.ok(title);
+	assert.deepEqual(wornProps(scene, title), ["fontFamily", "lineHeight"]);
 });

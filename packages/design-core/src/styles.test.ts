@@ -30,6 +30,7 @@ import {
 	setProp,
 	setStyle,
 	setStylePart,
+	wearStyle,
 } from "./edits.ts";
 import { explore } from "./explore.ts";
 import { normalizeScene } from "./project.ts";
@@ -309,6 +310,110 @@ test("a node that states its own value keeps it, and takes the rest", async () =
 		const sizes = atoms.filter((a) => a.startsWith("rendered(t1,size,"));
 		assert.equal(sizes.length, 1, "exactly one size is rendered");
 	}
+});
+
+test("applying a style to nodes that state their own values is visible", async () => {
+	// The gesture, and the reason `wearStyle` exists beside `setStyle`. Every
+	// text node the studio makes states a size and a weight, so applying a
+	// treatment with `setStyle` alone changes nothing anybody can see and leaves
+	// one silent override per node per property.
+	let scene = page(3);
+	for (const id of ["t1", "t2", "t3"])
+		scene = setProp(scene, [id], "size", single("14px"));
+	scene = {
+		...scene,
+		styles: [
+			style("prose", [
+				{ parts: { size: lit("15px"), weight: lit("450") } },
+				{ parts: { size: lit("18px"), weight: lit("400") } },
+			]),
+		],
+	};
+	const ids = ["t1", "t2", "t3"];
+
+	const inert = setStyle(scene, ids, "prose");
+	assert.deepEqual(
+		wornProps(inert, findInTree(inert.nodes, "t1") as SceneNode),
+		["weight"],
+		"size stays the node's own, so applying it half worked",
+	);
+	assert.deepEqual(
+		await designs(inert, ["size"]),
+		[
+			"t1.size=14px t2.size=14px t3.size=14px",
+			"t1.size=14px t2.size=14px t3.size=14px",
+		],
+		"two designs, and the size is the same 14px in both",
+	);
+
+	const applied = wearStyle(scene, ids, "prose");
+	for (const id of ids)
+		assert.deepEqual(
+			wornProps(applied, findInTree(applied.nodes, id) as SceneNode),
+			["size", "weight"],
+			"the treatment won",
+		);
+	assert.deepEqual(await designs(applied, ["size", "weight"]), [
+		"t1.size=15px t1.weight=450 t2.size=15px t2.weight=450 t3.size=15px t3.weight=450",
+		"t1.size=18px t1.weight=400 t2.size=18px t2.weight=400 t3.size=18px t3.weight=400",
+	]);
+
+	// And then one override, made on purpose, is the only one there is — the
+	// other two wearers still move with the pick.
+	const one = setProp(applied, ["t2"], "size", single("34px"));
+	assert.deepEqual(await designs(one, ["size"]), [
+		"t1.size=15px t2.size=34px t3.size=15px",
+		"t1.size=18px t2.size=34px t3.size=18px",
+	]);
+	assert.deepEqual(
+		wornProps(one, findInTree(one.nodes, "t2") as SceneNode),
+		["weight"],
+	);
+
+	// Taking it off again leaves the node with no opinion rather than with a
+	// baked copy: nothing was ever written in, so there is nothing to leave.
+	const bare = wearStyle(applied, ["t1"], undefined);
+	assert.equal(findInTree(bare.nodes, "t1")?.props.size, undefined);
+	assert.equal(findInTree(bare.nodes, "t1")?.style, undefined);
+});
+
+test("wearing a style leaves alone what the wearer cannot draw", () => {
+	// A rectangle wearing a text style keeps its fill: the property was never
+	// worn, so clearing it would be an edit to something invisible.
+	let scene = page(1);
+	scene = {
+		...scene,
+		nodes: [
+			{
+				...(scene.nodes[0] as SceneNode),
+				children: [
+					...(scene.nodes[0].children ?? []),
+					{
+						...makeNode("rect", { x: 0, y: 0, width: 40, height: 40 }, { id: "box" }),
+						props: { fill: single("#ff0000"), size: single("40px") },
+					},
+				],
+			},
+		],
+		styles: [
+			style("prose", [
+				{ parts: { size: lit("15px"), fill: lit("#000000") } },
+				{ parts: { size: lit("18px"), fill: lit("#111111") } },
+			]),
+		],
+	};
+	const worn = wearStyle(scene, ["t1", "box"], "prose");
+	const box = findInTree(worn.nodes, "box") as SceneNode;
+	assert.deepEqual(box.props.fill, undefined, "a rect draws a fill, so it goes");
+	assert.deepEqual(
+		box.props.size,
+		single("40px"),
+		"a rect has nowhere to put a size, so it stays",
+	);
+	// The text node is the mirror image of that.
+	const t1 = findInTree(worn.nodes, "t1") as SceneNode;
+	assert.equal(t1.props.size, undefined);
+	assert.deepEqual(wornProps(worn, t1), ["size"]);
 });
 
 test("the document, read on this side, agrees about precedence", () => {

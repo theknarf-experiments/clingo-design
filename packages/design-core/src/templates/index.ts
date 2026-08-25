@@ -20,6 +20,7 @@ import { places } from "./places.ts";
 import { rail } from "./rail.ts";
 import { ranked } from "./ranked.ts";
 import { sudoku } from "./sudoku.ts";
+import { typography } from "./typography.ts";
 
 export interface Template {
 	id: string;
@@ -60,6 +61,13 @@ export const TEMPLATES: Template[] = [
 		description:
 			"Three buttons that must all differ, with ink computed to stay readable.",
 		create: palette,
+	},
+	{
+		id: "typography",
+		name: "Two typographies",
+		description:
+			"One variable decides size, weight, family and leading together — two designs, both coherent, where four tokens would give sixteen.",
+		create: typography,
 	},
 	{
 		id: "ranked",

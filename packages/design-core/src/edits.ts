@@ -50,6 +50,7 @@ import {
 	rangesOverGroup,
 	sceneContext,
 	sharedPropsOfKinds,
+	styleProps,
 	uniqueName,
 	withFrame,
 	wornProps,
@@ -1647,6 +1648,55 @@ export function setStyle(
 		}
 		return { ...node, style: styleId };
 	});
+}
+
+/**
+ * Wearing a style the way *applying* one means it: the treatment wins.
+ *
+ * {@link setStyle} is the assignment on its own, and precedence being per
+ * property means a node that states its own size keeps it. That is right for the
+ * document — it is how a heading takes a family and a leading while stating its
+ * own size — and wrong for the gesture: select four paragraphs, wear Prose, and
+ * every one of them already states a size and a weight, so the visible result of
+ * applying a style is *nothing at all*, with four silent overrides to hunt down.
+ *
+ * So the panel calls this, and the property the style decides is cleared from
+ * the node. Which makes an override mean something: everything left overriding
+ * after this was overridden on purpose, by pressing the button that says so.
+ * Nothing is lost that undo will not bring back, and nothing is *copied* either
+ * — the node ends up with no opinion, and the treatment is still derived from
+ * the style's pick per universe.
+ */
+export function wearStyle(
+	scene: Scene,
+	ids: readonly string[],
+	styleId: string | undefined,
+): Scene {
+	const worn = setStyle(scene, ids, styleId);
+	const style = findStyle(worn.styles, styleId);
+	if (!style) return worn;
+	const decides = styleProps(style);
+	if (decides.length === 0) return worn;
+	const chosen = new Set(ids);
+
+	return {
+		...worn,
+		nodes: mapTree(worn.nodes, (node) => {
+			if (!chosen.has(node.id) || node.style !== style.id) return node;
+			const props = { ...node.props };
+			let cleared = false;
+			for (const prop of decides) {
+				// Only what this node would actually take: a property its kind
+				// cannot draw was never worn, so clearing it would be an edit to
+				// something nobody can see.
+				if (!KINDS[node.kind].props.includes(prop)) continue;
+				if (props[prop] === undefined) continue;
+				delete props[prop];
+				cleared = true;
+			}
+			return cleared ? { ...node, props } : node;
+		}),
+	};
 }
 
 /**

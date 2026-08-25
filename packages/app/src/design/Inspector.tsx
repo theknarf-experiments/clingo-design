@@ -64,8 +64,16 @@ import {
 	termLabel,
 	varLabel,
 	variantsOf,
+	type Style,
+	styleOf,
+	styleProps,
+	styleVar,
+	variantLabel,
+	wearStyle,
+	wornProps,
 } from "@clingo-design/design-core";
 
+import { NOTHING } from "./Styles";
 import { ValueEditor, type WhyRow } from "./ValueEditor";
 import { cx } from "./cx";
 import styles from "./Inspector.module.css";
@@ -619,6 +627,125 @@ function ComponentSection({
 }
 
 /**
+ * Which treatment this selection wears, if any.
+ *
+ * One select rather than a strip, because a node wears one style: two styles
+ * could both decide `size`, and then the answer would depend on which was
+ * listed first. Anything the style does not decide the node decides itself.
+ *
+ * It takes a whole selection so that "select the headings, wear Heading" is one
+ * gesture — which is how a style is applied in practice, and the reason this
+ * appears in the many-selected panel too.
+ *
+ * {@link wearStyle} rather than `setStyle`, so the gesture does what it looks
+ * like: the treatment wins, and what is left overriding afterwards was
+ * overridden on purpose. See its comment — the difference is the whole
+ * usability of applying one.
+ */
+function StylePicker({
+	all,
+	ids,
+	current,
+	mixed,
+	onSceneChange,
+}: {
+	all: readonly Style[];
+	ids: readonly string[];
+	/** The style they all wear, where they agree. */
+	current: string | undefined;
+	mixed: boolean;
+	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
+}) {
+	return (
+		<select
+			className={styles.wear}
+			data-role="wear-style"
+			value={mixed ? "?" : (current ?? "")}
+			title="Wear one of the document's styles, or none"
+			onChange={(e) => {
+				const next = e.target.value;
+				if (next === "?") return;
+				onSceneChange((prev) => wearStyle(prev, ids, next === "" ? undefined : next));
+			}}
+		>
+			{mixed ? (
+				<option value="?" disabled>
+					Mixed
+				</option>
+			) : null}
+			<option value="">No style</option>
+			{all.map((style) => (
+				<option key={style.id} value={style.id}>
+					{style.name}
+				</option>
+			))}
+		</select>
+	);
+}
+
+/**
+ * "Wearing Heading" — and what that means for this node.
+ *
+ * The same language a component instance gets, because it is the same idea:
+ * something outside this node decides part of it, editing the thing outside
+ * changes every node wearing it, and the node can still differ where it says
+ * so. What is *not* offered is a per-node choice of variant: the pick belongs
+ * to the style — one variable for the whole document — and a node that could
+ * choose its own would be a node that had its own copy of it.
+ */
+function StyleSection({
+	scene,
+	node,
+	picks,
+	onSceneChange,
+}: {
+	scene: Scene;
+	node: SceneNode;
+	picks: Picks;
+	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
+}) {
+	const worn = styleOf(scene, node);
+	// Nothing to wear and nothing worn: a document with no styles should not
+	// grow a section about them.
+	if (scene.styles.length === 0 && node.style === undefined) return null;
+	const decides = worn ? wornProps(scene, node) : [];
+	const at = worn ? picks[styleVar(worn.id)] : undefined;
+
+	return (
+		<div data-role="style-section">
+			<h3>Style</h3>
+			{node.style !== undefined && !worn ? (
+				<p className={styles.note} data-role="orphan-style">
+					Wearing “{node.style}”, which the document no longer holds. Nothing is
+					taken from it, so this node decides its own appearance.
+				</p>
+			) : null}
+			{worn ? (
+				<p className={styles.note} data-role="wearing">
+					Wearing <strong>{worn.name}</strong>
+					{worn.variants.length > 1 && at !== undefined ? (
+						<>
+							, showing <strong>{variantLabel(worn, at)}</strong>
+						</>
+					) : null}
+					.{" "}
+					{decides.length > 0
+						? `It decides ${decides.map((p) => PROPS[p].label.toLowerCase()).join(", ")} below.`
+						: "It decides nothing this node has anywhere to put."}
+				</p>
+			) : null}
+			<StylePicker
+				all={scene.styles}
+				ids={[node.id]}
+				current={worn?.id}
+				mixed={false}
+				onSceneChange={onSceneChange}
+			/>
+		</div>
+	);
+}
+
+/**
  * Properties of the current selection, in the shape a designer expects:
  * position, then content, then appearance.
  *
@@ -684,12 +811,32 @@ export function Inspector({
 	}
 
 	if (selected.length > 1) {
+		const worn = new Set(selected.map((n) => n.style));
 		return (
 			<div className={styles.inspector} data-role="inspector">
 				<h2>{selected.length} selected</h2>
 				<p className={styles.empty}>
 					Move them together, or select one to edit its properties.
 				</p>
+				{/* Except this: wearing a style is the one edit that is *better* made
+				    to a whole selection, because "these all look alike" is what a
+				    style says. */}
+				{scene.styles.length > 0 ? (
+					<div data-role="style-section">
+						<h3>Style</h3>
+						<p className={styles.note}>
+							One treatment for all {selected.length}. Whatever it decides they
+							stop deciding themselves; select one to override it there.
+						</p>
+						<StylePicker
+							all={scene.styles}
+							ids={selected.map((n) => n.id)}
+							current={worn.size === 1 ? [...worn][0] : undefined}
+							mixed={worn.size > 1}
+							onSceneChange={onSceneChange}
+						/>
+					</div>
+				) : null}
 			</div>
 		);
 	}
@@ -783,6 +930,124 @@ export function Inspector({
 		);
 	}
 
+	/** The style this node wears, and what it does and does not decide for it. */
+	const wears = styleOf(scene, node);
+	const taken = wears ? wornProps(scene, node) : [];
+	const offered = wears ? styleProps(wears) : [];
+
+	/**
+	 * One appearance property. Wearing a style puts it in one of three states,
+	 * and the whole point is that they are told apart at a glance.
+	 *
+	 *   - **the style decides it.** The row is the style's variants, read-only:
+	 *     what it holds is not this node's to type, and the alternatives are the
+	 *     treatments rather than values. Everything that asks the *solver* a
+	 *     question still works — which variant is live, which are ruled out,
+	 *     pinning one, asking why — because those are questions about the answer
+	 *     rather than about the document, which is the bargain a derived node's
+	 *     row strikes too.
+	 *   - **the node overrides it.** An ordinary editable row, marked as
+	 *     overriding and with a way back. Deliberate in both directions: you
+	 *     override by pressing a button, and that button is what says the style
+	 *     stopped applying here.
+	 *   - **neither.** The ordinary row, unchanged.
+	 */
+	function appearanceRow(prop: PropName) {
+		const spec = PROPS[prop];
+		const variable = propVar(node.id, prop);
+		if (wears && taken.includes(prop)) {
+			const svar = styleVar(wears.id);
+			const at = picks[svar] ?? 0;
+			return (
+				<div key={prop} className={styles.styled} data-styled={prop}>
+					<ValueEditor
+						testId={prop}
+						label={spec.label}
+						type={spec.type}
+						// The style's variants, in order, so the row says what the
+						// treatments hold for this property and which is showing. A
+						// variant silent about it draws nothing for it.
+						value={wears.variants.map((v) => v.parts[prop] ?? lit(NOTHING))}
+						readOnly
+						tokens={tokensFor(scene, prop)}
+						fallback={spec.fallback}
+						names={names}
+						active={picks[svar]}
+						varying={varying.has(svar)}
+						reachable={reach?.[svar]}
+						pinned={pins[svar]}
+						onPin={(index) => onPin(svar, index)}
+						why={why?.(svar)}
+						preview={(term: Term) => resolveValue(context, [term], svar)}
+						onChange={() => {}}
+					/>
+					<div className={styles.styledFoot}>
+						<span className={styles.styledBy}>from {wears.name}</span>
+						<button
+							type="button"
+							className={styles.follow}
+							data-role={`override-${prop}`}
+							title={`Give this node its own ${spec.label.toLowerCase()}, starting at what ${wears.name} is showing`}
+							onClick={() =>
+								onSceneChange((prev) =>
+									setProp(prev, [node.id], prop, [
+										wears.variants[at]?.parts[prop] ?? lit(spec.fallback),
+									]),
+								)
+							}
+						>
+							Override
+						</button>
+					</div>
+				</div>
+			);
+		}
+		const own = (
+			<ValueEditor
+				testId={prop}
+				label={spec.label}
+				type={spec.type}
+				value={node.props[prop] ?? defaultValue(prop)}
+				tokens={tokensFor(scene, prop)}
+				fallback={spec.fallback}
+				names={names}
+				active={picks[variable]}
+				varying={varying.has(variable)}
+				reachable={reach?.[variable]}
+				pinned={pins[variable]}
+				onPin={(index) => onPin(variable, index)}
+				why={why?.(variable)}
+				preview={(term: Term) => resolveValue(context, [term], variable)}
+				onChange={(next) =>
+					onSceneChange(
+						(prev) => setProp(prev, [node.id], prop, next),
+						`prop-${node.id}-${prop}`,
+					)
+				}
+			/>
+		);
+		if (!wears || !offered.includes(prop)) return <div key={prop}>{own}</div>;
+		return (
+			<div key={prop} className={styles.overriding} data-overriding={prop}>
+				{own}
+				<div className={styles.styledFoot}>
+					<span className={styles.styledBy}>overriding {wears.name}</span>
+					<button
+						type="button"
+						className={styles.follow}
+						data-role={`follow-style-${prop}`}
+						title={`Hand this property back to ${wears.name}`}
+						onClick={() =>
+							onSceneChange((prev) => setProp(prev, [node.id], prop, undefined))
+						}
+					>
+						Follow {wears.name}
+					</button>
+				</div>
+			</div>
+		);
+	}
+
 	return (
 		<div className={styles.inspector} data-role="inspector">
 			<input
@@ -804,6 +1069,16 @@ export function Inspector({
 				reach={reach}
 				onSceneChange={onSceneChange}
 				onSelect={onSelectionChange}
+			/>
+
+			{/* Beside it, and for the same reason: "wearing Heading" is part of what
+			    the selection is, and a panel that only said so forty rows down
+			    beside `size` would be a panel that never said it. */}
+			<StyleSection
+				scene={scene}
+				node={node}
+				picks={picks}
+				onSceneChange={onSceneChange}
 			/>
 
 			<h3>Position</h3>
@@ -962,38 +1237,7 @@ export function Inspector({
 
 			{KINDS[node.kind].props.length > 0 ? <h3>Appearance</h3> : null}
 			<div className={styles.props}>
-				{KINDS[node.kind].props.map((prop) => {
-					const spec = PROPS[prop];
-					const variable = propVar(node.id, prop);
-					const value = node.props[prop] ?? defaultValue(prop);
-					return (
-						<ValueEditor
-							key={prop}
-							testId={prop}
-							label={spec.label}
-							type={spec.type}
-							value={value}
-							tokens={tokensFor(scene, prop)}
-							fallback={spec.fallback}
-							names={names}
-							active={picks[variable]}
-							varying={varying.has(variable)}
-							reachable={reach?.[variable]}
-							pinned={pins[variable]}
-							onPin={(index) => onPin(variable, index)}
-							why={why?.(variable)}
-							preview={(term: Term) =>
-								resolveValue(context, [term], variable)
-							}
-							onChange={(next) =>
-								onSceneChange(
-									(prev) => setProp(prev, [node.id], prop, next),
-									`prop-${node.id}-${prop}`,
-								)
-							}
-						/>
-					);
-				})}
+				{KINDS[node.kind].props.map(appearanceRow)}
 			</div>
 		</div>
 	);

@@ -92,3 +92,13 @@
 	opacity: 1;
 	color: #dc2626;
 }
+
+/* The panel holds two kinds of variable and they are different shapes, so the
+   second gets a heading rather than being mixed into the token list. */
+.section {
+	margin: 0.5rem 0 0;
+	font-size: 0.7rem;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	opacity: 0.5;
+}

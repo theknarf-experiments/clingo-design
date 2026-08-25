@@ -33,6 +33,7 @@ import {
 	FRAME_DIMS,
 	type Dimension,
 	findStyle,
+	variantLabel,
 	flatten,
 	parseVariable,
 	sceneContext,
@@ -553,7 +554,7 @@ export function Studio({
 			if (parsed.kind === "style") {
 				// The style's own name. Which *variant* is showing is what the
 				// caption is about, and a variant has a name of its own — see
-				// `variantLabel`, which the styles panel will want next.
+				// `variantLabel`, and the caption below reads it.
 				return findStyle(scene.styles, parsed.style)?.name ?? parsed.style;
 			}
 			return scene.tokens.find((t) => t.id === parsed.token)?.name ?? parsed.token;
@@ -1002,7 +1003,13 @@ export function Studio({
 				parsed?.kind === "prop" && !byId.has(parsed.node)
 					? universe.model.byId[parsed.node]?.rendered[parsed.prop as PropName]
 					: undefined;
-			parts.push(`${labels.get(variable) ?? variable} ${drawn ?? index + 1}`);
+			// A style's alternatives are whole records, so there is no value to
+			// print — but a variant has a name, and "Prose Comfortable" is the
+			// caption somebody can act on where "Prose 2" is not.
+			const style =
+				parsed?.kind === "style" ? findStyle(scene.styles, parsed.style) : undefined;
+			const shown = style ? variantLabel(style, index) : (drawn ?? index + 1);
+			parts.push(`${labels.get(variable) ?? variable} ${shown}`);
 		}
 		if (more > 0) parts.push(`+${more} more`);
 		return parts.join(" · ") || "settled";
@@ -1315,7 +1322,10 @@ export function Studio({
 								p.id === "properties"
 									? selection.size
 									: p.id === "variables"
-										? scene.tokens.length
+										? // Both sections: the panel holds tokens and styles, and a
+											// document whose only variable was a style read "Variables"
+											// with no badge at all.
+											scene.tokens.length + scene.styles.length
 										: scene.constraints.length;
 							return (
 								<button
@@ -1374,6 +1384,7 @@ export function Studio({
 								pins={pins}
 								onPin={pin}
 								why={whyFor}
+								onSelectionChange={selectionIds}
 							/>
 						) : (
 							<Constraints
