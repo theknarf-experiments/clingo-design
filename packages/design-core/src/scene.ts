@@ -527,6 +527,19 @@ export const wrapsChildren = (node: Kinded): boolean =>
 	KINDS[node.kind].wrapsChildren;
 export const isDiagonal = (node: Kinded): boolean => KINDS[node.kind].diagonal;
 export const isPlotted = (node: Kinded): boolean => KINDS[node.kind].plotted;
+/**
+ * True when a kind draws words inside its box, so `rendered.text` means
+ * something for it.
+ *
+ * Off the property list rather than off a column of its own, because that is
+ * already the answer: a kind draws text exactly when `text` is one of the
+ * properties it paints. Not the same question as {@link KindSpec.measured},
+ * which is about a node taking its *size* from its content — the two coincide
+ * on the one kind that has both and would come apart on a kind that wrapped
+ * text to a fixed box.
+ */
+export const drawsWords = (node: Kinded): boolean =>
+	KINDS[node.kind].props.includes("text");
 
 /* ------------------------------------------------------------------ */
 /* Automatic layout                                                    */
@@ -750,10 +763,6 @@ export function makeFrame(frame: Frame): FrameValue {
 }
 
 const px = (n: number): string => `${Math.round(n)}px`;
-
-/** Whatever a node stores for one dimension. */
-export const frameValueOf = (node: SceneNode, dim: Dimension): Value =>
-	node.frame[dim];
 
 /**
  * What one dimension comes to, following whatever token it names.

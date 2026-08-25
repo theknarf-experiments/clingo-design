@@ -52,6 +52,18 @@ export function parseAtom(text: string): Atom | null {
 }
 
 /**
+ * Strips the sign a core echoes back, so an atom compares equal to itself.
+ *
+ * An assumption goes in signed — `+active(c)` or `-active(c)` — and clingo
+ * returns the unsatisfiable core in the same form, so the two halves of every
+ * "is this switch in the core?" test have to be brought to the same spelling
+ * first. Here rather than in the two callers that need it: `relax.ts` reads
+ * cores to propose ways out and `why.ts` reads them to explain a greyed value,
+ * and a private copy in each is two chances to fix one and not the other.
+ */
+export const unsigned = (text: string): string => text.replace(/^[+-]/, "");
+
+/**
  * The text an ASP string argument stands for: quotes off, escapes undone.
  *
  * Anything unquoted is returned as it came, since a constant is already its
@@ -72,17 +84,6 @@ export function unquote(argument: string): string {
 }
 
 /**
- * Rewrites clingo's source prefixes so a mistake in the rules panel is reported
- * against the line the user typed, not its offset in the full program.
- *
- * The prefix differs by entry point, and all three are in use: the one-shot
- * binary reads stdin and says `-:12:3`, a grounding error from a named block
- * says `<block>:12:3`, and the AST parser a session grounds through says
- * `<string>:12:3`. Missing that third one is how a warning would arrive with a
- * line number counted from the top of the generated program — technically true
- * and useless to anyone reading the panel.
- */
-/**
  * How many things clingo actually remarked on.
  *
  * Not the line count: a remark is a header line and then the atom it is about,
@@ -100,6 +101,17 @@ export function countDiagnostics(diagnostics: string): number {
 	return headers > 0 ? headers : 1;
 }
 
+/**
+ * Rewrites clingo's source prefixes so a mistake in the rules panel is reported
+ * against the line the user typed, not its offset in the full program.
+ *
+ * The prefix differs by entry point, and all three are in use: the one-shot
+ * binary reads stdin and says `-:12:3`, a grounding error from a named block
+ * says `<block>:12:3`, and the AST parser a session grounds through says
+ * `<string>:12:3`. Missing that third one is how a warning would arrive with a
+ * line number counted from the top of the generated program — technically true
+ * and useless to anyone reading the panel.
+ */
 export function formatDiagnostics(stderr: string, userRulesLine = 0): string {
 	return stderr
 		.split("\n")

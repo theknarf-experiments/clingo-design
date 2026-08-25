@@ -47,6 +47,7 @@ import {
 	cssText,
 	type Declarations,
 	diagonalRun,
+	paintFor,
 	paintOf,
 } from "./paint.ts";
 import {
@@ -63,8 +64,11 @@ import {
 	type Scene,
 	type SceneNode,
 	type Style,
+	drawsWords,
 	findStyle,
 	frameOf,
+	isDiagonal,
+	isPlotted,
 	propValueOf,
 	styleProps,
 	variantLabel,
@@ -401,15 +405,6 @@ const px = (n: number): string => `${round(n)}px`;
 /* A style, as a class                                                 */
 /* ------------------------------------------------------------------ */
 
-/** Which function turns this property into declarations for this kind, if any. */
-function paintFor(
-	kind: NodeKind,
-	prop: PropName,
-): ((value: string) => Declarations) | undefined {
-	if (!KINDS[kind].props.includes(prop)) return undefined;
-	return SHAPE_PAINT[kind]?.paint?.[prop] ?? PAINT[prop];
-}
-
 /**
  * One style, and the class it comes out as.
  *
@@ -658,10 +653,14 @@ function htmlContent(
 	layer: Layer,
 	node: ModelNode,
 ): string {
-	if (node.kind === "text") return escapeText(node.rendered.text ?? "");
+	// How a kind draws what is inside its box: its words, a stroke along a
+	// diagonal, a plotted outline, or nothing — a plain shape is all box. Every
+	// test reads the one table rather than naming a kind, so `svgNode` below
+	// answers the same three questions the same way.
+	if (drawsWords(node)) return escapeText(node.rendered.text ?? "");
 	const doc = docNode(index, node.id);
 	const frame = node.frame;
-	if (node.kind === "line" || node.kind === "arrow") {
+	if (isDiagonal(node)) {
 		const { y1, y2 } = diagonalRun(frame, doc?.diagonal);
 		const head =
 			node.kind === "arrow"
@@ -669,7 +668,7 @@ function htmlContent(
 				: "";
 		return `<svg class="s" aria-hidden="true"><line x1="0" y1="${y1}" x2="${frame.width}" y2="${y2}" stroke-linecap="round" fill="none"/>${head}</svg>`;
 	}
-	if (node.kind === "path") {
+	if (isPlotted(node)) {
 		if (!doc) return "";
 		const context = { tokens: index.scene.tokens, picks: layer.universe.pick };
 		const d = pathData(
@@ -1019,16 +1018,16 @@ function svgNode(
 
 	let own = "";
 	const doc = docNode(index, node.id);
-	if (node.kind === "text") {
+	if (drawsWords(node)) {
 		own = svgText(node, style);
-	} else if (node.kind === "line" || node.kind === "arrow") {
+	} else if (isDiagonal(node)) {
 		const { y1, y2 } = diagonalRun(frame, doc?.diagonal);
 		const head =
 			node.kind === "arrow"
 				? `<polyline points="${escapeAttr(arrowHead(0, y1, frame.width, y2))}" fill="none" stroke-linecap="round" stroke-linejoin="round"${style}/>`
 				: "";
 		own = `<line x1="0" y1="${round(y1)}" x2="${round(frame.width)}" y2="${round(y2)}" fill="none" stroke-linecap="round"${style}/>${head}`;
-	} else if (node.kind === "path") {
+	} else if (isPlotted(node)) {
 		const context = { tokens: index.scene.tokens, picks: layer.universe.pick };
 		const d = doc
 			? pathData(scalePoints(doc.points ?? [], frameOf(doc, context), frame), doc.closed)
@@ -1161,10 +1160,19 @@ export interface NotCollapsible {
 	reason: string;
 }
 
-/** Where two models disagree about anything but a frame. */
+/**
+ * Where two models disagree about anything but a frame.
+ *
+ * The id lists are joined on NUL because a node id may be a term with commas in
+ * it — `inst(primary,button)` — so any printable separator could make two
+ * different lists compare equal. Written as the escape rather than as the byte
+ * itself: a raw NUL makes grep treat the whole file as binary and report *no
+ * matches* rather than skipping it loudly, which hid this file from every
+ * search run across the source.
+ */
 function sameStructure(a: ModelScene, b: ModelScene): boolean {
 	const ids = Object.keys(a.byId).sort();
-	if (ids.join(" ") !== Object.keys(b.byId).sort().join(" ")) return false;
+	if (ids.join("\u0000") !== Object.keys(b.byId).sort().join("\u0000")) return false;
 	for (const id of ids) {
 		const x = a.byId[id];
 		const y = b.byId[id];

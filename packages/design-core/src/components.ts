@@ -243,9 +243,16 @@ export function variantsOf(
 			const context: ResolveContext = { tokens: scene.tokens, picks, props };
 			// What this combination actually draws. Two combinations that render
 			// alike are one variant, exactly as they would be one universe.
+			//
+			// Joined on NUL because a resolved literal may hold anything a designer
+			// can type, commas included, and two lists must not key alike by
+			// accident. Written as the escape rather than as the byte itself: a raw
+			// NUL makes grep treat the whole file as binary and report *no matches*
+			// rather than skipping it loudly, which hid this file from every search
+			// run across the source.
 			const key = componentVariables(def)
 				.map((v) => resolveValue(context, v.value, v.variable) ?? "")
-				.join(" ");
+				.join("\u0000");
 			if (seen.has(key)) return;
 			seen.add(key);
 			variants.push({

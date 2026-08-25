@@ -131,6 +131,30 @@ export const SURFACE_BOX: Declarations = {
 	overflow: "hidden",
 };
 
+/**
+ * Which function turns one property into declarations for one kind, if any.
+ *
+ * **The single answer to "what does this property paint?"** Three callers ask
+ * it and they must agree, or the export contradicts the canvas: the renderer
+ * ({@link paintOf}), the token-preserving walk that writes a wearer's own rule,
+ * and the filter that decides which of a style's properties may go in a shared
+ * class at all. That last one is why this is a lookup rather than a loop — it
+ * asks the question about a (kind, property) pair with no node in hand, to find
+ * out whether two wearers of different kinds would paint the property the same
+ * way.
+ *
+ * Nothing is decided here that the tables do not already say: a kind paints the
+ * properties its `KINDS` entry lists, through its own `SHAPE_PAINT` override
+ * where it has one and through {@link PAINT} otherwise.
+ */
+export function paintFor(
+	kind: NodeKind,
+	prop: PropName,
+): ((value: string) => Declarations) | undefined {
+	if (!KINDS[kind].props.includes(prop)) return undefined;
+	return SHAPE_PAINT[kind]?.paint?.[prop] ?? PAINT[prop];
+}
+
 /** Everything but the geometry: the ground, the kind's own box, the paint. */
 export function paintOf(
 	node: Kinded & { rendered: Partial<Record<PropName, string>> },
@@ -144,7 +168,7 @@ export function paintOf(
 	for (const prop of KINDS[node.kind].props) {
 		const value = node.rendered[prop];
 		if (value === undefined) continue;
-		const paint = shape?.paint?.[prop] ?? PAINT[prop];
+		const paint = paintFor(node.kind, prop);
 		if (paint) Object.assign(box, paint(value));
 	}
 	return box;

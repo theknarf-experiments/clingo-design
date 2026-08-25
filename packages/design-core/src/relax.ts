@@ -41,6 +41,7 @@
  * since an UNSAT core in this build is not minimal and the hitting-set pruning
  * below therefore only prunes, never decides.
  */
+import { unsigned } from "./atoms.ts";
 import type { Assumption, SolverSession } from "./solver.ts";
 
 /** A switch the user owns, and what dropping it would cost them. */
@@ -124,9 +125,6 @@ const DEFAULTS = {
 	maxPins: 3,
 };
 
-/** Strips the sign a core echoes back, so an atom compares equal to itself. */
-const bare = (text: string): string => text.replace(/^[+-]/, "");
-
 /** Every `k`-sized subset of `list`, in list order. */
 function* subsets<T>(list: readonly T[], k: number): Generator<T[]> {
 	if (k === 0) {
@@ -181,7 +179,7 @@ export async function findWays(
 	const record = (core: readonly string[]): boolean => {
 		const mine = new Set<string>();
 		for (const text of core) {
-			const atom = bare(text);
+			const atom = unsigned(text);
 			if (owned.has(atom)) mine.add(atom);
 		}
 		if (mine.size === 0) return false;

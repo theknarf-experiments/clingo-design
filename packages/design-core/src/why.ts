@@ -84,8 +84,9 @@
  * nothing here runs on an edit, and nothing here is computed for a row nobody
  * asked about.
  */
-import type { Assumption, SolverSession } from "./solver.ts";
+import { unsigned } from "./atoms.ts";
 import type { Switch } from "./relax.ts";
+import type { Assumption, SolverSession } from "./solver.ts";
 
 /**
  * What a designer points at.
@@ -205,9 +206,6 @@ const DEFAULTS = {
 	budget: 128,
 };
 
-/** Strips the sign a core echoes back. */
-const bare = (text: string): string => text.replace(/^[+-]/, "");
-
 /** A set of switch atoms, read as the thing the panel shows. */
 function reasonOf(atoms: readonly string[], owned: Map<string, Switch>): Reason {
 	const rules: string[] = [];
@@ -299,7 +297,7 @@ export async function explain(
 		while (found.length < limit && solves < budget) {
 			const taken = new Set(found.flat());
 			let candidates = core
-				.map(bare)
+				.map(unsigned)
 				.filter((atom) => owned.has(atom) && !taken.has(atom));
 			if (candidates.length === 0) break;
 			for (const drop of [...candidates]) {
