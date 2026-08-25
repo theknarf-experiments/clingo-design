@@ -21,7 +21,14 @@
  * unknown rather than a domain.
  */
 import { componentDefs, instanceNodes } from "./components.ts";
-import { askedSize, measuredCount, naturalSize, type Measurements } from "./measure.ts";
+import {
+	askedAxes,
+	naturalSize,
+	rowCount,
+	rowPicks,
+	type Measurements,
+	type Size,
+} from "./measure.ts";
 import {
 	CHILD_PROPS,
 	CONSTRAINT_KINDS,
@@ -126,6 +133,42 @@ export const probeAtom = (
 ): string => `gprobe(${nodeId},${axis},${direction})`;
 
 /**
+ * What a node asks to be, when what it says can vary.
+ *
+ * `lask/3` is one number per axis, and for a great many nodes it is a plain
+ * fact. Where it is not — a headline with three wordings, a heading wearing a
+ * two-variant style, a hugging row whose gap names a spacing scale — it is a
+ * *table*, because the size is a function of a tuple of picks rather than of one
+ * alternative. The rows are measured or computed before the solve; which row
+ * this universe reads is the solver's own business, and these four rules are the
+ * whole of how it decides.
+ *
+ * A row declares the picks it holds for, one `lrowif/4` each, and applies where
+ * none of them is contradicted. That keeps the *program* generic while the table
+ * is data: a document that crosses copy against a style changes the facts, not
+ * the shape of a rule. An index built as a compound term — `lrow(N,m(I,J),...)`
+ * — would need a join written per document, which is the one thing this compiler
+ * does not do.
+ *
+ * `laskdef/3` is the row nothing matched. It cannot normally happen: the axes
+ * are the full product, so exactly one row applies. It happens when the budget
+ * refused an axis, and when a hand-written rule mints an alternative the
+ * measurement pass never saw — `alt(prop(N,text),D)` is a legal thing to write.
+ * Without it such a node has no size equation at all and simplex puts it
+ * anywhere legal; with it the box is merely approximate, which is a design that
+ * looks wrong rather than a design that is arbitrary.
+ */
+const ASKED_RULES = [
+	"#defined lrow/4.",
+	"#defined lrowif/4.",
+	"#defined laskdef/3.",
+	"lrowout(N,I) :- lrowif(N,I,V,A), not pick(V,A).",
+	"lask(N,S,Z) :- lrow(N,I,S,Z), not lrowout(N,I).",
+	"lrowany(N,S) :- lrow(N,I,S,_), not lrowout(N,I).",
+	"lask(N,S,Z) :- laskdef(N,S,Z), not lrowany(N,S).",
+]
+
+/**
  * The layout system, as rules over the facts a laid-out container emits.
  *
  * Written once and generically: `main`/`cross` swap the axes so a column is
@@ -133,7 +176,6 @@ export const probeAtom = (
  * identity — children plus gaps plus padding fill the container exactly.
  */
 const LAYOUT_RULES = [
-	"#defined ltsize/4.",
 	"#defined word/2.",
 	"#defined numeral/2.",
 	"% ---- the settings, per universe ----",
@@ -170,10 +212,7 @@ const LAYOUT_RULES = [
 	"lalignself(N,A) :- l_word(N,alignSelf,A).",
 	"",
 	"#defined lslot/3.",
-	"% What a node asks to be, when what it says can vary. The host measures",
-	"% every alternative because they are not the same width; which one applies",
-	"% is the solver's own choice, so the fact cannot be picked in advance.",
-	"lask(N,S,V) :- ltsize(N,I,S,V), pick(prop(N,text),I).",
+	...ASKED_RULES,
 	"% Which axis is which, so one set of equations covers both directions.",
 	"lmain(C,x) :- layout(C,row).",
 	"lmain(C,y) :- layout(C,column).",
@@ -381,11 +420,10 @@ const FREEDOM_RULES = [
 	"",
 	"% ---- what is still free ----",
 	"#defined layout/2.",
-	"#defined ltsize/4.",
-	"% What a node asks to be, when what it says can vary. The host measures",
-	"% every alternative because they are not the same width; which one applies",
-	"% is the solver's own choice, so the fact cannot be picked in advance.",
-	"lask(N,S,V) :- ltsize(N,I,S,V), pick(prop(N,text),I).",
+	// The same four rules as the layout section, which is not emitted at all for
+	// a document with no layout in it — and a hand-written rule may still assert
+	// `lslot/3`. Stating a rule twice is stating it once.
+	...ASKED_RULES,
 	"% Every coordinate the solver decides rather than reads off the document.",
 	"gcoord(N,A) :- gpos(N,A).",
 	"gcoord(N,S) :- gsize(N,S).",
@@ -866,6 +904,23 @@ export const CONTRACT = `% Predicates you can rely on:
 %   lalign(C, A)  ljustify(C, J)  lgrow(N)  lalignself(N, A)
 %                               derived from those, and what the equations use
 %
+% What a node asks to be is a *table*, because a measured box is a function of
+% a tuple of picks: what it says, which treatment it wears, which step of a
+% scale that treatment names. Nothing about the rows is per document — a row
+% declares the picks it holds for and the join is one generic rule:
+%
+%   lask(N, width|height, Px)   derived: what N asks to be with nothing pushing
+%                               on it. A plain fact where the document settles
+%                               it, which is most nodes
+%   lrow(N, I, width|height, Px)   one row of the table, where it does not
+%   lrowif(N, I, Var, Alt)      row I holds only in universes where Var picked
+%                               Alt. A row with no lrowif holds in all of them
+%   laskdef(N, width|height, Px)   what N asks when no row holds at all: a
+%                               measurement budget that dropped an axis, or an
+%                               alternative a rule of yours minted. Without it
+%                               such a node has no size equation and simplex
+%                               puts it anywhere legal
+%
 % Geometry the solver decides, rather than the document:
 %
 %   gsolved(N)                  assert to hand N's frame to the solver
@@ -1002,28 +1057,51 @@ export interface CompileOptions {
 }
 
 /**
- * A node's asked size, as either one fact or a table the pick selects from.
+ * A node's asked size, as either one fact or a table the picks select from.
  *
- * Both would be two equations for one unknown, so it is one or the other.
+ * Both would be two equations for one unknown, so it is one or the other. Which
+ * it is falls out of {@link askedAxes}: no axes is a node whose size the
+ * document settles once, and the great majority of nodes are that.
+ *
+ * The rows are `naturalSize` evaluated per combination, which is measured
+ * arithmetic for a leaf and a bottom-up sum for a hugging container — so a
+ * container crossed over its subtree's choices costs grounding rather than a
+ * canvas. A dropped axis is written into the program as a comment: the box is
+ * then wrong in the universes that chose otherwise, and a wrong box is a
+ * visibly wrong design, so it says so where the generated program is read.
  */
 function emitAsked(
 	lines: string[],
+	scene: Scene,
 	node: SceneNode,
 	context: ResolveContext,
 	measurements: Measurements | undefined,
 ): void {
-	const alternatives = measuredCount(node, measurements);
-	if (alternatives > 1) {
-		for (let i = 0; i < alternatives; i++) {
-			const size = askedSize(node, measurements, i, context);
-			lines.push(atom("ltsize", node.id, i, "width", Math.round(size.width)));
-			lines.push(atom("ltsize", node.id, i, "height", Math.round(size.height)));
-		}
+	const { axes, dropped } = askedAxes(scene, node, measurements);
+	const say = (name: string, size: Size, ...before: Array<string | number>) => {
+		lines.push(atom(name, node.id, ...before, "width", Math.round(size.width)));
+		lines.push(atom(name, node.id, ...before, "height", Math.round(size.height)));
+	};
+	if (axes.length === 0) {
+		say("lask", naturalSize(node, measurements, context));
 		return;
 	}
-	const want = naturalSize(node, measurements, context);
-	lines.push(atom("lask", node.id, "width", Math.round(want.width)));
-	lines.push(atom("lask", node.id, "height", Math.round(want.height)));
+	if (dropped.length > 0) {
+		lines.push(
+			`% ${node.id}: ${rowCount(axes)} rows, and ${dropped.join(", ")} read at` +
+				" its first alternative — over the measurement budget.",
+		);
+	}
+	const rows = rowCount(axes);
+	for (let row = 0; row < rows; row++) {
+		const picks = rowPicks(axes, row);
+		say("lrow", naturalSize(node, measurements, { ...context, picks }), row);
+		for (const axis of axes) {
+			lines.push(atom("lrowif", node.id, row, axis.variable, picks[axis.variable]));
+		}
+	}
+	// What it asks for when no row applies at all — see ASKED_RULES.
+	say("laskdef", naturalSize(node, measurements, context));
 }
 
 export function compile(
@@ -1119,12 +1197,26 @@ export function compile(
 	/**
 	 * What a hugging container comes to has to be worked out on this side —
 	 * a maximum over its children is not a linear constraint — and that
-	 * arithmetic now reads values rather than numbers, so it needs the tokens.
-	 * Picks it cannot have: which universe this is has not been decided yet, so
-	 * a *varying* gap is measured at its first alternative. See `naturalSize`,
-	 * which was already approximate here for the same reason.
+	 * arithmetic reads values rather than numbers, so it needs the tokens.
+	 *
+	 * No picks, because this is the context for the *one-row* case, where there
+	 * is nothing to pick between. Where a node's size does depend on a pick,
+	 * `emitAsked` supplies one context per row and the arithmetic is exact in
+	 * each — which is how a varying gap stopped being read at its first
+	 * alternative.
 	 */
 	const measureContext = { tokens: scene.tokens, picks: {} };
+	/**
+	 * A node's asked size, once. A nested container is both a container and its
+	 * parent's child, so it is reached twice; a table is many lines, and stating
+	 * the same one twice would double it for nothing.
+	 */
+	const askedFor = new Set<string>();
+	const asked = (node: SceneNode): void => {
+		if (askedFor.has(node.id)) return;
+		askedFor.add(node.id);
+		emitAsked(layoutLines, scene, node, measureContext, options.measurements);
+	};
 	// One pass for every parent, rather than a tree search per node.
 	const parents = parentMap(scene.nodes);
 	/**
@@ -1178,13 +1270,13 @@ export function compile(
 			}
 			// The size the container asks for. Ignored when it hugs, and the
 			// stored frame is then only what it falls back to.
-			emitAsked(layoutLines, node, measureContext, options.measurements);
+			asked(node);
 			(node.children ?? []).forEach((child, index) => {
 				layoutLines.push(atom("lslot", node.id, child.id, index + 1));
 				// What the child would like to be, when it is not stretched — its
 				// content's size for a node that sizes itself, its frame otherwise,
 				// and for a hugging container of its own, whatever it hugs to.
-				emitAsked(layoutLines, child, measureContext, options.measurements);
+				asked(child);
 				for (const prop of CHILD_PROPS) {
 					const value = layoutValueOf(child, prop);
 					if (value) emitValue(layoutVar(child.id, prop), value);
