@@ -498,13 +498,22 @@ test("the component template is a component with four variants, used three times
 
 	const answer = await explore(scene, directSolver, { limit: 40 });
 	// The definition (4) x the one instance nobody decided for (4). The other
-	// two hold both of their choices.
+	// two hold both of their choices — and the style adds none, because a
+	// treatment with one variant is a decision the document already made.
 	assert.equal(answer.total, 16);
 	const model = answer.universes[0].model;
 	for (const use of ["primary", "secondary", "undecided"]) {
 		assert.ok(model.byId[`inst(${use},button)`], `${use} draws its copy`);
 		assert.ok(model.byId[`inst(${use},buttonLabel)`]);
+		// The definition wears the style, so every copy of that part does.
+		assert.equal(model.byId[`inst(${use},buttonLabel)`].rendered.size, "14px");
 	}
+	assert.equal(model.byId.buttonLabel.rendered.weight, "600");
+	assert.deepEqual(
+		model.wears.buttonText.map((w) => w.node),
+		["inst(primary,buttonLabel)", "inst(secondary,buttonLabel)", "inst(undecided,buttonLabel)"],
+		"and the wearing an instance derived is reported, since the document has no account of it",
+	);
 	// The two decided instances never change; the undecided one does.
 	const seen = new Set(
 		answer.universes.map((u) => u.model.byId["inst(undecided,buttonLabel)"].rendered.text),
@@ -564,4 +573,73 @@ test("a token an instance links to is still the document's one token", async () 
 		(u) => u.model.byId["inst(one,btn)"].rendered.fill === "#0ea5e9",
 	);
 	assert.ok(followed, "the instance follows the token link, not a frozen colour");
+});
+
+test("a style a definition wears reaches every instance, at the same variant", async () => {
+	// The other half of the sentence above, and the sharper half: a style is the
+	// document's, like a token, so an instance's copy takes the *same* pick
+	// rather than minting one. Two instances may differ in a fill the definition
+	// left open; they may not differ in treatment, and that is what makes "these
+	// all look alike" a promise rather than a coincidence.
+	const base = buttons([{ id: "one" }, { id: "two" }]);
+	const scene: Scene = {
+		...base,
+		styles: [
+			{
+				id: "cap",
+				name: "Caption",
+				variants: [
+					{ name: "Small", parts: { size: lit("12px"), weight: lit("500") } },
+					{ name: "Large", parts: { size: lit("20px"), weight: lit("800") } },
+				],
+			},
+		],
+		nodes: [
+			{
+				...base.nodes[0],
+				children: base.nodes[0].children?.map((n) =>
+					n.id !== "btn"
+						? n
+						: {
+								...n,
+								children: n.children?.map((c) =>
+									// Its own size and weight go, or the node would win and the
+									// style would decide nothing.
+									c.id === "label"
+										? {
+												...c,
+												style: "cap",
+												props: { text: c.props.text, ink: c.props.ink },
+											}
+										: c,
+								),
+							},
+				),
+			},
+		],
+	};
+
+	const answer = await explore(scene, directSolver, { limit: 60 });
+	const parts = ["label", "inst(one,label)", "inst(two,label)"];
+	for (const universe of answer.universes) {
+		const sizes = parts.map((id) => universe.model.byId[id].rendered.size);
+		assert.ok(
+			sizes.every((size) => size === "12px" || size === "20px"),
+			`every copy is styled: ${sizes.join(" ")}`,
+		);
+		assert.equal(new Set(sizes).size, 1, "and at one treatment, definition included");
+	}
+	// Both treatments are reachable, or the assertion above is vacuous.
+	assert.deepEqual(
+		[...new Set(answer.universes.map((u) => u.model.byId["inst(one,label)"].rendered.size))].sort(),
+		["12px", "20px"],
+	);
+	// And the wearing an instance derived is reported, because the document has
+	// no account of `inst(one,label)` to read it off.
+	assert.deepEqual(answer.universes[0].model.wears, {
+		cap: [
+			{ node: "inst(one,label)", props: ["size", "weight"] },
+			{ node: "inst(two,label)", props: ["size", "weight"] },
+		],
+	});
 });

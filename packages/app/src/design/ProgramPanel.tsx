@@ -27,6 +27,13 @@ export interface ProgramPanelProps {
 	 * predicate, which grounds happily and does nothing.
 	 */
 	diagnostics: string;
+	/**
+	 * What the tool approximated about the designs on screen — its own remarks
+	 * rather than clingo's, and shown in the same band for the same reason they
+	 * are counted with them: the reader's question is whether anything about
+	 * their rules is quietly not doing what it looks like.
+	 */
+	approximations: readonly string[];
 	/** The space as it stands, for the export tab. */
 	universes: readonly Universe[];
 	projectName: string;
@@ -61,6 +68,7 @@ export function ProgramPanel({
 	onChange,
 	error,
 	diagnostics,
+	approximations,
 	universes,
 	projectName,
 	status,
@@ -70,10 +78,12 @@ export function ProgramPanel({
 	// generated ASP, and most sessions never need it open.
 	const [open, setOpen] = useState(false);
 	const paint = useRef<HTMLPreElement | null>(null);
-	// An error wins the band outright: when the document does not ground there
-	// is no answer for a remark to be about, and whatever was said last
-	// describes the program from before the edit that broke it.
-	const notes = error ? "" : diagnostics;
+	// One band, two sources: clingo's remarks about the program, then the tool's
+	// about its own arithmetic. An error wins it outright either way — when the
+	// document does not ground there is no answer for a remark to be about, and
+	// whatever was said last describes the program from before the edit that
+	// broke it.
+	const notes = error ? "" : [diagnostics, ...approximations].filter(Boolean).join("\n");
 	const noteCount = countDiagnostics(notes);
 
 	function select(id: Tab) {
@@ -159,7 +169,7 @@ export function ProgramPanel({
 								<span
 									className={styles.badge}
 									data-role="diagnostic-count"
-									title={`${noteCount} thing${noteCount === 1 ? "" : "s"} clingo remarked on`}
+									title={`${noteCount} thing${noteCount === 1 ? "" : "s"} remarked on`}
 								>
 									{noteCount}
 								</span>

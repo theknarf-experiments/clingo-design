@@ -251,7 +251,17 @@ const LAYOUT_RULES = [
 	"% something a simplex solver can express, so it is taken here, over the",
 	"% sizes the children ask for — which for a child that hugs in turn is the",
 	"% size its own contents come to, computed bottom-up before compiling.",
-	"lbiggest(C,M) :- lhug(C), lcrosssz(C,S), M = #max{ Z : lslot(C,X,_), lask(X,S,Z) }.",
+	"% The `0` in the set is the empty maximum, written down. A child whose asked",
+	"% size is a *table* is not decidable at grounding, so without it the",
+	"% aggregate has to be ground for the case where no row holds — where a",
+	"% maximum over nothing is the infimum, and `#inf + 2*P` is an operation",
+	"% clingo remarks on, twice per axis, on every document with a measured child",
+	"% under a layout. That case is not a design: `laskdef/3` answers for every",
+	"% universe, so some row always holds. Every size in the set is a rounded",
+	"% pixel count and so is at least zero, which is what makes the floor free —",
+	"% and what it says is that a container hugging nothing is its padding.",
+	"lbiggest(C,M) :- lhug(C), lcrosssz(C,S),",
+	"                 M = #max{ Z : lslot(C,X,_), lask(X,S,Z); 0 }.",
 	"&sum{ lsz(C,S) } = T :- lhug(C), lcrosssz(C,S), not lstretched(C,S),",
 	"    lbiggest(C,M), lpad(C,P), T = M + 2*P.",
 	"",
@@ -564,10 +574,18 @@ const COMPONENT_RULES = [
 	"    cpart(R,N), alt_derived(prop(N,P),K,Via,prop(S,Q)), cpartvar(R,prop(S,Q)).",
 	"alt_derived(prop(inst(I,N),P),K,Via,S) :- instance(I,R), cpart(R,N),",
 	"    alt_derived(prop(N,P),K,Via,S), not cpartvar(R,S).",
+	"% ---- and what the definition wears ----",
+	"% A style is the document's, like a token, so a copy takes the *same* pick",
+	"% rather than minting one: two instances of a definition that wears the",
+	"% compact treatment are both compact, and the one variable is what makes",
+	"% that a promise instead of a coincidence. Without this line a definition's",
+	"% style reached the definition and nothing else, and every instance drew the",
+	"% part unstyled — a wrong picture, not merely a missing class.",
+	"sty_wears(inst(I,N),S,P) :- instance(I,R), cpart(R,N), sty_wears(N,S,P).",
 ]
 
 /**
- * Styles, as two rules over the facts a style and its wearers emit.
+ * Styles, as a handful of rules over the facts a style and its wearers emit.
  *
  * Short, because a style is not new machinery: it is one more variable, and its
  * alternatives happen to be records. `sty(S)` picks exactly like `tok(T)` does,
@@ -575,21 +593,38 @@ const COMPONENT_RULES = [
  * named by a rule, projection — applies to it because none of them can tell the
  * difference.
  *
- * What is new is only the join, and it is the second rule. A style's variant
- * decides several properties *at once*, so the pick lands on a whole record
- * rather than on a literal, and one pick then writes into several
- * `resolved(prop(N,P))`. That is the entire content of the feature: it turns a
- * cross product into a correlation. Two two-alternative tokens linked to size
- * and weight give four designs of which two are incoherent; one two-variant
- * style gives two, and both are coherent by construction.
+ * What is new is only the join. A style's variant decides several properties
+ * *at once*, so the pick lands on a whole record rather than on a literal, and
+ * one pick then writes into several `resolved(prop(N,P))`. That is the entire
+ * content of the feature: it turns a cross product into a correlation. Two
+ * two-alternative tokens linked to size and weight give four designs of which
+ * two are incoherent; one two-variant style gives two, and both are coherent by
+ * construction.
  *
  * Emitted always, like the geometry and component rules and for the same
  * reason: `sty_wears/3` and `alt(sty(S),I)` are things a hand-written rule may
  * assert — "every node in this row wears the compact treatment" is one rule —
  * and a contract that quietly does nothing on some documents is not one.
+ *
+ * Wearing therefore has two sources, and the split is the whole of what
+ * `sty_doc/3` is for. The document's own wearing is a fact the studio already
+ * holds; everything else — an instance's copy of a definition that wears one, a
+ * node a rule dressed — exists **only in the answer set**, and so is the only
+ * half worth showing. Same argument as `dvar/1` a few hundred lines down, and
+ * the same shape: derive the difference, show that.
  */
 const STYLE_RULES = [
-	"#defined sty_wears/3.",
+	"#defined sty_doc/3.",
+	"% What the document itself says: a wearer, and one property it takes.",
+	"% `sty_wears/3` is the union, so a rule that reads it sees one predicate and",
+	"% cannot tell which half a wearing came from.",
+	"sty_wears(N,S,P) :- sty_doc(N,S,P).",
+	"% And the other half, on its own. A node dressed by a rule is a node the",
+	"% document has no account of, so nothing on the TypeScript side can know it",
+	"% wears anything: the export gives it the class its neighbours share, and the",
+	"% measurement pass — which runs before this solve and reads the document —",
+	"% reports that it sized the node in the font the document gave it.",
+	"sty_derived(N,S,P) :- sty_wears(N,S,P), not sty_doc(N,S,P).",
 	"% What one variant says about one property, in this universe.",
 	"%",
 	"% A part is a value in every sense but one — it holds a single alternative,",
@@ -746,9 +781,15 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               A fact where the document wrote a literal;
 %                               derived from resolved(spart(S,I,Prop)) where it
 %                               wrote a token link or a derivation
+%   sty_doc(N, S, Prop)         the document's own wearing, as a fact
 %   sty_wears(N, S, Prop)       N takes Prop from S. Per property, because a
 %                               node that states its own value keeps it — assert
 %                               it yourself to dress nodes your rules created
+%   sty_derived(N, S, Prop)     derived: wearing no sty_doc/3 states. An
+%                               instance's copy of a definition that wears one
+%                               is in here, and so is anything you dressed —
+%                               and this is the half that is shown, because the
+%                               other half is already in the document
 %
 % A style is the one variable the way out keeps as a variable: the HTML export
 % writes it as a CSS class, so the properties every wearer takes from it are one
@@ -758,16 +799,25 @@ export const CONTRACT = `% Predicates you can rely on:
 %   - a class can only say what every wearer *draws*, so a style holding both a
 %     fill and a size, worn by a rectangle and by some text, shares neither. Two
 %     styles is the way to say that, and it is also what it means;
-%   - wearing is read from the document. A node your rule dressed by asserting
-%     sty_wears/3 is exported with the properties inlined and shares no class,
-%     the same way a rule-minted node's token link exports as the literal.
+%   - a node you dressed shares the class like any other wearer, because
+%     sty_derived/3 is read back out of the answer set. What it does *not* get
+%     is the token name: the class holds \`var(--lg)\` where a document wearer
+%     named a token, and the literal where only your rule did — the same way a
+%     rule-minted node's token link exports as the literal.
+%
+% One thing to know if a node you dressed sizes itself to its content: text is
+% measured before this solve, from the document, so its box was measured in the
+% font the document gave it and not in the treatment your rule handed it. The
+% studio says so rather than drawing a wrong box quietly.
 %
 % Where the *only* thing a document's universes disagree about is sty(S), that
 % export is one file with both treatments in it: a media query where the
-% variants differ in lengths — the tighter type scale is the narrow screen — and
-% prefers-color-scheme where they differ only in colour. A style may do that and
-% a loose length token may not, because a property is never a coordinate: no
-% class can end up standing in for a \`left\` that the solver worked out.
+% variants differ in how much room they ask for — the tighter type scale is the
+% narrow screen, leading counted as the pixels it comes to rather than as the
+% ratio it is written as — and prefers-color-scheme where they differ only in
+% colour. A style may do that and a loose length token may not, because a
+% property is never a coordinate: no class can end up standing in for a \`left\`
+% that the solver worked out.
 %
 % alt/2 is a derivable predicate too, so a rule can mint a variable the
 % document never named, and it then picks, resolves, renders, greys and pins
@@ -1319,7 +1369,7 @@ export function compile(
 		// runs in: what the style contributes is what is left over.
 		if (node.style !== undefined) {
 			for (const prop of wornProps(scene, node)) {
-				wearLines.push(atom("sty_wears", node.id, node.style, prop));
+				wearLines.push(atom("sty_doc", node.id, node.style, prop));
 			}
 		}
 	}
@@ -1654,6 +1704,14 @@ export function compile(
 			"               derived_of(Via,Src,L).",
 			"#show dvar(V) : dvar(V), scenery.",
 			"#show dalt(V,I,L) : dalt(V,I,L), scenery.",
+			"% Wearing the document did not write, for exactly the same reason: the",
+			"% document's own is already in the document, and this is the half that",
+			"% exists nowhere else. An instance's copy of a definition that wears a",
+			"% style is in here, and so is a node a rule of yours dressed. Two",
+			"% readers need it — the export, which shares one class between wearers",
+			"% it can only learn about here, and the studio, which measured the node",
+			"% before this solve and has to say so.",
+			"#show sty_derived(N,S,P) : sty_derived(N,S,P), scenery.",
 			"% Sets a rule named, so a constraint can be pointed at one without the",
 			"% document enumerating what is in it — and so the Rules panel can offer",
 			"% the groups that actually exist rather than asking for an ASP term.",

@@ -36,6 +36,7 @@
 import type { Frame } from "./geometry.ts";
 import { pathData, scalePoints } from "./geometry.ts";
 import { parseInstancePart } from "./components.ts";
+import { lineHeightPx } from "./measure.ts";
 import type { ModelNode, ModelScene } from "./model.ts";
 import {
 	DOCUMENT_BASE,
@@ -56,6 +57,7 @@ import {
 	LAYOUT_PROPS,
 	type LayoutProp,
 	type NodeKind,
+	PROP_NAMES,
 	PROPS,
 	type PropName,
 	type Scene,
@@ -421,10 +423,19 @@ interface StyleClass {
 	name: string;
 	/** The properties the class carries, in table order. */
 	props: PropName[];
-	/** Wearers drawn in this universe, by node id, in document order. */
+	/**
+	 * Wearers drawn in this universe, by node id: the document's first, in
+	 * document order, then the ones only the answer set names.
+	 *
+	 * The order is load-bearing, not tidiness — {@link classRule} reads the
+	 * class's value off the first wearer that takes each property, and only a
+	 * wearer the document holds can say which token it named.
+	 */
 	wearers: string[];
 	/** Per wearer, the properties it takes from the style rather than states. */
 	worn: Map<string, Set<PropName>>;
+	/** Which of them the document has no account of — see `ModelScene.wears`. */
+	derived: string[];
 }
 
 /**
@@ -455,11 +466,19 @@ interface StyleClass {
  * writing it as the cascade rather than as an absence is what makes the output
  * editable: change `.prose` and everything that did not override follows.
  *
- * Read off the *document*, because that is where wearing lives: `sty_wears/3`
- * is a predicate a rule may assert too, and the answer set does not report it
- * back. Those nodes come out with the properties inlined, exactly as a
- * rule-minted node's token link comes out as a literal, and for the same
- * reason. Named in {@link ExportResult.lost}.
+ * Wearing comes from both places it can come from. The document is one, and
+ * the answer set is the other: `ModelScene.wears` is the wearing no
+ * `sty_doc/3` states — an instance's copy of a definition that wears a style,
+ * and a node a hand-written rule dressed — and a wearer is a wearer however the
+ * program came to know it. Reading only the document was a smaller output that
+ * was also a wrong one: every instance of a styled component repeated the
+ * treatment inline, and the class the definition's own part carried was a class
+ * with one user.
+ *
+ * What a derived wearer does not bring is the token a value *named*: the
+ * document has no account of it, so the class holds `var(--lg)` only when a
+ * document wearer put it there — which is why the document's wearers are first
+ * in the list {@link classRule} reads from. Named in {@link ExportResult.lost}.
  */
 function styleClasses(index: DocIndex, base: Layer): StyleClass[] {
 	const model = base.universe.model;
@@ -471,6 +490,16 @@ function styleClasses(index: DocIndex, base: Layer): StyleClass[] {
 			if (node.style !== style.id || !model.byId[node.id]) continue;
 			wearers.push(node.id);
 			worn.set(node.id, new Set(wornProps(index.scene, node)));
+		}
+		// Then the wearers only this universe knows about. A property the node
+		// draws for itself is not in the atom, so `wornProps`' precedence has
+		// already been applied by the join that derived it.
+		const derived: string[] = [];
+		for (const wearer of model.wears[style.id] ?? []) {
+			if (!model.byId[wearer.node] || worn.has(wearer.node)) continue;
+			wearers.push(wearer.node);
+			derived.push(wearer.node);
+			worn.set(wearer.node, new Set(wearer.props));
 		}
 		if (wearers.length === 0) continue;
 		const props = styleProps(style).filter((prop) => {
@@ -490,6 +519,7 @@ function styleClasses(index: DocIndex, base: Layer): StyleClass[] {
 			props,
 			wearers,
 			worn,
+			derived,
 		});
 	}
 	return out;
@@ -1427,7 +1457,57 @@ interface StyleChange {
 	node: string;
 	/** What it drew with, per universe, in the order they came in. */
 	values: string[];
+	/**
+	 * Everything that node drew with, per universe.
+	 *
+	 * Kept beside the values because one property cannot always be read on its
+	 * own: a line height of 1.35 is a *multiple*, and how much room it asks for
+	 * is a fact about the size it multiplies — which the same style may be
+	 * changing. See {@link ROOMINESS}.
+	 */
+	drawn: Array<Partial<Record<PropName, string>>>;
 }
+
+/**
+ * How much room a property's value asks for — bigger is roomier — or nothing
+ * where two of its values cannot be put in that order at all.
+ *
+ * This is the table the breakpoint collapse turns on, and it is a table rather
+ * than a type test because `PROPS[p].type` gets one property wrong and the
+ * wrongness is not the type's fault. Every `length` is its own answer: 15px is
+ * tighter than 18px, and that is what a type ramp means. A **line height** is
+ * typed `number` because it is a ratio and it genuinely is one — making it a
+ * length would put `8px` in the inspector's placeholder and let a token of
+ * lengths link to it — but the ratio is not the quantity: 1.2 of 24px is 28.8px
+ * of leading and 1.5 of 16px is 24px, so the tighter *number* is the roomier
+ * *line*. Ordering by what is written is how a real responsive ramp — bigger
+ * type, tighter leading — comes out as "the lengths disagree" and refuses.
+ *
+ * So the entry reads the leading in pixels, which is the same arithmetic the
+ * text measurement uses, and both halves of such a ramp then agree.
+ *
+ * Everything else stays out and stays out on purpose: no stylesheet can know
+ * which of two weights, two families or two alignments belongs on a narrow
+ * screen, and a table with an entry for them would be a guess wearing a number.
+ */
+const ROOMINESS: Partial<
+	Record<PropName, (drawn: Partial<Record<PropName, string>>) => number | undefined>
+> = {
+	...Object.fromEntries(
+		PROP_NAMES.filter((prop) => PROPS[prop].type === "length").map((prop) => [
+			prop,
+			(drawn: Partial<Record<PropName, string>>) => numeralOf(drawn[prop] ?? ""),
+		]),
+	),
+	lineHeight: (drawn) =>
+		drawn.lineHeight === undefined
+			? undefined
+			: lineHeightPx(drawn.size, drawn.lineHeight),
+};
+
+/** How much room one universe's reading asks for, if the property is orderable. */
+const roomOf = (change: StyleChange, universe: number): number | undefined =>
+	ROOMINESS[change.prop]?.(change.drawn[universe]);
 
 /**
  * What the variants of one style actually disagree about, read off the answer
@@ -1450,10 +1530,13 @@ function styleChanges(
 	for (const prop of styleProps(style)) {
 		for (const node of wearers) {
 			if (!wornProps(scene, node).includes(prop)) continue;
-			const values = universes.map((u) => u.model.byId[node.id]?.rendered[prop]);
+			const drawn = universes.map((u) => u.model.byId[node.id]?.rendered ?? {});
+			const values = drawn.map((rendered) => rendered[prop]);
 			if (values.some((v) => v === undefined)) continue;
 			const said = values as string[];
-			if (new Set(said).size > 1) out.push({ prop, node: node.id, values: said });
+			if (new Set(said).size > 1) {
+				out.push({ prop, node: node.id, values: said, drawn });
+			}
 			break;
 		}
 	}
@@ -1480,11 +1563,15 @@ function styleChanges(
  *      field it decides, so both sides of the breakpoint are designs somebody
  *      authored, and the switch is one class redefinition plus the boxes that
  *      moved. Switching one loose length gives a design nobody wrote down.
- *   3. **The document states the order.** One variant's lengths are all smaller
- *      than the other's, and the tighter type scale is the narrow screen —
+ *   3. **The document states the order.** One variant asks for less room than
+ *      the other everywhere, and the tighter type scale is the narrow screen —
  *      which is what every responsive type ramp there has ever been means. Where
- *      the lengths disagree about which variant is the tighter one, there is no
- *      narrow design to pick and this refuses.
+ *      they disagree about which variant is the tighter one, there is no narrow
+ *      design to pick and this refuses. How much room a value asks for is
+ *      {@link ROOMINESS}, and it is a table because one property's number is not
+ *      its size: a line height is a *multiple* of a size the same style may be
+ *      changing, so the textbook ramp — bigger type, tighter leading — reads as
+ *      a contradiction until the leading is counted in pixels.
  *
  * And where the variants differ only in colour, the same argument makes it a
  * theme instead, ordered by the ground it paints.
@@ -1493,9 +1580,13 @@ function styleChanges(
  *
  *   - two variants for a breakpoint. A third has no pair of screens to be, the
  *     same way a third direction would not;
- *   - at least one length has to differ, and the lengths have to agree. A style
- *     that varies only its weight, its family or its leading carries no claim
+ *   - at least one *size* has to differ, and the sizes have to agree. A style
+ *     that varies only its weight, its family or its alignment carries no claim
  *     about screen width, and is refused rather than guessed at;
+ *   - the breakpoint is the width the wide design occupies, so a treatment that
+ *     changes only the leading — which moves a column's height and not its
+ *     width — comes out as a query at the design's own width. Coarse, and the
+ *     same coarseness a radius ramp has always had;
  *   - a wearer that states its own value for a property does not change across
  *     the breakpoint. That is what an override means, and it is visible in the
  *     output: the declaration sits in the node's own rule, not in the class;
@@ -1535,16 +1626,14 @@ function styleCollapse(
 		);
 	}
 
-	// Otherwise the lengths decide, if they agree.
-	const lengths = changes.filter(
-		(change) => PROPS[change.prop].type === "length" && readable(change),
-	);
+	// Otherwise the sizes decide, if they agree.
+	const lengths = changes.filter(readable);
 	if (lengths.length === 0) {
 		const named = changes
 			.map((change) => PROPS[change.prop].label.toLowerCase())
 			.join(", ");
 		return {
-			reason: `The variants of “${style.name}” differ in ${named}, and none of that is a length. A stylesheet has no way to know which of two weights or two families is the narrow screen, so this exports as one design at a time.`,
+			reason: `The variants of “${style.name}” differ in ${named}, and none of that is a size. A stylesheet has no way to know which of two weights or two families is the narrow screen, so this exports as one design at a time.`,
 		};
 	}
 	if (universes.length !== 2) {
@@ -1553,11 +1642,11 @@ function styleCollapse(
 		};
 	}
 	const ways = new Set(
-		lengths.map((change) => Math.sign(numeral(change.values[1]) - numeral(change.values[0]))),
+		lengths.map((change) => Math.sign(room(change, 1) - room(change, 0))),
 	);
 	if (ways.size !== 1) {
 		return {
-			reason: `The lengths in “${style.name}” disagree about which treatment is the tighter one — one of them grows where another shrinks — so neither variant is the narrow screen.`,
+			reason: `The sizes in “${style.name}” disagree about which treatment is the tighter one — one of them grows where another shrinks — so neither variant is the narrow screen.`,
 		};
 	}
 	const [narrow, wide] = ways.has(1) ? [0, 1] : [1, 0];
@@ -1571,12 +1660,13 @@ function styleCollapse(
 	);
 }
 
-/** The number a rendered length reads as, and 0 where it reads as nothing. */
-const numeral = (text: string): number => numeralOf(text) ?? 0;
+/** How much room a reading asks for, and 0 where it asks for nothing legible. */
+const room = (change: StyleChange, universe: number): number =>
+	roomOf(change, universe) ?? 0;
 
-/** True where every universe's value for this property is a number. */
+/** True where every universe's reading of this property is an amount of room. */
 const readable = (change: StyleChange): boolean =>
-	change.values.every((value) => numeralOf(value) !== undefined);
+	change.drawn.every((_, universe) => roomOf(change, universe) !== undefined);
 
 /**
  * Two universes, the lighter treatment first.
@@ -1709,9 +1799,15 @@ function emit(
 				? `Every variant but two. ${names} came out as ${out.classes.length === 1 ? "a class" : "classes"} and the layers switch between the two treatments these designs picked; a third variant would not be in the file.`
 				: `Which treatment. ${names} came out as ${out.classes.length === 1 ? "a class" : "classes"} — one place to edit, and every wearer follows — but a class holds one variant, and the style's others are not in the file.`,
 		);
-		lost.push(
-			"A style a rule handed a node. Wearing is read from the document, so a node dressed by an asserted sty_wears/3 carries its properties inlined and shares no class.",
-		);
+		// A wearer only the answer set names shares the class, and that is the
+		// point of reading it back — but it brings no *name* with it, because the
+		// document has no value of its own to have named one.
+		const derived = out.classes.filter((c) => c.derived.length > 0);
+		if (derived.length > 0) {
+			lost.push(
+				`Token names under ${derived.map((c) => `.${c.name}`).join(", ")}. A node an instance or a rule dressed wears the class like any other, but a property no wearer the document holds takes from the style reaches it as a literal rather than as the token it linked to.`,
+			);
+		}
 	}
 	return {
 		target: options.target,

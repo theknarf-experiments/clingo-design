@@ -116,7 +116,7 @@ import { heldPicks } from "./components.ts";
 import { formatDiagnostics, parseAtom } from "./atoms.ts";
 import { type Freedom, probeFreedom } from "./freedom.ts";
 import type { Frame } from "./geometry.ts";
-import type { Measurements } from "./measure.ts";
+import { type Measurements, measurementNotes } from "./measure.ts";
 import { type ModelScene, readModel, readSolved } from "./model.ts";
 import { type Switch, type Way, findWays } from "./relax.ts";
 import { STRENGTHS, type Scene, strengthOfLevel } from "./scene.ts";
@@ -277,6 +277,19 @@ export interface Exploration {
 	 * grounds, contributes nothing, and clingo mentions it.
 	 */
 	diagnostics: string;
+	/**
+	 * What the tool approximated about these designs, in the same words clingo
+	 * would use. Empty on almost every document.
+	 *
+	 * Beside the diagnostics rather than inside them because the source is
+	 * different — this is the tool remarking on its own arithmetic, not clingo
+	 * remarking on the program — and in the same band because the reader's
+	 * question is the same one: is anything about my rules not doing what it
+	 * looks like? Today there is exactly one entry, and it is the one
+	 * approximation that cannot announce itself where it happens; see
+	 * {@link measurementNotes}.
+	 */
+	approximations: string[];
 }
 
 /**
@@ -884,6 +897,15 @@ export class Explorer {
 			diagnostics: this.#diagnostics,
 			levels,
 		};
+		// Read off the designs that are actually shown, so it is a remark about
+		// what is on screen: a rule that only dresses a node in some universes
+		// says nothing about the ones that do not.
+		const noted = (universes: readonly Universe[]): string[] =>
+			measurementNotes(
+				scene,
+				universes.map((u) => u.model),
+				options.measurements,
+			);
 
 		// A document that expresses a preference is a different question, not a
 		// harder version of the same one: the answer is the near-optimal designs
@@ -909,6 +931,7 @@ export class Explorer {
 					ms: Date.now() - started,
 					solves,
 					...ranked.exploration,
+					approximations: noted(ranked.exploration.universes),
 				};
 			}
 		}
@@ -1005,6 +1028,7 @@ export class Explorer {
 		return {
 			...common,
 			ms: Date.now() - started,
+			approximations: noted(universes),
 			universes,
 			brave,
 			cautious,
@@ -1073,7 +1097,12 @@ export class Explorer {
 		poolSize: number,
 		seed: number,
 		countLimit: number,
-	): Promise<{ exploration: Omit<Exploration, keyof Common> | null; solves: number }> {
+	): Promise<{
+		// The approximations are the caller's: they are read off the universes
+		// this returns, so there is one place that decides what a remark is.
+		exploration: Omit<Exploration, keyof Common | "approximations"> | null;
+		solves: number;
+	}> {
 		const best = await session.solve({
 			models: 1,
 			mode: "optN",

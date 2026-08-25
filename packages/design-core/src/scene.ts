@@ -168,6 +168,15 @@ export const PROPS: Record<PropName, PropSpec> = {
 		styleable: true,
 		inherited: true,
 	},
+	// A `number`, not a length, and that is not an oversight: CSS reads a
+	// unitless line height as a multiple of the font size, which is what makes a
+	// type scale hold together when the size changes. The one place the
+	// difference bit — a breakpoint has to know which of two treatments is the
+	// tighter one, and a ratio cannot say on its own — is answered where that
+	// question is asked, by `ROOMINESS` in export.ts, which reads the leading in
+	// pixels. Typing it as a length instead would have offered `8px` in the
+	// inspector and let a scale of lengths link to it, to fix a comparison
+	// happening somewhere else.
 	lineHeight: {
 		label: "Line height",
 		type: "number",

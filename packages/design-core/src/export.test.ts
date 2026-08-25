@@ -518,6 +518,42 @@ test("a class carries only what every wearer draws", async () => {
 	assert.match(bare.text, /background: #abcdef;/, "the rectangle still takes its fill");
 });
 
+test("a wearer only the answer set names shares the class too", async () => {
+	// Wearing has two sources — `sty_doc/3` and anything a rule derives — and a
+	// class with one user was the old reading of the second. The document dresses
+	// two nodes; a rule dresses a third, and all three point at one block.
+	const base = dressed([{ parts: { ink: ref("accent"), size: lit("22px") } }]);
+	const scene: Scene = {
+		...base,
+		nodes: [
+			{
+				...base.nodes[0],
+				children: [
+					...(base.nodes[0].children ?? []),
+					text("c", "C", [20, 100, 200, 24], "Gamma", {}),
+				],
+			},
+		],
+		rules: `${RULES_HEADER}\nsty_wears(c,panel,ink). sty_wears(c,panel,size).\n`,
+	};
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const out = exportUniverse(scene, exploration.universes[0], { target: "html" });
+
+	// One block, three elements pointing at it, and the token name survives
+	// because a wearer the document holds is the one that named it.
+	assert.equal(block(out.text, ":where(.panel)"), "\tcolor: var(--accent);\n\tfont-size: 22px;");
+	assert.equal(out.text.match(/ panel"/g)?.length, 3);
+	assert.equal(out.text.match(/font-size: 22px;/g)?.length, 1, "and it is shared, not repeated");
+	// The class is all the derived wearer's type: its own rule holds none of it.
+	const cls = /class="(n\d+) panel" data-node="c"/.exec(out.text);
+	assert.ok(cls, "the rule's wearer carries the class");
+	assert.doesNotMatch(block(out.text, `.${cls[1]}`) ?? "", /font-size|color:/);
+	assert.ok(
+		out.lost.some((line) => /Token names under \.panel/.test(line)),
+		"what a derived wearer cannot bring is the name, and the list says so",
+	);
+});
+
 test("universes that differ only by a style are one artefact with a breakpoint", async () => {
 	const scene = typography();
 	const exploration = await explore(scene, directSolver, { limit: 8 });
@@ -577,7 +613,7 @@ test("a style that varies only in colour is a theme instead", async () => {
 	);
 });
 
-test("a style with no length, or with lengths that disagree, is refused", async () => {
+test("a style with no size, or with sizes that disagree, is refused", async () => {
 	for (const [variants, expected, boxes] of [
 		// A weight is not a distance: nothing says which of two is the narrow
 		// screen, so this is the same refusal a bare token gets.
@@ -586,7 +622,7 @@ test("a style with no length, or with lengths that disagree, is refused", async 
 				{ name: "Book", parts: { weight: lit("400") } },
 				{ name: "Bold", parts: { weight: lit("700") } },
 			],
-			/none of that is a length/,
+			/none of that is a size/,
 			false,
 		],
 		// One length grows where the other shrinks, so neither treatment is the
@@ -611,6 +647,40 @@ test("a style with no length, or with lengths that disagree, is refused", async 
 		assert.equal(out.note, verdict.reason);
 		assert.doesNotMatch(out.text, /@media/);
 	}
+});
+
+test("a line height is ordered by the leading it comes to, not by the ratio", async () => {
+	// The real responsive ramp: bigger type, tighter leading. Read as written,
+	// 1.5 -> 1.2 shrinks where 16px -> 24px grows, and the collapse would refuse
+	// a document that is the textbook case. Read as room on the page, 24px of
+	// leading becomes 28.8px and the two agree.
+	const ramp = dressed([
+		{ name: "Body", parts: { size: lit("16px"), lineHeight: lit("1.5") } },
+		{ name: "Display", parts: { size: lit("24px"), lineHeight: lit("1.2") } },
+	]);
+	const two = await explore(ramp, directSolver, { limit: 8 });
+	assert.equal(two.universes.length, 2);
+	const verdict = collapseSpace(ramp, two.universes);
+	assert.ok(!("reason" in verdict), `expected a collapse, got: ${JSON.stringify(verdict)}`);
+	assert.equal(verdict.kind, "breakpoint");
+	assert.match(verdict.note, /Body below \d+px and Display at or above it/);
+
+	// And a treatment whose only difference is the leading is orderable at all,
+	// which is the case the type table used to get wrong on its own: line height
+	// is a `number`, so nothing about it was a length.
+	const leading = dressed([
+		{ name: "Tight", parts: { lineHeight: lit("1.2") } },
+		{ name: "Airy", parts: { lineHeight: lit("1.8") } },
+	]);
+	const pair = await explore(leading, directSolver, { limit: 8 });
+	assert.equal(pair.universes.length, 2);
+	const collapsed = collapseSpace(leading, pair.universes);
+	assert.ok(!("reason" in collapsed), "a leading ramp is a ramp");
+	assert.match(collapsed.note, /Tight below \d+px and Airy at or above it/);
+	const out = exportSpace(leading, pair.universes, { target: "html" });
+	const media = /@media \(min-width: \d+px\) \{\n([\s\S]*?)\n\}/.exec(out.text);
+	assert.ok(media, "expected a media query");
+	assert.match(media[1], /line-height: 1.8;/);
 });
 
 test("a surface clips, in both targets", async () => {

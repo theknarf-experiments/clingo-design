@@ -15,6 +15,7 @@
  * is the table, and the solver selects a row from it through `lrowif/4`. See
  * `emitAsked` in compile.ts for the other half.
  */
+import type { ModelScene } from "./model.ts";
 import {
 	KINDS,
 	type PropName,
@@ -22,6 +23,7 @@ import {
 	type Scene,
 	type SceneNode,
 	type Sizing,
+	findStyle,
 	frameOf,
 	isLaidOut,
 	layoutLength,
@@ -30,7 +32,7 @@ import {
 	styleOf,
 	wornProps,
 } from "./scene.ts";
-import { flatten } from "./tree.ts";
+import { findInTree, flatten } from "./tree.ts";
 import {
 	type Picks,
 	type ResolveContext,
@@ -77,7 +79,11 @@ export interface MeasureAxis {
  * only places that know the encoding.
  */
 export interface Measured {
-	/** Most significant first; see {@link capAxes} for what that decides. */
+	/**
+	 * Most significant first — the wording before the treatment. See
+	 * {@link capAxes} for what the order decides, and {@link rowIndex} for why
+	 * the position of an axis is also part of how a row is addressed.
+	 */
 	axes: readonly MeasureAxis[];
 	/** One per combination: `rowCount(axes)` of them. */
 	sizes: readonly Size[];
@@ -189,6 +195,13 @@ export const MEASURE_BUDGET = 32;
  * for a text node it is the wording — a headline with forty alternatives is a
  * document that wants forty measurements, and refusing them all would be a
  * regression rather than a budget.
+ *
+ * Which makes the order the whole of the decision, and it has two answers
+ * because the two callers know different things. A leaf's axes are in
+ * {@link MEASURED_PROPS} order, declared: the host is choosing what to *measure*
+ * and cannot know what it would have found. A container's are sorted by
+ * {@link byInfluence} first, because by then every child has been measured and
+ * "which of these matters least" is a question with a number in it.
  */
 export function capAxes(
 	axes: readonly MeasureAxis[],
@@ -385,17 +398,100 @@ function couldHug(scene: Scene, node: SceneNode): boolean {
  * `dropped` gathers both budgets — the host's, from the table, and this side's,
  * from the union — so whatever the program says about a node names every
  * variable its box ignores, wherever it was given up.
+ *
+ * Where the union is over the budget, {@link byInfluence} decides the order the
+ * cap eats through, and only then: a table nothing is dropped from is the same
+ * table whatever order it is written in, so a document under the budget — which
+ * is nearly all of them — gets exactly the program it got before.
  */
 export function askedAxes(
 	scene: Scene,
 	node: SceneNode,
 	measured?: Measurements,
 ): { axes: MeasureAxis[]; dropped: string[] } {
-	const capped = capAxes(dedupe(rawAskedAxes(scene, node, measured)));
+	const raw = dedupe(rawAskedAxes(scene, node, measured));
+	const capped = capAxes(
+		rowCount(raw) > MEASURE_BUDGET ? byInfluence(scene, node, raw, measured) : raw,
+	);
 	const already = measuredTable(node, measured)?.dropped ?? [];
 	return already.length === 0
 		? capped
 		: { axes: capped.axes, dropped: [...already, ...capped.dropped] };
+}
+
+/**
+ * How far this axis alone moves what the node asks to be.
+ *
+ * The one number the drop order needs, and it is measured rather than guessed:
+ * `naturalSize` is exactly the arithmetic the rows are made of, so this asks the
+ * real question — take this variable through its alternatives, leave everything
+ * else where the table would read it, and see how much the box travels. Which
+ * makes it honest about the container's own arithmetic for free: a wording
+ * inside a fixed-size child moves nothing, and neither does one whose width is
+ * never the widest on the cross axis.
+ *
+ * Both dimensions, added, because a column's direction may itself be one of the
+ * picks and there is then no one axis to call the interesting one.
+ *
+ * First-order, and deliberately: it holds the other axes at their first
+ * alternative rather than crossing them, which is the same convention
+ * {@link rowIndex} reads a dropped axis at, and it costs one evaluation per
+ * alternative instead of the product this exists to avoid.
+ */
+function influence(
+	node: SceneNode,
+	axis: MeasureAxis,
+	measured: Measurements | undefined,
+	context: ResolveContext,
+): number {
+	let low = Number.POSITIVE_INFINITY;
+	let high = Number.NEGATIVE_INFINITY;
+	for (let i = 0; i < axis.count; i++) {
+		const size = naturalSize(node, measured, {
+			...context,
+			picks: { ...context.picks, [axis.variable]: i },
+		});
+		const total = size.width + size.height;
+		low = Math.min(low, total);
+		high = Math.max(high, total);
+	}
+	return high - low;
+}
+
+/**
+ * The axes most worth keeping first — the ones whose alternatives disagree most
+ * about the box.
+ *
+ * The cap drops off the tail, so the tail is what this decides. Before it, the
+ * order was discovery order, which for a container is *tree* order: a column of
+ * eight three-wording headings is 6561 combinations capped to 27 rows, and which
+ * five children lost their wordings was whichever five came later in the
+ * document. Measured on exactly that document — the four quiet headings first
+ * and the four that move by hundreds of pixels last — tree order left a mean
+ * error of 268px and a worst case of 428px against the exact size, and this
+ * order leaves 1.75px and 90px. Same rows, same budget, same arithmetic; only
+ * which axes survive it differs.
+ *
+ * Ties keep discovery order, so a document whose axes all matter equally is
+ * still written in the order it is read in.
+ */
+function byInfluence(
+	scene: Scene,
+	node: SceneNode,
+	axes: readonly MeasureAxis[],
+	measured: Measurements | undefined,
+): MeasureAxis[] {
+	// The context `emitAsked` measures its rows in, so an axis is weighed in the
+	// arithmetic it will be read in — a gap that names a spacing token above all,
+	// which without the tokens here would look like an axis that moves nothing.
+	const context: ResolveContext = { tokens: scene.tokens, picks: {} };
+	const ranked = axes.map((axis, at) => ({
+		axis,
+		at,
+		moves: influence(node, axis, measured, context),
+	}));
+	ranked.sort((a, b) => b.moves - a.moves || a.at - b.at);
+	return ranked.map((entry) => entry.axis);
 }
 
 function rawAskedAxes(
@@ -513,6 +609,78 @@ export function naturalSize(
 /** The nodes the host should measure, at any depth. */
 export function toMeasure(nodes: readonly SceneNode[]): SceneNode[] {
 	return flatten(nodes).filter(autoSizes);
+}
+
+/* ------------------------------------------------------------------ */
+/* The one approximation that cannot report itself                     */
+/* ------------------------------------------------------------------ */
+
+/** How many wearers a note names before it starts counting them instead. */
+const NAMED = 4;
+
+/**
+ * Boxes measured in a font the answer set does not use.
+ *
+ * Every other approximation in this file announces itself where the arithmetic
+ * happens: a dropped axis is a variable this table left out, and `emitAsked`
+ * writes it into the generated program as a comment. This one has nothing to
+ * drop. A rule that asserts `sty_wears/3` dresses a node the measurement pass
+ * has already measured — that pass runs before the solve and reads the
+ * *document*, where no such wearing exists — so there was no axis to give up and
+ * nothing was rounded off. The box is simply the wrong box, quietly, and the
+ * only place the condition exists at all is the answer set: `sty_derived/3` is
+ * precisely "wearing the document does not know about".
+ *
+ * So the signal is read back rather than derived here, and it costs no atoms on
+ * a document nobody dressed by hand. Three things have to be true before a word
+ * is said, and each removes a way of crying wolf:
+ *
+ *   - the node's size came from a **measurement** — a table the host filled in.
+ *     Where nothing measured it there is no measurement to be wrong;
+ *   - the wearing covers a property the measurement **reads**. A rule that hands
+ *     a heading a fill changes no box;
+ *   - and the node is one the **document** holds. An instance's copy is in
+ *     `sty_derived/3` too and is never measured: its size comes from the
+ *     definition's own table, which the document did measure, style included.
+ *
+ * Worded as clingo words a remark about a program that ran anyway, `info:` and
+ * all, because that is what this is and because it shares the panel's band and
+ * its count with the ones clingo writes — see `countDiagnostics`.
+ */
+export function measurementNotes(
+	scene: Scene,
+	models: readonly Pick<ModelScene, "wears">[],
+	measured?: Measurements,
+): string[] {
+	/** One note per style and property set; the nodes are what accumulates. */
+	const grouped = new Map<string, { style: string; props: PropName[]; nodes: string[] }>();
+	for (const model of models) {
+		for (const [style, wearers] of Object.entries(model.wears)) {
+			for (const wearer of wearers) {
+				const node = findInTree(scene.nodes, wearer.node);
+				if (!node || !measuredTable(node, measured)) continue;
+				const props = MEASURED_PROPS.filter((prop) => wearer.props.includes(prop));
+				if (props.length === 0) continue;
+				const key = `${style}\u0000${props.join(",")}`;
+				const at = grouped.get(key);
+				if (!at) grouped.set(key, { style, props, nodes: [wearer.node] });
+				else if (!at.nodes.includes(wearer.node)) at.nodes.push(wearer.node);
+			}
+		}
+	}
+	return [...grouped.values()].map(({ style, props, nodes }) => {
+		const named = findStyle(scene.styles, style)?.name ?? style;
+		const rest = nodes.length - NAMED;
+		const one = nodes.length === 1;
+		return (
+			`info: a rule dresses ${nodes.slice(0, NAMED).join(", ")}` +
+			`${rest > 0 ? ` and ${rest} more` : ""} in “${named}”, which the` +
+			" document does not say. Text is measured before the solve and from" +
+			` the document, so ${one ? "that box hugs" : "those boxes hug"} the ` +
+			props.map((prop) => PROPS[prop].label.toLowerCase()).join(" and ") +
+			` the document gives ${one ? "it" : "them"}, not the treatment's.`
+		);
+	});
 }
 
 export interface FontSpec {

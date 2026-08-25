@@ -875,6 +875,30 @@ test("a hand-written rule can dress nodes it created", async () => {
 	assert.deepEqual(sizes, ["20px", "44px"]);
 });
 
+test("wearing a rule asserted is read back out of the answer set", async () => {
+	// The document cannot know it, so the answer set is the only place it
+	// exists — and two readers need it: the export, which shares one class
+	// between wearers, and the measurement pass, which sized this node from the
+	// document and has to admit which font it used.
+	let scene = page(1);
+	scene = {
+		...scene,
+		styles: [style("h", [{ parts: { size: lit("20px"), weight: lit("700") } }])],
+		rules: "sty_wears(t1,h,size). sty_wears(t1,h,weight).\n",
+	};
+	const [model] = (await models(scene)).map(readModel);
+	assert.deepEqual(model.wears, { h: [{ node: "t1", props: ["size", "weight"] }] },
+		"by style, and the properties in table order",
+	);
+	assert.equal(model.byId.t1.rendered.size, "20px", "and it really is worn");
+
+	// The document's own wearing is *not* in there: it is already in the
+	// document, and repeating it in every answer set would be bytes for nothing.
+	const own = (await models(wear(scene, ["t1"], "h"))).map(readModel);
+	assert.deepEqual(own[0].wears, {});
+	assert.equal(own[0].byId.t1.rendered.size, "20px");
+});
+
 test("the style rules add nothing clingo wants to remark on", async () => {
 	let scene = page(1);
 	scene = {
@@ -1187,7 +1211,14 @@ test("a style compiles to facts and never changes the shape of the program", () 
 	assert.deepEqual(rulesOf(styled), rulesOf(plain));
 
 	assert.ok(styled.includes("alt(sty(h),0)."), "the variants are alternatives");
-	assert.ok(styled.includes("sty_wears(t1,h,size)."), "and the wearer is a fact");
+	assert.ok(
+		styled.includes("sty_doc(t1,h,size)."),
+		"and the document's own wearing is a fact",
+	);
+	assert.ok(
+		!styled.includes("sty_wears(t1,h,size)."),
+		"sty_wears/3 is the union of that and what a rule derives, so it is a rule",
+	);
 	assert.ok(
 		styled.includes(`alt(${stylePartVar("h", 1, "size")},0).`),
 		"a linked part becomes a variable",

@@ -19,6 +19,14 @@ import { countDiagnostics, formatDiagnostics } from "./atoms.ts";
 import { directSolver } from "./directSolver.ts";
 import { Explorer, explore } from "./explore.ts";
 import { addNode, makeNode, setProp } from "./edits.ts";
+import {
+	type Measured,
+	type Size,
+	capAxes,
+	measureAxes,
+	rowCount,
+	toMeasure,
+} from "./measure.ts";
 import { emptyScene, type Scene } from "./scene.ts";
 import { TEMPLATES } from "./templates/index.ts";
 import { lit } from "./values.ts";
@@ -129,6 +137,37 @@ test("every shipped template is clean, so a badge always means your own rule", a
 		const { diagnostics } = await explore(template.create(), directSolver, {
 			limit: 2,
 			sample: "first",
+		});
+		assert.equal(diagnostics, "", `${template.id}: ${diagnostics}`);
+	}
+});
+
+test("and clean once the text is measured, which is the only way the studio runs", async () => {
+	// The loop above measures nothing, so every `lask/3` is a plain fact — and
+	// that is not the program the app grounds. A measured child under a layout
+	// has a *table*, no row of which is decidable at grounding, so an aggregate
+	// over it has to be ground for the case where none holds: a maximum over
+	// nothing, plus padding, which clingo remarked on twice per axis on every
+	// document with a hugging container in it. Twenty of them on `typography`,
+	// none of which anyone could act on, and a badge that reads 20 is a badge
+	// nobody reads. See `lbiggest` in the layout rules.
+	for (const template of TEMPLATES) {
+		const scene = template.create();
+		const measurements: Record<string, Measured> = {};
+		for (const node of toMeasure(scene.nodes)) {
+			// The host's own table, built exactly as `measureScene` builds it —
+			// only the pixels are invented, and no diagnostic can depend on those.
+			const { axes, dropped } = capAxes(measureAxes(scene, node));
+			const sizes: Size[] = [];
+			for (let row = 0; row < rowCount(axes); row++) {
+				sizes.push({ width: 120 + row * 13, height: 24 + row * 7 });
+			}
+			measurements[node.id] = dropped.length > 0 ? { axes, sizes, dropped } : { axes, sizes };
+		}
+		const { diagnostics } = await explore(scene, directSolver, {
+			limit: 2,
+			sample: "first",
+			measurements,
 		});
 		assert.equal(diagnostics, "", `${template.id}: ${diagnostics}`);
 	}

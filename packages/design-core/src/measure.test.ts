@@ -14,7 +14,9 @@ import {
 } from "./edits.ts";
 import { explore } from "./explore.ts";
 import {
+	type Measured,
 	type Measurements,
+	askedAxes,
 	askedSize,
 	autoSizes,
 	capAxes,
@@ -465,6 +467,133 @@ test("the solver reads exactly one row, and it is the right one", async () => {
 	}
 	// 20 of padding around each measured box, in odometer order.
 	assert.deepEqual(widths, [60, 100, 120, 220]);
+});
+
+test("over the budget, a container drops the axes that move it least", () => {
+	// The claim, as a measurement: the drop order is worth deciding, and this is
+	// the one it is decided by. A column of eight three-wording headings is 6561
+	// combinations capped to 27 rows, so five children lose their wordings — and
+	// which five used to be whichever five came later in the document.
+	const spreads = [
+		[100, 101, 102],
+		[100, 100, 103],
+		[100, 102, 101],
+		[100, 101, 100],
+		[100, 180, 260],
+		[100, 300, 500],
+		[100, 140, 190],
+		[100, 220, 340],
+	];
+	let scene: Scene = { ...emptyScene(), nodes: [] };
+	scene = addNode(
+		scene,
+		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "col" }),
+	);
+	const measurements: Record<string, Measured> = {};
+	spreads.forEach((widths, i) => {
+		scene = addNodeTo(scene, "col", {
+			...makeNode("text", { x: 0, y: 0, width: 100, height: 20 }, { id: `t${i}` }),
+			props: { text: [lit("a"), lit("b"), lit("c")] },
+		});
+		measurements[`t${i}`] = {
+			axes: [{ variable: propVar(`t${i}`, "text"), count: 3 }],
+			sizes: widths.map((width) => ({ width, height: 20 })),
+		};
+	});
+	scene = setLayout(
+		scene,
+		"col",
+		makeLayout({ direction: "column", gap: 8, padding: 12 }),
+	);
+	const col = findInTree(scene.nodes, "col");
+	assert.ok(col);
+
+	const { axes, dropped } = askedAxes(scene, col, measurements);
+	assert.equal(rowCount(axes), 27, "three axes of three, inside the budget of 32");
+	assert.deepEqual(
+		axes.map((axis) => axis.variable),
+		[propVar("t5", "text"), propVar("t7", "text"), propVar("t4", "text")],
+		"the three whose wordings move the column most, biggest first",
+	);
+	assert.equal(dropped.length, 5);
+
+	// And the cost of the approximation, over every universe there is. The same
+	// budget in tree order leaves a mean error of 268px and a worst case of 428.
+	const context = { tokens: scene.tokens, picks: {} };
+	const rows = new Map<number, ReturnType<typeof naturalSize>>();
+	for (let row = 0; row < rowCount(axes); row++) {
+		rows.set(row, naturalSize(col, measurements, { ...context, picks: rowPicks(axes, row) }));
+	}
+	let total = 0;
+	let worst = 0;
+	let universes = 0;
+	for (let n = 0; n < 3 ** 8; n++) {
+		const picks: Record<string, number> = {};
+		let rest = n;
+		for (let i = 7; i >= 0; i--) {
+			picks[propVar(`t${i}`, "text")] = rest % 3;
+			rest = Math.floor(rest / 3);
+		}
+		const exact = naturalSize(col, measurements, { ...context, picks });
+		const got = rows.get(rowIndex(axes, picks));
+		assert.ok(got);
+		const off = Math.abs(got.width - exact.width) + Math.abs(got.height - exact.height);
+		total += off;
+		worst = Math.max(worst, off);
+		universes++;
+	}
+	assert.equal(universes, 6561);
+	assert.ok(total / universes < 2, `mean error ${total / universes}px`);
+	assert.ok(worst <= 90, `worst error ${worst}px`);
+});
+
+test("a style a rule handed a measured node is reported, since nothing was dropped", async () => {
+	// The one approximation with no axis to give up: the pass that measured this
+	// node ran before the solve and read the document, where the wearing does
+	// not exist. So there is no comment to write into the program and the signal
+	// has to come back out of the answer set.
+	let scene = styled({
+		styles: [heading([{ parts: { size: lit("40px"), weight: lit("800") } }])],
+	});
+	// Nobody wears it in the document; a rule dresses the one measured node.
+	scene = setStyle(scene, ["t"], undefined);
+	scene = { ...scene, rules: "sty_wears(t,head,size). sty_wears(t,head,weight).\n" };
+	const measurements: Measurements = { t: oneSize({ width: 60, height: 20 }) };
+
+	const out = await explore(scene, directSolver, { sample: "first", measurements });
+	assert.equal(out.diagnostics, "", "clingo has nothing to say: the rules are fine");
+	assert.deepEqual(out.approximations, [
+		"info: a rule dresses t in “Heading”, which the document does not say." +
+			" Text is measured before the solve and from the document, so that box" +
+			" hugs the size and weight the document gives it, not the treatment's.",
+	]);
+	// It is a remark, not a refusal: the design is still there, and the box is
+	// still the one the measurement gave.
+	assert.equal(out.universes[0].model.byId.t.rendered.size, "40px");
+	assert.equal(out.universes[0].solved.t?.width, 60);
+
+	// And the three ways of not being worth a word.
+	const quiet = async (scene: Scene, measured?: Measurements) =>
+		(await explore(scene, directSolver, { sample: "first", measurements: measured }))
+			.approximations;
+	assert.deepEqual(
+		await quiet(scene),
+		[],
+		"nothing measured it, so there is no measurement to be wrong",
+	);
+	assert.deepEqual(
+		await quiet(
+			{ ...scene, rules: "sty_wears(t,head,ink).\n", styles: [heading([{ parts: { ink: lit("#ff0000") } }])] },
+			measurements,
+		),
+		[],
+		"a treatment the measurement does not read changes no box",
+	);
+	assert.deepEqual(
+		await quiet({ ...setStyle(scene, ["t"], "head"), rules: "" }, measurements),
+		[],
+		"and the document's own wearing was measured with the style, as always",
+	);
 });
 
 test("an axis over the budget is dropped, not truncated", () => {

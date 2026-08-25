@@ -22,6 +22,7 @@ import type { Frame } from "./geometry.ts";
 import {
 	KINDS,
 	type NodeKind,
+	PROP_NAMES,
 	PROPS,
 	type PropName,
 	sharedPropsOfKinds,
@@ -41,6 +42,14 @@ export interface ModelNode {
 	/** What it draws with: final text per property, tokens already followed. */
 	rendered: Partial<Record<PropName, string>>;
 	children: ModelNode[];
+}
+
+/** A node wearing a style the document does not say it wears. */
+export interface ModelWearer {
+	/** The node id, which may be an instance part — `inst(i,label)`. */
+	node: string;
+	/** Which of the style's properties it takes from it, in table order. */
+	props: PropName[];
 }
 
 /** One alternative of a variable a rule minted. */
@@ -77,6 +86,22 @@ export interface ModelScene {
 	 * would have nothing to offer, dim or pin.
 	 */
 	variables: Record<string, ModelAlternative[]>;
+	/**
+	 * Wearing the answer set knows about and the document does not, by style id —
+	 * `sty_derived/3`.
+	 *
+	 * Two ways to be in here, and the reading is the same for both: an
+	 * instance's copy of a definition part that wears a style, and a node a
+	 * hand-written rule dressed. Only this half is shown, because the document's
+	 * own wearing is already in the document — the same argument as
+	 * {@link variables}.
+	 *
+	 * Read by the export, which cannot otherwise share the class with a wearer
+	 * the document never named, and by the studio, which measures text from the
+	 * document *before* this solve and so has to admit which boxes it sized in
+	 * the wrong font.
+	 */
+	wears: Record<string, ModelWearer[]>;
 }
 
 /**
@@ -134,6 +159,8 @@ interface Facts {
 	groups: Map<string, string[]>;
 	/** variable key -> solver index -> literal id */
 	variables: Map<string, Map<number, string>>;
+	/** style id -> node id -> the properties it takes from that style */
+	wears: Map<string, Map<string, Set<PropName>>>;
 }
 
 function collect(atoms: readonly string[]): Facts {
@@ -148,6 +175,7 @@ function collect(atoms: readonly string[]): Facts {
 		visible: new Set(),
 		groups: new Map(),
 		variables: new Map(),
+		wears: new Map(),
 	};
 	for (const text of atoms) {
 		const atom = parseAtom(text);
@@ -216,6 +244,18 @@ function collect(atoms: readonly string[]): Facts {
 				let alts = facts.variables.get(a);
 				if (!alts) facts.variables.set(a, (alts = new Map()));
 				alts.set(index, c);
+				break;
+			}
+			// Wearing the document did not state. Keyed by the style, because both
+			// readers ask "who wears this one" rather than "what does this node
+			// wear" — though a rule may well answer the second with two.
+			case "sty_derived/3": {
+				if (!(c in PROPS)) break;
+				let nodes = facts.wears.get(b);
+				if (!nodes) facts.wears.set(b, (nodes = new Map()));
+				let props = nodes.get(a);
+				if (!props) nodes.set(a, (props = new Set()));
+				props.add(c as PropName);
 				break;
 			}
 		}
@@ -319,7 +359,20 @@ export function readModel(atoms: readonly string[]): ModelScene {
 			});
 	}
 
-	return { roots, byId, groups, variables };
+	// In table order rather than in the order the atoms arrived, so a class's
+	// declarations come out in the same order for a rule's wearer as for the
+	// document's.
+	const wears: Record<string, ModelWearer[]> = {};
+	for (const [style, nodes] of facts.wears) {
+		wears[style] = [...nodes]
+			.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+			.map(([node, props]) => ({
+				node,
+				props: PROP_NAMES.filter((prop) => props.has(prop)),
+			}));
+	}
+
+	return { roots, byId, groups, variables, wears };
 }
 
 /**
