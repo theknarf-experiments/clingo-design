@@ -1049,9 +1049,15 @@ export function Editor({
 			<Annotations notes={notes} />
 
 			{/* What the selection may still be dragged along. End ticks where
-			    something stops it; an open end where nothing does. */}
+			    something stops it; an open end where nothing does.
+
+			    `data-role=travel`, not `freedom`: that role is the status line's
+			    readout of the same thing, and this sat earlier in document order,
+			    so a bare querySelector('[data-role=freedom]') found this
+			    decorative svg and read its empty textContent. A regression script
+			    asserted blank for however long that had been true. */}
 			{travelMarks.length > 0 ? (
-				<svg className={styles.travel} data-role="freedom" aria-hidden="true">
+				<svg className={styles.travel} data-role="travel" aria-hidden="true">
 					{travelMarks.map((mark) => {
 						const horizontal = mark.axis === "x";
 						const a = horizontal

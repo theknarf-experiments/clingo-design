@@ -4,6 +4,7 @@ import {
 	PROPS,
 	STYLE_PROPS,
 	VALUE_TYPES,
+	type ModelWearer,
 	type Picks,
 	type PropName,
 	type Scene,
@@ -56,6 +57,17 @@ export interface StylesProps {
 	why?: (variable: string) => WhyRow | undefined;
 	/** So "worn by 4" can put those four in the inspector. */
 	onSelectionChange?: (ids: string[]) => void;
+	/**
+	 * Wearing the answer set knows about and the document does not, by style id.
+	 *
+	 * A style can be worn by something that is not a layer — an instance's copy
+	 * of a styled definition part is `inst(i,label)`, and a hand-written rule can
+	 * dress a node it invented. Neither is in `scene`, so counting the document's
+	 * wearers called such a style unworn. It is a *different subject* rather than
+	 * a bigger number, which is why it gets its own sentence and no select
+	 * button: there is nothing in the layer list to select.
+	 */
+	derivedWears?: Readonly<Record<string, readonly ModelWearer[]>>;
 }
 
 /**
@@ -216,6 +228,7 @@ function StyleTable({
 	onPin,
 	why,
 	onSelectionChange,
+	derivedWears,
 }: {
 	scene: Scene;
 	style: Style;
@@ -228,6 +241,7 @@ function StyleTable({
 	onPin: StylesProps["onPin"];
 	why?: StylesProps["why"];
 	onSelectionChange?: (ids: string[]) => void;
+	derivedWears?: StylesProps["derivedWears"];
 }) {
 	const variable = styleVar(style.id);
 	const active = picks[variable];
@@ -237,6 +251,8 @@ function StyleTable({
 	const props = styleProps(style);
 	const spare = STYLE_PROPS.filter((p) => !props.includes(p));
 	const wearers = flatten(scene.nodes).filter((n) => n.style === style.id);
+	/** Worn, but not by anything in the layer list — see the prop's comment. */
+	const derived = derivedWears?.[style.id] ?? [];
 	const branches = style.variants.length > 1;
 	/**
 	 * Whether the solver's answer about this variable says anything.
@@ -286,6 +302,20 @@ function StyleTable({
 					>
 						worn by {wearers.length}
 					</button>
+				) : derived.length > 0 ? (
+					// Worn, and not by a layer. No button, because there is nothing in
+					// the layer list to select: an instance's copy of a styled
+					// definition part and a node a rule invented are both only in the
+					// answer set.
+					<span
+						className={styles.wearers}
+						data-role="derived-wearers"
+						title={`Not from the layer list: ${derived
+							.map((w) => w.node)
+							.join(", ")}`}
+					>
+						worn by {derived.length} the rules dress
+					</span>
 				) : (
 					<span className={styles.unworn} data-role="unworn">
 						worn by nothing
@@ -553,6 +583,7 @@ export function Styles({
 	onPin,
 	why,
 	onSelectionChange,
+	derivedWears,
 }: StylesProps) {
 	return (
 		<div className={styles.styles} data-role="styles">
@@ -592,6 +623,7 @@ export function Styles({
 					onPin={onPin}
 					why={why}
 					onSelectionChange={onSelectionChange}
+					derivedWears={derivedWears}
 				/>
 			))}
 		</div>

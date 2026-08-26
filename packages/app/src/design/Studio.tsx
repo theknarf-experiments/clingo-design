@@ -1401,6 +1401,7 @@ export function Studio({
 								onPin={pin}
 								why={whyFor}
 								onSelectionChange={selectionIds}
+								derivedWears={answer?.wears}
 							/>
 						) : (
 							<Constraints

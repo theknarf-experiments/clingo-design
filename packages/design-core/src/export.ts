@@ -298,6 +298,25 @@ function docNode(index: DocIndex, id: string): SceneNode | undefined {
  * universe picked. Without that a styled fill naming `accent` would come out as
  * the hex — the one thing this file exists to avoid — and it would be a class
  * full of hex codes, which is worse than an inline one.
+ *
+ * Four of `parseVariable`'s six tags fall through to `undefined`, and only one
+ * of those is a hole worth watching. Measured before believing it: every caller
+ * passes a `propVar` or a `frameVar` — nothing constructs a layout, constraint
+ * or style variable and asks this — so the fall-through is unreachable rather
+ * than lossy. That is not an accident of the callers:
+ *
+ *   * `layout` (`lval(N,gap)`) and `constraint` (`cval(C)`) both drive
+ *     *geometry*, and this exporter is positioned. A gap becomes solved
+ *     coordinates and lands as `left`/`top` in literal pixels, so there is no
+ *     declaration for a token name to survive into. THIS IS THE ONE TO
+ *     REVISIT: a flow-layout emitter would write a real `gap`, and then a gap
+ *     naming a length token wants `var(--spacing)` and would silently get the
+ *     number instead.
+ *   * `style` (`sty(S)`) has no `Value` to return at all — a style's
+ *     alternatives are whole records, not terms. A style's *parts* are read
+ *     through the `prop` branch above, which is why a styled fill keeps its
+ *     token name; the part keys `spart(S,I,P)` are deliberately absent from
+ *     `parseVariable` for the same reason.
  */
 function documentValue(
 	index: DocIndex,

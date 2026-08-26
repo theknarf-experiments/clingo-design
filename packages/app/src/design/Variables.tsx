@@ -12,6 +12,7 @@ import {
 	resolveValue,
 	setTokenValue,
 	tokenVar,
+	type ModelWearer,
 } from "@clingo-design/design-core";
 
 import { Styles } from "./Styles";
@@ -38,6 +39,14 @@ export interface VariablesProps {
 	why?: (variable: string) => WhyRow | undefined;
 	/** So a style can put its wearers in the inspector — see `Styles`. */
 	onSelectionChange?: (ids: string[]) => void;
+	/**
+	 * Wearing the answer set knows about and the document does not, by style id.
+	 *
+	 * `ModelScene.wears` — an instance's copy of a styled definition part, or a
+	 * node a hand-written rule dressed. The panel needs it to stop saying "worn
+	 * by nothing" about a style that is worn, just not by a layer.
+	 */
+	derivedWears?: Readonly<Record<string, readonly ModelWearer[]>>;
 }
 
 /**
@@ -73,6 +82,7 @@ export function Variables({
 	onPin,
 	why,
 	onSelectionChange,
+	derivedWears,
 }: VariablesProps) {
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 
@@ -90,6 +100,7 @@ export function Variables({
 				onPin={onPin}
 				why={why}
 				onSelectionChange={onSelectionChange}
+				derivedWears={derivedWears}
 			/>
 
 			<h3 className={styles.section}>Values</h3>
