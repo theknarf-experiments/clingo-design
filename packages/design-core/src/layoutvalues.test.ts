@@ -21,7 +21,21 @@ import {
 	makeLayout,
 } from "./scene.ts";
 import { findInTree, mapTree } from "./tree.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { type Token, type Value, lit, ref, single } from "./values.ts";
+
+/**
+ * Sizes go in as pixels and arrangements come back as pixels.
+ *
+ * The same seam `layout.test.ts` draws, and for the same reason: what is being
+ * checked here is a sum a reader can do in their head — "10 padding + 100 wide
+ * + 10 gap" — and there is nothing to be learned from writing it at 9525 times
+ * the size. The settings themselves stay exactly as they were, because a layout
+ * setting is a `px` string a designer typed and those did not change.
+ */
+const P = EMU_PER_PX;
+
+const px = (n: number): number => n * P;
 
 /** A hugging row of two rects, whose settings the caller supplies. */
 function row(
@@ -31,7 +45,9 @@ function row(
 	let scene: Scene = { ...emptyScene(), tokens, nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 400, height: 300 }, { id: "box" }),
+		makeNode("frame", { x: 0, y: 0, width: px(400), height: px(300) }, {
+			id: "box",
+		}),
 	);
 	for (const [id, w, h] of [
 		["a", 100, 40],
@@ -40,7 +56,7 @@ function row(
 		scene = addNodeTo(
 			scene,
 			"box",
-			makeNode("rect", { x: 0, y: 0, width: w, height: h }, { id }),
+			makeNode("rect", { x: 0, y: 0, width: px(w), height: px(h) }, { id }),
 		);
 	}
 	return {
@@ -58,10 +74,23 @@ const universes = async (scene: Scene): Promise<Universe[]> => {
 	return result.universes;
 };
 
+type Solved = Readonly<Record<string, Record<string, number | undefined>>>;
+
+/** A solved arrangement's numbers, in pixels. */
+const pixels = (solved: Solved): Solved =>
+	Object.fromEntries(
+		Object.entries(solved).map(([id, frame]) => [
+			id,
+			Object.fromEntries(
+				Object.entries(frame).map(([dim, emu]) => [dim, (emu ?? 0) / P]),
+			),
+		]),
+	);
+
 const one = async (scene: Scene) => {
 	const list = await universes(scene);
 	assert.equal(list.length, 1, "expected a settled document");
-	return list[0].solved;
+	return pixels(list[0].solved);
 };
 
 /** Each universe's arrangement, as a comparable string. */
@@ -70,7 +99,7 @@ const shapes = (list: Universe[]): string[] =>
 		.map((u) =>
 			["box", "a", "b"]
 				.map((id) => {
-					const f = u.solved[id] ?? {};
+					const f = pixels(u.solved)[id] ?? {};
 					return `${id}:${f.x},${f.y},${f.width},${f.height}`;
 				})
 				.join(" "),
@@ -94,9 +123,13 @@ test("a direction with two alternatives is two designs, not one", async () => {
 	assert.equal(list.length, 2, "a row and a column are different designs");
 	const [asColumn, asRow] = shapes(list);
 	assert.notEqual(asRow, asColumn);
-	const widths = list.map((u) => u.solved.box.width).sort((x, y) => (x ?? 0) - (y ?? 0));
+	const widths = list
+		.map((u) => pixels(u.solved).box.width)
+		.sort((x, y) => (x ?? 0) - (y ?? 0));
 	assert.deepEqual(widths, [120, 190], "one runs across, one runs down");
-	const heights = list.map((u) => u.solved.box.height).sort((x, y) => (x ?? 0) - (y ?? 0));
+	const heights = list
+		.map((u) => pixels(u.solved).box.height)
+		.sort((x, y) => (x ?? 0) - (y ?? 0));
 	assert.deepEqual(heights, [60, 90]);
 });
 
@@ -111,7 +144,9 @@ test("a gap that names a token is a spacing scale", async () => {
 	];
 	const list = await universes(row({ gap: [ref("space")] }, tokens));
 	assert.equal(list.length, 2, "compact and comfortable");
-	const widths = list.map((u) => u.solved.box.width).sort((x, y) => (x ?? 0) - (y ?? 0));
+	const widths = list
+		.map((u) => pixels(u.solved).box.width)
+		.sort((x, y) => (x ?? 0) - (y ?? 0));
 	assert.deepEqual(widths, [184, 204], "180 of children and padding, plus the gap");
 });
 
@@ -128,7 +163,9 @@ test("one token drives the gap of several containers at once", async () => {
 test("hugging or not is itself a choice the document can hold", async () => {
 	const list = await universes(row({ sizing: [lit("hug"), lit("fixed")] }));
 	assert.equal(list.length, 2);
-	const widths = list.map((u) => u.solved.box.width).sort((x, y) => (x ?? 0) - (y ?? 0));
+	const widths = list
+		.map((u) => pixels(u.solved).box.width)
+		.sort((x, y) => (x ?? 0) - (y ?? 0));
 	assert.deepEqual(widths, [190, 400], "hugged, or the frame it was drawn at");
 });
 
@@ -137,7 +174,9 @@ test("justification varies like anything else", async () => {
 		row({ sizing: single("fixed"), justify: [lit("start"), lit("end")] }),
 	);
 	assert.equal(list.length, 2);
-	const first = list.map((u) => u.solved.a.x).sort((x, y) => (x ?? 0) - (y ?? 0));
+	const first = list
+		.map((u) => pixels(u.solved).a.x)
+		.sort((x, y) => (x ?? 0) - (y ?? 0));
 	assert.deepEqual(first, [10, 220], "against the near padding, or the far one");
 });
 
@@ -150,7 +189,9 @@ test("a child's grow is two named options rather than a checkbox", async () => {
 	);
 	const list = await universes(scene);
 	assert.equal(list.length, 2);
-	const widths = list.map((u) => u.solved.b.width).sort((x, y) => (x ?? 0) - (y ?? 0));
+	const widths = list
+		.map((u) => pixels(u.solved).b.width)
+		.sort((x, y) => (x ?? 0) - (y ?? 0));
 	assert.deepEqual(widths, [60, 270], "its own size, or all that is left");
 });
 
@@ -163,9 +204,11 @@ test("a child's alignment can vary, and absence still follows the container", as
 	);
 	const list = await universes(scene);
 	assert.equal(list.length, 2);
-	const ys = list.map((u) => u.solved.b.y).sort((x, y) => (x ?? 0) - (y ?? 0));
+	const ys = list
+		.map((u) => pixels(u.solved).b.y)
+		.sort((x, y) => (x ?? 0) - (y ?? 0));
 	assert.deepEqual(ys, [10, 270], "with its siblings, or against the far edge");
-	for (const u of list) assert.equal(u.solved.a.y, 10, "a said nothing");
+	for (const u of list) assert.equal(pixels(u.solved).a.y, 10, "a said nothing");
 });
 
 test("giving a child's say back leaves the container in charge", async () => {
@@ -227,7 +270,9 @@ test("a layout nobody can see is not a variable", () => {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 100, height: 100 }, { id: "empty" }),
+		makeNode("frame", { x: 0, y: 0, width: px(100), height: px(100) }, {
+			id: "empty",
+		}),
 	);
 	scene = {
 		...scene,
@@ -261,12 +306,12 @@ test("measuring a hug follows a gap through the token it names", () => {
 	assert.ok(box);
 	assert.deepEqual(
 		naturalSize(box, undefined, { tokens, picks: {} }),
-		{ width: 190, height: 40 },
+		{ width: px(190), height: px(40) },
 		"100 + 30 + 60",
 	);
 	assert.deepEqual(
 		naturalSize(box),
-		{ width: 176, height: 40 },
+		{ width: px(176), height: px(40) },
 		"with no tokens to follow, the fallback gap of 16",
 	);
 });

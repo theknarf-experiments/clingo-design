@@ -23,12 +23,42 @@ import {
 } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
 import { type Scene, constraintValue, dimension, emptyScene } from "./scene.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { lit } from "./values.ts";
 
-/** The number a constraint holds to, the way the editor reads it back. */
+/**
+ * This file is written in pixels at both ends, and EMU in the middle.
+ *
+ * What every case below is *about* is the arithmetic — 40 wide, 24 apart,
+ * centred at 60, "as far past 150 as a is short of it" — and that arithmetic is
+ * unreadable at 9525 times the size. So the two seams are named: {@link px}
+ * puts a case into the document, and {@link pixels} reads an answer back out.
+ *
+ * Both are exact. A whole pixel is a whole multiple of 9525 in either
+ * direction, so nothing is being rounded here to make the assertions fit — and
+ * a solver answer that landed *between* pixels would come back as a fraction
+ * and fail loudly, which is exactly what should happen.
+ */
+const P = EMU_PER_PX;
+
+const px = (n: number): number => n * P;
+
+/** A solved frame's four numbers, in pixels. */
+const pixels = (solved: Solved): Solved =>
+	Object.fromEntries(
+		Object.entries(solved).map(([id, frame]) => [
+			id,
+			Object.fromEntries(
+				Object.entries(frame).map(([dim, emu]) => [dim, (emu ?? 0) / P]),
+			),
+		]),
+	);
+
+/** The number a constraint holds to, in pixels, the way the editor reads it. */
 const valueOf = (scene: Scene, id: string): number | undefined => {
 	const c = scene.constraints.find((k) => k.id === id);
-	return c && constraintValue(scene, c);
+	const emu = c && constraintValue(scene, c);
+	return emu === undefined ? undefined : emu / P;
 };
 
 const empty = (): Scene => ({ ...emptyScene(), nodes: [] });
@@ -37,7 +67,7 @@ const solve = async (scene: Scene) => {
 	const result = await explore(scene, directSolver, { sample: "first" });
 	assert.equal(result.count, 1, "geometry must not multiply the universes");
 	assert.equal(result.optimized, false, "a theory objective is not #minimize");
-	return result.universes[0].solved;
+	return pixels(result.universes[0].solved);
 };
 
 const fails = async (scene: Scene): Promise<UnsatisfiableError> => {
@@ -84,7 +114,14 @@ function shifted(
 function loose(...boxes: Array<[string, number, number, number, number]>): Scene {
 	let scene = empty();
 	for (const [id, x, y, width, height] of boxes) {
-		scene = addNode(scene, makeNode("rect", { x, y, width, height }, { id }));
+		scene = addNode(
+			scene,
+			makeNode(
+				"rect",
+				{ x: px(x), y: px(y), width: px(width), height: px(height) },
+				{ id },
+			),
+		);
 	}
 	return scene;
 }
@@ -125,18 +162,22 @@ test("align works across parents, on world coordinates", async () => {
 	for (const [id, x] of [["left", 0], ["right", 500]] as const) {
 		scene = addNode(
 			scene,
-			makeNode("frame", { x, y: 0, width: 300, height: 200 }, { id }),
+			makeNode(
+				"frame",
+				{ x: px(x), y: 0, width: px(300), height: px(200) },
+				{ id },
+			),
 		);
 	}
 	scene = addNodeTo(
 		scene,
 		"left",
-		makeNode("rect", { x: 30, y: 0, width: 20, height: 20 }, { id: "p" }),
+		makeNode("rect", { x: px(30), y: 0, width: px(20), height: px(20) }, { id: "p" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"right",
-		makeNode("rect", { x: 510, y: 0, width: 20, height: 20 }, { id: "q" }),
+		makeNode("rect", { x: px(510), y: 0, width: px(20), height: px(20) }, { id: "q" }),
 	);
 	// p stays where it is, so q's answer is the only one there is.
 	scene = addConstraint(scene, "pin", ["p"], undefined, "left").scene;
@@ -172,7 +213,7 @@ test("align ranges over more than two", async () => {
 test("gap is measured edge to edge", async () => {
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 400, 0, 60, 20]);
 	const added = addConstraint(scene, "gap", ["a", "b"], undefined, "x");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(24) }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(px(24)) }));
 	assert.equal(
 		(solved.b.x ?? 0) - right(solved, "a"),
 		24,
@@ -194,11 +235,11 @@ test("which member is the near side is the order they were named in", async () =
 	scene = addConstraint(scene, "pin", ["b"], undefined, "width").scene;
 
 	const forward = addConstraint(scene, "gap", ["a", "b"], undefined, "x");
-	const ahead = await solve(updateConstraint(forward.scene, forward.id, { value: dimension(10) }));
+	const ahead = await solve(updateConstraint(forward.scene, forward.id, { value: dimension(px(10)) }));
 	assert.equal((ahead.b.x ?? 0) - right(ahead, "a"), 10);
 
 	const backward = addConstraint(scene, "gap", ["b", "a"], undefined, "x");
-	const behind = await solve(updateConstraint(backward.scene, backward.id, { value: dimension(10) }));
+	const behind = await solve(updateConstraint(backward.scene, backward.id, { value: dimension(px(10)) }));
 	assert.equal(
 		(behind.a.x ?? 0) - right(behind, "b"),
 		10,
@@ -223,7 +264,7 @@ test("a fresh gap measures what is already there and changes nothing", async () 
 test("a vertical gap is the same rule down the other axis", async () => {
 	const scene = loose(["a", 0, 0, 20, 30], ["b", 0, 200, 20, 30]);
 	const added = addConstraint(scene, "gap", ["a", "b"], undefined, "y");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(10) }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(px(10)) }));
 	assert.equal((solved.b.y ?? 0) - bottom(solved, "a"), 10);
 	assert.equal(solved.a.x, 0, "the horizontal axis was not touched");
 });
@@ -231,7 +272,7 @@ test("a vertical gap is the same rule down the other axis", async () => {
 test("a negative gap is an overlap, not a swap", async () => {
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 100, 0, 40, 20]);
 	const added = addConstraint(scene, "gap", ["a", "b"], undefined, "x");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(-10) }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(px(-10)) }));
 	assert.equal((solved.b.x ?? 0) - right(solved, "a"), -10);
 });
 
@@ -285,7 +326,7 @@ test("symmetric about a third node balances the two around its centre", async ()
 	// Then insist a sits somewhere new, and watch b follow.
 	const pinned = addConstraint(added.scene, "pin", ["a"], undefined, "centerX");
 	const solved = await solve(
-		updateConstraint(pinned.scene, pinned.id, { value: dimension(50) }),
+		updateConstraint(pinned.scene, pinned.id, { value: dimension(px(50)) }),
 	);
 	assert.equal(cx(solved, "a"), 50);
 	assert.equal(cx(solved, "b"), 250, "as far past 150 as a is short of it");
@@ -300,7 +341,7 @@ test("symmetric about a line needs no third node", async () => {
 		valueOf(added.scene, added.id),
 		175,
 	);
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(100) }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(px(100)) }));
 	const centreA = cx(solved, "a");
 	const centreB = cx(solved, "b");
 	assert.equal(centreA + centreB, 200, "equidistant either side of 100");
@@ -310,7 +351,7 @@ test("symmetric about a line needs no third node", async () => {
 test("a mirror down the y axis reflects vertically", async () => {
 	const scene = loose(["a", 0, 0, 20, 40], ["b", 0, 300, 20, 40]);
 	const added = addConstraint(scene, "symmetric", ["a", "b"], undefined, "y");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(50) }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(px(50)) }));
 	assert.equal(cy(solved, "a") + cy(solved, "b"), 100);
 	assert.equal(solved.a.x, 0, "the horizontal axis is nobody's business here");
 });
@@ -322,7 +363,7 @@ test("a mirror down the y axis reflects vertically", async () => {
 test("pin fixes one coordinate outright", async () => {
 	const scene = loose(["a", 0, 0, 40, 20]);
 	const added = addConstraint(scene, "pin", ["a"], undefined, "left");
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(250) }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(px(250)) }));
 	assert.equal(solved.a.x, 250);
 	assert.equal(solved.a.y, 0);
 	assert.equal(solved.a.width, 40);
@@ -332,23 +373,31 @@ test("pin reaches a size and a centre as readily as an edge", async () => {
 	const scene = loose(["a", 0, 0, 40, 20]);
 	const wide = addConstraint(scene, "pin", ["a"], undefined, "width");
 	assert.equal(
-		(await solve(updateConstraint(wide.scene, wide.id, { value: dimension(300) }))).a.width,
+		(await solve(updateConstraint(wide.scene, wide.id, { value: dimension(px(300)) }))).a.width,
 		300,
 	);
 	const centred = addConstraint(scene, "pin", ["a"], undefined, "centerY");
-	const solved = await solve(updateConstraint(centred.scene, centred.id, { value: dimension(60) }));
+	const solved = await solve(updateConstraint(centred.scene, centred.id, { value: dimension(px(60)) }));
 	assert.equal(cy(solved, "a"), 60);
 });
 
 test("a pin on a child is a canvas coordinate, not a parent-relative one", async () => {
 	let scene = addNode(
 		empty(),
-		makeNode("frame", { x: 100, y: 50, width: 400, height: 300 }, { id: "card" }),
+		makeNode(
+			"frame",
+			{ x: px(100), y: px(50), width: px(400), height: px(300) },
+			{ id: "card" },
+		),
 	);
 	scene = addNodeTo(
 		scene,
 		"card",
-		makeNode("rect", { x: 120, y: 60, width: 40, height: 20 }, { id: "kid" }),
+		makeNode(
+			"rect",
+			{ x: px(120), y: px(60), width: px(40), height: px(20) },
+			{ id: "kid" },
+		),
 	);
 	const added = addConstraint(scene, "pin", ["kid"], undefined, "left");
 	assert.equal(
@@ -356,7 +405,7 @@ test("a pin on a child is a canvas coordinate, not a parent-relative one", async
 		120,
 		"seeded from where it sits on the canvas",
 	);
-	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(200) }));
+	const solved = await solve(updateConstraint(added.scene, added.id, { value: dimension(px(200)) }));
 	assert.equal(solved.kid.x, 100, "200 on the canvas is 100 inside a card at 100");
 });
 
@@ -367,9 +416,9 @@ test("a pin on a child is a canvas coordinate, not a parent-relative one", async
 test("two pins on one quantity come back as a core naming both", async () => {
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 300, 0, 40, 20]);
 	const first = addConstraint(scene, "pin", ["a"], undefined, "left");
-	const one = updateConstraint(first.scene, first.id, { value: dimension(0) });
+	const one = updateConstraint(first.scene, first.id, { value: dimension(px(0)) });
 	const second = addConstraint(one, "pin", ["a"], undefined, "left");
-	const both = updateConstraint(second.scene, second.id, { value: dimension(100) });
+	const both = updateConstraint(second.scene, second.id, { value: dimension(px(100)) });
 	// A third rule that is perfectly satisfiable must not be blamed.
 	const innocent = addConstraint(both, "equalSize", ["a", "b"], undefined, "width");
 
@@ -388,7 +437,7 @@ test("an alignment and a gap that cannot both hold name each other", async () =>
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 300, 0, 40, 20]);
 	const aligned = addConstraint(scene, "align", ["a", "b"], undefined, "left");
 	const gapped = addConstraint(aligned.scene, "gap", ["a", "b"], undefined, "x");
-	const scene2 = updateConstraint(gapped.scene, gapped.id, { value: dimension(10) });
+	const scene2 = updateConstraint(gapped.scene, gapped.id, { value: dimension(px(10)) });
 
 	const error = await fails(scene2);
 	assert.deepEqual([...error.conflict].sort(), [aligned.id, gapped.id].sort());
@@ -398,9 +447,9 @@ test("a geometric rule and a property rule are attributed separately", async () 
 	// The geometric conflict is real; the colour rule is fine and stays unnamed.
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 300, 0, 40, 20]);
 	const first = addConstraint(scene, "pin", ["a"], undefined, "width");
-	const one = updateConstraint(first.scene, first.id, { value: dimension(10) });
+	const one = updateConstraint(first.scene, first.id, { value: dimension(px(10)) });
 	const second = addConstraint(one, "pin", ["a"], undefined, "width");
-	const both = updateConstraint(second.scene, second.id, { value: dimension(20) });
+	const both = updateConstraint(second.scene, second.id, { value: dimension(px(20)) });
 	const colours = addConstraint(both, "match", ["a", "b"], "fill");
 
 	const error = await fails(colours.scene);
@@ -410,7 +459,7 @@ test("a geometric rule and a property rule are attributed separately", async () 
 test("switching a geometric rule off takes it out of the program", async () => {
 	const scene = loose(["a", 0, 0, 40, 20]);
 	const added = addConstraint(scene, "pin", ["a"], undefined, "left");
-	const moved = updateConstraint(added.scene, added.id, { value: dimension(250) });
+	const moved = updateConstraint(added.scene, added.id, { value: dimension(px(250)) });
 	assert.equal((await solve(moved)).a.x, 250);
 	const off = updateConstraint(moved, added.id, { enabled: false });
 	assert.deepEqual(await solve(off), {}, "nothing is handed to the solver at all");

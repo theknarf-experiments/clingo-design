@@ -13,24 +13,52 @@ import { addNode, addNodeTo, makeNode } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
 import { type Scene, emptyScene, makeLayout } from "./scene.ts";
 import { mapTree } from "./tree.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { lit } from "./values.ts";
+
+/**
+ * Pixels at both ends, EMU in the theory atoms.
+ *
+ * These cases drive the solver directly, so their hand-written `&sum` rules hold
+ * the same integers the compiler would emit — which are EMU. Writing
+ * `>= 2857500` would say nothing to a reader, so the rules interpolate
+ * {@link px} and the answers come back through {@link pixels}.
+ */
+const P = EMU_PER_PX;
+
+const px = (n: number): number => n * P;
 
 const empty = (): Scene => ({ ...emptyScene(), nodes: [] });
 
 const rules = (scene: Scene, text: string): Scene => ({ ...scene, rules: text });
 
+type Solved = Readonly<Record<string, Record<string, number | undefined>>>;
+
+/** A solved frame's numbers, in pixels. */
+const pixels = (solved: Solved): Solved =>
+	Object.fromEntries(
+		Object.entries(solved).map(([id, frame]) => [
+			id,
+			Object.fromEntries(
+				Object.entries(frame).map(([dim, emu]) => [dim, (emu ?? 0) / P]),
+			),
+		]),
+	);
+
 const run = async (scene: Scene) => {
 	const result = await explore(scene, directSolver, { sample: "first" });
 	assert.equal(result.count, 1, "solved geometry must not multiply universes");
 	assert.equal(result.optimized, false, "a theory objective is not #minimize");
-	return result.universes[0].solved;
+	return pixels(result.universes[0].solved);
 };
 
 /** One rect on the canvas at a deliberately un-round place. */
 function loose(): Scene {
 	return addNode(
 		empty(),
-		makeNode("rect", { x: 120, y: 40, width: 60, height: 30 }, { id: "box" }),
+		makeNode("rect", { x: px(120), y: px(40), width: px(60), height: px(30) }, {
+			id: "box",
+		}),
 	);
 }
 
@@ -41,12 +69,20 @@ function loose(): Scene {
 function nested(): Scene {
 	let scene = addNode(
 		empty(),
-		makeNode("frame", { x: 100, y: 50, width: 400, height: 300 }, { id: "card" }),
+		makeNode(
+			"frame",
+			{ x: px(100), y: px(50), width: px(400), height: px(300) },
+			{ id: "card" },
+		),
 	);
 	scene = addNodeTo(
 		scene,
 		"card",
-		makeNode("rect", { x: 120, y: 60, width: 40, height: 20 }, { id: "kid" }),
+		makeNode(
+		"rect",
+		{ x: px(120), y: px(60), width: px(40), height: px(20) },
+		{ id: "kid" },
+	),
 	);
 	return scene;
 }
@@ -62,7 +98,7 @@ test("a solved node with nothing said about it keeps its stored frame", async ()
 
 test("a solved node moves as little as the relation allows", async () => {
 	const pushed = await run(
-		rules(loose(), "gsolved(box).\n&sum{ wv(box,x) } >= 300."),
+		rules(loose(), `gsolved(box).\n&sum{ wv(box,x) } >= ${px(300)}.`),
 	);
 	assert.equal(pushed.box.x, 300, "the nearest legal x, not an arbitrary one");
 	assert.equal(pushed.box.y, 40, "the axis nobody mentioned did not move");
@@ -71,14 +107,14 @@ test("a solved node moves as little as the relation allows", async () => {
 	// ...and the same from the other side, so this is not a lower bound the
 	// simplex solver happened to sit on.
 	const pulled = await run(
-		rules(loose(), "gsolved(box).\n&sum{ wv(box,x) } <= 50."),
+		rules(loose(), `gsolved(box).\n&sum{ wv(box,x) } <= ${px(50)}.`),
 	);
 	assert.equal(pulled.box.x, 50);
 });
 
 test("the pull is on every unknown, size included", async () => {
 	const solved = await run(
-		rules(loose(), "gsolved(box).\n&sum{ lsz(box,width) } >= 200."),
+		rules(loose(), `gsolved(box).\n&sum{ lsz(box,width) } >= ${px(200)}.`),
 	);
 	assert.equal(solved.box.width, 200);
 	assert.equal(solved.box.height, 30, "unmentioned, so unchanged");
@@ -91,17 +127,19 @@ test("displacement is shared, so the cheapest side of a relation gives way", asy
 	// pinning one end makes the answer unique, and it is the other that moves.
 	let scene = addNode(
 		empty(),
-		makeNode("rect", { x: 0, y: 0, width: 20, height: 20 }, { id: "a" }),
+		makeNode("rect", { x: 0, y: 0, width: px(20), height: px(20) }, { id: "a" }),
 	);
 	scene = addNode(
 		scene,
-		makeNode("rect", { x: 400, y: 0, width: 20, height: 20 }, { id: "b" }),
+		makeNode("rect", { x: px(400), y: 0, width: px(20), height: px(20) }, {
+			id: "b",
+		}),
 	);
 	const solved = await run(
 		rules(
 			scene,
 			`gsolved(a). gsolved(b).
-&sum{ wv(b,x); -wv(a,x) } = 100.
+&sum{ wv(b,x); -wv(a,x) } = ${px(100)}.
 &sum{ wv(a,x) } = 0.`,
 		),
 	);
@@ -116,7 +154,7 @@ test("displacement is shared, so the cheapest side of a relation gives way", asy
 test("a world coordinate is the parent's plus the node's own offset", async () => {
 	// The parent stays a fact, so its 100 enters the sum as a number.
 	const solved = await run(
-		rules(nested(), "gsolved(kid).\n&sum{ wv(kid,x) } = 200."),
+		rules(nested(), `gsolved(kid).\n&sum{ wv(kid,x) } = ${px(200)}.`),
 	);
 	assert.equal(solved.kid.x, 100, "200 on the canvas is 100 inside a card at 100");
 	assert.equal(solved.kid.y, 10, "still parent-relative, still untouched");
@@ -141,26 +179,30 @@ test("nodes under different parents can be compared", async () => {
 	] as const) {
 		scene = addNode(
 			scene,
-			makeNode("frame", { x, y: 0, width: 300, height: 200 }, { id }),
+			makeNode(
+				"frame",
+				{ x: px(x), y: 0, width: px(300), height: px(200) },
+				{ id },
+			),
 		);
 	}
 	// 30 into the near card, 10 into the far one.
 	scene = addNodeTo(
 		scene,
 		"left",
-		makeNode("rect", { x: 30, y: 0, width: 20, height: 20 }, { id: "p" }),
+		makeNode("rect", { x: px(30), y: 0, width: px(20), height: px(20) }, { id: "p" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"right",
-		makeNode("rect", { x: 510, y: 0, width: 20, height: 20 }, { id: "q" }),
+		makeNode("rect", { x: px(510), y: 0, width: px(20), height: px(20) }, { id: "q" }),
 	);
 	const solved = await run(
 		rules(
 			scene,
 			`gsolved(p). gsolved(q).
 &sum{ wv(q,x); -wv(p,x) } = 0.
-&sum{ wv(p,x) } = 30.`,
+&sum{ wv(p,x) } = ${px(30)}.`,
 		),
 	);
 	assert.equal(solved.p.x, 30, "where it already was");
@@ -179,7 +221,11 @@ test("nodes under different parents can be compared", async () => {
 function laidOut(): Scene {
 	let scene = addNode(
 		empty(),
-		makeNode("frame", { x: 100, y: 50, width: 400, height: 100 }, { id: "row" }),
+		makeNode(
+			"frame",
+			{ x: px(100), y: px(50), width: px(400), height: px(100) },
+			{ id: "row" },
+		),
 	);
 	for (const [id, width] of [
 		["a", 100],
@@ -188,7 +234,7 @@ function laidOut(): Scene {
 		scene = addNodeTo(
 			scene,
 			"row",
-			makeNode("rect", { x: 0, y: 0, width, height: 40 }, { id }),
+			makeNode("rect", { x: 0, y: 0, width: px(width), height: px(40) }, { id }),
 		);
 	}
 	return {
@@ -215,11 +261,13 @@ test("a laid-out child that is also solved is one set of equations", async () =>
 test("a laid-out child's world coordinate is the row's plus the layout's", async () => {
 	// The row starts at 100 and the layout puts b at 120 inside it, so 220 is
 	// the only canvas position b has — asking for it holds, and asking for a
-	// pixel either side does not.
-	const solved = await run(rules(laidOut(), "gsolved(b).\n&sum{ wv(b,x) } = 220."));
+	// pixel either side does not. A pixel, not a unit: the atoms are EMU now, so
+	// asking for 221 of them would be off by a ten-thousandth of a pixel and
+	// would still be refused, which is a weaker claim than this case means.
+	const solved = await run(rules(laidOut(), `gsolved(b).\n&sum{ wv(b,x) } = ${px(220)}.`));
 	assert.equal(solved.b.x, 120);
 	await assert.rejects(
-		run(rules(laidOut(), "gsolved(b).\n&sum{ wv(b,x) } = 221.")),
+		run(rules(laidOut(), `gsolved(b).\n&sum{ wv(b,x) } = ${px(221)}.`)),
 		UnsatisfiableError,
 	);
 });
@@ -228,7 +276,7 @@ test("a layout and a geometric demand that disagree are a real contradiction", a
 	// Nothing papers over this: the layout fixes lv(a,x) at the padding and the
 	// rule wants it elsewhere, so there is no answer rather than a compromise.
 	await assert.rejects(
-		run(rules(laidOut(), "gsolved(a).\n&sum{ lv(a,x) } = 999.")),
+		run(rules(laidOut(), `gsolved(a).\n&sum{ lv(a,x) } = ${px(999)}.`)),
 		UnsatisfiableError,
 	);
 });
@@ -238,7 +286,7 @@ test("a layout and a geometric demand that disagree are a real contradiction", a
 /* ------------------------------------------------------------------ */
 
 test("solved coordinates do not multiply the universes", async () => {
-	const scene = rules(loose(), "gsolved(box).\n&sum{ wv(box,x) } >= 300.");
+	const scene = rules(loose(), `gsolved(box).\n&sum{ wv(box,x) } >= ${px(300)}.`);
 	const varying: Scene = {
 		...scene,
 		nodes: mapTree(scene.nodes, (n) => ({
@@ -250,6 +298,10 @@ test("solved coordinates do not multiply the universes", async () => {
 	assert.equal(result.count, 2, "the two fills, and nothing crossed with them");
 	assert.equal(result.optimized, false);
 	for (const universe of result.universes) {
-		assert.equal(universe.solved.box.x, 300, "every universe places it the same");
+		assert.equal(
+			pixels(universe.solved).box.x,
+			300,
+			"every universe places it the same",
+		);
 	}
 });

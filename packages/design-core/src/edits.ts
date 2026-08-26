@@ -15,6 +15,13 @@ import {
 	openVariables,
 } from "./components.ts";
 import {
+	DEFAULT_UNIT,
+	EMU_PER_PX,
+	type Emu,
+	type Unit,
+	quantizeGesture,
+} from "./units.ts";
+import {
 	type Frame,
 	MIN_NODE_SIZE,
 	type PathPoint,
@@ -35,6 +42,8 @@ import {
 	type Dimension,
 	EDGES,
 	type Edge,
+	type Guide,
+	type GuideProp,
 	KINDS,
 	type NodeKind,
 	PROPS,
@@ -44,11 +53,17 @@ import {
 	type Sizing,
 	type Style,
 	type StyleVariant,
+	type SurfaceGuides,
 	dimension,
 	edgeOn,
+	findGuide,
 	findStyle,
 	frameDim,
 	frameOf,
+	guideLines,
+	holdsDatum,
+	nextGuideId,
+	withGuideAt,
 	isConstraintTerm,
 	makeFrame,
 	makeLayout,
@@ -83,6 +98,7 @@ import {
 import {
 	edgeAt,
 	findInTree,
+	frameAt,
 	flatten,
 	groupFrame,
 	locate,
@@ -142,8 +158,26 @@ export function makeNode(
  * A path through `points`, given in whatever space the pointer produced them.
  *
  * The frame becomes their bounding box and the points are stored relative to
- * it, which is the invariant everything else relies on. They are rounded first
- * so that frame and points stay on the same whole pixels.
+ * it, which is the invariant everything else relies on: `Plot` scales the
+ * vertices out of the box they were authored in and into the one the node is
+ * drawn at, so a frame that is not their bounding box squashes the shape and
+ * slides it off the anchors the designer clicked.
+ *
+ * Two things keep that invariant, and they are not the same thing. The anchors
+ * are quantized because a stored frame lands on a whole pixel whatever it is
+ * handed — `writeLength` quantizes every dimension a gesture writes — so
+ * vertices off the pixel grid give a bounding box the document cannot keep.
+ * That used to read `Math.round`, which said exactly this while a vertex was a
+ * pixel count; in EMU the same call rounds a number that is already whole and
+ * quietly does nothing.
+ *
+ * And the points are shifted into the box the node is *stored* at rather than
+ * into the raw bounding box, because quantizing the anchors is not enough on its
+ * own: `pathBounds` includes the extremes of every bezier, and a curve reaches
+ * its widest wherever the arithmetic puts it, whole-pixel anchors or not. A
+ * `normaliseFrame` that then moved the box out from under the points would offset
+ * the whole shape by up to half a pixel — which is the same disagreement, arrived
+ * at from the other end.
  */
 export function makePath(
 	points: readonly PathPoint[],
@@ -151,22 +185,26 @@ export function makePath(
 	options: { id?: string; name?: string } = {},
 ): SceneNode {
 	// Anchors go to whole pixels so frame and points agree; handles are
-	// offsets and stay exactly as drawn, since rounding them would visibly
+	// offsets and stay exactly as drawn, since quantizing them would visibly
 	// kink a shallow curve.
 	const whole: PathPoint[] = points.map((p) => ({
 		...p,
-		x: Math.round(p.x),
-		y: Math.round(p.y),
+		x: quantizeGesture(p.x),
+		y: quantizeGesture(p.y),
 	}));
 	const bounds = pathBounds(whole, closed) ?? {
 		x: 0,
 		y: 0,
 		...KINDS.path.defaultSize,
 	};
-	return makeNode("path", bounds, {
+	// The box the node will be stored at — `makeNode` runs the frame through
+	// this too, and it is idempotent, so asking for it early costs nothing and
+	// is the only way the shift below can be against the frame that survives.
+	const box = normaliseFrame(bounds);
+	return makeNode("path", box, {
 		...options,
 		closed,
-		points: whole.map((p) => ({ ...p, x: p.x - bounds.x, y: p.y - bounds.y })),
+		points: whole.map((p) => ({ ...p, x: p.x - box.x, y: p.y - box.y })),
 	});
 }
 
@@ -705,11 +743,23 @@ function deepCopy(
 	};
 }
 
+/**
+ * How far a copy is nudged off its original: sixteen pixels, as EMU.
+ *
+ * A statement about an eye rather than about a document — far enough that the
+ * copy is visibly a second thing, near enough that it is obviously the same
+ * thing — so it is a pixel count times {@link EMU_PER_PX}, like the hand-and-eye
+ * constants in `geometry.ts`. Left as a bare 16 it would have been sixteen
+ * ten-thousandths of a pixel, and duplicating would have looked like nothing
+ * happening at all.
+ */
+export const DUPLICATE_OFFSET = 16 * EMU_PER_PX;
+
 /** Copies subtrees, offset so the copies are visible, and reports their ids. */
 export function duplicateNodes(
 	scene: Scene,
 	ids: readonly string[],
-	offset = 16,
+	offset = DUPLICATE_OFFSET,
 	picks: Picks = {},
 ): { scene: Scene; ids: string[] } {
 	const copy = new Set(ids);
@@ -966,6 +1016,286 @@ export function wrapInLayout(
 }
 
 /* ------------------------------------------------------------------ */
+/* Guides: the grid a surface is ruled with, and the lines drawn on it */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Rules a surface with a grid, or takes the grid away.
+ *
+ * The twin of {@link setLayout}, down to the shape of the argument, because
+ * absence means the same thing in both: a node with no `guides` has no grid at
+ * all rather than a grid of one track, and there is no flag to keep in step.
+ *
+ * Taking one away prunes, and that is the half worth naming. A column line is a
+ * constraint member that lives nowhere in the tree, so a rule holding a card to
+ * `cg(page,3,left)` is left pointing at a line that no longer exists — the same
+ * ghost {@link deleteNodes} refuses to leave behind, reached from the other
+ * direction. See {@link holdsDatum}, which is the question the prune asks.
+ */
+export function setGuides(
+	scene: Scene,
+	id: string,
+	guides: SurfaceGuides | undefined,
+): Scene {
+	return pruneConstraints({
+		...scene,
+		nodes: mapTree(scene.nodes, (node) => {
+			if (node.id !== id) return node;
+			if (!guides) {
+				const { guides: _dropped, ...rest } = node;
+				return rest;
+			}
+			return { ...node, guides };
+		}),
+	});
+}
+
+/** One or more grid settings replaced, on a surface that already has a grid. */
+export function updateGuides(
+	scene: Scene,
+	id: string,
+	patch: Partial<SurfaceGuides>,
+): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (!node?.guides) return scene;
+	return setGuides(scene, id, { ...node.guides, ...patch });
+}
+
+/**
+ * One setting's whole list of alternatives — the panel's edit, and the one that
+ * makes a grid responsive.
+ *
+ * {@link setFrameValue} for a guide setting, and it is the only edit here that
+ * changes how *many* grids the document holds: giving `columns` a second
+ * alternative is what makes twelve-wide and six-wide one document rather than
+ * two.
+ */
+export function setGuideValue(
+	scene: Scene,
+	id: string,
+	prop: GuideProp,
+	value: Value,
+): Scene {
+	if (value.length === 0) return scene;
+	return updateGuides(scene, id, { [prop]: value });
+}
+
+/**
+ * One node in the tree replaced, if the document holds it — and the document
+ * itself back untouched when the replacement is the node it replaces.
+ *
+ * The identity is load-bearing for the gestures below in the way it is for
+ * `withFrame`: a drag that ended where it began must not write an edit, and the
+ * cheapest way to be sure of that is for "nothing changed" to be answerable by
+ * `===` all the way up.
+ */
+function mapNode(
+	scene: Scene,
+	id: string,
+	fn: (node: SceneNode) => SceneNode,
+): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (!node) return scene;
+	const next = fn(node);
+	if (next === node) return scene;
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (n) => (n.id === id ? next : n)),
+	};
+}
+
+/** The lines of one surface rewritten; an empty list is stored as no list. */
+function withLines(node: SceneNode, lines: readonly Guide[]): SceneNode {
+	if (lines.length === 0) {
+		const { lines: _dropped, ...rest } = node;
+		return rest;
+	}
+	return { ...node, lines: [...lines] };
+}
+
+/**
+ * Draws a line on a surface, at `at` in that surface's own coordinates.
+ *
+ * A gesture, so the position goes through {@link dimension} — quantized to a
+ * whole pixel and spelled in the document's display unit, exactly as a drag
+ * writes a frame. This is one of the few writers that *can* honour
+ * {@link Scene.unit} for a brand-new length, because unlike `makeFrame` it has
+ * the document in hand: a guide pulled onto a millimetre page is written in
+ * millimetres.
+ *
+ * The id comes from {@link nextGuideId} rather than from a counter here, because
+ * what a guide id has to be — spellable as an ASP constant, unused *on this
+ * surface* — are facts about the document rather than about this edit.
+ *
+ * Nothing at all for a node that is not a surface: a guide is a line on a page,
+ * and hanging one off a rectangle would put a datum in the document that the
+ * compiler declines to emit and the overlay declines to draw.
+ */
+export function addGuide(
+	scene: Scene,
+	surface: string,
+	axis: "x" | "y",
+	at: Emu,
+): { scene: Scene; id: string | null } {
+	const node = findInTree(scene.nodes, surface);
+	if (!node || !KINDS[node.kind].surface) return { scene, id: null };
+	const id = nextGuideId(node);
+	const guide: Guide = {
+		id,
+		axis,
+		at: dimension(at, scene.unit ?? DEFAULT_UNIT),
+	};
+	return {
+		scene: mapNode(scene, surface, (n) =>
+			withLines(n, [...guideLines(n), guide]),
+		),
+		id,
+	};
+}
+
+/**
+ * A line dropped on the design, at a point in **canvas** coordinates.
+ *
+ * What a ruler's drag ends in. The ruler knows where the pointer is and nothing
+ * about what is under it, and this is the half that is a question about the
+ * document: which page the line belongs to, and where on that page. `frameAt`
+ * answers the first — the innermost surface under the drop, the same answer a
+ * newly drawn node gets — and the second is then the drop less that surface's
+ * own origin.
+ *
+ * Dropped where there is no surface, nothing is drawn. A guide has to belong to
+ * something: in world coordinates it would be the one piece of geometry that did
+ * not move when the artboard beside it moved, and "the guide I put on this page"
+ * is what a designer means every time. That is the pasteboard guide of a
+ * page-layout tool, and it is deliberately absent until there is a page model
+ * for one to be beside.
+ */
+export function drawGuideAt(
+	scene: Scene,
+	axis: "x" | "y",
+	at: Point,
+	solved: Readonly<Record<string, Partial<Frame>>> = {},
+	picks: Picks = {},
+): { scene: Scene; id: string | null } {
+	const host = frameAt(scene.nodes, at, solved, sceneContext(scene, picks));
+	if (!host) return { scene, id: null };
+	return addGuide(
+		scene,
+		host.node.id,
+		axis,
+		axis === "x" ? at.x - host.world.x : at.y - host.world.y,
+	);
+}
+
+/**
+ * A line dragged somewhere else, in its surface's own coordinates.
+ *
+ * `picks` is the universe on screen, for the reason {@link setFrames} takes one:
+ * a guide's position is a value like any other, so the write lands on the
+ * alternative that universe chose. The refusals — a locked line, a position that
+ * is a link to a token — are {@link withGuideAt}'s, so that every road to moving
+ * a guide passes the same gate.
+ */
+export function moveGuide(
+	scene: Scene,
+	surface: string,
+	guide: string,
+	at: Emu,
+	picks: Picks = {},
+): Scene {
+	const context = sceneContext(scene, picks);
+	return mapNode(scene, surface, (node) => {
+		const line = findGuide(node, guide);
+		if (!line) return node;
+		const next = withGuideAt(node, line, at, context);
+		return next === line
+			? node
+			: withLines(
+					node,
+					guideLines(node).map((g) => (g.id === guide ? next : g)),
+				);
+	});
+}
+
+/**
+ * A line's whole list of positions — what a typed number or a link to a token
+ * writes, where {@link moveGuide} is what a hand writes.
+ *
+ * The same split {@link setFrameValue} and `withFrame` make, and the same
+ * reason: a value typed into a field is a statement about every universe, and a
+ * drag is an adjustment to the one on screen.
+ */
+export function setGuideAt(
+	scene: Scene,
+	surface: string,
+	guide: string,
+	value: Value,
+): Scene {
+	if (value.length === 0) return scene;
+	return mapNode(scene, surface, (node) =>
+		withLines(
+			node,
+			guideLines(node).map((g) => (g.id === guide ? { ...g, at: value } : g)),
+		),
+	);
+}
+
+/**
+ * Whether a gesture may move this line.
+ *
+ * Stored as nothing at all when it may, so a document only carries the lines
+ * somebody deliberately pinned down — the same shape {@link setSizing} and
+ * {@link setChildLayout} use for their defaults.
+ *
+ * A lock is a decision about the *guide* and so it lives in the document and
+ * reaches a collaborator; whether guides are *shown* is a decision about the
+ * person looking and never gets near here.
+ */
+export function setGuideLocked(
+	scene: Scene,
+	surface: string,
+	guide: string,
+	locked: boolean,
+): Scene {
+	return mapNode(scene, surface, (node) =>
+		withLines(
+			node,
+			guideLines(node).map((g) => {
+				if (g.id !== guide) return g;
+				if (!locked) {
+					const { locked: _dropped, ...rest } = g;
+					return rest;
+				}
+				return { ...g, locked: true };
+			}),
+		),
+	);
+}
+
+/**
+ * Rubs a line out, and with it any rule that was only holding something to it.
+ *
+ * The prune is the same one {@link setGuides} runs and for the same reason: a
+ * datum is a constraint member with nothing in the tree behind it, so deleting
+ * the line is the only moment anything can notice that a rule naming it has
+ * been left pointing at nothing.
+ */
+export function removeGuide(
+	scene: Scene,
+	surface: string,
+	guide: string,
+): Scene {
+	return pruneConstraints(
+		mapNode(scene, surface, (node) =>
+			withLines(
+				node,
+				guideLines(node).filter((g) => g.id !== guide),
+			),
+		),
+	);
+}
+
+/* ------------------------------------------------------------------ */
 /* Constraints                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -1000,6 +1330,65 @@ export function addConstraint(
 		scene: { ...scene, constraints: [...scene.constraints, constraint] },
 		id: constraint.id,
 	};
+}
+
+/**
+ * The rule that already holds this node's edge to this line, if the document
+ * has one.
+ *
+ * Switched off counts as said. A rule that is off is not why the node is where
+ * it is — but the answer to "you have already written this one, it is turned
+ * off" is to turn it back on in the Rules panel, and a second identical rule
+ * beside the first is the worse of the two outcomes by a distance.
+ */
+export function pinnedTo(
+	scene: Scene,
+	node: string,
+	term: string,
+	edge: Edge,
+): string | undefined {
+	return scene.constraints.find(
+		(c) =>
+			c.kind === "align" &&
+			c.edge === edge &&
+			c.group === undefined &&
+			c.nodes.length === 2 &&
+			c.nodes.includes(node) &&
+			c.nodes.includes(term),
+	)?.id;
+}
+
+/**
+ * **Turns a snap into a rule**, which is the whole reason a column line is a
+ * datum rather than a hint drawn on the glass.
+ *
+ * Dropping a card against column three lines it up once. Saying so makes it
+ * stay lined up: the count changes, a token moves, a whole responsive
+ * alternative is chosen, and the card is still on column three — and the rule
+ * has a name, a switch, a place in an unsat core and a sentence in the why
+ * panel, because it is an ordinary `align` and nothing about it is special.
+ *
+ * `align` is the kind because `align` forces the *same* edge on both members,
+ * and a datum's six edges coincide — so an align on `left` puts the card's left
+ * edge on the line and one on `centerX` puts its centre there, off the same
+ * number. Which of those it is comes from the edge the gesture actually caught,
+ * so what gets written is what the designer just did rather than a guess.
+ *
+ * Already said is left alone, and the existing rule's id comes back: a drag that
+ * lands on the same line twice is one rule, not a pile of them.
+ */
+export function pinToDatum(
+	scene: Scene,
+	node: string,
+	term: string,
+	edge: Edge,
+): { scene: Scene; id: string | null } {
+	const already = pinnedTo(scene, node, term, edge);
+	if (already) return { scene, id: already };
+	if (!holdsDatum(scene, term) || !findInTree(scene.nodes, node)) {
+		return { scene, id: null };
+	}
+	return addConstraint(scene, "align", [node, term], undefined, edge);
 }
 
 /**
@@ -1387,12 +1776,18 @@ export function sharedProps(
  * Deleting a node must not leave a constraint quietly ranging over a ghost:
  * it would either do nothing or, worse, still be listed as the reason a design
  * is impossible.
+ *
+ * A member is not necessarily a node. A guide and a column line are {@link
+ * holdsDatum} members with no entry in the tree — so the live set is the nodes
+ * *or* a datum the document still holds, and without the second half the first
+ * node anybody deleted would strip every datum out of every rule, taking the
+ * whole rule with it wherever that dropped it below `minNodes`.
  */
 export function pruneConstraints(scene: Scene): Scene {
 	const alive = new Set(flatten(scene.nodes).map((n) => n.id));
 	const next: Constraint[] = [];
 	for (const c of scene.constraints) {
-		const nodes = c.nodes.filter((id) => alive.has(id));
+		const nodes = c.nodes.filter((id) => alive.has(id) || holdsDatum(scene, id));
 		// A group's members are the rule's business: deleting a document node
 		// says nothing about them, and a constraint over one is never a ghost.
 		if (c.group === undefined && nodes.length < CONSTRAINT_KINDS[c.kind].minNodes) {
@@ -1404,6 +1799,28 @@ export function pruneConstraints(scene: Scene): Scene {
 		next.every((c, i) => c === scene.constraints[i])
 		? scene
 		: { ...scene, constraints: next };
+}
+
+/* ------------------------------------------------------------------ */
+/* The document's unit                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What this document is measured in — see {@link Scene.unit}.
+ *
+ * A display setting, so this changes nothing about what any stored length
+ * *means*: `"16px"` is 152400 EMU in a millimetre document exactly as it is in
+ * a pixel one. What it changes is what the inspector reads values out in, what
+ * a number typed with no suffix beside it means, and what a length nobody has
+ * spelled yet is written in.
+ *
+ * The only writer besides `normalizeScene`, and unlike that one it can never
+ * take the field away: an absent unit is the marker that says a document
+ * predates EMU and its path vertices are still pixels, and a document that
+ * could lose the stamp is a document that gets migrated twice.
+ */
+export function setUnit(scene: Scene, unit: Unit): Scene {
+	return scene.unit === unit ? scene : { ...scene, unit };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1911,6 +2328,11 @@ export function releaseComponent(scene: Scene, id: string): Scene {
  * It is created at the definition's size. That size is the instance's own from
  * then on — the copy inside fills whatever box the instance has — so resizing
  * one is a placement decision and not a departure from the definition.
+ *
+ * The forty-pixel aisle and the sixteen-pixel stacking gap below are claims
+ * about what reads as "beside" and "under", so like {@link DUPLICATE_OFFSET}
+ * they are pixel counts written in EMU. As bare numbers they would have put
+ * every instance on top of the definition and on top of each other.
  */
 export function addInstance(
 	scene: Scene,
@@ -1927,8 +2349,8 @@ export function addInstance(
 		...makeNode(
 			"instance",
 			{
-				x: box.x + box.width + 40,
-				y: box.y + taken * (box.height + 16),
+				x: box.x + box.width + 40 * EMU_PER_PX,
+				y: box.y + taken * (box.height + 16 * EMU_PER_PX),
 				width: box.width,
 				height: box.height,
 			},

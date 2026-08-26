@@ -3,17 +3,23 @@ import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import {
 	CONSTRAINT_KINDS,
+	DEFAULT_UNIT,
+	DUPLICATE_OFFSET,
+	EMU_PER_PX,
 	LAYOUT_PROPS,
 	type LayoutProp,
 	DRAW_KINDS,
 	type Edge,
 	KINDS,
+	type Point,
 	type NodeKind,
 	type PropName,
 	SHAPE_KINDS,
 	type Frame,
 	type Relaxation,
 	type ReorderTo,
+	type RuledLine,
+	ruledLines,
 	type Scene,
 	type Universe,
 	addConstraint,
@@ -29,11 +35,16 @@ import {
 	describeCosts,
 	describeExplanation,
 	documentBounds,
+	datumLabel,
 	partLabel,
 	FRAME_DIMS,
+	GUIDE_PROPS,
+	type GuideProp,
+	guideAtIn,
 	type Dimension,
 	findStyle,
 	variantLabel,
+	drawGuideAt,
 	flatten,
 	parseVariable,
 	reachableAlternatives,
@@ -61,10 +72,12 @@ import { Artboard } from "./Artboard";
 import { Constraints } from "./Constraints";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Editor, type Tool } from "./Editor";
+import { Guides } from "./Guides";
 import { Inspector } from "./Inspector";
 import { LayerList } from "./LayerList";
 import { ProgramPanel } from "./ProgramPanel";
 import { PanelResizer, usePanelWidth } from "./PanelResizer";
+import { Rulers } from "./Rulers";
 import { ShapePicker } from "./ShapePicker";
 import { StatusLine } from "./StatusLine";
 import { ToolIcon } from "./ToolIcon";
@@ -75,6 +88,7 @@ import { layoutArtboards } from "./layout";
 import { measureScene } from "./measureText";
 import { useCulling } from "./useCulling";
 import { useExploration } from "./useExploration";
+import { canvasPx, canvasRect } from "./viewport";
 import styles from "./Studio.module.css";
 import tabStyles from "./tabs.module.css";
 
@@ -89,8 +103,12 @@ const CAPTION_PARTS = 3;
 /**
  * How far past the document the editable surface reaches, so new frames can be
  * drawn well beside the existing ones.
+ *
+ * Two thousand *pixels* of the design, spelled that way round because that is
+ * the number worth reading. It is added to the document's own bounds, which are
+ * EMU, and a bare 2000 there would be a fifth of a pixel of elbow room.
  */
-const PAD = 2000;
+const PAD = 2000 * EMU_PER_PX;
 
 /** Hotkeys, by toolbar slot. The shapes share one, which also cycles them. */
 const TOOL_KEY: Record<string, string> = {
@@ -149,12 +167,22 @@ const ORDER: Record<string, [near: ReorderTo, far: ReorderTo]> = {
 	"]": ["forward", "front"],
 };
 
-/** Arrows nudge by a pixel, Shift by eight. */
+/**
+ * Arrows nudge by a pixel, Shift by eight — as EMU, like every other statement
+ * about a hand rather than about a document (`MIN_NODE_SIZE`, `SNAP_THRESHOLD`,
+ * `DUPLICATE_OFFSET`).
+ *
+ * The factor is not decoration. `moveNodes` adds these to a coordinate in EMU,
+ * and a bare 1 would be a ten-thousandth of a pixel — under the whole-pixel
+ * quantum `withFrame` writes on, so the sum would round straight back to the
+ * value already stored and the guard there would skip the dimension entirely.
+ * Not a nudge too small to see: no edit at all, and no error either.
+ */
 const NUDGE: Record<string, [x: number, y: number]> = {
-	ArrowLeft: [-1, 0],
-	ArrowRight: [1, 0],
-	ArrowUp: [0, -1],
-	ArrowDown: [0, 1],
+	ArrowLeft: [-EMU_PER_PX, 0],
+	ArrowRight: [EMU_PER_PX, 0],
+	ArrowUp: [0, -EMU_PER_PX],
+	ArrowDown: [0, EMU_PER_PX],
 };
 
 /**
@@ -207,6 +235,36 @@ export function Studio({
 	 * alone, and is undone by forgetting it.
 	 */
 	const [pins, setPins] = useState<Readonly<Record<string, number>>>({});
+	/**
+	 * Where the rulers measure from, in the document's own coordinates.
+	 *
+	 * Editor state, beside the pinned universe and for the same reason. The
+	 * guides design draws the line at "is this a decision about the design, or
+	 * about the person looking at it" — a guide's lock is a decision and lives in
+	 * the document, whether guides are *shown* is not and does not. A zero point
+	 * is plainly the second kind: moving it changes no geometry, reaches no
+	 * solve, alters no export, and two people looking at the same document may
+	 * hold it in two places without disagreeing about anything. Putting it in the
+	 * document would mean opening a file and finding every number on both rulers
+	 * measured from a corner somebody else chose.
+	 *
+	 * The document's own origin is where it starts, which is what makes the
+	 * rulers read as the coordinates the inspector shows until somebody asks for
+	 * something else.
+	 */
+	const [zero, setZero] = useState<Point>({ x: 0, y: 0 });
+	/**
+	 * Whether the margins, the grid and the guides are on show.
+	 *
+	 * The other half of the same line the zero point sits on, and the design says
+	 * exactly where it falls: a guide's *lock* is a decision about that guide, is
+	 * worth persisting and should reach a collaborator; whether guides are
+	 * *shown* is about the person looking, and a document that carried it would
+	 * mean opening a file and not being able to see why your layout will not
+	 * move. It reaches no solve and no export either — a design that changed when
+	 * you hid the guides would be a bug, not a feature.
+	 */
+	const [showGuides, setShowGuides] = useState(true);
 	const [leftWidth, setLeftWidth] = usePanelWidth("clingo-design.panel.left", 190);
 	const [rightWidth, setRightWidth] = usePanelWidth("clingo-design.panel.right", 260);
 	// Text sizes itself, and only something with a canvas can say how big it
@@ -421,24 +479,67 @@ export function Studio({
 	 * Where each copy sits on the canvas. The one being edited gets the whole
 	 * padded surface, so that drawing a frame beside the document still has
 	 * somewhere to land.
+	 *
+	 * This is where the design's plane becomes the canvas's, and it is the only
+	 * place in this file that crosses: `region` and `layout` are EMU, because
+	 * they are arithmetic over the document's own geometry, while a `left` in a
+	 * style and a rectangle handed to the culler are CSS pixels, because that is
+	 * what a browser lays out and what the camera is scaled in. The consequence
+	 * worth knowing is that document coordinate `d` lands at canvas coordinate
+	 * `canvasPx(d)` exactly — the editable surface's own content offset cancels
+	 * its box's position — which is what lets the rulers below read the canvas
+	 * as if it were the document.
 	 */
 	const boxes = useMemo<Frame[]>(
 		() =>
 			Array.from({ length: shown.length }, (_, i) =>
-				view === "design" && i === 0 && !showingWays
-					? region
-					: {
-							x: layout.placements[i]?.x ?? 0,
-							y: layout.placements[i]?.y ?? 0,
-							width: bounds.width,
-							height: bounds.height,
-						},
+				canvasRect(
+					view === "design" && i === 0 && !showingWays
+						? region
+						: {
+								x: layout.placements[i]?.x ?? 0,
+								y: layout.placements[i]?.y ?? 0,
+								width: bounds.width,
+								height: bounds.height,
+							},
+				),
 			),
 		[shown.length, view, showingWays, region, layout, bounds],
 	);
 	// Two dozen artboards is two dozen full copies of the document; the ones
 	// nowhere near the viewport get no DOM at all.
 	const onscreen = useCulling(camera, host, boxes);
+
+	/**
+	 * The lines a copy is ruled with, per universe.
+	 *
+	 * Per universe rather than once for the document, because a grid is a value
+	 * like everything else: a column count holding twelve and six is two grids,
+	 * and seeing the two side by side is most of the reason the multiverse view
+	 * exists. Reading them off a single universe would draw one design's grid over
+	 * another design's nodes.
+	 *
+	 * Cached against the universe object rather than memoised on `shown`, which is
+	 * a fresh array every render — a universe is solved once and then looked at
+	 * many times, so this walks the document once per copy per solve. The editable
+	 * copy is not in here: the editor reads its own, because it needs them for
+	 * snapping as well as for drawing.
+	 */
+	const ruledFor = useMemo(() => {
+		const cache = new WeakMap<Universe, readonly RuledLine[]>();
+		return (universe: Universe): readonly RuledLine[] => {
+			let found = cache.get(universe);
+			if (!found) {
+				found = ruledLines(
+					scene,
+					universe.solved,
+					sceneContext(scene, universe.pick),
+				);
+				cache.set(universe, found);
+			}
+			return found;
+		};
+	}, [scene]);
 
 	const selectionIds = useCallback((ids: string[]) => setSelection(new Set(ids)), []);
 
@@ -499,7 +600,10 @@ export function Studio({
 	}, [byId, known]);
 
 	const fit = useCallback(() => {
-		if (layout.bounds.width > 0) canvas.current?.fit(layout.bounds, 0.06);
+		// `fit` frames a rectangle in the *canvas's* coordinates — it divides by
+		// the viewport's pixel size to work out a scale — so the grid's bounds
+		// cross on the way in like everything else that reaches the camera.
+		if (layout.bounds.width > 0) canvas.current?.fit(canvasRect(layout.bounds), 0.06);
 	}, [layout]);
 
 	/**
@@ -563,6 +667,15 @@ export function Studio({
 			if (parsed.kind === "layout") {
 				return `${nameOf(parsed.node)} ${LAYOUT_PROPS[parsed.field as LayoutProp].label}`;
 			}
+			if (parsed.kind === "guide") {
+				// A hand-drawn guide's field is `at(g1)`, which is on no settings
+				// table — so it is captioned by the surface it belongs to, which is
+				// the only name it has.
+				const line = guideAtIn(parsed.field);
+				return line === undefined
+					? `${nameOf(parsed.node)} ${GUIDE_PROPS[parsed.field as GuideProp].label}`
+					: `${nameOf(parsed.node)} guide`;
+			}
 			if (parsed.kind === "frame") {
 				return `${nameOf(parsed.node)} ${FRAME_DIMS[parsed.dim as Dimension].label}`;
 			}
@@ -585,6 +698,12 @@ export function Studio({
 	 * identical offers with different consequences, which is worse than an ASP
 	 * term. A rule with no members is its own name already, so it gets nothing
 	 * added.
+	 *
+	 * A member is not always a node: a rule that holds a card to a column line
+	 * names a *datum*, and `cg(page,3,left)` in the middle of a sentence about why
+	 * the card is where it is undoes the sentence. `datumLabel` is the third
+	 * reading, after the document's own name and a component part's, and it is why
+	 * the why-panel can answer "Align on Card, Column 3 left — Page forces this".
 	 */
 	const ruleLabel = useCallback(
 		(id: string): string => {
@@ -595,7 +714,10 @@ export function Studio({
 				c.group ??
 				`${c.nodes
 					.slice(0, 2)
-					.map((n) => byId.get(n)?.name ?? partLabel(scene, n) ?? n)
+					.map(
+						(n) =>
+							byId.get(n)?.name ?? partLabel(scene, n) ?? datumLabel(scene, n) ?? n,
+					)
 					.join(", ")}${c.nodes.length > 2 ? "…" : ""}`;
 			const label = CONSTRAINT_KINDS[c.kind].label;
 			return over ? `${label} on ${over}` : label;
@@ -723,6 +845,9 @@ export function Studio({
 			...accel("G", group),
 			...accel("G", ungroup, true),
 			...accel("D", duplicate),
+			// The universal hide-guides shortcut, and it hides them for the person
+			// pressing it and nobody else.
+			...accel(";", () => setShowGuides((on) => !on)),
 			{ hotkey: { key: "A", shift: true }, callback: autoLayout },
 			{
 				hotkey: { key: "Escape" },
@@ -794,6 +919,22 @@ export function Studio({
 		onSceneChange((prev) => moveNodes(prev, [...selection], x, y, picks), "nudge");
 	}
 
+	/**
+	 * A line pulled off a ruler and dropped on the design.
+	 *
+	 * The ruler's half of the gesture is pixels and this is the document's: which
+	 * page the line belongs to and where on it, both of which `drawGuideAt`
+	 * answers — including the case where the answer is "nowhere", since a guide
+	 * has to belong to a surface. Dropped against the universe on screen, like
+	 * every other gesture, because a solved artboard is where the eye sees it
+	 * rather than where the document stores it.
+	 */
+	function drawGuide(axis: "x" | "y", at: Point) {
+		onSceneChange(
+			(prev) => drawGuideAt(prev, axis, at, primary?.solved ?? {}, picks).scene,
+		);
+	}
+
 	function autoLayout() {
 		if (selection.size < 1) return;
 		let created: string | null = null;
@@ -810,7 +951,11 @@ export function Studio({
 		if (selection.size === 0) return;
 		let created: string[] = [];
 		onSceneChange((prev) => {
-			const result = duplicateNodes(prev, [...selection], 16, picks);
+			// The offset is `DUPLICATE_OFFSET` rather than a 16 written here,
+			// because sixteen of *what* is the whole question: sixteen EMU is a
+			// six-thousandth of a pixel, and the copy would land under the original
+			// where nothing but the layer list could find it.
+			const result = duplicateNodes(prev, [...selection], DUPLICATE_OFFSET, picks);
 			created = result.ids;
 			return result.scene;
 		});
@@ -1121,6 +1266,7 @@ export function Studio({
 											varying={unsettled}
 											freedom={freedom}
 											derived={derived}
+											showGuides={showGuides}
 											onContextMenu={(at) => {
 												const box = host.current?.getBoundingClientRect();
 												setMenu({
@@ -1135,9 +1281,18 @@ export function Studio({
 										// tiles neatly.
 										<div
 											className={styles.copy}
-											style={{ left: -bounds.x, top: -bounds.y }}
+											style={{ left: -canvasPx(bounds.x), top: -canvasPx(bounds.y) }}
 										>
 											<Artboard scene={scene} universe={universe} />
+											{/* Beside the artboard rather than inside it, because a
+											    grid rules a design without being part of it — the
+											    same line the exporter draws. Inert here: there is
+											    nothing to drag on a copy you are not editing, and
+											    hiding them is the person's business and never the
+											    document's. */}
+											{showGuides ? (
+												<Guides scene={scene} lines={ruledFor(universe)} />
+											) : null}
 										</div>
 									)}
 									{way ? (
@@ -1173,6 +1328,26 @@ export function Studio({
 							);
 						})}
 					</InfiniteCanvas>
+
+					{/* Only over the design, and that is a claim about coordinates
+					    rather than about clutter. The editable copy is the one whose
+					    box is the padded `region` and whose content is offset back by
+					    the same amount, so a document coordinate lands at exactly
+					    `canvasPx` of itself and a ruler reading the canvas is reading
+					    the document. Every other copy is packed against the grid's own
+					    origin, so the same reading would be off by wherever that copy
+					    happened to be tiled — a ruler that is wrong is worse than no
+					    ruler, and there is nothing to measure in a wall of thumbnails
+					    anyway. */}
+					{view === "design" && !showingWays ? (
+						<Rulers
+							camera={camera}
+							unit={scene.unit ?? DEFAULT_UNIT}
+							zero={zero}
+							onZeroChange={setZero}
+							onDrawGuide={drawGuide}
+						/>
+					) : null}
 
 					<div className={styles.toolbar}>
 						<Link className={styles.back} to="/" title="Back to projects">
@@ -1224,6 +1399,16 @@ export function Studio({
 						) : null}
 						{view === "design" ? (
 							<div className={styles.tools}>
+								<button
+									type="button"
+									className={cx(styles.tool, showGuides && styles.toolActive)}
+									data-role="guides"
+									data-active={showGuides ? "" : undefined}
+									title="Show the margins, the grid and the guides (⌘;)"
+									onClick={() => setShowGuides((on) => !on)}
+								>
+									Guides
+								</button>
 								<button
 									type="button"
 									className={styles.tool}

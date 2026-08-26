@@ -15,7 +15,18 @@ import { addConstraint, addNode, makeNode, updateConstraint } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
 import { type Scene, dimension, emptyScene } from "./scene.ts";
 import { findTemplate } from "./templates/index.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { type Value, lit, ref, single, tokenVar } from "./values.ts";
+
+/**
+ * The token values here are `px` strings and the solver's answers are EMU, so
+ * the assertions carry the factor. The cases are left in pixels because what
+ * each of them is about is a token holding 20, 90 or 160 — three numbers a
+ * reader recognises as three rows of a design table.
+ */
+const P = EMU_PER_PX;
+
+const px = (n: number): number => n * P;
 
 /** Two loose rects and one `length` token, which is the whole apparatus. */
 function scene(token: Value): Scene {
@@ -30,7 +41,7 @@ function scene(token: Value): Scene {
 	] as const) {
 		out = addNode(
 			out,
-			makeNode("rect", { x, y: 0, width: 40, height: 20 }, { id }),
+			makeNode("rect", { x: px(x), y: 0, width: px(40), height: px(20) }, { id }),
 		);
 	}
 	return out;
@@ -47,11 +58,11 @@ const explored = (s: Scene) => explore(s, directSolver, { sample: "first" });
 test("a dimension that names a token takes the token's value", async () => {
 	const near = await explored(pinned(single("40px"), [ref("size")]));
 	assert.equal(near.count, 1, "one length is one design");
-	assert.equal(near.universes[0].solved.a.x, 40);
+	assert.equal(near.universes[0].solved.a.x, px(40));
 
 	// The only edit is to the token, and the geometry moves with it.
 	const far = await explored(pinned(single("175px"), [ref("size")]));
-	assert.equal(far.universes[0].solved.a.x, 175);
+	assert.equal(far.universes[0].solved.a.x, px(175));
 });
 
 test("three lengths on one token are three universes, at three places", async () => {
@@ -61,7 +72,7 @@ test("three lengths on one token are three universes, at three places", async ()
 	assert.equal(result.count, 3, "a design table has a row per value");
 	assert.deepEqual(
 		result.universes.map((u) => u.solved.a.x ?? 0).sort((p, q) => p - q),
-		[20, 90, 160],
+		[px(20), px(90), px(160)],
 	);
 	// Each universe still says which alternative it took, so the grid can
 	// caption itself and the Variables panel can pin one.
@@ -74,9 +85,9 @@ test("three lengths on one token are three universes, at three places", async ()
 test("a dimension typed in as a number is still one universe", async () => {
 	// The guard on the trade-off: projecting the dimension must not turn a
 	// document that never asked for alternatives into several designs.
-	const result = await explored(pinned(single("40px"), dimension(90)));
+	const result = await explored(pinned(single("40px"), dimension(px(90))));
 	assert.equal(result.count, 1);
-	assert.equal(result.universes[0].solved.a.x, 90);
+	assert.equal(result.universes[0].solved.a.x, px(90));
 });
 
 test("two constraints driven by one token move together", async () => {
@@ -130,9 +141,9 @@ test("the design-table template shows its three configurations", async () => {
 	});
 	assert.equal(result.count, 3);
 	const gaps = result.universes
-		.map((u) => (u.solved.two.x ?? 0) - ((u.solved.one.x ?? 0) + 120))
+		.map((u) => (u.solved.two.x ?? 0) - ((u.solved.one.x ?? 0) + px(120)))
 		.sort((p, q) => p - q);
-	assert.deepEqual(gaps, [16, 56, 112]);
+	assert.deepEqual(gaps, [px(16), px(56), px(112)]);
 	// The margin is a token too, and it holds in every one of them.
-	for (const u of result.universes) assert.equal(u.solved.one.x, 60);
+	for (const u of result.universes) assert.equal(u.solved.one.x, px(60));
 });

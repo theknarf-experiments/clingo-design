@@ -164,13 +164,18 @@ open(R,C) :- pos(R), pos(C), not given(R,C,_).
 % ---- the 81 cells ----
 % node/1 is derivable, so these are on the canvas without being in the
 % document. Frames are relative to the page, which is what the grid is drawn on.
+%
+% frame/3 is in EMU, so every coordinate here is written in pixels and
+% multiplied by "emupx" — a #const the generated program declares, folded away
+% while grounding. Say the unit rather than the number: ${CELL}*emupx is a
+% ${CELL}-pixel cell, and ${CELL * 9525} is nothing anybody can read.
 node(cell(R,C)) :- pos(R), pos(C).
 kind(cell(R,C),text) :- pos(R), pos(C).
 child(page,cell(R,C)) :- pos(R), pos(C).
-frame(cell(R,C),x,X) :- pos(R), pos(C), X = ${PAD} + (C-1)*${CELL}.
-frame(cell(R,C),y,Y) :- pos(R), pos(C), Y = ${TOP} + (R-1)*${CELL}.
-frame(cell(R,C),width,${CELL}) :- pos(R), pos(C).
-frame(cell(R,C),height,${CELL}) :- pos(R), pos(C).
+frame(cell(R,C),x,X) :- pos(R), pos(C), X = (${PAD} + (C-1)*${CELL})*emupx.
+frame(cell(R,C),y,Y) :- pos(R), pos(C), Y = (${TOP} + (R-1)*${CELL})*emupx.
+frame(cell(R,C),width,${CELL}*emupx) :- pos(R), pos(C).
+frame(cell(R,C),height,${CELL}*emupx) :- pos(R), pos(C).
 % child/2 is a set, so paint order is order/2 and nothing else. The digits go
 % over the board and its grid rules, which are the ${over} layers the page holds.
 order(cell(R,C),I) :- pos(R), pos(C), I = ${over} + (R-1)*9 + C.

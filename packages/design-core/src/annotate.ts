@@ -10,8 +10,19 @@
  * constraint's stored number, so a mark always says where the design actually
  * ended up. Which mark a kind gets is one field in `CONSTRAINT_KINDS`, so a new
  * kind picks a shape instead of growing this file a case.
+ *
+ * A member is not always a node. A column line and a hand-drawn guide reach a
+ * constraint as a *datum*, and the reason those marks matter more than the rest
+ * is that a datum is the one member a designer cannot see. A card sitting at 480
+ * with nothing beside it looks like a card somebody dragged to 480; the mark is
+ * what says "column three of the page put it there", and it is also what lets
+ * the why-panel's sentence about that rule land on something visible. Where a
+ * datum stands is `lines.ts`'s answer rather than one worked out here — see
+ * {@link datumFrame}, which is also where a datum that answers nothing is
+ * refused.
  */
 import type { Frame } from "./geometry.ts";
+import { type RuledLine, ruledLines } from "./lines.ts";
 import {
 	CONSTRAINT_KINDS,
 	type Constraint,
@@ -21,6 +32,13 @@ import {
 	type Scene,
 } from "./scene.ts";
 import { placedNodes } from "./tree.ts";
+import {
+	DEFAULT_UNIT,
+	EMU_PER_PX,
+	type Unit,
+	displayLength,
+	wholeEmu,
+} from "./units.ts";
 import type { ResolveContext } from "./values.ts";
 
 /**
@@ -40,21 +58,39 @@ export interface Annotation {
 	at: number;
 	from: number;
 	to: number;
-	/** A number worth reading — a distance, a size, a pinned coordinate. */
+	/**
+	 * A number worth reading — a distance, a size, a pinned coordinate.
+	 *
+	 * Already spelled, in the document's own unit: `"60px"`, `"12pt"`. The
+	 * coordinates beside it are EMU because a renderer has to do arithmetic on
+	 * them, but this one is only ever read, and 571500 is not a thing to put in
+	 * front of a designer who drew a 60-pixel gap.
+	 */
 	label?: string;
 }
 
 /**
- * How far a line reaches past the members it crosses.
+ * How far a line reaches past the members it crosses: eight pixels, as EMU.
  *
  * Without it, a rule about a selected node's own edge would run exactly under
  * that node's selection outline and be invisible — a pin especially, which has
- * only the one member to span.
+ * only the one member to span. Eight *pixels* because it is a claim about an
+ * outline's thickness rather than about the design, which is why it carries the
+ * factor: at a bare 8 the overhang would be a thousandth of a pixel and the mark
+ * would go back to hiding under the selection.
  */
-const OVERHANG = 8;
+const OVERHANG = 8 * EMU_PER_PX;
 
-/** Half a pixel is noise; a whole one is a position. */
-const round = (v: number): number => Math.round(v * 10) / 10;
+/**
+ * Back onto a whole EMU.
+ *
+ * This used to round to a tenth of a pixel, on the grounds that half a pixel was
+ * noise. At 1/914400 in there is no noise left to cut — the only fractions that
+ * reach here are the halves that `across(...).size / 2` makes out of integers —
+ * so what is left is the same tie rule the rest of the codebase uses, applied to
+ * a coordinate that is about to be drawn.
+ */
+const round = wholeEmu;
 
 /** How much of a node's own size lies before an edge. */
 const OFFSET = { lead: 0, mid: 0.5, trail: 1 } as const;
@@ -78,11 +114,72 @@ function edgeOf(frame: Frame, edge: Edge): number {
 }
 
 /**
+ * Where a datum stands, as a box the marks can be measured off.
+ *
+ * A datum is a **zero-size box** along the axis it is about, which is exactly
+ * what the solver makes of it, and the surface's whole extent across that axis,
+ * which the solver deliberately leaves free — `lsz(D,·)` is fixed on the
+ * datum's own axis only, because a column line has no opinion about a height.
+ * So the cross extent is not the model's to give, and it is not this file's
+ * either: it is the band `ruledLines` draws its lines across, which is what
+ * keeps a mark and the line it is about the same length. A column line drawn
+ * the height of its page reads as a column line; one drawn the height of the
+ * card beside it reads as a coincidence.
+ *
+ * **The line is the overlay's line, not a second reading of it.** This used to
+ * take the term to the answer set itself — `solved[term]?.[axis]` — and that is
+ * one lookup too few. clingo-lpx reports a value for every theory variable in
+ * the ground program whether or not this answer set constrained it, so in the
+ * four-column universe of a responsive grid `lv(cg(page,5,left))` comes back
+ * all the same, at zero. A mark built from it asserts an alignment against a
+ * line that is not in this design, sitting on the near margin, for a rule that
+ * correctly moved nothing. `lines.ts` names that trap and guards it by asking
+ * the document how many tracks there are — see `trackCount`, and the reason the
+ * answer set cannot be asked — so the fix is not to guard it twice but to read
+ * the lines the design actually has. Both files' headers promised the two
+ * readers agree; now they are one reader.
+ *
+ * That also settles the rest for free: a document nobody has solved is ruled
+ * with no lines and so draws no datum marks, which is the honest report rather
+ * than a gap; and a hand-drawn guide is found the same way a track is, because
+ * `ruledLines` walks both.
+ *
+ * **A datum answers on its own axis and nowhere else**, which is the one
+ * refusal left here and is not a caution: it is the silence the generated
+ * program already answers with, said in the same place. `gdaxis/2` gives a datum
+ * equations on one axis, so an `align` on `top` against a column line grounds a
+ * free variable and the rule states nothing — and a mark for it would state
+ * something. The rule then falls to the `minNodes` check with a member short,
+ * which is where a rule that says nothing has always gone.
+ *
+ * An ordinary node has already been found before this is asked, so a rule that
+ * minted a node called `cg(page,3,left)` keeps its own frame.
+ */
+function datumFrame(
+	term: string,
+	edge: Edge,
+	lines: ReadonlyMap<string, RuledLine>,
+): Frame | undefined {
+	const line = lines.get(term);
+	if (!line || line.axis !== EDGES[edge].axis) return undefined;
+	const band = line.to - line.from;
+	return line.axis === "x"
+		? { x: line.at, y: line.from, width: 0, height: band }
+		: { x: line.from, y: line.at, width: band, height: 0 };
+}
+
+/**
  * Every mark the selection earns.
  *
  * A constraint draws only while one of its members is selected: the point is
  * to explain the thing being looked at, not to turn the canvas into a
  * blueprint. Disabled rules draw nothing, because they do nothing.
+ *
+ * The edge is settled here rather than inside {@link marksFor} because a datum
+ * cannot be placed without it — which line of the track a term names is one
+ * question, and whether *this rule* is about that axis at all is another. A
+ * member that answers nothing simply does not arrive, and the `minNodes` check
+ * below then drops the rule the same way it drops one whose nodes were deleted.
  */
 export function annotate(
 	scene: Scene,
@@ -91,27 +188,44 @@ export function annotate(
 	context?: ResolveContext,
 ): Annotation[] {
 	if (selection.size === 0) return [];
-	const world = new Map(
-		placedNodes(scene.nodes, solved, context).map((p) => [p.node.id, p.world]),
+	const placed = new Map(
+		placedNodes(scene.nodes, solved, context).map((p) => [p.node.id, p]),
 	);
+	/**
+	 * The lines this design is ruled with, by term — built at most once, and
+	 * only if some member turns out not to be a node at all. Most selections
+	 * name nothing but nodes, and `ruledLines` walks the tree.
+	 */
+	let ruled: Map<string, RuledLine> | undefined;
+	const lines = () =>
+		(ruled ??= new Map(
+			ruledLines(scene, solved, context).map((line) => [line.term, line]),
+		));
 	const out: Annotation[] = [];
 	for (const c of scene.constraints ?? []) {
 		const spec = CONSTRAINT_KINDS[c.kind];
 		if (spec.annotation === "none" || !c.enabled) continue;
 		if (!c.nodes.some((id) => selection.has(id))) continue;
+		const edge = c.edge ?? spec.edges[0];
+		if (!edge) continue;
 		const frames = c.nodes
-			.map((id) => world.get(id))
+			.map((id) => placed.get(id)?.world ?? datumFrame(id, edge, lines()))
 			.filter((f): f is Frame => f !== undefined);
 		if (frames.length < spec.minNodes) continue;
-		out.push(...marksFor(c, frames));
+		out.push(...marksFor(c, edge, frames, scene.unit ?? DEFAULT_UNIT));
 	}
 	return out;
 }
 
-function marksFor(c: Constraint, frames: readonly Frame[]): Annotation[] {
+function marksFor(
+	c: Constraint,
+	edge: Edge,
+	frames: readonly Frame[],
+	unit: Unit,
+): Annotation[] {
 	const spec = CONSTRAINT_KINDS[c.kind];
-	const edge = c.edge ?? spec.edges[0];
-	if (!edge) return [];
+	/** Every label on a mark, in the unit the document is read in. */
+	const say = (emu: number) => displayLength(emu, unit);
 	const axis = EDGES[edge].axis;
 	const of = { constraint: c.id, kind: c.kind, axis } as const;
 
@@ -144,7 +258,7 @@ function marksFor(c: Constraint, frames: readonly Frame[]): Annotation[] {
 				),
 				from: round(trail),
 				to: round(lead),
-				label: `${round(lead - trail)}`,
+				label: say(round(lead - trail)),
 			},
 		];
 	}
@@ -155,7 +269,7 @@ function marksFor(c: Constraint, frames: readonly Frame[]): Annotation[] {
 		// is where the design settled.
 		const mid = (f: Frame) => along(f, axis).start + along(f, axis).size / 2;
 		const at = round((mid(frames[0]) + mid(frames[1])) / 2);
-		return [{ ...of, shape: "line", at, ...band(), label: `${at}` }];
+		return [{ ...of, shape: "line", at, ...band(), label: say(at) }];
 	}
 
 	// "edges": a size is a thing each member has of its own, so it draws one
@@ -167,7 +281,7 @@ function marksFor(c: Constraint, frames: readonly Frame[]): Annotation[] {
 			at: round(across(f, axis).start + across(f, axis).size / 2),
 			from: round(along(f, axis).start),
 			to: round(along(f, axis).start + along(f, axis).size),
-			label: `${round(along(f, axis).size)}`,
+			label: say(round(along(f, axis).size)),
 		}));
 	}
 	const at = round(edgeOf(frames[0], edge));
@@ -179,7 +293,7 @@ function marksFor(c: Constraint, frames: readonly Frame[]): Annotation[] {
 			...band(),
 			// Only where the number is the point: an alignment is about the
 			// edges meeting, not about which coordinate they met at.
-			...(spec.valueType ? { label: `${at}` } : {}),
+			...(spec.valueType ? { label: say(at) } : {}),
 		},
 	];
 }

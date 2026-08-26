@@ -16,11 +16,13 @@ import { explore } from "./explore.ts";
 import {
 	type Measured,
 	type Measurements,
+	type Size,
 	askedAxes,
 	askedSize,
 	autoSizes,
 	capAxes,
 	fontString,
+	lineHeightEmu,
 	lineHeightPx,
 	measureAxes,
 	naturalSize,
@@ -28,10 +30,12 @@ import {
 	rowCount,
 	rowIndex,
 	rowPicks,
+	sizeFromCssPx,
 	sizingOf,
 	toMeasure,
 } from "./measure.ts";
 import {
+	PROPS,
 	type Scene,
 	type SceneNode,
 	type Style,
@@ -39,23 +43,49 @@ import {
 	makeLayout,
 } from "./scene.ts";
 import { findInTree, mapTree, propValues } from "./tree.ts";
+import { EMU_PER_PX, type Emu, cssPxFromEmu, emuOf } from "./units.ts";
+
+/**
+ * A length in whole CSS pixels, as the EMU the model holds.
+ *
+ * Every box in this file is stated in pixels because that is the unit anybody
+ * reading it thinks in — a heading is 231 wide, not 2,200,275 — and every one
+ * of them crosses here. The same convention `geometry.test.ts` uses, and it is
+ * a helper rather than a literal so that a test asserting `px(230)` against a
+ * solved value is comparing two numbers with the same name for their unit.
+ */
+const px = (n: number): Emu => n * EMU_PER_PX;
+
+/** A box drawn in pixels. */
+const box = (x: number, y: number, width: number, height: number) => ({
+	x: px(x),
+	y: px(y),
+	width: px(width),
+	height: px(height),
+});
+
+/** A measured size in pixels — what the host's `measureText` hands back. */
+const size = (width: number, height: number): Size => ({
+	width: px(width),
+	height: px(height),
+});
 
 /** A hugging row holding one text node and one plain rectangle. */
 function row(): Scene {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "box" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "box" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"box",
-		makeNode("text", { x: 0, y: 0, width: 160, height: 28 }, { id: "t" }),
+		makeNode("text", box(0, 0, 160, 28), { id: "t" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"box",
-		makeNode("rect", { x: 0, y: 0, width: 40, height: 40 }, { id: "r" }),
+		makeNode("rect", box(0, 0, 40, 40), { id: "r" }),
 	);
 	return {
 		...scene,
@@ -83,8 +113,8 @@ import {
 } from "./values.ts";
 
 test("only the measured kinds size themselves, and by default they do", () => {
-	const text = makeNode("text", { x: 0, y: 0, width: 160, height: 28 });
-	const rect = makeNode("rect", { x: 0, y: 0, width: 160, height: 28 });
+	const text = makeNode("text", box(0, 0, 160, 28));
+	const rect = makeNode("rect", box(0, 0, 160, 28));
 	assert.equal(sizingOf(text), "hug");
 	assert.equal(autoSizes(text), true);
 	assert.equal(sizingOf(rect), "fixed", "a rectangle is the box it was drawn at");
@@ -94,21 +124,21 @@ test("only the measured kinds size themselves, and by default they do", () => {
 test("a measurement wins over the frame, but only where it applies", () => {
 	const scene = row();
 	const measurements = {
-		t: oneSize({ width: 231, height: 22 }),
-		r: oneSize({ width: 9, height: 9 }),
+		t: oneSize(size(231, 22)),
+		r: oneSize(size(9, 9)),
 	};
 	const text = findInTree(scene.nodes, "t");
 	const rect = findInTree(scene.nodes, "r");
 	assert.ok(text && rect);
-	assert.deepEqual(askedSize(text, measurements), { width: 231, height: 22 });
+	assert.deepEqual(askedSize(text, measurements), size(231, 22));
 	assert.deepEqual(
 		askedSize(rect, measurements),
-		{ width: 40, height: 40 },
+		size(40, 40),
 		"a rectangle never asks for anything but its frame",
 	);
 	assert.deepEqual(
 		askedSize(text),
-		{ width: 160, height: 28 },
+		size(160, 28),
 		"unmeasured, it falls back to the box it was drawn at",
 	);
 });
@@ -119,10 +149,7 @@ test("fixing a text node's size takes it out of the measuring", () => {
 	const text = findInTree(scene.nodes, "t");
 	assert.ok(text);
 	assert.equal(sizingOf(text), "fixed");
-	assert.deepEqual(askedSize(text, { t: oneSize({ width: 231, height: 22 }) }), {
-		width: 160,
-		height: 28,
-	});
+	assert.deepEqual(askedSize(text, { t: oneSize(size(231, 22)) }), size(160, 28));
 	// Back to automatic, and the document carries no trace of the detour.
 	const back = findInTree(setSizing(scene, ["t"], "hug").nodes, "t");
 	assert.equal(back && "sizing" in back, false);
@@ -137,14 +164,18 @@ test("only the auto-sized nodes are handed out for measuring", () => {
 
 test("the measured size is what reaches the layout facts", () => {
 	const scene = row();
-	assert.ok(compile(scene).program.includes("lask(t,width,160)."));
+	assert.ok(compile(scene).program.includes(`lask(t,width,${px(160)}).`));
+	// Half a pixel is 4762.5 EMU, and 9525 is odd, so a box measured at one is
+	// the case `emitAsked` quantizes: the fact is whole EMU, ties away from
+	// zero. Before EMU this test rounded to a whole *pixel* and could not have
+	// said anything finer.
 	const measured = compile(scene, {
-		measurements: { t: oneSize({ width: 231.4, height: 21.6 }) },
+		measurements: { t: oneSize({ width: px(231.5), height: px(21.5) }) },
 	});
-	assert.ok(measured.program.includes("lask(t,width,231)."));
-	assert.ok(measured.program.includes("lask(t,height,22)."));
+	assert.ok(measured.program.includes(`lask(t,width,${px(231) + 4763}).`));
+	assert.ok(measured.program.includes(`lask(t,height,${px(21) + 4763}).`));
 	assert.ok(
-		measured.program.includes("lask(r,width,40)."),
+		measured.program.includes(`lask(r,width,${px(40)}).`),
 		"an unmeasured sibling is untouched",
 	);
 });
@@ -161,12 +192,12 @@ test("a hugging container grows to the text it actually holds", async () => {
 	};
 
 	const dragged = await solved();
-	assert.equal(dragged.box.width, 230, "10 + 160 + 10 + 40 + 10");
+	assert.equal(dragged.box.width, px(230), "10 + 160 + 10 + 40 + 10");
 
-	const fitted = await solved({ t: oneSize({ width: 231, height: 22 }) });
-	assert.equal(fitted.box.width, 301, "10 + 231 + 10 + 40 + 10");
-	assert.equal(fitted.t.width, 231);
-	assert.equal(fitted.r.x, 251, "the sibling moves along with it");
+	const fitted = await solved({ t: oneSize(size(231, 22)) });
+	assert.equal(fitted.box.width, px(301), "10 + 231 + 10 + 40 + 10");
+	assert.equal(fitted.t.width, px(231));
+	assert.equal(fitted.r.x, px(251), "the sibling moves along with it");
 });
 
 test("a hugging container asks for what its contents come to, not its frame", () => {
@@ -174,13 +205,13 @@ test("a hugging container asks for what its contents come to, not its frame", ()
 	assert.ok(box);
 	assert.deepEqual(
 		askedSize(box),
-		{ width: 10, height: 10 },
+		size(10, 10),
 		"its stored frame is stale by construction — the solver owns its size",
 	);
-	assert.deepEqual(naturalSize(box), { width: 230, height: 60 });
+	assert.deepEqual(naturalSize(box), size(230, 60));
 	assert.deepEqual(
-		naturalSize(box, { t: oneSize({ width: 231, height: 22 }) }),
-		{ width: 301, height: 60 },
+		naturalSize(box, { t: oneSize(size(231, 22)) }),
+		size(301, 60),
 		"measurements reach all the way down",
 	);
 });
@@ -191,13 +222,34 @@ test("a natural size stops at a container that is not hugging", () => {
 	);
 	const box = findInTree(fixed, "box");
 	assert.ok(box);
-	assert.deepEqual(naturalSize(box), { width: 10, height: 10 });
+	assert.deepEqual(naturalSize(box), size(10, 10));
 });
 
+/* ------------------------------------------------------------------ */
+/* The font engine's boundary                                          */
+/* ------------------------------------------------------------------ */
+
 test("a font shorthand is what a canvas asks for", () => {
+	const georgia = 'Georgia, "Times New Roman", serif';
 	assert.equal(
-		fontString({ family: 'Georgia, "Times New Roman", serif', size: "18px", weight: "600" }),
-		'600 18px Georgia, "Times New Roman", serif',
+		fontString({ family: georgia, size: "18px", weight: "600" }),
+		`600 18px ${georgia}`,
+	);
+	// The three spellings of one size, and the canvas is told the same thing by
+	// all of them. A shorthand takes `pt` and would have measured 18 pixels of
+	// type as 24, silently, in the one path the whole document's hugging hangs
+	// off; `emu` is not CSS at all and would have thrown the font away entirely.
+	for (const said of ["13.5pt", "0.1875in", "171450emu"]) {
+		assert.equal(
+			fontString({ family: georgia, size: said, weight: "600" }),
+			`600 18px ${georgia}`,
+			`${said} is 18px`,
+		);
+	}
+	// And a size that is no length falls back to what a node saying nothing means.
+	assert.equal(
+		fontString({ family: georgia, size: "large", weight: "600" }),
+		`600 ${PROPS.size.fallback} ${georgia}`,
 	);
 });
 
@@ -206,6 +258,38 @@ test("line height is a multiple of the font size unless it carries a unit", () =
 	assert.equal(lineHeightPx("20px", "24px"), 24);
 	// Nothing said: the document's own default ratio, against the default size.
 	assert.equal(lineHeightPx(undefined, undefined), 16 * 1.35);
+	// The reader underneath it, which is the one the exporter orders a type ramp
+	// by. The ratio must stay a ratio: 1.5 of 20px is 30px and not 1.5 EMU,
+	// which is the confusion the split of `numeralOf` and `emuOf` exists to
+	// prevent, and it is the same number said either way.
+	assert.equal(lineHeightEmu("20px", "1.5"), px(30));
+	assert.equal(lineHeightEmu("15pt", "1.5"), px(30), "the same type, in points");
+	assert.equal(lineHeightEmu("20px", "0.25in"), px(24));
+});
+
+test("a measured box crosses into EMU once, and lands on a whole one", () => {
+	// The one float this module lets in. Whole pixels are exact both ways.
+	assert.deepEqual(sizeFromCssPx({ width: 231, height: 22 }), size(231, 22));
+	assert.equal(cssPxFromEmu(sizeFromCssPx({ width: 231, height: 22 }).width), 231);
+	// A fraction the shaper actually produces is kept, to a hundred-thousandth
+	// of it: a whole pixel is 9525 EMU, so there is room for the tail that a
+	// whole-pixel model had to throw away.
+	assert.equal(sizeFromCssPx({ width: 231.4, height: 0 }).width, px(231) + 3810);
+	// Half a pixel is 4762.5 EMU and 9525 is odd, so this is the one place the
+	// crossing rounds — by name, ties away from zero.
+	assert.equal(sizeFromCssPx({ width: 231.5, height: 0 }).width, px(231) + 4763);
+	assert.ok(
+		Number.isInteger(sizeFromCssPx({ width: 1 / 3, height: 1 / 7 }).height),
+		"a measured box is stored, so it is a whole EMU",
+	);
+});
+
+test("a size no unit spells falls back to the default, never to zero", () => {
+	// The exact-or-nothing contract, seen from this side: `emuOf` is what every
+	// reader in this file goes through, so the fallbacks below are the fallbacks
+	// a document out of an older tool gets — a definite default, never a zero.
+	assert.equal(emuOf("20.5px"), undefined);
+	assert.equal(lineHeightEmu("20.5px", "1.5"), px(16) * 1.5, "the default size");
 });
 
 test("copy is a value, so a headline can branch the space", async () => {
@@ -213,7 +297,7 @@ test("copy is a value, so a headline can branch the space", async () => {
 	scene = addNodeTo(
 		scene,
 		"frame1",
-		makeNode("text", { x: 0, y: 0, width: 100, height: 20 }, { id: "t" }),
+		makeNode("text", box(0, 0, 100, 20), { id: "t" }),
 	);
 	scene = setProp(scene, ["t"], "text", [lit("Sign up"), lit("Get started")]);
 
@@ -241,12 +325,12 @@ test("a hugging row follows whichever wording won", async () => {
 	scene = addNodeTo(
 		scene,
 		"frame1",
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "row" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "row" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"row",
-		makeNode("text", { x: 0, y: 0, width: 10, height: 10 }, { id: "t" }),
+		makeNode("text", box(0, 0, 10, 10), { id: "t" }),
 	);
 	scene = setProp(scene, ["t"], "text", [lit("short"), lit("much longer")]);
 	scene = setLayout(scene, "row", makeLayout({ gap: 0, padding: 10 }));
@@ -261,8 +345,8 @@ test("a hugging row follows whichever wording won", async () => {
 					t: {
 						axes: [{ variable: propVar("t", "text"), count: 2 }],
 						sizes: [
-							{ width: 50, height: 20 },
-							{ width: 130, height: 20 },
+							size(50, 20),
+							size(130, 20),
 						],
 					},
 				},
@@ -270,7 +354,7 @@ test("a hugging row follows whichever wording won", async () => {
 			return r.universes[0].solved.row?.width;
 		}),
 	);
-	assert.deepEqual(widths, [70, 150], "50 + 20 padding, then 130 + 20");
+	assert.deepEqual(widths, [px(70), px(150)], "50 + 20 padding, then 130 + 20");
 });
 
 /* ------------------------------------------------------------------ */
@@ -300,10 +384,10 @@ function styled(scene: Partial<Scene> & { styles: Style[] }): Scene {
 	let out: Scene = { ...emptyScene(), nodes: [], ...scene };
 	out = addNode(
 		out,
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "box" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "box" }),
 	);
 	out = addNodeTo(out, "box", {
-		...makeNode("text", { x: 0, y: 0, width: 60, height: 20 }, { id: "t" }),
+		...makeNode("text", box(0, 0, 60, 20), { id: "t" }),
 		props: { text: single("Text") },
 	});
 	out = setLayout(out, "box", makeLayout({ gap: 0, padding: 10 }));
@@ -443,10 +527,10 @@ test("the solver reads exactly one row, and it is the right one", async () => {
 		t: {
 			axes,
 			sizes: [
-				{ width: 40, height: 20 },
-				{ width: 80, height: 40 },
-				{ width: 100, height: 20 },
-				{ width: 200, height: 40 },
+				size(40, 20),
+				size(80, 40),
+				size(100, 20),
+				size(200, 40),
 			],
 		},
 	};
@@ -466,7 +550,7 @@ test("the solver reads exactly one row, and it is the right one", async () => {
 		}
 	}
 	// 20 of padding around each measured box, in odometer order.
-	assert.deepEqual(widths, [60, 100, 120, 220]);
+	assert.deepEqual(widths, [px(60), px(100), px(120), px(220)]);
 });
 
 test("over the budget, a container drops the axes that move it least", () => {
@@ -487,17 +571,17 @@ test("over the budget, a container drops the axes that move it least", () => {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "col" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "col" }),
 	);
 	const measurements: Record<string, Measured> = {};
 	spreads.forEach((widths, i) => {
 		scene = addNodeTo(scene, "col", {
-			...makeNode("text", { x: 0, y: 0, width: 100, height: 20 }, { id: `t${i}` }),
+			...makeNode("text", box(0, 0, 100, 20), { id: `t${i}` }),
 			props: { text: [lit("a"), lit("b"), lit("c")] },
 		});
 		measurements[`t${i}`] = {
 			axes: [{ variable: propVar(`t${i}`, "text"), count: 3 }],
-			sizes: widths.map((width) => ({ width, height: 20 })),
+			sizes: widths.map((width) => size(width, 20)),
 		};
 	});
 	scene = setLayout(
@@ -537,7 +621,11 @@ test("over the budget, a container drops the axes that move it least", () => {
 		const exact = naturalSize(col, measurements, { ...context, picks });
 		const got = rows.get(rowIndex(axes, picks));
 		assert.ok(got);
-		const off = Math.abs(got.width - exact.width) + Math.abs(got.height - exact.height);
+		// In pixels, because the claim is about how wrong a picture looks and a
+		// reader cannot see 17,000 EMU. The arithmetic above is all EMU.
+		const off = cssPxFromEmu(
+			Math.abs(got.width - exact.width) + Math.abs(got.height - exact.height),
+		);
 		total += off;
 		worst = Math.max(worst, off);
 		universes++;
@@ -558,7 +646,7 @@ test("a style a rule handed a measured node is reported, since nothing was dropp
 	// Nobody wears it in the document; a rule dresses the one measured node.
 	scene = setStyle(scene, ["t"], undefined);
 	scene = { ...scene, rules: "sty_wears(t,head,size). sty_wears(t,head,weight).\n" };
-	const measurements: Measurements = { t: oneSize({ width: 60, height: 20 }) };
+	const measurements: Measurements = { t: oneSize(size(60, 20)) };
 
 	const out = await explore(scene, directSolver, { sample: "first", measurements });
 	assert.equal(out.diagnostics, "", "clingo has nothing to say: the rules are fine");
@@ -570,7 +658,7 @@ test("a style a rule handed a measured node is reported, since nothing was dropp
 	// It is a remark, not a refusal: the design is still there, and the box is
 	// still the one the measurement gave.
 	assert.equal(out.universes[0].model.byId.t.rendered.size, "40px");
-	assert.equal(out.universes[0].solved.t?.width, 60);
+	assert.equal(out.universes[0].solved.t?.width, px(60));
 
 	// And the three ways of not being worth a word.
 	const quiet = async (scene: Scene, measured?: Measurements) =>
@@ -624,9 +712,9 @@ test("a dropped axis is written into the program, not swallowed", async () => {
 		t: {
 			axes: [{ variable: propVar("t", "text"), count: 3 }],
 			sizes: [
-				{ width: 10, height: 20 },
-				{ width: 20, height: 20 },
-				{ width: 30, height: 20 },
+				size(10, 20),
+				size(20, 20),
+				size(30, 20),
 			],
 			dropped: [styleVar("head")],
 		},
@@ -661,7 +749,7 @@ test("a dropped axis is written into the program, not swallowed", async () => {
 			return out.universes[0].solved.box?.width;
 		}),
 	);
-	assert.deepEqual(boxes, [50, 50]);
+	assert.deepEqual(boxes, [px(50), px(50)]);
 });
 
 test("an alternative no measurement covers still gets a definite box", async () => {
@@ -682,8 +770,8 @@ literal(minted,"minted").
 		t: {
 			axes: [{ variable: propVar("t", "text"), count: 2 }],
 			sizes: [
-				{ width: 40, height: 20 },
-				{ width: 90, height: 20 },
+				size(40, 20),
+				size(90, 20),
 			],
 		},
 	};
@@ -695,7 +783,7 @@ literal(minted,"minted").
 	assert.equal(out.count, 1);
 	assert.equal(
 		out.universes[0].solved.box?.width,
-		60,
+		px(60),
 		"the first row's box plus the padding, rather than an arbitrary point",
 	);
 });
@@ -707,18 +795,18 @@ function nested(inner: Partial<Record<"gap" | "padding", Value>>): Scene {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "outer" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "outer" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"outer",
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "inner" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "inner" }),
 	);
 	for (const id of ["a", "b"]) {
 		scene = addNodeTo(
 			scene,
 			"inner",
-			makeNode("rect", { x: 0, y: 0, width: 40, height: 20 }, { id }),
+			makeNode("rect", box(0, 0, 40, 20), { id }),
 		);
 	}
 	scene = setLayout(scene, "outer", makeLayout({ direction: "column", gap: 0, padding: 0 }));
@@ -750,7 +838,7 @@ test("a hugging container's contribution follows a varying gap", async () => {
 			"and the parent is exactly as wide as the child it hugs",
 		);
 	}
-	assert.deepEqual(widths, [88, 104], "40 + gap + 40");
+	assert.deepEqual(widths, [px(88), px(104)], "40 + gap + 40");
 });
 
 test("a hugging container's contribution follows its child's treatment", async () => {
@@ -759,15 +847,15 @@ test("a hugging container's contribution follows its child's treatment", async (
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "outer" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "outer" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"outer",
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "inner" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "inner" }),
 	);
 	scene = addNodeTo(scene, "inner", {
-		...makeNode("text", { x: 0, y: 0, width: 10, height: 10 }, { id: "t" }),
+		...makeNode("text", box(0, 0, 10, 10), { id: "t" }),
 		props: { text: single("Text") },
 	});
 	scene = setLayout(scene, "outer", makeLayout({ direction: "column", gap: 0, padding: 0 }));
@@ -786,8 +874,8 @@ test("a hugging container's contribution follows its child's treatment", async (
 		t: {
 			axes: measureAxes(scene, textOf(scene)),
 			sizes: [
-				{ width: 100, height: 20 },
-				{ width: 200, height: 40 },
+				size(100, 20),
+				size(200, 40),
 			],
 		},
 	};
@@ -800,7 +888,7 @@ test("a hugging container's contribution follows its child's treatment", async (
 		});
 		widths.push(out.universes[0].solved.outer?.width ?? 0);
 	}
-	assert.deepEqual(widths, [110, 210], "the measured box plus 10 of padding");
+	assert.deepEqual(widths, [px(110), px(210)], "the measured box plus 10 of padding");
 });
 
 test("a laid-out child with two widths is both of them", async () => {
@@ -811,12 +899,12 @@ test("a laid-out child with two widths is both of them", async () => {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "box" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "box" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"box",
-		makeNode("rect", { x: 0, y: 0, width: 100, height: 20 }, { id: "r" }),
+		makeNode("rect", box(0, 0, 100, 20), { id: "r" }),
 	);
 	scene = setLayout(scene, "box", makeLayout({ gap: 0, padding: 10 }));
 	scene = {
@@ -836,5 +924,5 @@ test("a laid-out child with two widths is both of them", async () => {
 		assert.equal(out.count, 1);
 		widths.push(out.universes[0].solved.r?.width ?? 0);
 	}
-	assert.deepEqual(widths, [100, 200]);
+	assert.deepEqual(widths, [px(100), px(200)]);
 });

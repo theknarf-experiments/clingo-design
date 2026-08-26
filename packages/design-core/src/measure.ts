@@ -3,8 +3,19 @@
  *
  * Nothing here measures anything. Measuring text needs a font engine, and the
  * only one available is the browser's canvas — so the host measures and hands
- * the numbers in as plain pixels, and this side is arithmetic over them. That
- * is what keeps the compiler pure and testable in Node, where no canvas exists.
+ * the numbers in, and this side is arithmetic over them. That is what keeps the
+ * compiler pure and testable in Node, where no canvas exists.
+ *
+ * **Where the float gets in.** A font engine measures in CSS pixels and cannot
+ * be asked to do otherwise: an advance width is a fraction the shaper worked
+ * out, not a document quantity. Everything downstream of here — `naturalSize`,
+ * `lask/3`, the layout equations — is EMU. So this file is the one seam in the
+ * tree where the two meet, and it is deliberately narrow: three functions carry
+ * a `Px` in their name ({@link lineHeightPx}, {@link sizeFromCssPx}, and the
+ * host's own `measureText`), everything else is EMU, and the crossing happens
+ * once per measured box rather than wherever a number happens to be handy. A
+ * second crossing anywhere would be undetectable — pixels and EMU are both
+ * `number`, and a box 9525 times too small still lays out.
  *
  * What a node asks to be is not one number, it is a **table**. A text node's
  * box depends on its wording, and — since a style is one variable whose
@@ -34,6 +45,13 @@ import {
 } from "./scene.ts";
 import { findInTree, flatten } from "./tree.ts";
 import {
+	EMU_PER_PX,
+	type Emu,
+	cssPxFromEmu,
+	emuFromCssPx,
+	emuOf,
+} from "./units.ts";
+import {
 	type Picks,
 	type ResolveContext,
 	type Term,
@@ -42,6 +60,7 @@ import {
 	findToken,
 	frameVar,
 	layoutVar,
+	numeralOf,
 	propVar,
 	referencedTokens,
 	stylePartVar,
@@ -50,9 +69,17 @@ import {
 	varies,
 } from "./values.ts";
 
+/**
+ * A box, in EMU — like every other length in the model.
+ *
+ * A measured size arrives from the font engine in float CSS pixels and crosses
+ * at {@link sizeFromCssPx}; from there it is added to gaps and paddings that
+ * are EMU, and it reaches the program as `lask/3`. Nothing between the two is
+ * allowed to be pixels.
+ */
 export interface Size {
-	width: number;
-	height: number;
+	width: Emu;
+	height: Emu;
 }
 
 /**
@@ -683,10 +710,14 @@ export function measurementNotes(
 	});
 }
 
+/* ------------------------------------------------------------------ */
+/* The font engine's boundary                                          */
+/* ------------------------------------------------------------------ */
+
 export interface FontSpec {
 	/** A CSS font-family list, as stored. */
 	family: string;
-	/** A CSS length. */
+	/** A length as the document stores it — `"16px"`, `"12pt"`, `"14288emu"`. */
 	size: string;
 	weight: string;
 }
@@ -695,31 +726,84 @@ export interface FontSpec {
  * A CSS `font` shorthand — the one string a canvas 2D context understands, and
  * the form pretext wants. Order is fixed by CSS: weight, then size, then the
  * family list.
+ *
+ * The size is converted rather than passed through, and both halves of that
+ * matter. A canvas *would* accept `12pt` — CSS units are legal in the shorthand
+ * — and would then measure at 16px while anything reading the same literal with
+ * a parser of its own got 12, which is precisely the silent, wrong-direction
+ * disagreement this module's single boundary exists to prevent. And the `emu`
+ * spelling is not CSS at all (see `UnitSpec.css`), so a document holding one
+ * would make the whole shorthand unparseable and the engine would quietly
+ * measure in the default font — a box wrong by whole characters, with nothing
+ * anywhere saying so. A size that is not a length falls back to the document's
+ * own default, which is what a node that says nothing means.
  */
 export function fontString(spec: FontSpec): string {
-	return `${spec.weight} ${spec.size} ${spec.family}`;
-}
-
-/** A CSS length in pixels. Only px and bare numbers occur in this model. */
-export function pixels(value: string | undefined, fallback: number): number {
-	const n = Number.parseFloat(value ?? "");
-	return Number.isFinite(n) ? n : fallback;
+	return `${spec.weight} ${cssPxFromEmu(fontSizeEmu(spec.size))}px ${spec.family}`;
 }
 
 /**
- * How tall one line is, in pixels.
+ * The font size a measurement reads, in EMU: what was said, or what a node
+ * saying nothing means.
+ *
+ * The second fallback is belt and braces and stays: `PROPS.size.fallback` is
+ * exact today and this file would rather measure at 16px than at zero if
+ * someone ever writes a fallback no unit spells.
+ */
+const fontSizeEmu = (value: string | undefined): Emu =>
+	emuOf(value ?? "") ?? emuOf(PROPS.size.fallback) ?? 16 * EMU_PER_PX;
+
+/**
+ * How tall one line is, in EMU.
  *
  * CSS reads a unitless line-height as a multiple of the font size and a length
  * as itself; the inspector offers the former, but a document may hold either.
+ * Which is why the two readers are tried in that order rather than merged: a
+ * bare `1.5` is a *ratio* and would otherwise read as 1.5 pixels, and `numeralOf`
+ * refusing a suffix is what keeps the two apart.
+ *
+ * The product of a ratio and an EMU is not generally an integer, and that is
+ * fine — a leading is in flight, never stored, and `Emu` is integral only where
+ * it is stored. Rounding it here would be a quantization with no caller asking
+ * for one.
  */
-export function lineHeightPx(
+export function lineHeightEmu(
 	fontSize: string | undefined,
 	lineHeight: string | undefined,
-): number {
-	const size = pixels(fontSize, pixels(PROPS.size.fallback, 16));
+): Emu {
+	const size = fontSizeEmu(fontSize);
 	const raw = (lineHeight ?? "").trim();
-	const ratio = Number(raw);
-	if (raw !== "" && Number.isFinite(ratio)) return size * ratio;
-	if (raw.endsWith("px")) return pixels(raw, size);
-	return size * Number(PROPS.lineHeight.fallback);
+	const ratio = numeralOf(raw);
+	if (ratio !== undefined) return size * ratio;
+	const length = emuOf(raw);
+	if (length !== undefined) return length;
+	return size * (numeralOf(PROPS.lineHeight.fallback) ?? 1.35);
 }
+
+/**
+ * The same leading in float CSS pixels, for the line walker that lays glyphs
+ * out — one of the two directions across this file's seam, and named for it.
+ */
+export const lineHeightPx = (
+	fontSize: string | undefined,
+	lineHeight: string | undefined,
+): number => cssPxFromEmu(lineHeightEmu(fontSize, lineHeight));
+
+/**
+ * A box the font engine measured, as a length the model can hold.
+ *
+ * The one place in the tree where a float legitimately becomes EMU by way of
+ * text — the host calls it on `measureText`'s return, and the row it stores in
+ * a {@link Measured} table is EMU from then on. Whole EMU, because a measured
+ * box *is* stored: it travels to the compiler and reaches `lask/3`, which is a
+ * clingo fact and must be an integer. The quantization is 1/914400 of an inch,
+ * four decimal orders below anything the shaper could have meant.
+ *
+ * Deliberately not doing the rounding-up the host does: how much slack a
+ * measured box needs is a question about wrapping, which belongs beside the
+ * line walker, and this is only the conversion.
+ */
+export const sizeFromCssPx = (size: { width: number; height: number }): Size => ({
+	width: emuFromCssPx(size.width),
+	height: emuFromCssPx(size.height),
+});

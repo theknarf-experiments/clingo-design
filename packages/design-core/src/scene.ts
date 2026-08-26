@@ -9,11 +9,28 @@
  * number, not as a choosable domain: the *pick* is over the handful of
  * alternatives written down, and `frame/3` is derived from it.
  *
+ * Every length here is **EMU** — see `units.ts` — while the *document* still
+ * stores the text a designer typed, unit and all: `"24px"`, `"12pt"`, `"0.25in"`.
+ * So this file is where the two meet. It reads with `emuOf`, which is exact or
+ * nothing, and writes with {@link writeLength}, which spells a value back in the
+ * unit it was already written in. Nothing in it rounds a conversion, and the one
+ * rounding left is a claim about a pointer rather than about a number.
+ *
  * Everything is a {@link Value}: a list of alternatives, each a literal or
  * a token reference. One alternative is an ordinary design; two or more is a
  * branch the solver explores.
  */
 import { type Frame, MIN_NODE_SIZE, type PathPoint, boundsOf } from "./geometry.ts";
+import {
+	DEFAULT_UNIT,
+	EMU_PER_PX,
+	type Emu,
+	type Unit,
+	emuOf,
+	formatLength,
+	quantizeGesture,
+	unitOf,
+} from "./units.ts";
 import {
 	type Picks,
 	type ResolveContext,
@@ -24,16 +41,74 @@ import {
 	activeIndex,
 	constraintVar,
 	frameVar,
+	guideAtVar,
+	guideVar,
 	layoutVar,
 	lit,
-	numeralOf,
 	ref,
 	resolveValue,
 	single,
 	styleVar,
+	tallyOf,
 	type Term,
 	wordOf,
 } from "./values.ts";
+import { parseAtom } from "./atoms.ts";
+
+/* ------------------------------------------------------------------ */
+/* Writing a length down                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How this file writes a length it *computed* — from a pointer, from a sum of
+ * other lengths, from a default one of the tables below states.
+ *
+ * One writer where there were two: a module-private `px()` for frames and an
+ * exported `dimension()` for constraint values, eleven hundred lines apart and
+ * with a `Math.round` each. They had already drifted once.
+ *
+ * Two steps, and neither belongs at a call site because forgetting either is
+ * invisible. **Quantizing** puts the value on a whole pixel. The old rounding
+ * was there to keep `numeral/2` an integer and that reason is gone, but a second
+ * one is not: a hand moving a mouse means a pixel, and without a quantum every
+ * drag would write `"10.4px"` where it used to write `"10px"` — sub-pixel noise
+ * in a document two people share, bought with precision no hand has. A whole
+ * *pixel* rather than a whole `unit`, because the pointer is what is being
+ * quantized and a pointer moves in pixels; a whole millimetre would be four
+ * pixels of dead travel per step. **Spelling** in `unit` is what keeps a
+ * designer's units across an edit: drag a node whose x is `"12pt"` and it comes
+ * back `"12.75pt"`, because one pixel is exactly 0.75pt.
+ *
+ * The two steps can disagree, and where they do the spelling loses: nothing
+ * spells a whole pixel in millimetres (9525 EMU is not a multiple of 9), so a
+ * dragged millimetre value comes back in pixels, which is the fallback
+ * {@link formatLength} was given for. A print document is still measured and
+ * displayed in millimetres; what it cannot be is dragged in them, and the
+ * inspector's field is where a person says `210mm` and means it.
+ *
+ * A length a *person typed* does not come through here. That is a statement
+ * rather than a gesture — `12.5pt` means 12.5pt, and no pointer was involved —
+ * so the inspector reads it with `nearestEmu` and writes it with
+ * {@link formatLength}, unquantized.
+ */
+export function writeLength(emu: Emu, unit: Unit = DEFAULT_UNIT): string {
+	return formatLength(quantizeGesture(emu), unit);
+}
+
+/**
+ * A length one of the tables below states in whole pixels, as EMU and as the
+ * text a document stores.
+ *
+ * The tables used to hold hand-typed strings — `"16px"`, `"2px"` — and under EMU
+ * that is a promise rather than a fact. A fallback is read by `emuOf`, which is
+ * exact or nothing, so an entry no unit could spell (`"8.5px"`) would make the
+ * property silently say *nothing at all* rather than say 8.5. Writing them
+ * through {@link writeLength} makes every entry exact by construction, and
+ * leaves the number stated once, in the unit the person who chose it was
+ * thinking in.
+ */
+const fromPx = (px: number): Emu => px * EMU_PER_PX;
+const pxLength = (px: number): string => writeLength(fromPx(px));
 
 export type PropName =
 	| "text"
@@ -122,7 +197,7 @@ export const PROPS: Record<PropName, PropSpec> = {
 	strokeWidth: {
 		label: "Thickness",
 		type: "length",
-		fallback: "2px",
+		fallback: pxLength(2),
 		styleable: true,
 		inherited: false,
 	},
@@ -157,7 +232,7 @@ export const PROPS: Record<PropName, PropSpec> = {
 	size: {
 		label: "Size",
 		type: "length",
-		fallback: "16px",
+		fallback: pxLength(16),
 		styleable: true,
 		inherited: true,
 	},
@@ -246,8 +321,8 @@ export interface KindSpec {
 	 * shadow should do, rather than appearing on every shape ever drawn.
 	 */
 	defaults: Partial<Record<PropName, Value>>;
-	/** Size a click with no drag produces. */
-	defaultSize: { width: number; height: number };
+	/** Size a click with no drag produces, in EMU — see {@link fromPx}. */
+	defaultSize: { width: Emu; height: Emu };
 	/** Has pixels of its own: it paints, it can be hit, it attracts snaps. */
 	drawable: boolean;
 	/**
@@ -316,7 +391,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		label: "Frame",
 		props: ["fill", "radius", "stroke", "strokeWidth", "shadow", "opacity"],
 		defaults: { fill: [lit("#ffffff")] },
-		defaultSize: { width: 480, height: 320 },
+		defaultSize: { width: fromPx(480), height: fromPx(320) },
 		drawable: true,
 		tool: true,
 		container: true,
@@ -334,7 +409,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 			fill: [lit(PROPS.fill.fallback)],
 			radius: [lit(PROPS.radius.fallback)],
 		},
-		defaultSize: { width: 160, height: 120 },
+		defaultSize: { width: fromPx(160), height: fromPx(120) },
 		drawable: true,
 		tool: true,
 		container: false,
@@ -351,7 +426,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		label: "Ellipse",
 		props: ["fill", "stroke", "strokeWidth", "shadow", "opacity"],
 		defaults: { fill: [lit(PROPS.fill.fallback)] },
-		defaultSize: { width: 140, height: 140 },
+		defaultSize: { width: fromPx(140), height: fromPx(140) },
 		drawable: true,
 		tool: true,
 		container: false,
@@ -372,7 +447,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 			stroke: [lit(PROPS.stroke.fallback)],
 			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
 		},
-		defaultSize: { width: 160, height: 96 },
+		defaultSize: { width: fromPx(160), height: fromPx(96) },
 		drawable: true,
 		tool: true,
 		container: false,
@@ -390,7 +465,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 			stroke: [lit(PROPS.stroke.fallback)],
 			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
 		},
-		defaultSize: { width: 160, height: 96 },
+		defaultSize: { width: fromPx(160), height: fromPx(96) },
 		drawable: true,
 		tool: true,
 		container: false,
@@ -414,7 +489,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		},
 		// Only reached by a caller that has no points to bound; the pen always
 		// has some.
-		defaultSize: { width: 120, height: 120 },
+		defaultSize: { width: fromPx(120), height: fromPx(120) },
 		drawable: true,
 		tool: true,
 		container: false,
@@ -443,7 +518,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 			size: [lit(PROPS.size.fallback)],
 			weight: [lit(PROPS.weight.fallback)],
 		},
-		defaultSize: { width: 160, height: 28 },
+		defaultSize: { width: fromPx(160), height: fromPx(28) },
 		drawable: true,
 		tool: true,
 		container: false,
@@ -458,7 +533,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		label: "Group",
 		props: [],
 		defaults: {},
-		defaultSize: { width: 0, height: 0 },
+		defaultSize: { width: fromPx(0), height: fromPx(0) },
 		drawable: false,
 		tool: false,
 		container: true,
@@ -483,7 +558,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		label: "Instance",
 		props: [],
 		defaults: {},
-		defaultSize: { width: 160, height: 48 },
+		defaultSize: { width: fromPx(160), height: fromPx(48) },
 		// Clickable and snappable: it is a thing on the canvas even though the
 		// pixels belong to the copy inside it.
 		drawable: true,
@@ -629,12 +704,12 @@ export const LAYOUT_PROPS: Record<LayoutProp, LayoutPropSpec> = {
 		on: "container",
 	},
 	/** Between adjacent children. */
-	gap: { label: "Gap", type: "length", fallback: "16px", on: "container" },
+	gap: { label: "Gap", type: "length", fallback: pxLength(16), on: "container" },
 	/** Inside every edge of the container. */
 	padding: {
 		label: "Padding",
 		type: "length",
-		fallback: "16px",
+		fallback: pxLength(16),
 		on: "container",
 	},
 	/** Under a laid-out parent: take a share of the leftover space. */
@@ -678,6 +753,12 @@ export type AutoLayout = Record<ContainerProp, Value>;
  *
  * Everything unstated takes the table's fallback, so this is also how a new
  * layout is made.
+ *
+ * A bare number here is **whole pixels**, not EMU, and that is not the exception
+ * it looks like: a bare number is what a document means by pixels too, and every
+ * caller of this is a template or a test writing down a gap the way a person
+ * says one. A gesture never comes through here — nothing drags a gap — so there
+ * is no pointer quantity to be confused with.
  */
 export function makeLayout(
 	spec: Partial<Record<ContainerProp, string | number>> = {},
@@ -689,11 +770,440 @@ export function makeLayout(
 			given === undefined
 				? LAYOUT_PROPS[prop].fallback
 				: typeof given === "number"
-					? `${given}px`
+					? pxLength(given)
 					: given,
 		);
 	}
 	return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Guides: margins, a grid of tracks, and lines drawn by hand          */
+/* ------------------------------------------------------------------ */
+
+/** One setting of the grid a surface is ruled with. */
+export type GuideProp =
+	| "marginTop"
+	| "marginRight"
+	| "marginBottom"
+	| "marginLeft"
+	| "columns"
+	| "gutter"
+	| "rows"
+	| "rowGutter";
+
+export interface GuidePropSpec {
+	label: string;
+	type: ValueType;
+	fallback: string;
+	/**
+	 * Which part of the track equation this setting is. A track's width is
+	 * `(span - lead - trail - (N-1)*gutter) / N`, and every setting here is one
+	 * of those four names.
+	 */
+	role: "margin" | "count" | "gutter";
+	/**
+	 * The axis the tracks are cut along: columns divide `x`, rows divide `y`.
+	 *
+	 * The same axis {@link EDGES} names, and named here for the same reason it is
+	 * named there — so the rule that places a track is written over an axis
+	 * variable rather than over the word `x`. A row grid is then the column rule
+	 * with a different fact, which is what made rows worth having from the start
+	 * instead of "later".
+	 */
+	axis: "x" | "y";
+	/**
+	 * For a margin: which end of that axis it is measured in from — matching
+	 * {@link EdgeSpec.place}, so `marginLeft` and the `left` edge are the same
+	 * end of the same axis. Absent on the counts and the gutters, which belong to
+	 * the whole axis rather than to one end of it.
+	 */
+	place?: "lead" | "trail";
+}
+
+/**
+ * Every input to the guide system, in one place.
+ *
+ * Shaped exactly like {@link LAYOUT_PROPS}, and for the same reasons, which is
+ * the whole argument for building it this way: a bundle of settings a container
+ * holds, none of which paints, all of which the solver reads, each free to vary.
+ * Reusing that shape means the compiler emits this table's values as facts and
+ * derives the grid from the pick, so adding a setting is one entry plus one rule.
+ *
+ * They are {@link Value}s rather than numbers, and the payoff is bigger here than
+ * it is for a gap. A margin that names a `length` token *is* the page's spacing
+ * scale. And a count holding two alternatives is a responsive grid written as one
+ * document — twelve columns wide, six narrow — which means the solver can *pick*
+ * a grid, and a constraint can decide which grid the design uses. That is the
+ * thing the page-layout tools cannot say: in InDesign a second grid is a second
+ * master page and a second copy of the layout.
+ *
+ * Absence is off. A node with no {@link SceneNode.guides} has no grid at all —
+ * nothing emitted, nothing drawn — exactly as `layout === undefined` means no
+ * automatic layout, and there is no `enabled` flag to keep in step with the
+ * settings around it. That costs nothing, because the degenerate grid is already
+ * free: one track with no margins is indistinguishable from no grid.
+ */
+export const GUIDE_PROPS: Record<GuideProp, GuidePropSpec> = {
+	marginTop: {
+		label: "Top margin",
+		type: "length",
+		fallback: pxLength(0),
+		role: "margin",
+		axis: "y",
+		place: "lead",
+	},
+	marginRight: {
+		label: "Right margin",
+		type: "length",
+		fallback: pxLength(0),
+		role: "margin",
+		axis: "x",
+		place: "trail",
+	},
+	marginBottom: {
+		label: "Bottom margin",
+		type: "length",
+		fallback: pxLength(0),
+		role: "margin",
+		axis: "y",
+		place: "trail",
+	},
+	marginLeft: {
+		label: "Left margin",
+		type: "length",
+		fallback: pxLength(0),
+		role: "margin",
+		axis: "x",
+		place: "lead",
+	},
+	/**
+	 * A `count`, not a `number` — see {@link VALUE_TYPES.count}. A number's
+	 * inhabitants are 1.35 line heights and 0.5 opacities, and the rule that lays
+	 * the tracks out grounds `1..N` over this one, so a fraction is not a wide
+	 * grid but a hung grounder.
+	 */
+	columns: {
+		label: "Columns",
+		type: "count",
+		fallback: VALUE_TYPES.count.fallback,
+		role: "count",
+		axis: "x",
+	},
+	gutter: {
+		label: "Gutter",
+		type: "length",
+		fallback: pxLength(16),
+		role: "gutter",
+		axis: "x",
+	},
+	rows: {
+		label: "Rows",
+		type: "count",
+		fallback: VALUE_TYPES.count.fallback,
+		role: "count",
+		axis: "y",
+	},
+	rowGutter: {
+		label: "Row gutter",
+		type: "length",
+		fallback: pxLength(16),
+		role: "gutter",
+		axis: "y",
+	},
+};
+
+export const GUIDE_PROP_NAMES = Object.keys(GUIDE_PROPS) as GuideProp[];
+
+/** The one setting matching a description — the shape {@link edgeOn} has. */
+const guidePropWhere = (
+	matches: (spec: GuidePropSpec) => boolean,
+): GuideProp => GUIDE_PROP_NAMES.find((p) => matches(GUIDE_PROPS[p])) as GuideProp;
+
+/** How many tracks this axis is cut into: `columns` for x, `rows` for y. */
+export const countOn = (axis: "x" | "y"): GuideProp =>
+	guidePropWhere((s) => s.role === "count" && s.axis === axis);
+
+/** The space between two adjacent tracks on this axis. */
+export const gutterOn = (axis: "x" | "y"): GuideProp =>
+	guidePropWhere((s) => s.role === "gutter" && s.axis === axis);
+
+/** The margin at one end of this axis. */
+export const marginOn = (
+	axis: "x" | "y",
+	place: "lead" | "trail",
+): GuideProp =>
+	guidePropWhere(
+		(s) => s.role === "margin" && s.axis === axis && s.place === place,
+	);
+
+/**
+ * The grid a surface is ruled with — margins and a count of tracks per axis.
+ *
+ * The twin of {@link AutoLayout}, down to the type: a record over the settings
+ * table, every field a {@link Value}. What it describes is the opposite half of
+ * the same idea. A layout *places* the children; a grid places nothing at all —
+ * it says where the lines are, and a constraint decides what is pinned to them.
+ * So a surface can hold both, and they never argue.
+ */
+export type SurfaceGuides = Record<GuideProp, Value>;
+
+/**
+ * A grid from plain words and numbers — what a template or a test means when it
+ * has one grid in mind rather than a space of them. Everything unstated takes
+ * the table's fallback, so this is also how a new grid is made.
+ *
+ * A bare number is **whole pixels**, exactly as it is in {@link makeLayout} and
+ * for the same reason: a bare number is what a document means by pixels, and
+ * nobody drags a margin into existence.
+ */
+export function makeGuides(
+	spec: Partial<Record<GuideProp, string | number>> = {},
+): SurfaceGuides {
+	const out = {} as SurfaceGuides;
+	for (const prop of GUIDE_PROP_NAMES) {
+		const given = spec[prop];
+		out[prop] = single(
+			given === undefined
+				? GUIDE_PROPS[prop].fallback
+				: typeof given === "number"
+					? // A count is a number of things, not a distance: `columns: 12`
+						// is twelve, not twelve pixels' worth of columns.
+						GUIDE_PROPS[prop].type === "count"
+						? String(Math.trunc(given))
+						: pxLength(given)
+					: given,
+		);
+	}
+	return out;
+}
+
+/**
+ * One line a designer drew, on a surface.
+ *
+ * **In the surface's own local coordinates** — the same space a child's frame is
+ * in, and the same invariant the whole document runs on: an operation on a node
+ * says nothing about what it contains, and everything inside comes along on its
+ * own. Move the artboard and its guides move; duplicate it and they duplicate;
+ * a component definition carries its own. A world-space guide would be the one
+ * piece of geometry that did not, and "the guide I put on this page" is what a
+ * designer means every time. The pasteboard guides of a page-layout tool have no
+ * equivalent here because there is no page model for them to be beside yet; when
+ * one arrives, a spread-level guide is this same field one level up.
+ *
+ * {@link at} is a {@link Value} for the reason a frame dimension is: a guide that
+ * names a token moves with the token, so dragging the guide can edit the token
+ * and everything pinned to the guide follows. That is the thesis of the tool,
+ * applied to the guide itself.
+ */
+export interface Guide {
+	/**
+	 * Unique among the lines of *its own surface*, and spellable as an ASP
+	 * constant — it reaches the program inside a datum term ({@link lineDatum})
+	 * and inside its own variable key ({@link guideAtVar}).
+	 *
+	 * Per surface rather than per document, which is what keeps duplication free:
+	 * copy an artboard and the copy's lines keep their names under a new surface
+	 * id, so `gl(frame2,g1)` is a different datum from `gl(frame1,g1)` without
+	 * anything having to renumber.
+	 */
+	id: string;
+	axis: "x" | "y";
+	/** Where it sits, along that axis, relative to the surface's own origin. */
+	at: Value;
+	/**
+	 * Do not let a gesture move it. A property of the guide, unlike whether
+	 * guides are *shown*, which is a property of the person looking and lives in
+	 * the editor — see the note on {@link SceneNode.lines}.
+	 */
+	locked?: boolean;
+}
+
+/**
+ * True when this node's guides mean anything: it holds a grid, and it is the
+ * kind of thing a grid can be drawn on.
+ *
+ * Mirrors {@link isLaidOut}, and asks {@link KINDS} rather than naming a kind. A
+ * grid stored on a rectangle is not deleted on the way in — a stored document is
+ * read, not corrected — it simply says nothing, here and in the compiler, which
+ * both ask this.
+ */
+export const isGridded = (node: SceneNode): boolean =>
+	node.guides !== undefined && KINDS[node.kind].surface;
+
+/** Whatever a node stores for one guide setting, if anything. */
+export function guideValueOf(
+	node: SceneNode,
+	prop: GuideProp,
+): Value | undefined {
+	return node.guides?.[prop];
+}
+
+/**
+ * What a guide setting comes to, following whatever token it names — the same
+ * walk the generated program does through `resolved/2`.
+ *
+ * Nothing for a setting the node does not hold, or one that resolves to no
+ * literal at all; the program behaves the same way, and the caller falls back to
+ * the table.
+ */
+export function guideSetting(
+	node: SceneNode,
+	prop: GuideProp,
+	context: ResolveContext = NO_CONTEXT,
+): string | undefined {
+	return resolveValue(
+		context,
+		guideValueOf(node, prop),
+		guideVar(node.id, prop),
+	);
+}
+
+/**
+ * A margin or a gutter, in EMU, falling back to the table's own default.
+ *
+ * Never negative, for the reason {@link layoutLength} is not: a margin of -8 is
+ * not a page, and the track equation would read it as one.
+ */
+export function guideLength(
+	node: SceneNode,
+	prop: GuideProp,
+	context?: ResolveContext,
+): Emu {
+	const resolved = guideSetting(node, prop, context);
+	const n = resolved === undefined ? undefined : emuOf(resolved);
+	return Math.max(0, n ?? emuOf(GUIDE_PROPS[prop].fallback) ?? 0);
+}
+
+/**
+ * How many tracks an axis is cut into. **At least one**, always.
+ *
+ * The clamp is not tidiness: the track width divides by this number, so a grid
+ * of zero columns is not an empty grid but an equation with no solution. One
+ * track spanning the space inside the margins is what "no grid" already looks
+ * like, so the degenerate case answers itself.
+ *
+ * Read with `tallyOf`, which refuses a fraction, a negative and anything past
+ * `MAX_TALLY` — a count is the one quantity the *grounder* reads, and a mistyped
+ * hundred thousand would hang clingo rather than draw a wrong picture.
+ */
+export function guideCount(
+	node: SceneNode,
+	prop: GuideProp,
+	context?: ResolveContext,
+): number {
+	const resolved = guideSetting(node, prop, context);
+	const n = resolved === undefined ? undefined : tallyOf(resolved);
+	return Math.max(1, n ?? tallyOf(GUIDE_PROPS[prop].fallback) ?? 1);
+}
+
+/** The lines drawn on a node, in the order they were drawn. */
+export const guideLines = (node: SceneNode): readonly Guide[] => node.lines ?? [];
+
+export const findGuide = (
+	node: SceneNode,
+	id: string | undefined,
+): Guide | undefined =>
+	id === undefined ? undefined : guideLines(node).find((g) => g.id === id);
+
+/**
+ * A name for a new line on this surface: `g1`, `g2`, … — the first one free.
+ *
+ * Here rather than at whatever edit draws a guide, because the two things a
+ * guide id has to be are facts about the document: spellable as an ASP constant,
+ * since it reaches the program inside a term, and unused *on this surface*,
+ * since that is the scope {@link Guide.id} is unique in. Both are easy to
+ * satisfy by accident and impossible to notice having broken — a colliding id is
+ * two datums answering to one name, which the solver reads as one datum.
+ */
+export function nextGuideId(node: SceneNode): string {
+	const taken = new Set(guideLines(node).map((g) => g.id));
+	for (let n = 1; ; n++) {
+		const id = `g${n}`;
+		if (!taken.has(id)) return id;
+	}
+}
+
+/**
+ * Where one line sits, in EMU, in its surface's own coordinates.
+ *
+ * Zero for a position that resolves to no length — the same answer
+ * {@link frameDim} gives, and the same reason: the generated program's own
+ * default says zero, and a reader that guessed something else would draw the
+ * line somewhere the solver does not think it is.
+ */
+export function guideAt(
+	node: SceneNode,
+	guide: Guide,
+	context: ResolveContext = NO_CONTEXT,
+): Emu {
+	const resolved = resolveValue(
+		context,
+		guide.at,
+		guideAtVar(node.id, guide.id),
+	);
+	return (resolved === undefined ? undefined : emuOf(resolved)) ?? 0;
+}
+
+/**
+ * A line dragged to a new place — {@link withFrame} for a guide, and it obeys
+ * the same rule for the same reasons.
+ *
+ * The write lands on **the alternative the visible universe picked**, so a guide
+ * that holds two positions keeps both and the drag moves the one on screen. An
+ * alternative that names a token or is derived is left exactly as it is: that
+ * position is the token's to change, and quietly replacing the link with a
+ * number would unwire the very thing the guide was drawn to demonstrate — drag
+ * the guide, the token moves, everything pinned to it follows. The position is
+ * written back in the unit it was already spelled in, and a patch that repeats
+ * what is stored is not an edit at all.
+ *
+ * The lock is honoured here rather than at whatever gesture called, because a
+ * lock is a property of the guide: every road to moving it has to pass this one.
+ */
+export function withGuideAt(
+	node: SceneNode,
+	guide: Guide,
+	at: Emu,
+	context: ResolveContext = NO_CONTEXT,
+): Guide {
+	if (guide.locked) return guide;
+	const index = activeIndex(
+		guide.at,
+		guideAtVar(node.id, guide.id),
+		context.picks,
+	);
+	const term = index === -1 ? undefined : guide.at[index];
+	if (term?.kind !== "literal") return guide;
+	if (emuOf(term.value) === at) return guide;
+	const written = writeLength(at, unitOf(term.value));
+	if (term.value === written) return guide;
+	return {
+		...guide,
+		at: guide.at.map((t, i) => (i === index ? lit(written) : t)),
+	};
+}
+
+/**
+ * True when a gesture cannot move this line: it is locked, or the alternative on
+ * screen is a link rather than a number.
+ *
+ * The twin of {@link frameFrozen}, and it exists for the same reason — the
+ * editor has to be able to say "not this one" *before* the drag rather than by
+ * silently doing nothing after it.
+ */
+export function guideFrozen(
+	node: SceneNode,
+	guide: Guide,
+	context: ResolveContext = NO_CONTEXT,
+): boolean {
+	if (guide.locked) return true;
+	const index = activeIndex(
+		guide.at,
+		guideAtVar(node.id, guide.id),
+		context.picks,
+	);
+	return index === -1 || guide.at[index].kind !== "literal";
 }
 
 /* ------------------------------------------------------------------ */
@@ -728,10 +1238,10 @@ export interface DimensionSpec {
  * ({@link frameVar}), alternatives, tokens, and a pick per universe.
  */
 export const FRAME_DIMS: Record<Dimension, DimensionSpec> = {
-	x: { label: "x", type: "length", fallback: "0px", role: "pos" },
-	y: { label: "y", type: "length", fallback: "0px", role: "pos" },
-	width: { label: "width", type: "length", fallback: "0px", role: "span" },
-	height: { label: "height", type: "length", fallback: "0px", role: "span" },
+	x: { label: "x", type: "length", fallback: pxLength(0), role: "pos" },
+	y: { label: "y", type: "length", fallback: pxLength(0), role: "pos" },
+	width: { label: "width", type: "length", fallback: pxLength(0), role: "span" },
+	height: { label: "height", type: "length", fallback: pxLength(0), role: "span" },
 };
 
 export const DIMENSIONS = Object.keys(FRAME_DIMS) as Dimension[];
@@ -747,50 +1257,57 @@ export type FrameValue = Record<Dimension, Value>;
  * per node would multiply the space past usefulness before anyone had made a
  * decision.
  *
- * Rounded, because that rounding is load-bearing: `frame/3` reaches ASP through
- * `numeral/2`, which rounds, so a fractional number stored here would put the
- * canvas (which draws the atom) and hit testing (which reads the document) a
- * sub-pixel apart. Every write goes through here or {@link withFrame}, so the
- * whole document is on whole pixels by construction.
+ * **In pixels**, because there is no document here to ask. A frame is made from
+ * a gesture or from a template, and neither has the scene in hand — see
+ * {@link writeLength} for what that costs, which is nothing while `px` is the
+ * default unit and a gesture is a whole number of pixels anyway. A length in
+ * another unit gets into the document by being typed, or by being kept: an edit
+ * to an existing value spells it back in its own unit.
  */
 export function makeFrame(frame: Frame): FrameValue {
 	return {
-		x: single(px(frame.x)),
-		y: single(px(frame.y)),
-		width: single(px(frame.width)),
-		height: single(px(frame.height)),
+		x: single(writeLength(frame.x)),
+		y: single(writeLength(frame.y)),
+		width: single(writeLength(frame.width)),
+		height: single(writeLength(frame.height)),
 	};
 }
 
-const px = (n: number): string => `${Math.round(n)}px`;
-
 /**
- * What one dimension comes to, following whatever token it names.
+ * What one dimension comes to in EMU, following whatever token it names.
  *
- * The same walk the generated program does through `resolved/2` and
- * `numeral/2` — including the rounding, so the number here and the number in
- * `frame/3` are the same number. `context.picks` is the universe being looked
- * at; without one the first alternative stands in, which is what an unsolved
- * preview should show.
+ * The same walk the generated program does through `resolved/2` and `numeral/2`
+ * — and now *exactly* the same number, where it used to be the same number only
+ * because both sides rounded to a pixel. `emuOf` is exact or nothing and the
+ * compiler emits what it returns, so the canvas and the solver can no longer
+ * disagree by half a pixel however fine the document gets.
+ * `context.picks` is the universe being looked at; without one the first
+ * alternative stands in, which is what an unsolved preview should show.
  *
- * A dimension that resolves to no number at all is 0, exactly as the program's
- * own default rule makes it, rather than being left unstated.
+ * A dimension that resolves to no length at all is 0, exactly as the program's
+ * own default rule makes it, rather than being left unstated. The values that
+ * fall into that hole are wider than they were: `"20.5px"` is 195262.5 EMU and
+ * so is not a length, where before it was 20.5 and rounded to 21. That is the
+ * migration's business, not this function's — see `normalizeScene`, which snaps
+ * every stored length onto its unit's lattice once, visibly, on the way in.
  */
 export function frameDim(
 	node: SceneNode,
 	dim: Dimension,
 	context: ResolveContext = NO_CONTEXT,
-): number {
+): Emu {
 	const resolved = resolveValue(
 		context,
 		node.frame[dim],
 		frameVar(node.id, dim),
 	);
-	const n = resolved === undefined ? undefined : numeralOf(resolved);
-	return Math.round(n ?? 0);
+	return (resolved === undefined ? undefined : emuOf(resolved)) ?? 0;
 }
 
-/** All four, as the plain rectangle every gesture and every renderer wants. */
+/**
+ * All four, as the plain rectangle every gesture and every renderer wants — in
+ * EMU, like every {@link Frame} in this codebase.
+ */
 export function frameOf(
 	node: SceneNode,
 	context: ResolveContext = NO_CONTEXT,
@@ -815,6 +1332,10 @@ export function frameOf(
  * it is: that dimension is the token's to change, and quietly replacing the
  * link with a literal would unwire a parameter the designer set up. The editor
  * says so by refusing to drag such an axis; see `frameFrozen`.
+ *
+ * The patch is in EMU, and each dimension is written back **in the unit it was
+ * already written in** — {@link unitOf} off the old literal, {@link writeLength}
+ * into the new one. A design in points stays in points across a drag.
  */
 export function withFrame(
 	node: SceneNode,
@@ -829,9 +1350,15 @@ export function withFrame(
 		const index = activeIndex(value, frameVar(node.id, dim), context.picks);
 		const term = index === -1 ? undefined : value[index];
 		if (term?.kind !== "literal") continue;
-		const written = px(
-			FRAME_DIMS[dim].role === "span" ? Math.max(MIN_NODE_SIZE, next) : next,
-		);
+		const wanted =
+			FRAME_DIMS[dim].role === "span" ? Math.max(MIN_NODE_SIZE, next) : next;
+		// A patch that says what the value already says is not an edit. That used
+		// to be covered by comparing the two spellings a line below, and is not any
+		// more: a stored length can now be finer than the pixel a gesture is
+		// quantized to, so a drag that ended where it began would otherwise pull an
+		// exact "12.5pt" onto the pixel grid on its way past.
+		if (emuOf(term.value) === wanted) continue;
+		const written = writeLength(wanted, unitOf(term.value));
 		if (term.value === written) continue;
 		frame ??= { ...node.frame };
 		frame[dim] = value.map((t, i) => (i === index ? lit(written) : t));
@@ -915,6 +1442,31 @@ export interface SceneNode {
 	children?: SceneNode[];
 	/** Set on a container to lay its children out automatically. */
 	layout?: AutoLayout;
+	/**
+	 * Set on a surface to rule it with margins and a grid of tracks — see
+	 * {@link GUIDE_PROPS}. Absent is no grid at all.
+	 */
+	guides?: SurfaceGuides;
+	/**
+	 * Lines drawn by hand on this surface — see {@link Guide}.
+	 *
+	 * Beside {@link guides} rather than inside it, because the two are not the
+	 * same kind of thing however alike they look on screen. The grid is a record
+	 * over a fixed table of settings, keyed by name, with a fallback for every
+	 * field; a line is an object with an identity, a lock and a lifecycle — drawn,
+	 * dragged, deleted one at a time. Forcing them into one field would give the
+	 * grid a key the table does not know about, or give every line a defaulted
+	 * setting it has no use for.
+	 *
+	 * What is *not* here is whether any of this is shown. That is a fact about the
+	 * person looking rather than about the document, it belongs beside the pinned
+	 * universe in the editor, and a document that carried it would mean opening a
+	 * file and being unable to see why the layout will not move. Locking is the
+	 * other half of that split and does live here: "do not let me drag this by
+	 * accident" is a decision about the guide, worth keeping, and worth sending to
+	 * a collaborator.
+	 */
+	lines?: Guide[];
 	/**
 	 * Under a laid-out parent: whether it takes a share of the leftover space.
 	 * A `growth` value — absent is the same as keeping its size.
@@ -1007,15 +1559,23 @@ export function layoutSetting(
 	);
 }
 
-/** The same, as pixels, falling back to the table's default. */
+/**
+ * The same, as a length in EMU, falling back to the table's own default.
+ *
+ * Never negative: a gap of -8 is not a design, and the layout rules would read
+ * it as one. The table's own fallback is written by {@link pxLength} and so is
+ * always a length `emuOf` can read, which leaves the final `?? 0` for the one
+ * caller that could still reach it — someone asking a word-valued setting like
+ * `direction` how long it is, which is a question with no answer.
+ */
 export function layoutLength(
 	node: SceneNode,
 	prop: LayoutProp,
 	context?: ResolveContext,
-): number {
+): Emu {
 	const resolved = layoutSetting(node, prop, context);
-	const n = resolved === undefined ? undefined : numeralOf(resolved);
-	return Math.max(0, n ?? numeralOf(LAYOUT_PROPS[prop].fallback) ?? 0);
+	const n = resolved === undefined ? undefined : emuOf(resolved);
+	return Math.max(0, n ?? emuOf(LAYOUT_PROPS[prop].fallback) ?? 0);
 }
 
 /** The same, as one of the words the setting's menu offers. */
@@ -1526,7 +2086,16 @@ export interface Constraint {
 	kind: ConstraintKind;
 	/** The property being constrained. Meaningless to the geometric kinds. */
 	prop: PropName;
-	/** Nodes it ranges over, in the order they were named. */
+	/**
+	 * Nodes it ranges over, in the order they were named.
+	 *
+	 * A member may also be a **datum** — a guide, or one line of a column grid —
+	 * which is not a node and is not in the document's tree. That is deliberate
+	 * and it is what makes "pin this card to column three" an ordinary `align`
+	 * with a name, a switch and a place in an unsat core, rather than a second
+	 * snapping system. See {@link parseDatum}, and {@link holdsDatum}, which is
+	 * what anything filtering this list against the live nodes has to ask as well.
+	 */
 	nodes: string[];
 	/**
 	 * A set a rule named, ranged over instead of {@link nodes}.
@@ -1548,7 +2117,7 @@ export interface Constraint {
 	/** Which quantity, for the geometric kinds. */
 	edge?: Edge;
 	/**
-	 * What a `gap`, a `pin` or a mirror line holds to, in pixels.
+	 * What a `gap`, a `pin` or a mirror line holds to — a length, so EMU.
 	 *
 	 * A {@link Value} like any other, so it can be a number typed in or a link
 	 * to a `length` token — and a token with three alternatives driving it is a
@@ -1587,6 +2156,233 @@ export interface Constraint {
  */
 export const strengthOfLevel = (level: number): Strength | undefined =>
 	STRENGTH_NAMES.find((s) => STRENGTHS[s].level === level);
+
+/* ------------------------------------------------------------------ */
+/* Datums: the other face of a guide                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * **A guide is not a line drawn on top of the design.** It is a datum: one fixed
+ * linear quantity in the design's own coordinates, which the geometric machinery
+ * can name in exactly the place it names a node.
+ *
+ * That is the whole trick, and it is what keeps the feature small. `align`,
+ * `gap` and `symmetric` relate their members through `c_node/2` and read a
+ * quantity per member; a datum supplies that quantity and nothing else changes.
+ * No new constraint kind, no parallel snapping, no second geometry engine. "Pin
+ * this card to column three" is an `align` over `[card, cg(page,3,left)]`, and so
+ * it gets a name and a switch like every other rule, an unsat core can blame it,
+ * and `why.ts` can already explain it.
+ *
+ * A datum is a **zero-size box** in the solver, which is what lets it reuse the
+ * edge machinery rather than growing an edge family of its own — and it is why
+ * naming an edge in the term below is not a contradiction. All six of the
+ * datum's own edges coincide, so the `edge` argument is not saying which edge of
+ * the datum: it is saying **which line of the track** the datum stands for. That
+ * matters for `align` in particular, which forces the *same* edge on both
+ * members: `align` on `left` puts the card's left edge on the line, and `align`
+ * on `centerX` puts its centre there, because the datum answers the same number
+ * either way.
+ *
+ * Three lines per track rather than two — `left`, `centerX`, `right` on a column;
+ * `top`, `centerY`, `bottom` on a row — because centring something in a column is
+ * the second thing anybody does with a grid, and with two lines it would need a
+ * rule that talks about both. The set is read off {@link EDGES} rather than
+ * listed, so it is the same three places every other piece of geometry has.
+ */
+export type Datum =
+	/** One line of the `index`-th track of a surface's grid; 1-based, as `1..N` grounds. */
+	| { kind: "track"; surface: string; index: number; edge: Edge }
+	/** One line drawn by hand — see {@link Guide}. */
+	| { kind: "line"; surface: string; guide: string };
+
+/**
+ * The term a track line reaches ASP as, and the string a constraint stores as a
+ * member: `cg(page,3,left)`.
+ *
+ * A term rather than an opaque id, for the reason a constraint's own id is one:
+ * it is what the answer set says, what an overlay reads back, and what a
+ * hand-written rule can name.
+ */
+export const trackDatum = (
+	surface: string,
+	index: number,
+	edge: Edge,
+): string => `cg(${surface},${index},${edge})`;
+
+/** The same, for a line a designer drew: `gl(page,g1)`. */
+export const lineDatum = (surface: string, guide: string): string =>
+	`gl(${surface},${guide})`;
+
+/**
+ * Reads either back, or nothing for a term that is neither — which is what an
+ * ordinary node id is, since a node id is a bare word or a term of the user's
+ * own. Parsed rather than matched, for the reason `parseVariable` is: a surface
+ * id may itself be a term, and `cg(cell(1,1),3,left)` has three arguments of
+ * which two hold commas.
+ */
+export function parseDatum(term: string): Datum | undefined {
+	const atom = parseAtom(term);
+	if (!atom) return undefined;
+	const [a, b, c] = atom.args;
+	if (atom.name === "cg" && atom.args.length === 3) {
+		const index = Number(b);
+		if (!Number.isInteger(index) || index < 1) return undefined;
+		// A size or an axis names no line, so it names no datum: `cg(page,3,width)`
+		// would be a member every geometric rule read as something it is not.
+		if (!Object.hasOwn(EDGES, c) || EDGES[c as Edge].role !== "pos") {
+			return undefined;
+		}
+		return { kind: "track", surface: a, index, edge: c as Edge };
+	}
+	if (atom.name === "gl" && atom.args.length === 2) {
+		return { kind: "line", surface: a, guide: b };
+	}
+	return undefined;
+}
+
+/** True when a constraint member is a datum rather than a node. */
+export const isDatum = (term: string): boolean => parseDatum(term) !== undefined;
+
+/** Every node in the document, roots first — see {@link datumIds}. */
+function eachNode(nodes: readonly SceneNode[], visit: (n: SceneNode) => void) {
+	for (const node of nodes) {
+		visit(node);
+		if (node.children) eachNode(node.children, visit);
+	}
+}
+
+/**
+ * The largest number of tracks this axis is cut into **in any universe**.
+ *
+ * A count is a value like any other, so a responsive grid holds two of them and
+ * the twelfth column exists in one universe and not the other. Enumerating the
+ * datums therefore means taking the widest reading, not the current one.
+ *
+ * It reads this value's own alternatives and stops there: a count that *names a
+ * token* is read at whatever the token resolves to with no pick, so a token
+ * holding `[6, 12]` reports six. That is a real limit and it is why
+ * {@link holdsDatum} — the question anything destructive should ask — does not
+ * look at the index at all.
+ */
+function trackCeiling(scene: Scene, node: SceneNode, axis: "x" | "y"): number {
+	const prop = countOn(axis);
+	const key = guideVar(node.id, prop);
+	const value = guideValueOf(node, prop);
+	let most = guideCount(node, prop, sceneContext(scene));
+	for (let i = 0; i < (value?.length ?? 0); i++) {
+		most = Math.max(most, guideCount(node, prop, sceneContext(scene, { [key]: i })));
+	}
+	return most;
+}
+
+/**
+ * Every datum this document holds — what the editor can offer as a member, and
+ * what an overlay draws.
+ *
+ * Ordered surface by surface, and within a surface: the column lines, the row
+ * lines, then the hand-drawn ones. A track index runs to {@link trackCeiling},
+ * so a grid that is twelve columns in one universe and six in another offers
+ * twelve — a datum that exists in *some* universe is a datum a rule may name.
+ *
+ * Walked here rather than through `flatten` in tree.ts because the dependency
+ * runs the other way: tree.ts reads this file.
+ */
+export function datumIds(scene: Scene): string[] {
+	const out: string[] = [];
+	eachNode(scene.nodes, (node) => {
+		if (isGridded(node)) {
+			for (const axis of ["x", "y"] as const) {
+				// The three places this axis has, off the same table every other
+				// piece of geometry reads them from.
+				const places = PLACES.filter((e) => EDGES[e].axis === axis);
+				const count = trackCeiling(scene, node, axis);
+				for (let k = 1; k <= count; k++) {
+					for (const edge of places) out.push(trackDatum(node.id, k, edge));
+				}
+			}
+		}
+		for (const guide of guideLines(node)) {
+			out.push(lineDatum(node.id, guide.id));
+		}
+	});
+	return out;
+}
+
+/**
+ * True when the document still holds what a datum names — the question
+ * `pruneConstraints` asks of every member that is not a node.
+ *
+ * Deliberately blunter than {@link datumIds}: a track datum is held when its
+ * surface is gridded, whatever index it names. Asking whether *that* track
+ * exists would mean deleting a designer's rule the moment they typed a smaller
+ * column count, and getting it back would mean retyping the rule rather than the
+ * count. A member pointing past the end of the grid says nothing until the grid
+ * grows again, which is what an alternative in a value already means everywhere
+ * else in this document.
+ */
+export function holdsDatum(scene: Scene, term: string): boolean {
+	const datum = parseDatum(term);
+	if (!datum) return false;
+	let held = false;
+	eachNode(scene.nodes, (node) => {
+		if (node.id !== datum.surface) return;
+		held =
+			datum.kind === "track"
+				? isGridded(node)
+				: findGuide(node, datum.guide) !== undefined;
+	});
+	return held;
+}
+
+/**
+ * What one track is called on each axis, and what each of its three lines is
+ * called — the words, and only the words.
+ *
+ * A table rather than a conditional for the usual reason, but also because the
+ * two axes genuinely disagree about English: the middle line of a column is its
+ * *centre* and the middle line of a row is its *middle*, and `EDGES` cannot say
+ * that because "Horizontal centre" is a name for an edge of a node rather than
+ * for a line of a track. Both keys are read off {@link EDGES} — the axis and the
+ * place — so nothing here decides which line a term names, only how to say it.
+ */
+const TRACK_WORDS = {
+	x: { track: "Column", lead: "left", mid: "centre", trail: "right" },
+	y: { track: "Row", lead: "top", mid: "middle", trail: "bottom" },
+} as const;
+
+/**
+ * A datum in the words a person uses for it: `"Column 3 left — Page"`.
+ *
+ * The twin of `partLabel`, and here for the same reason it is beside
+ * `parseInstancePart`: this is where the term's grammar is known, and a second
+ * reader spelling `cg(page,3,left)` out by hand would be a second grammar.
+ *
+ * It matters more than a tidier panel. A datum is the one member of a rule that
+ * a designer cannot point at — a card at 480 with nothing beside it looks like a
+ * card somebody dragged there — so every sentence the tool builds out of a rule's
+ * members has to be able to say "column three of the page". That is what makes
+ * "*Align on Card, Column 3 left — Page* forces this" an answer to why the card
+ * is where it is, where the raw term is only a receipt.
+ *
+ * Nothing for a term that is not a datum, exactly as `partLabel` answers nothing
+ * for a node that is not an instance part, so a caller can chain the two and
+ * fall through to the id. The name is the surface's own, unresolved — a datum on
+ * a surface the document no longer holds still reads as its term's surface id,
+ * which is more use than nothing while a rule is being repaired.
+ */
+export function datumLabel(scene: Scene, term: string): string | undefined {
+	const datum = parseDatum(term);
+	if (!datum) return undefined;
+	let surface = datum.surface;
+	eachNode(scene.nodes, (node) => {
+		if (node.id === datum.surface) surface = node.name;
+	});
+	if (datum.kind === "line") return `Guide ${datum.guide} — ${surface}`;
+	const spec = EDGES[datum.edge];
+	const words = TRACK_WORDS[spec.axis];
+	return `${words.track} ${datum.index} ${words[spec.place ?? "lead"]} — ${surface}`;
+}
 
 /* ------------------------------------------------------------------ */
 /* Styles                                                             */
@@ -1769,10 +2565,33 @@ export interface Scene {
 	 * escape hatch. Rules here can constrain or vary anything above.
 	 */
 	rules: string;
+	/**
+	 * The unit this document is measured in, for the two purposes a *display*
+	 * unit has: what the inspector shows and offers, and what a length nobody
+	 * has spelled yet gets written in. It governs no read — a stored `"16"` is
+	 * pixels whatever this says, or the meaning of every legacy value in the
+	 * document would move when a designer changed a menu.
+	 *
+	 * Optional, and its absence carries a second meaning that is worth more than
+	 * the first one today: **a document with no unit predates EMU**. Every
+	 * length in this document is a unit-suffixed string and reads the same in
+	 * either era — that is what keeping the storage format bought — but a *bare
+	 * number* does not, and a path's vertices are bare numbers in the current
+	 * format too. `normalizeScene` stamps it, and seeing it absent is how that
+	 * migration knows those vertices are still pixels.
+	 *
+	 * So exactly two things write it, and the second one is why the field exists
+	 * at all: `normalizeScene`, which puts it there, and `setUnit`, which is the
+	 * inspector's unit menu and can only ever exchange one unit for another.
+	 * Nothing may take it away again — a document that could lose the stamp is a
+	 * document that gets migrated twice — and nothing else should set it without
+	 * reading that migration first.
+	 */
+	unit?: Unit;
 }
 
-/** The size the document's first frame is created at. */
-export const DEFAULT_FRAME = { width: 720, height: 480 };
+/** The size the document's first frame is created at, in EMU. */
+export const DEFAULT_FRAME = { width: fromPx(720), height: fromPx(480) };
 
 export const RULES_HEADER = `% Power-user panel — plain ASP, appended after the generated program.
 % Everything above is generated from the document; these rules can constrain
@@ -1819,6 +2638,9 @@ export function emptyScene(): Scene {
 		],
 		constraints: [],
 		rules: RULES_HEADER,
+		// Stated rather than left to the default, because absence means "written
+		// before EMU" — see {@link Scene.unit}. A document made now is not.
+		unit: DEFAULT_UNIT,
 	};
 }
 
@@ -1871,29 +2693,37 @@ export function tokensFor(scene: Scene, prop: PropName): Token[] {
 	return tokensOfType(scene, PROPS[prop].type);
 }
 
-/** A whole number of pixels, as the {@link Value} a dimension is stored as. */
-export const dimension = (n: number): Value => single(`${Math.round(n)}px`);
+/**
+ * A computed length in EMU, as the {@link Value} a constraint or a dimension is
+ * stored as. One line of {@link writeLength}, which is where the reasoning is.
+ */
+export const dimension = (emu: Emu, unit: Unit = DEFAULT_UNIT): Value =>
+	single(writeLength(emu, unit));
 
 /**
- * The number a constraint's dimension comes to, following whatever token it
+ * The length a constraint's value comes to in EMU, following whatever token it
  * names.
  *
  * The same walk the generated program does through `resolved/2` and
  * `numeral/2`, done here for the editor: the row has to show a number, and a
  * seeded constraint has to be measured before there is any answer to read it
  * out of. `picks` is the universe being looked at, if there is one.
+ *
+ * Nothing rather than zero when the value is not a length — a `gap` linked to a
+ * token holding `50%` has no distance to show, and a row that printed 0 would be
+ * claiming it did.
  */
 export function constraintValue(
 	scene: Scene,
 	constraint: Constraint,
 	picks: Picks = {},
-): number | undefined {
+): Emu | undefined {
 	const resolved = resolveValue(
 		{ tokens: scene.tokens, picks },
 		constraint.value,
 		constraintVar(constraint.id),
 	);
-	return resolved === undefined ? undefined : numeralOf(resolved);
+	return resolved === undefined ? undefined : emuOf(resolved);
 }
 
 /** A default value for a property that has none yet. */

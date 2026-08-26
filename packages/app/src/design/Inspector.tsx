@@ -1,10 +1,21 @@
+import { useState } from "react";
 import {
 	CHILD_PROPS,
+	CSS_UNITS,
+	MAX_TALLY,
+	tallyOf,
 	type DerivedNode,
 	CONTAINER_PROPS,
 	DIMENSIONS,
 	type Dimension,
 	FRAME_DIMS,
+	GUIDE_PROPS,
+	GUIDE_PROP_NAMES,
+	type GuideProp,
+	UNITS,
+	type Unit,
+	formatLength,
+	setUnit,
 	LAYOUT_PROPS,
 	type LayoutProp,
 	type Sizing,
@@ -25,18 +36,24 @@ import {
 	frameFrozen,
 	frameOf,
 	frameVar,
+	guideValueOf,
+	guideVar,
+	isGridded,
 	isPinned,
 	isMeasured,
 	lit,
 	layoutValueOf,
 	layoutVar,
 	layoutWord,
+	makeGuides,
 	makeLayout,
 	managedNodes,
 	nodeNames,
 	parentOf,
 	propValues,
 	setChildLayout,
+	setGuideValue,
+	setGuides,
 	setLayout,
 	setSizing,
 	single,
@@ -46,7 +63,6 @@ import {
 	propVar,
 	renameNode,
 	resolveValue,
-	setFrame,
 	setFrameValue,
 	setProp,
 	tokensFor,
@@ -75,8 +91,14 @@ import {
 } from "@clingo-design/design-core";
 
 import { NOTHING } from "./Styles";
-import { ValueEditor, type WhyRow } from "./ValueEditor";
+import { LengthInput, ValueEditor, type WhyRow } from "./ValueEditor";
 import { cx } from "./cx";
+import {
+	MARGIN_FIELDS,
+	TRACK_FIELDS,
+	guideFieldLabel,
+} from "./guideFields";
+import { documentUnit, shownEmu } from "./lengths";
 import styles from "./Inspector.module.css";
 
 export interface InspectorProps {
@@ -130,17 +152,104 @@ export interface InspectorProps {
 
 const SIZINGS: Sizing[] = ["hug", "fixed"];
 
-function NumberField({
+/**
+ * How many tracks an axis is cut into.
+ *
+ * A spinner, where every length field in this panel deliberately is not, and the
+ * difference is the whole reason `count` is its own value type: a count has no
+ * unit to spell, so there is nothing for `type="number"` to make untypable, and
+ * stepping it is the gesture somebody actually wants — "one more column" is an
+ * edit, "13" is a thing you have to work out first.
+ *
+ * It commits only what {@link tallyOf} reads, which is the same reader the
+ * compiler puts through `tally/2`. A fraction or a negative is not a strange
+ * grid, it is a `1..N` the grounder cannot ground, and `MAX_TALLY` is the
+ * ceiling that says so out loud.
+ */
+function CountField({
 	label,
 	value,
-	onChange,
+	onCommit,
+	onSplit,
+}: {
+	label: string;
+	/** The stored literal, which for a count is the number as written. */
+	value: string;
+	onCommit: (text: string) => void;
+	/** Give this count a second alternative — a responsive grid, in one click. */
+	onSplit?: () => void;
+}) {
+	// A draft while the box is being typed into, for the reason `LengthInput`
+	// keeps one: a field that canonicalises under the caret is a field you cannot
+	// clear in order to type a different number.
+	const [draft, setDraft] = useState<string | null>(null);
+	return (
+		<label className={styles.field}>
+			<span className={styles.fieldLabel}>{label}</span>
+			<input
+				className={styles.number}
+				type="number"
+				min={1}
+				max={MAX_TALLY}
+				step={1}
+				data-field={label}
+				value={draft ?? value}
+				onChange={(e) => {
+					const text = e.target.value;
+					setDraft(text);
+					const read = tallyOf(text.trim());
+					// Zero tracks is not an empty grid, it is an equation with no
+					// solution — the width of a track is divided by this — so the
+					// floor is one, which is what `guideCount` clamps to as well.
+					if (read !== undefined && read >= 1) onCommit(String(read));
+				}}
+				onBlur={() => setDraft(null)}
+			/>
+			{onSplit ? (
+				<button
+					type="button"
+					className={styles.split}
+					data-role={`split-${label}`}
+					title="Give this a second value, so the design branches here"
+					onClick={(e) => {
+						e.preventDefault();
+						onSplit();
+					}}
+				>
+					+
+				</button>
+			) : null}
+		</label>
+	);
+}
+
+/**
+ * One coordinate of a frame.
+ *
+ * It takes the stored literal rather than the number the canvas drew with, and
+ * the difference is the point: for a coordinate this field can edit the two are
+ * the same value, but the literal is the one that still says which unit it was
+ * written in. A field that took the number would have to guess.
+ *
+ * Not `type="number"` any more, and it cannot be: a spinner will not hold
+ * `210mm`. What is lost with it is the arrow keys, which is a real loss and the
+ * canvas is where nudging belongs anyway.
+ */
+function LengthField({
+	label,
+	value,
+	unit,
+	onCommit,
 	onSplit,
 	disabled,
 	pinned,
 }: {
 	label: string;
-	value: number;
-	onChange: (next: number) => void;
+	/** The stored literal for this dimension. */
+	value: string;
+	unit: Unit;
+	/** The new stored literal — see `LengthInput`. */
+	onCommit: (text: string) => void;
 	/**
 	 * Give this dimension a second alternative — the one gesture that turns a
 	 * position into a design decision. Absent where there is nothing to split.
@@ -157,16 +266,13 @@ function NumberField({
 			title={pinned ? "The rules leave this one value" : undefined}
 		>
 			<span className={styles.fieldLabel}>{label}</span>
-			<input
-				type="number"
+			<LengthInput
 				className={styles.number}
-				value={Math.round(value)}
-				data-field={label}
+				field={label}
+				value={value}
+				unit={unit}
 				disabled={disabled}
-				onChange={(e) => {
-					const next = Number(e.target.value);
-					if (Number.isFinite(next)) onChange(next);
-				}}
+				onCommit={onCommit}
 			/>
 			{onSplit ? (
 				<button
@@ -182,6 +288,52 @@ function NumberField({
 					+
 				</button>
 			) : null}
+		</label>
+	);
+}
+
+/**
+ * What this document is measured in.
+ *
+ * A document-wide setting in a panel that is otherwise about one selection, and
+ * it sits in the position grid because that is where its effect is: the four
+ * fields beside it are the ones a person reads a unit off, and a menu two panels
+ * away would be a menu nobody connects to the numbers it changed.
+ *
+ * It changes no value in the document. A stored `"24px"` is 228600 EMU in a
+ * millimetre document exactly as it is in a pixel one — it simply reads as
+ * `6.35mm`, and keeps saying `"24px"` until somebody types over it. That is the
+ * line the whole unit design draws: what a length *is* is settled, and a unit is
+ * how it is spelled and read.
+ *
+ * `CSS_UNITS` rather than every row of the table, because `emu` is the writer's
+ * escape for a value no CSS unit spells and not a unit anybody works in.
+ */
+function UnitField({
+	unit,
+	onChange,
+}: {
+	unit: Unit;
+	onChange: (next: Unit) => void;
+}) {
+	return (
+		<label
+			className={styles.field}
+			title="What this document is measured in. Every length here is read out in it, and a number typed with no unit means it — stored values keep the unit they were written in until they are edited."
+		>
+			<span className={styles.fieldLabel}>units</span>
+			<select
+				className={styles.number}
+				data-role="document-unit"
+				value={unit}
+				onChange={(e) => onChange(e.target.value as Unit)}
+			>
+				{CSS_UNITS.map((u) => (
+					<option key={u} value={u}>
+						{UNITS[u].label}
+					</option>
+				))}
+			</select>
 		</label>
 	);
 }
@@ -219,6 +371,7 @@ function DerivedPanel({
 	reach,
 	pins,
 	onPin,
+	unit,
 	why,
 }: {
 	id: string;
@@ -226,6 +379,8 @@ function DerivedPanel({
 	node: ModelNode | undefined;
 	parent: string | null;
 	everywhere: boolean;
+	/** The document's unit: the answer set is in EMU like everything else. */
+	unit: Unit;
 	/** Variables a rule minted, by key — see `ModelScene.variables`. */
 	variables: Readonly<Record<string, readonly ModelAlternative[]>>;
 	picks: Picks;
@@ -265,6 +420,7 @@ function DerivedPanel({
 				readOnly
 				// Nothing to link to and nothing to write back: the rule decides.
 				tokens={[]}
+				unit={unit}
 				fallback={spec.fallback}
 				active={picks[variable]}
 				varying={(reachable?.size ?? alternatives.length) > 1}
@@ -314,11 +470,15 @@ function DerivedPanel({
 								data-pinned=""
 							>
 								<span className={styles.fieldLabel}>{axis}</span>
+								{/* What the answer set said, read out in the document's unit.
+								    A derived frame is EMU like every other frame, and it is
+								    the solver's number rather than a stored literal — so this
+								    is the one geometry field with nothing to preserve the
+								    spelling of. */}
 								<input
-									type="number"
 									className={styles.number}
 									data-field={axis}
-									value={Math.round(node.frame[axis])}
+									value={shownEmu(node.frame[axis], unit)}
 									disabled
 									readOnly
 								/>
@@ -785,6 +945,15 @@ export function Inspector({
 	const selected = [...selection]
 		.map((id) => findInTree(scene.nodes, id))
 		.filter((n): n is SceneNode => n !== undefined);
+	/**
+	 * What every length in this panel is read out in, whatever each one is
+	 * stored as. One document-wide answer rather than one per row: a panel where
+	 * the width said millimetres and the padding said pixels would be a panel
+	 * whose numbers cannot be compared by eye, which is most of what a panel of
+	 * numbers is for.
+	 */
+	const unit = documentUnit(scene);
+	const changeUnit = (next: Unit) => onSceneChange((prev) => setUnit(prev, next));
 
 	// A single selected id the document does not hold is a node some rule
 	// derived. There is nothing to edit, so what it gets is an account of
@@ -804,6 +973,7 @@ export function Inspector({
 					reach={reach}
 					pins={pins}
 					onPin={onPin}
+					unit={unit}
 					why={why}
 				/>
 			);
@@ -817,6 +987,14 @@ export function Inspector({
 					Nothing selected. Draw a rectangle with <kbd>R</kbd>, text with{" "}
 					<kbd>T</kbd>, or pick a layer.
 				</p>
+				{/* The document's own setting, and the only panel state that is worth
+				    anything with nothing selected — "measure this in millimetres" is a
+				    decision about the document, usually made before the first
+				    rectangle exists. */}
+				<h3>Units</h3>
+				<div className={styles.grid}>
+					<UnitField unit={unit} onChange={changeUnit} />
+				</div>
 			</div>
 		);
 	}
@@ -877,6 +1055,51 @@ export function Inspector({
 	}
 
 	/**
+	 * The literal one dimension holds — which, for a dimension a field can edit,
+	 * is the whole of what it holds: {@link plainDimension} is exactly "one
+	 * alternative, and it is a number".
+	 *
+	 * The literal rather than `box[dim]`, because the two are the same length and
+	 * only one of them still says which unit it was written in. The fallback is
+	 * for the dimension a `frameOf` default filled in, where there is no literal
+	 * to have a unit.
+	 */
+	function storedLength(dim: Dimension): string {
+		const term = node.frame[dim][0];
+		return term?.kind === "literal" ? term.value : formatLength(box[dim], unit);
+	}
+
+	/**
+	 * Typing a coordinate, which is a *statement* and not a gesture.
+	 *
+	 * So it is written exactly as said, through the same `setFrameValue` the
+	 * alternatives row below uses — one of them is the list and the other is its
+	 * only member. Three things `setFrame` would have done are deliberately not
+	 * done here, and each is a gesture's business rather than a statement's:
+	 *
+	 *   - it writes through `writeLength`, which rounds to a whole pixel. Right
+	 *     for a hand on a mouse, and it would make `210mm` — 793.7px — impossible
+	 *     to type into the document that most wants it.
+	 *   - it normalises the *whole* box, so typing a width would quietly pull a
+	 *     hand-typed `12.5pt` x onto the pixel grid beside it. One field, one
+	 *     value.
+	 *   - it clamps a size to `MIN_NODE_SIZE`, which `geometry.ts` states as the
+	 *     smallest a node may be *dragged* down to. A one-pixel rule is a thing
+	 *     you type.
+	 *
+	 * What is given up with them is `refit`: a path's vertices do not rescale
+	 * when its box is typed, and a group above does not re-fit until the next
+	 * edit that moves something. Both were already true of the alternatives row,
+	 * and neither is worth reimplementing half of `edits.ts` in a panel for.
+	 */
+	function stateDimension(dim: Dimension, text: string) {
+		onSceneChange(
+			(prev) => setFrameValue(prev, [node.id], dim, [lit(text)]),
+			`frame-${node.id}-${dim}`,
+		);
+	}
+
+	/**
 	 * The probe is the authority wherever it has spoken: a field is dead when the
 	 * rules leave the coordinate one value, and live otherwise — even for a
 	 * coordinate the solver decides, because the stored number is what that
@@ -919,6 +1142,7 @@ export function Inspector({
 				type={spec.type}
 				value={value}
 				tokens={tokensOfType(scene, spec.type)}
+				unit={unit}
 				fallback={spec.fallback}
 				names={names}
 				active={picks[variable]}
@@ -935,6 +1159,104 @@ export function Inspector({
 								? setChildLayout(prev, [node.id], prop as "grow" | "alignSelf", next)
 								: updateLayout(prev, node.id, { [prop]: next }),
 						`layout-${node.id}-${prop}`,
+					)
+				}
+			/>
+		);
+	}
+
+	/**
+	 * One guide setting, as an ordinary value row.
+	 *
+	 * `layoutRow`'s twin, because the document's two tables are twins: a margin
+	 * or a gutter is a value exactly as a gap is, so it gets the same editor and
+	 * the same everything downstream — a margin can name the page's spacing
+	 * token, and a column count with two alternatives is a responsive grid held
+	 * in one document. Which entry of `GUIDE_PROPS` it is decides the rest.
+	 *
+	 * Nothing here is a distance the *editor* works out. Where the lines then
+	 * fall is the solver's answer to these numbers, which is why the canvas reads
+	 * them back out of the answer set instead of dividing anything by hand.
+	 */
+	/**
+	 * What one guide setting holds, with the table's own fallback standing in.
+	 *
+	 * The fallback is not a guess: it is what the compiler emits for a setting a
+	 * node does not hold, so a field showing it is showing what the grid is
+	 * actually being ruled with.
+	 */
+	function guideValue(prop: GuideProp): Value {
+		return guideValueOf(node, prop) ?? single(GUIDE_PROPS[prop].fallback);
+	}
+
+	/**
+	 * A setting with one number in it, which is what a compact field can edit —
+	 * {@link plainDimension} for the grid, and the same argument: a choice or a
+	 * link to a token is a value with a life of its own, and typing over it would
+	 * either throw an alternative away or silently unwire a parameter.
+	 */
+	function plainGuide(prop: GuideProp): boolean {
+		const value = guideValue(prop);
+		return value.length === 1 && value[0].kind === "literal";
+	}
+
+	/** The literal a plain setting holds — for a plain one, all it holds. */
+	function storedGuide(prop: GuideProp): string {
+		const term = guideValue(prop)[0];
+		return term?.kind === "literal" ? term.value : GUIDE_PROPS[prop].fallback;
+	}
+
+	/** Typing one: a statement, written exactly as said, like a coordinate. */
+	function stateGuide(prop: GuideProp, text: string) {
+		onSceneChange(
+			(prev) => setGuideValue(prev, node.id, prop, [lit(text)]),
+			`guides-${node.id}-${prop}`,
+		);
+	}
+
+	/**
+	 * Turning one setting into two — and for a grid this is the headline rather
+	 * than a corner case. A count with two alternatives is twelve columns wide and
+	 * six narrow, held in one document, with the solver free to choose between
+	 * them and a rule free to decide which. The second alternative is a copy of
+	 * the first, spelling and all, so a margin written in millimetres does not
+	 * sprout a pixel twin.
+	 */
+	function splitGuide(prop: GuideProp) {
+		onSceneChange((prev) =>
+			setGuideValue(prev, node.id, prop, [
+				...guideValue(prop),
+				lit(storedGuide(prop)),
+			]),
+		);
+	}
+
+	function guideRow(prop: GuideProp) {
+		const spec = GUIDE_PROPS[prop];
+		const variable = guideVar(node.id, prop);
+		const value: Value = guideValue(prop);
+		return (
+			<ValueEditor
+				key={prop}
+				testId={`guide-${prop}`}
+				label={spec.label}
+				type={spec.type}
+				value={value}
+				tokens={tokensOfType(scene, spec.type)}
+				unit={unit}
+				fallback={spec.fallback}
+				names={names}
+				active={picks[variable]}
+				varying={varying.has(variable)}
+				reachable={reach?.[variable]}
+				pinned={pins[variable]}
+				onPin={(index) => onPin(variable, index)}
+				why={why?.(variable)}
+				preview={(term: Term) => resolveValue(context, [term], variable)}
+				onChange={(next) =>
+					onSceneChange(
+						(prev) => setGuideValue(prev, node.id, prop, next),
+						`guides-${node.id}-${prop}`,
 					)
 				}
 			/>
@@ -981,6 +1303,7 @@ export function Inspector({
 						value={wears.variants.map((v) => v.parts[prop] ?? lit(NOTHING))}
 						readOnly
 						tokens={tokensFor(scene, prop)}
+						unit={unit}
 						fallback={spec.fallback}
 						names={names}
 						active={picks[svar]}
@@ -1020,6 +1343,7 @@ export function Inspector({
 				type={spec.type}
 				value={node.props[prop] ?? defaultValue(prop)}
 				tokens={tokensFor(scene, prop)}
+				unit={unit}
 				fallback={spec.fallback}
 				names={names}
 				active={picks[variable]}
@@ -1100,39 +1424,40 @@ export function Inspector({
 				</p>
 			) : null}
 			{/* The ordinary case: four numbers in a compact grid, each with a way to
-			    turn itself into a decision. Empty only when all four have become
-			    one, and then it would be a gap in the panel. */}
-			{DIMENSIONS.some(plainDimension) ? (
+			    turn itself into a decision — and the unit they are all read in,
+			    beside them, because a number whose unit is elsewhere on the screen
+			    is a number nobody trusts. The grid is never empty now: a node whose
+			    four coordinates have all become decisions still has a unit. */}
 			<div className={styles.grid}>
 				{DIMENSIONS.filter(plainDimension).map((dim) => (
-					<NumberField
+					<LengthField
 						key={dim}
 						label={dim}
-						value={box[dim]}
+						value={storedLength(dim)}
+						unit={unit}
 						pinned={dimensionPinned(dim)}
 						disabled={dimensionPinned(dim)}
 						// Splitting is offered even where the rules have settled the
 						// coordinate: what a second alternative says is "these are two
 						// designs", which is a question about the space rather than an
 						// edit the solver has already answered.
+						//
+						// The second alternative is a copy of the literal, spelling and
+						// all — the same thing the value row's own "+ Add value" does, and
+						// what keeps a design in points from sprouting a pixel twin.
 						onSplit={() =>
 							onSceneChange((prev) =>
 								setFrameValue(prev, [node.id], dim, [
 									...node.frame[dim],
-									lit(`${box[dim]}px`),
+									lit(storedLength(dim)),
 								]),
 							)
 						}
-						onChange={(next) =>
-							onSceneChange(
-								(prev) => setFrame(prev, node.id, { ...box, [dim]: next }, picks),
-								`frame-${dim}`,
-							)
-						}
+						onCommit={(text) => stateDimension(dim, text)}
 					/>
 				))}
+				<UnitField unit={unit} onChange={changeUnit} />
 			</div>
-			) : null}
 
 			{/* A dimension holding more than one number, or one that names a token,
 			    gets the row every other value gets: the alternatives, which one this
@@ -1148,7 +1473,11 @@ export function Inspector({
 						type={FRAME_DIMS[dim].type}
 						value={node.frame[dim]}
 						tokens={tokensOfType(scene, FRAME_DIMS[dim].type)}
-						fallback={`${box[dim]}px`}
+						unit={unit}
+						// What a third alternative starts at: where the node is now,
+						// spelled in the document's unit, since a fallback has no
+						// literal of its own to inherit a spelling from.
+						fallback={formatLength(box[dim], unit)}
 						names={names}
 						active={picks[variable]}
 						varying={varying.has(variable)}
@@ -1242,6 +1571,105 @@ export function Inspector({
 						<div className={styles.props}>
 							{CONTAINER_PROPS.map((prop) => layoutRow(prop))}
 						</div>
+					) : null}
+				</>
+			) : null}
+
+			{KINDS[node.kind].surface ? (
+				<>
+					<h3>Guides</h3>
+					{/* Absence is off, so there is nothing to switch: a surface either
+					    holds a grid or does not, and the checkbox is that field. A
+					    one-track grid with no margins is indistinguishable from no
+					    grid, so the degenerate case costs nothing and there is no
+					    "enabled" flag to keep in step with the settings under it.
+
+					    Turning it off prunes the rules that were holding something to
+					    a column of it — see `setGuides`. */}
+					<label className={styles.check}>
+						<input
+							type="checkbox"
+							data-role="rule-guides"
+							checked={isGridded(node)}
+							onChange={(e) =>
+								onSceneChange((prev) =>
+									setGuides(
+										prev,
+										node.id,
+										e.target.checked ? makeGuides() : undefined,
+									),
+								)
+							}
+						/>
+						<span>Rule this surface with margins and a grid</span>
+					</label>
+
+					{isGridded(node) ? (
+						<>
+							{/* What the numbers below are *for*, said once. A grid here is
+							    not a drawing aid: every line it implies is a place a rule
+							    can name, so a card held to column three is still held to it
+							    when the count changes. */}
+							<p className={styles.note} data-role="guides-note">
+								Where the lines fall is the solver's answer to these numbers,
+								and each one is a place a rule can hold something to — pin a
+								card to column three and it stays there when the count changes.
+								None of it is part of the design, so none of it is exported.
+							</p>
+
+							{/* The live area, in the same compact grid the position fields
+							    use, and labelled with the same one-word edges: a margin and
+							    an edge are the same end of the same axis. */}
+							<div className={styles.grid} data-role="guide-margins">
+								{MARGIN_FIELDS.filter(plainGuide).map((prop) => (
+									<LengthField
+										key={prop}
+										label={guideFieldLabel(prop)}
+										value={storedGuide(prop)}
+										unit={unit}
+										onSplit={() => splitGuide(prop)}
+										onCommit={(text) => stateGuide(prop, text)}
+									/>
+								))}
+							</div>
+
+							{/* Then the tracks, an axis to a line: how many, and how far
+							    apart. A count is a spinner and a gutter is a length, which
+							    is the `count`/`length` split in the value table showing
+							    through to the two controls it was added to make possible. */}
+							<div className={styles.grid} data-role="guide-tracks">
+								{TRACK_FIELDS.filter(plainGuide).map((prop) =>
+									GUIDE_PROPS[prop].role === "count" ? (
+										<CountField
+											key={prop}
+											label={guideFieldLabel(prop)}
+											value={storedGuide(prop)}
+											onSplit={() => splitGuide(prop)}
+											onCommit={(text) => stateGuide(prop, text)}
+										/>
+									) : (
+										<LengthField
+											key={prop}
+											label={guideFieldLabel(prop)}
+											value={storedGuide(prop)}
+											unit={unit}
+											onSplit={() => splitGuide(prop)}
+											onCommit={(text) => stateGuide(prop, text)}
+										/>
+									),
+								)}
+							</div>
+
+							{/* And anything that has stopped being one number — a margin that
+							    names the page's spacing token, a count with two alternatives
+							    — gets the row every other value gets, in the table's own
+							    order. This is where a responsive grid is read and pinned. */}
+							<div className={styles.props}>
+								{GUIDE_PROP_NAMES.filter((prop) => !plainGuide(prop)).map(
+									guideRow,
+								)}
+							</div>
+						</>
 					) : null}
 				</>
 			) : null}

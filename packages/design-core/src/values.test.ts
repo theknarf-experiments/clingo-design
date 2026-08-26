@@ -2,9 +2,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+	MAX_TALLY,
+	VALUE_TYPES,
+	VALUE_TYPE_NAMES,
 	activeTerm,
+	guideAtIn,
+	guideAtVar,
+	guideVar,
+	isLengthType,
 	layoutVar,
 	lit,
+	numeralOf,
 	parseVariable,
 	propVar,
 	ref,
@@ -12,6 +20,7 @@ import {
 	resolveToken,
 	resolveValue,
 	single,
+	tallyOf,
 	termLabel,
 	tokenVar,
 	varies,
@@ -139,6 +148,48 @@ test("wordOf reads the constant a literal stands for", () => {
 	assert.equal(wordOf("a b"), undefined);
 });
 
+test("numeralOf reads a ratio, and no longer reads a length", () => {
+	assert.equal(numeralOf("1.35"), 1.35);
+	assert.equal(numeralOf("400"), 400);
+	assert.equal(numeralOf("0.5"), 0.5);
+	assert.equal(numeralOf("-2"), -2);
+	// The px suffix is gone on purpose: a length is EMU now and goes through
+	// emuOf. Reading "24px" as 24 here is how a length would arrive at a ratio's
+	// caller wearing its own numerals.
+	assert.equal(numeralOf("24px"), undefined);
+	assert.equal(numeralOf("12pt"), undefined);
+	assert.equal(numeralOf("50%"), undefined, "as before, not its leading digits");
+	assert.equal(numeralOf("#3b82f6"), undefined);
+});
+
+test("tallyOf reads a count, and refuses what a count cannot be", () => {
+	assert.equal(tallyOf("12"), 12);
+	assert.equal(tallyOf("0"), 0);
+	assert.equal(tallyOf(" 3 "), 3);
+	assert.equal(tallyOf("1.35"), undefined, "there are no 1.35 columns");
+	assert.equal(tallyOf("-1"), undefined);
+	assert.equal(tallyOf("12px"), undefined);
+	assert.equal(tallyOf(String(MAX_TALLY)), MAX_TALLY);
+	// Past the ceiling reads as nothing rather than grounding 1..100000.
+	assert.equal(tallyOf(String(MAX_TALLY + 1)), undefined);
+});
+
+test("the quantity column says which reader a type belongs to", () => {
+	assert.equal(isLengthType("length"), true);
+	assert.equal(isLengthType("number"), false, "a line height is a ratio");
+	assert.equal(isLengthType("count"), false);
+	assert.equal(isLengthType("color"), false);
+	assert.equal(VALUE_TYPES.count.fallback, "1");
+	// A quantity is one of the three readers, and a closed menu never has one:
+	// the options are words, and words are read by wordOf.
+	for (const type of VALUE_TYPE_NAMES) {
+		const { quantity, options } = VALUE_TYPES[type];
+		if (quantity === undefined) continue;
+		assert.ok(["length", "ratio", "count"].includes(quantity), type);
+		assert.equal(options, undefined, `${type} is a quantity, not a menu`);
+	}
+});
+
 test("a layout setting is a variable like any other", () => {
 	assert.equal(layoutVar("box", "gap"), "lval(box,gap)");
 	assert.deepEqual(parseVariable("lval(box,gap)"), {
@@ -146,4 +197,21 @@ test("a layout setting is a variable like any other", () => {
 		node: "box",
 		field: "gap",
 	});
+});
+
+test("a guide setting and a guide are one variable family, and cannot collide", () => {
+	assert.equal(guideVar("page", "columns"), "gval(page,columns)");
+	assert.equal(guideAtVar("page", "g1"), "gval(page,at(g1))");
+	assert.deepEqual(parseVariable("gval(page,at(g1))"), {
+		kind: "guide",
+		node: "page",
+		field: "at(g1)",
+	});
+
+	// The wrapping is what keeps one family safe for both halves: a line named
+	// `columns` would otherwise be the column count, and both of them resolve to
+	// a length, so nothing downstream would have noticed.
+	assert.equal(guideAtIn("at(g1)"), "g1");
+	assert.equal(guideAtIn("columns"), undefined);
+	assert.notEqual(guideAtVar("page", "columns"), guideVar("page", "columns"));
 });

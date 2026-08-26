@@ -163,6 +163,30 @@
 	height: 1px;
 }
 
+/* The offer to say out loud what the drag just did. It sits on the line it is
+   about, because "pin to column three" beside a button that could mean anything
+   is a sentence about a thing you cannot see. */
+.pinOffer {
+	position: absolute;
+	transform: translate(-50%, -50%);
+	padding: 2px 8px;
+	font: inherit;
+	font-size: 11px;
+	line-height: 1.5;
+	white-space: nowrap;
+	color: var(--dc-bg, #fff);
+	background: #06b6d4;
+	border: 0;
+	border-radius: 3px;
+	cursor: pointer;
+	pointer-events: auto;
+	z-index: 4;
+}
+
+.pinOffer:hover {
+	background: color-mix(in srgb, #06b6d4 80%, #000);
+}
+
 /* The pen's path so far, plus the segment being placed. Drawn in document
    coordinates: the svg is a one-pixel anchor at the document origin — zero
    would switch rendering off — and everything overflows out of it. */

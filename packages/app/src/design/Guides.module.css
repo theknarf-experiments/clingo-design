@@ -1,0 +1,104 @@
+/* The lines the design is ruled with: margins, the column and row grid, and the
+   guides somebody pulled out of a ruler. Drawn in canvas pixels from the
+   document's own origin, which is the plane both callers put their contents in,
+   so a line sits exactly where the answer set put it.
+
+   Colours follow the century of paste-up convention every page-layout tool
+   inherited — magenta for the column grid, cyan for a line drawn by hand — which
+   is worth borrowing because it is the one visual vocabulary a designer arrives
+   already knowing. Both stay well away from the accent, since neither is a
+   selection, and away from the rose of a live snap guide, which is a thing
+   happening rather than a thing there. */
+
+/* A column or a row: the space between two of the lines below, filled.
+
+   Faint on purpose — this is the one thing here that covers the design rather
+   than ruling it, so it has to be legible over white and invisible over
+   anything being read. What it buys is the distinction lines cannot make: which
+   gaps are tracks and which are gutters. Where a column grid and a row grid both
+   divide, the two washes cross and the cells show, which is what a plaid grid
+   looks like everywhere else and is the truthful picture of what was asked for. */
+.band {
+	position: absolute;
+	pointer-events: none;
+	background: color-mix(in srgb, #d946ef 7%, transparent);
+}
+
+.ruled {
+	position: absolute;
+	pointer-events: none;
+}
+
+.ruled[data-axis="x"] {
+	width: 1px;
+}
+
+.ruled[data-axis="y"] {
+	height: 1px;
+}
+
+.track {
+	background: color-mix(in srgb, #d946ef 55%, transparent);
+}
+
+/* The outermost line of the grid on its axis. Stronger than a track line
+   because it is the edge of the page's live area — the thing everything else is
+   measured inside — and because a margin and the first column's near line are
+   the same line, so if it were drawn alike there would be nothing to see. */
+.margin {
+	background: color-mix(in srgb, #d946ef 85%, transparent);
+}
+
+.drawnLine {
+	background: #06b6d4;
+}
+
+/* A line a hand may reach. The strip is a pixel wide and a hand is not, so the
+   grab area is a pseudo-element either side of it — the same bargain the path
+   anchors make, and like them it is in document pixels, so it shrinks as you
+   zoom out.
+
+   A locked line keeps the reach, because unlocking it is a double-click on the
+   line itself and there would otherwise be no way back. What it does not keep
+   is the cursor, and its press falls through to whatever is behind it. */
+.grabbable {
+	pointer-events: auto;
+}
+
+.grabbable::before {
+	content: "";
+	position: absolute;
+	inset: -4px;
+}
+
+.ruled[data-axis="x"].grabbable:not([data-locked]) {
+	cursor: col-resize;
+}
+
+.ruled[data-axis="y"].grabbable:not([data-locked]) {
+	cursor: row-resize;
+}
+
+/* Locked, and saying so rather than just refusing: dashes are what every tool
+   uses for "this one is not going anywhere". */
+.lockedLine {
+	background: none;
+	opacity: 0.85;
+}
+
+.lockedLine[data-axis="x"] {
+	border-left: 1px dashed #06b6d4;
+}
+
+.lockedLine[data-axis="y"] {
+	border-top: 1px dashed #06b6d4;
+}
+
+/* The line a drag is currently caught on. Thickened rather than recoloured, so
+   it is still recognisably the same line — and so the rose snap guide stays the
+   one thing on screen that means "right now". */
+.ruled[data-active] {
+	box-shadow: 0 0 0 1px currentColor;
+	color: color-mix(in srgb, #06b6d4 50%, transparent);
+}
+

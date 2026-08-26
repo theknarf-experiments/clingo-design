@@ -19,6 +19,21 @@
  * domain of thousands. Where a coordinate genuinely has to be worked out it is
  * not a choice either — it is a variable of the simplex solver, which costs one
  * unknown rather than a domain.
+ *
+ * **Every number that crosses into ASP is EMU** — 1/914400 in, see units.ts.
+ * That is what this file used to buy with rounding: a clingo fact has to be an
+ * integer and so does a theory coefficient, so `numeral/2`, `lask/3` and
+ * `ldefnum/2` each ran their number through a `Math.round` and the canvas and
+ * the solver then disagreed by up to half a pixel. With EMU the integrality is
+ * the *parser's* guarantee — `emuOf` is exact or nothing — so all three roundings
+ * are gone rather than moved, and the one that remains ({@link emitAsked}) is
+ * quantizing a measured box, which is a float for reasons no unit can fix.
+ *
+ * Two consequences a rule-writer meets, both recorded in {@link CONTRACT}:
+ * `frame(card,width,228600)` is 24 px, and `#const emupx` is emitted so a
+ * hand-written rule can go on saying `44*emupx` and have gringo fold it; and the
+ * usable range narrows, because gringo's integers are 32-bit and **wrap
+ * silently** — see {@link ASP_EMU_CEILING}.
  */
 import { componentDefs, instanceNodes } from "./components.ts";
 import {
@@ -37,6 +52,8 @@ import {
 	DIMENSIONS,
 	EDGES,
 	EDGE_NAMES,
+	GUIDE_PROPS,
+	GUIDE_PROP_NAMES,
 	LAYOUT_PROPS,
 	LAYOUT_PROP_NAMES,
 	NODE_KINDS,
@@ -44,6 +61,9 @@ import {
 	constrainsProp,
 	dimension,
 	frameDim,
+	guideLines,
+	guideValueOf,
+	isGridded,
 	isLaidOut,
 	layoutValueOf,
 	levelOf,
@@ -61,21 +81,117 @@ import {
 	VALUE_TYPES,
 	constraintVar,
 	frameVar,
+	guideAtVar,
+	guideVar,
+	isLengthType,
 	layoutVar,
-	numeralOf,
 	propVar,
 	referencedTokens,
 	stylePartVar,
 	styleVar,
+	tallyOf,
 	tokenVar,
 	type Value,
 	wordOf,
 } from "./values.ts";
+import { EMU_PER_PX, emuOf, wholeEmu } from "./units.ts";
 import { flatten, parentMap } from "./tree.ts";
 
 /** The switch a constraint is compiled behind — see {@link compile}. */
 export const guardAtom = (constraintId: string): string =>
 	`active(${constraintId})`;
+
+/**
+ * The name a hand-written rule can say a pixel by.
+ *
+ * `frame/3` now carries EMU, which silently rewrites every hand-authored rule
+ * that ever wrote a coordinate down — the sudoku and map templates, and any
+ * rule in the power panel. `frame(cell(R,C),width,44)` used to be a 44-pixel
+ * cell and is now a 44-EMU one, a twentieth of a pixel: a wrong picture, with
+ * nothing to notice it by.
+ *
+ * A `#const` is the cheapest possible mitigation and the only one that keeps
+ * such a rule *readable*: `44*emupx` says what it means, gringo folds it at
+ * ground time so it costs nothing, and the multiplication is arithmetic on a
+ * term rather than a unit conversion — nothing here rounds. The alternative,
+ * mass-multiplying every literal in every template and test by 9525, would
+ * leave `frame(cell(R,C),width,419100)` behind, which nobody can read and
+ * nobody can check.
+ */
+const EMU_CONST = [
+	"% A CSS pixel, in the EMU every coordinate below is written in. Say what you",
+	"% mean — `frame(cell(R,C),width,44*emupx)` — and gringo folds it while",
+	"% grounding, so naming the unit is free.",
+	`#const emupx = ${EMU_PER_PX}.`,
+];
+
+/**
+ * How large an EMU may get before gringo wraps — and why the answer is two
+ * numbers rather than one.
+ *
+ * gringo's integers are 32-bit and **overflow silently**: `X = 4*536870912`
+ * grounds to `a(-2147483648)` with no diagnostic and no error, which is checked
+ * rather than assumed — see the ceiling tests in aspunits.test.ts.
+ *
+ * Two families of right-hand side put a coefficient on a length a document
+ * names, and they are bounded differently:
+ *
+ *   - **A constraint's value.** The widest is `D = 4*V` in the mirrorless
+ *     `symmetric` rule below — two doublings, since edges are doubled so a
+ *     centre is whole and there are two members either side of the line. Four
+ *     is a constant of the program, so this family has one fixed ceiling, and
+ *     it is this one.
+ *   - **A layout's gap and padding.** The hugging rule grounds
+ *     `T = 2*P + (K-1)*G`, and the two justification rules ground `(1-K)*G`,
+ *     where `K` is the container's child count. *Nothing in the document
+ *     bounds `K`*, so this family has no fixed ceiling at all — it has one per
+ *     container. See {@link aspLayoutCeiling}.
+ *
+ * The second family is why this constant is not on its own the answer to "how
+ * large an EMU may a document name". It was written as though it were, on the
+ * argument that `4*V` is the widest arithmetic anywhere in the program; the
+ * layout rules had been putting a child count on a right-hand side since long
+ * before EMU, and quietly falsify it for any container with more than three
+ * children.
+ *
+ * The guide rules join the first family rather than the second, and doing so
+ * was a design decision rather than luck: a track line's place is written as a
+ * whole multiple of a *pitch* precisely so that every constant on a right-hand
+ * side stays a sum of at most four lengths. Writing the same equation with a
+ * track width instead puts `(N-1)*G` there, and a thousand-track grid would
+ * then wrap at a gutter of a fifty-thousandth of the limit. See
+ * {@link GUIDE_RULES}.
+ *
+ * 2^31/4 EMU is 56,364 px, or a 48-foot artboard. Before EMU the same ceiling
+ * stood at ~536M px, so this is a real narrowing and it is still some four
+ * hundred times the widest thing anyone has drawn. Neither ceiling is enforced:
+ * a clamp would silently move a designer's number, which is the same failure in
+ * a politer coat, and there is no channel from this file into clingo's
+ * diagnostics to say so out loud. Recorded, tested, and left to the day a
+ * document goes near it.
+ */
+export const ASP_EMU_CEILING = Math.floor((2 ** 31 - 1) / 4);
+
+/**
+ * The largest EMU a laid-out container may name for its gap or its padding,
+ * given how many children it has.
+ *
+ * `2*P + (K-1)*G` is the widest of the layout right-hand sides, so with padding
+ * and gap both at this value the sum is `(K+1)` of them and still grounds. A
+ * container with three children or fewer is held by {@link ASP_EMU_CEILING}
+ * instead, which is where the doubling in the constraint family already puts
+ * it — below four the child count is not what binds.
+ *
+ * The fall from there is steep and worth saying in the units a person thinks
+ * in: a row of a hundred children is held to about 2,230 px of gap. That is
+ * still some forty times any gutter anyone has typed, which is why this is
+ * recorded rather than enforced — but it is four hundred times *tighter* than
+ * the number this file used to claim, and a generated grid is exactly the kind
+ * of document that would have found out the hard way.
+ */
+export function aspLayoutCeiling(children: number): number {
+	return Math.floor((2 ** 31 - 1) / Math.max(4, children + 1));
+}
 
 /**
  * Names of the solver's layout unknowns.
@@ -244,6 +360,10 @@ const LAYOUT_RULES = [
 	"% Hugging along the main axis: children, gaps and padding, exactly. The",
 	"% container is in the same sum as its children, so a child that hugs in",
 	"% turn simply contributes its own solved size.",
+	"% `T` is where a child count meets a length, which makes this the widest",
+	"% ground arithmetic in the program and this container — not the `symmetric`",
+	"% rule — the thing that decides how large a gap a wide row may name. See",
+	"% aspLayoutCeiling.",
 	"&sum{ lsz(C,S); -lsz(X,S) : lslot(C,X,_) } = T :- lhug(C), lmainsz(C,S),",
 	"    not lstretched(C,S), lgap(C,G), lpad(C,P), lcount(C,K),",
 	"    T = 2*P + (K-1)*G.",
@@ -257,8 +377,8 @@ const LAYOUT_RULES = [
 	"% maximum over nothing is the infimum, and `#inf + 2*P` is an operation",
 	"% clingo remarks on, twice per axis, on every document with a measured child",
 	"% under a layout. That case is not a design: `laskdef/3` answers for every",
-	"% universe, so some row always holds. Every size in the set is a rounded",
-	"% pixel count and so is at least zero, which is what makes the floor free —",
+	"% universe, so some row always holds. Every size in the set is a whole",
+	"% count of EMU and so is at least zero, which is what makes the floor free —",
 	"% and what it says is that a container hugging nothing is its padding.",
 	"lbiggest(C,M) :- lhug(C), lcrosssz(C,S),",
 	"                 M = #max{ Z : lslot(C,X,_), lask(X,S,Z); 0 }.",
@@ -359,7 +479,16 @@ const GEOMETRY_RULES = [
 	"% switch is deliberately not consulted: which unknowns exist must not",
 	"% depend on which constraints are assumed, and a node the solver places",
 	"% with nothing to say about it lands on its stored frame anyway.",
-	"gsolved(N) :- constraint(C), c_kind(C,K), gkind(K), c_node(C,N).",
+	"%",
+	"% Unless the member is a *datum* — a column line, a hand-drawn guide — and",
+	"% that exception is the one line the guides feature adds here. A datum is",
+	"% not a node: it has no frame/3, so the pull inequalities below never ground",
+	"% for it, and gd(D,A) would then be a variable in the shared &minimize with",
+	"% nothing bounding it from below. An unbounded objective is not a wrong",
+	"% picture, it is no answer at all. What a datum *is* placed by is the grid",
+	"% equation in the guide rules, which is exact rather than nearest.",
+	"gsolved(N) :- constraint(C), c_kind(C,K), gkind(K), c_node(C,N),",
+	"              not gdatum(N).",
 	"gpos(N,A) :- gsolved(N), gaxis(A).",
 	"gsize(N,S) :- gsolved(N), gspan(S).",
 	"",
@@ -375,6 +504,19 @@ const GEOMETRY_RULES = [
 	"% tool has to. It does not forbid a resize — `equalSize` and a pin on a",
 	"% width have no other way to be satisfied, and still are.",
 	"% Behind a switch so a probe can take it off; see the freedom rules below.",
+	"%",
+	"% The 4 did not have to be rescaled when lengths became EMU, and that is a",
+	"% claim worth proving rather than assuming, because getting it wrong would",
+	"% tilt every compromise in the tool by a factor of 9525. The objective and",
+	"% every equation it ranges over are *homogeneous of degree one in the",
+	"% lengths*: read the equations above and below and every constant on a",
+	"% right-hand side is itself a length (V, P, G, Z, M, T, D), while the only",
+	"% bare integers anywhere are coefficients — goff(E,K), the 2* and 4*, the",
+	"% (K-1)* of a gap count, the #count of children. So scaling every length by",
+	"% 9525 maps a feasible point (lv,lsz,wv,ge,gd) to 9525 times itself and",
+	"% multiplies the objective by 9525 exactly. A positive scalar does not move",
+	"% an argmin, so the arrangement simplex returns is the same arrangement. What",
+	"% did change is that the answer is now exact where it used to be rounded.",
 	"&minimize{ gd(N,A) : gpos(N,A), gpull; 4*gd(N,S) : gsize(N,S), gpull }.",
 	"",
 	"% ---- world coordinates ----",
@@ -414,6 +556,172 @@ const GEOMETRY_RULES = [
 	"&sum{ ge(N,E); -2*wv(N,A); -K*lsz(N,S) } = 0 :- gedgeof(N,E), gedge(E,A,pos),",
 	"    goff(E,K), gspanof(A,S).",
 	"&sum{ ge(N,E); -2*lsz(N,E) } = 0 :- gedgeof(N,E), gedge(E,_,span).",
+]
+
+/**
+ * Guides: margins, a grid of tracks, and lines drawn by hand.
+ *
+ * The whole feature is here and it adds no geometry engine, because a guide is
+ * not a line drawn over the design — it is a **datum**, one fixed linear
+ * quantity in the design's own coordinates that the machinery above can name in
+ * exactly the place it names a node. `align`, `gap` and `symmetric` relate their
+ * members through `c_node/2` and read one quantity per member; these rules
+ * supply that quantity and nothing else changes. "Pin this card to column three"
+ * is an `align` over `[card, cg(page,3,left)]`, so it gets a name and a switch
+ * like every other rule, an unsat core can blame it, and `why.ts` can already
+ * explain it.
+ *
+ * Three decisions are doing the work, and each of them is a thing that would
+ * have been a second implementation:
+ *
+ *  - **A datum is a zero-size box.** `lsz(D,_)` is nailed to 0, so all six of
+ *    its edges coincide and the generic edge equation above produces every one
+ *    of them for nothing. That is why naming an edge in `cg(S,K,E)` is not a
+ *    contradiction: the edge is not saying which edge of the datum, it is saying
+ *    which *line of the track*. It also makes `align` — which forces the same
+ *    edge on both members — do the right thing for either: `left` puts the
+ *    card's left edge on the line, `centerX` puts its centre there, because the
+ *    datum answers the same number either way.
+ *  - **The arithmetic happens in the theory, not in TypeScript.** The settings
+ *    are {@link Value}s, so which margin holds is the solver's answer and not
+ *    something this file knows; and the surface's own size may itself be an
+ *    unknown — a hugging frame, or one a geometric constraint placed — which
+ *    only an equation over `lsz(S,width)` gets right. `c_value/2` and `l_value/3`
+ *    both took this road for the first of those reasons alone.
+ *  - **`gpitch`, rather than a track width.** One track plus one gutter is the
+ *    quantity every line's place is a whole multiple of, so the coefficients
+ *    below stay `2*(K-1)+J` — ground arithmetic on small integers — and every
+ *    constant on a right-hand side stays a single length. Writing it with a
+ *    track width instead puts `(N-1)*G` on a right-hand side, and with a
+ *    thousand-track grid (see `MAX_TALLY`) that is a length multiplied by a
+ *    thousand, which is how a program starts overflowing gringo's 32-bit
+ *    integers in silence. The track width is not lost: it is `gpitch` less the
+ *    gutter, and it is also what a track's `right` datum comes back as minus its
+ *    `left` — read out of the same answer, which is the point.
+ *
+ * Emitted always, like the geometry and component rules and for the same
+ * reason: `ggrid/1` and `gline/3` are things a hand-written rule may assert, and
+ * a contract that quietly does nothing on some documents is not one. With no
+ * facts none of it grounds, and the two structural `gdatum/1` rules — which are
+ * what stop a datum from being handed to `gsolved` — must be present whether the
+ * *document* holds a grid or a rule of yours named a line of one.
+ */
+const GUIDE_RULES = [
+	"#defined ggrid/1.",
+	"#defined gline/3.",
+	"#defined numeral/2.",
+	"#defined tally/2.",
+	"#defined layout/2.",
+	"#defined lslot/3.",
+	"#defined c_node/2.",
+	"% ---- the settings, per universe ----",
+	"% The same shape a layout's settings have, for the same reason: a margin",
+	"% that names a length token *is* the page's spacing scale, and a column",
+	"% count with two alternatives is a responsive grid held in one document.",
+	"% So the facts the equations read are derived from the pick rather than",
+	"% written down.",
+	"g_value(S,F,L) :- resolved(gval(S,F),L).",
+	"% A length setting — a margin, a gutter. Negative is not a page, it is a",
+	"% typo, exactly as it is for a gap.",
+	"gnum(S,F,V) :- ggrid(S), g_value(S,F,L), numeral(L,V), V >= 0.",
+	"gnum(S,F,0) :- ggrid(S), g_value(S,F,L), numeral(L,V), V < 0.",
+	"greadsnum(S,F) :- ggrid(S), g_value(S,F,L), numeral(L,_).",
+	"gnum(S,F,V) :- ggrid(S), gdefnum(F,V), not greadsnum(S,F).",
+	"% A count setting, through tally/2 rather than numeral/2 — the split the",
+	"% EMU change built that family for. A twelve-column grid read as a length is",
+	"% 114300 EMU, and the range below would ground 114300 tracks.",
+	"%",
+	"% Zero tracks is not an empty grid, it is an equation with no solution: the",
+	"% span is divided by this number. So a count of nothing falls to the table's",
+	"% own default of one, which is also what one track spanning the whole space",
+	"% inside the margins already means. `guideCount` clamps at 1 for the same",
+	"% reason and lands on the same answer.",
+	"gcount(S,F,N) :- ggrid(S), g_value(S,F,L), tally(L,N), N >= 1.",
+	"greadscount(S,F) :- ggrid(S), g_value(S,F,L), tally(L,N), N >= 1.",
+	"gcount(S,F,N) :- ggrid(S), gdefcount(F,N), not greadscount(S,F).",
+	"",
+	"% ---- per axis, off the settings table ----",
+	"% gcountof/2, ggutterof/2 and gmarginof/3 are GUIDE_PROPS written out as",
+	"% facts, so no rule below ever spells a setting's name — and rows are the",
+	"% column rules with a different fact rather than a second implementation,",
+	"% which is the whole reason that table carries an axis column at all.",
+	"gtracks(S,A,N) :- gcountof(A,F), gcount(S,F,N).",
+	"ggutter(S,A,V) :- ggutterof(A,F), gnum(S,F,V).",
+	"gmargin(S,A,P,V) :- gmarginof(A,P,F), gnum(S,F,V).",
+	"gtrack(S,A,K) :- gtracks(S,A,N), K = 1..N.",
+	"",
+	"% ---- how wide a track is ----",
+	"% N tracks and N-1 gutters fill what the margins leave, which written in",
+	"% pitch is N*(track+gutter) = span - lead - trail + gutter. The count is a",
+	"% bound integer here, so N*gpitch is a coefficient on an unknown in exactly",
+	"% the way K*lsz already is above.",
+	"&sum{ N*gpitch(S,A); -lsz(S,Z) } = T :- gtracks(S,A,N), gspanof(A,Z),",
+	"    gmargin(S,A,lead,M1), gmargin(S,A,trail,M2), ggutter(S,A,G),",
+	"    T = G - M1 - M2.",
+	"% The surface's own span, where nothing else in the program owns it. A grid",
+	"% is a fraction of the surface's size, so the equation above needs one — and",
+	"% a surface no constraint names and no layout arranges has no lsz equation",
+	"% at all, which would leave the whole grid floating on a free variable. This",
+	"% is the same bargain the world-coordinate chain strikes a few lines up: the",
+	"% unknown where the solver owns it, the stored number where it does not.",
+	"gowns(S,Z) :- gsize(S,Z).",
+	"gowns(S,Z) :- layout(S,_), gspan(Z).",
+	"gowns(S,Z) :- lslot(_,S,_), gspan(Z).",
+	"gspanned(S,Z) :- gtrack(S,A,_), gspanof(A,Z).",
+	"&sum{ lsz(S,Z) } = V :- gspanned(S,Z), not gowns(S,Z), frame(S,Z,V).",
+	"% ...and its world coordinate, which is derived only from gsolved above and",
+	"% so is absent for a surface no rule places. Seeded here, and the ancestor",
+	"% chain above then carries it up to the root on its own.",
+	"gworld(S,A) :- gtrack(S,A,_).",
+	"gworld(S,A) :- gline(S,_,A).",
+	"",
+	"% ---- what a datum is ----",
+	"gdatum(cg(S,K,E)) :- gtrack(S,A,K), gedge(E,A,pos).",
+	"gdaxis(cg(S,K,E),A) :- gtrack(S,A,K), gedge(E,A,pos).",
+	"gdon(cg(S,K,E),S) :- gtrack(S,A,K), gedge(E,A,pos).",
+	"gdatum(gl(S,G)) :- gline(S,G,_).",
+	"gdaxis(gl(S,G),A) :- gline(S,G,A).",
+	"gdon(gl(S,G),S) :- gline(S,G,_).",
+	"% And a member of either shape, whoever named it — read structurally, which",
+	"% is the same reading `parseDatum` does on the TypeScript side. It has to be",
+	"% independent of the picks, because it is what guards `gsolved`: a member",
+	"% naming column twelve of a grid that is six columns wide in this universe",
+	"% is a datum that does not exist, and handing *that* to the solver as a node",
+	"% is the unbounded objective. Here it is a datum with no gdaxis and so no",
+	"% equations, which is the same silence `holdsDatum` describes — the rule",
+	"% says nothing until the grid grows again.",
+	"gdatum(cg(S,K,E)) :- c_node(_,cg(S,K,E)).",
+	"gdatum(gl(S,G)) :- c_node(_,gl(S,G)).",
+	"% The zero-size box. Only on the datum's own axis: a column line has no",
+	"% opinion about a `top`, and a rule that named one gets an unconstrained",
+	"% quantity — silence — rather than an answer the grid never gave.",
+	"&sum{ lsz(D,Z) } = 0 :- gdaxis(D,A), gspanof(A,Z).",
+	"",
+	"% ---- where each line falls ----",
+	"% Track K's lead line is lead-margin + (K-1) pitches from the surface's own",
+	"% origin, and the other two lines of that track are a track width and half a",
+	"% track width further on. Doubled, exactly as an edge is and for the same",
+	"% reason — a centre is otherwise a half — with goff/2 supplying the 0, 1 or 2",
+	"% off the same table the edges read it from. A track width is a pitch less a",
+	"% gutter, which is where the -J*G comes from.",
+	"&sum{ 2*lv(D,A); -Q*gpitch(S,A) } = T :- gtrack(S,A,K), gedge(E,A,pos),",
+	"    goff(E,J), D = cg(S,K,E), gmargin(S,A,lead,M), ggutter(S,A,G),",
+	"    Q = 2*(K-1)+J, T = 2*M - J*G.",
+	"% A hand-drawn line simply sits where it says, in its surface's own local",
+	"% coordinates — the same space a child's frame is in.",
+	"gat(S,G,V) :- gline(S,G,_), g_value(S,at(G),L), numeral(L,V).",
+	"gsited(S,G) :- gline(S,G,_), g_value(S,at(G),L), numeral(L,_).",
+	"% A position that reads as no length takes the origin, which is the answer",
+	"% `frame/3` defaults to and the answer `guideAt` gives, so the line the",
+	"% overlay draws and the line a rule names are still the same line.",
+	"gat(S,G,0) :- gline(S,G,_), not gsited(S,G).",
+	"&sum{ lv(D,A) } = V :- gline(S,G,A), D = gl(S,G), gat(S,G,V).",
+	"% ...and onto the canvas, which is the child rule from the world chain above",
+	"% written once more: a datum is parented to its surface in every sense but",
+	"% child/2. Naming lv/2 rather than a family of its own is what lets the",
+	"% overlay read a line's place straight out of `readSolved`, in the same",
+	"% coordinates it reads a node's.",
+	"&sum{ wv(D,A); -wv(S,A); -lv(D,A) } = 0 :- gdon(D,S), gdaxis(D,A).",
 ]
 
 /**
@@ -493,9 +801,14 @@ const SCENE_DEFAULT_RULES = [
 	"% number, which is every rectangle nobody has asked to vary.",
 	"f_value(N,D,L) :- resolved(fval(N,D),L).",
 	"% Through numeral/2, so the number here is the same number the editor reads",
-	"% off the document: both round, so the canvas and hit testing agree exactly.",
+	"% off the document — literally the same, now that both sides read EMU with",
+	"% the one exact-or-nothing reader. They used to agree only to a pixel,",
+	"% because each rounded its own copy, and the canvas and hit testing could",
+	"% therefore disagree about where a box ended.",
 	"% A dimension that reads as no number at all derives nothing and falls to",
-	"% the default below, rather than meaning zero by accident.",
+	"% the default below, rather than meaning zero by accident — which is now the",
+	"% answer for a fraction of an EMU as well as for a percentage: `frameDim`",
+	"% falls back in exactly the same place, so the two sides still agree.",
 	"frame(N,D,V) :- f_value(N,D,L), numeral(L,V).",
 	"kinded(N) :- kind(N,K), K != frame.",
 	"kind(N,frame) :- node(N), not kinded(N).",
@@ -682,7 +995,21 @@ const GEOMETRIC_CONSTRAINT_RULES = [
 	"gneed(C,E) :- gaxial(C,A), glead(A,E).",
 	"gneed(C,E) :- gaxial(C,A), gtrail(A,E).",
 	"gneed(C,E) :- gaxial(C,A), gmid(A,E).",
-	"gedgeof(N,E) :- gcon(C), c_node(C,N), gneed(C,E).",
+	"% A datum has a place and no size, so a *span* edge of one is not a quantity",
+	"% any rule may be about. This is the second half of the refusal `gdaxis/2`",
+	"% makes on the other axis, and it has to be said separately because the two",
+	"% silences come from opposite directions: `top` on a column line is quiet",
+	"% because nothing constrains ge(D,top), while `width` would be far too loud —",
+	"% the generic edge equation above meets the datum's own `lsz(D,Z) = 0` and",
+	"% pins ge(D,width) to zero, so an `equalSize` against a column line would hand",
+	"% a real node a width of nothing and never say why. Two clicks away from the",
+	"% feature's own headline: the canvas offers `align [card, cg(page,3,left)]`,",
+	"% and the rule panel's kind menu retargets it to `equalSize`, whose default",
+	"% edge is `width`. Refusing the edge leaves ge(D,width) an unconstrained",
+	"% quantity, which is the silence a rule that says nothing has always got, and",
+	"% it drops out of `annotate` and `why` by the same door.",
+	"gnoedge(N,E) :- gdatum(N), gedge(E,_,span).",
+	"gedgeof(N,E) :- gcon(C), c_node(C,N), gneed(C,E), not gnoedge(N,E).",
 	"% The switch, exactly as the property kinds use it.",
 	"gon(C,K) :- gcon(C), c_kind(C,K), active(C).",
 	"",
@@ -700,6 +1027,14 @@ const GEOMETRIC_CONSTRAINT_RULES = [
 	"&sum{ ge(A,M); ge(B,M); -2*ge(K,M) } = 0 :- gon(C,symmetric), gaxial(C,X),",
 	"    gmid(X,M), c_slot(C,A,1), c_slot(C,B,2), c_slot(C,K,3).",
 	"% ...or of a line on the canvas, when there is no third member to be it.",
+	"% `4*V` is the widest *constant* coefficient in this program — an edge",
+	"% doubled, and two of them — which makes this line the one that sets the",
+	"% ceiling on how large an EMU a constraint may name. It is not the widest",
+	"% arithmetic anywhere: the layout rules ground `2*P + (K-1)*G` on a child",
+	"% count nothing bounds, and beat it from four children up. gringo's integers",
+	"% are 32-bit and wrap without a word, so the limit here is 2^31/4 EMU, about",
+	"% 56,000 px. See ASP_EMU_CEILING and aspLayoutCeiling, and the tests that",
+	"% ground the overflow rather than believing the arithmetic.",
 	"&sum{ ge(A,M); ge(B,M) } = D :- gon(C,symmetric), gaxial(C,X), gmid(X,M),",
 	"    c_slot(C,A,1), c_slot(C,B,2), not gmirror(C), c_value(C,V), D = 4*V.",
 	"% pin: the escape hatch — one quantity, one number, no freedom left.",
@@ -730,8 +1065,48 @@ const LAYOUT_OPTIONS = LAYOUT_PROP_NAMES.flatMap((prop) => {
 	// Only the container's settings default; a child's absence is a statement.
 	if (spec.on !== "container") return facts
 	if (options) return [...facts, atom("ldefword", prop, spec.fallback)]
-	const n = numeralOf(spec.fallback)
-	return n === undefined ? facts : [atom("ldefnum", prop, Math.round(n))]
+	// A setting with no menu is a length — a gap, a padding — so the fallback is
+	// read as EMU by the same exact-or-nothing reader the document's own values
+	// go through. The `Math.round` that used to be here is gone rather than
+	// moved: `"16px"` is 152400 exactly, and a fallback the table wrote that no
+	// unit spells would emit no default at all, which is a table entry to fix
+	// rather than a number to fudge. `lengths.test.ts` holds that to be true of
+	// every length fallback in every table.
+	const n = emuOf(spec.fallback)
+	return n === undefined ? facts : [atom("ldefnum", prop, n)]
+})
+
+/**
+ * The guide vocabulary, as facts — {@link GUIDE_PROPS} written out, so no rule
+ * in {@link GUIDE_RULES} ever names a setting.
+ *
+ * Two columns are doing the work and both are shared with {@link EDGES} on
+ * purpose. `axis` is what makes the track rule generic, so a row grid is one
+ * more fact rather than the column rule with `x` spelled into it; and `place`
+ * is the same lead/trail an edge carries, which is what makes `marginLeft` and
+ * the `left` edge provably the same end of the same axis rather than two
+ * spellings that happen to agree.
+ *
+ * The reader a fallback goes through is chosen by the setting's *quantity*
+ * rather than by its role — the same dispatch the TypeScript readers make, and
+ * the reason a count can never be read as 114300 EMU of column.
+ */
+const GUIDE_FACTS = GUIDE_PROP_NAMES.flatMap((prop) => {
+	const spec = GUIDE_PROPS[prop]
+	const lookup =
+		spec.role === "count"
+			? [atom("gcountof", spec.axis, prop)]
+			: spec.role === "gutter"
+				? [atom("ggutterof", spec.axis, prop)]
+				: spec.place
+					? [atom("gmarginof", spec.axis, spec.place, prop)]
+					: []
+	if (isLengthType(spec.type)) {
+		const n = emuOf(spec.fallback)
+		return n === undefined ? lookup : [...lookup, atom("gdefnum", prop, n)]
+	}
+	const n = tallyOf(spec.fallback)
+	return n === undefined ? lookup : [...lookup, atom("gdefcount", prop, n)]
 })
 
 /** Predicates the generated program exposes to user rules. */
@@ -755,8 +1130,34 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               unground while its switch is off
 %   rendered(Node, Prop, Lit)   what a node actually draws with
 %   literal(Lit, "text")        the text a literal id stands for
-%   numeral(Lit, N)             the number a literal reads as: "24px" is 24
+%   numeral(Lit, Emu)           the LENGTH a literal reads as, in EMU:
+%                               "24px" is 228600 and "0.25in" is 228600 too.
+%                               Exact or absent — "1.5px" is 14287.5 EMU, so it
+%                               is not a length and emits nothing at all
+%   tally(Lit, N)               the COUNT one reads as: "12" is 12. A separate
+%                               family because a count is a different quantity
+%                               from a length and the grounder reads it — a
+%                               rule doing \`1..N\` off numeral/2 would ground
+%                               114300 tracks for "12"
 %   word(Lit, W)                the constant one reads as: "row" is row
+%
+% Units. Every length below — frame/3, numeral/2, c_value/2, lgap/2, lpad/2,
+% lask/3 and the theory variables lv/lsz/wv/ge — is in **EMU**, an integer
+% 1/914400 of an inch. That is the OOXML unit, and it is used here because
+% 914400 divides every absolute unit CSS defines (1in = 96px = 72pt = 6pc =
+% 25.4mm), so every conversion a designer's document goes through is exact and
+% no fact anywhere is rounded to reach an integer.
+%
+% Write \`emupx\` rather than a bare number and your rules read as they always
+% did — gringo folds it while grounding, so it is free:
+%
+%   #const emupx = ${EMU_PER_PX}.       generated for you, above
+%   frame(cell(R,C),width,50*emupx).   a fifty-pixel cell
+%
+% One limit worth knowing, because nothing will tell you: gringo's integers are
+% 32-bit and wrap in silence, and the widest term below is 4*V, so a dimension
+% past about 2^31/4 EMU — 56,000 px, a 48-foot artboard — comes back negative
+% rather than large.
 %
 % Variables are named after where they live:
 %   prop(Node, Property)        a node's property
@@ -845,7 +1246,7 @@ export const CONTRACT = `% Predicates you can rely on:
 %   node(N)  kind(N, ${NODE_KINDS.join("|")})  child(Parent, Child)
 %   order(N, I)                 where N sits among its siblings, 1-based —
 %                               child/2 is a set, so this is the paint order
-%   frame(N, x|y|width|height, Pixels)   <- relative to the parent, if any.
+%   frame(N, x|y|width|height, Emu)   <- relative to the parent, if any.
 %                               A fact where the document holds one number for
 %                               a dimension; derived from f_value/3 where it
 %                               holds a choice, so a node can sit in one place
@@ -872,10 +1273,10 @@ export const CONTRACT = `% Predicates you can rely on:
 %   node(cell(R,C)) :- pos(R), pos(C).
 %   kind(cell(R,C),rect) :- pos(R), pos(C).
 %   child(board,cell(R,C)) :- pos(R), pos(C).
-%   frame(cell(R,C),x,X) :- pos(R), pos(C), X = 20 + (C-1)*70.
-%   frame(cell(R,C),y,Y) :- pos(R), pos(C), Y = 20 + (R-1)*70.
-%   frame(cell(R,C),width,50) :- pos(R), pos(C).
-%   frame(cell(R,C),height,50) :- pos(R), pos(C).
+%   frame(cell(R,C),x,X) :- pos(R), pos(C), X = (20 + (C-1)*70)*emupx.
+%   frame(cell(R,C),y,Y) :- pos(R), pos(C), Y = (20 + (R-1)*70)*emupx.
+%   frame(cell(R,C),width,50*emupx) :- pos(R), pos(C).
+%   frame(cell(R,C),height,50*emupx) :- pos(R), pos(C).
 %   rendered(cell(R,C),fill,"#38bdf8") :- pos(R), pos(C).
 %
 % Universes may now differ in *structure*, not only in values — hide a cell on
@@ -899,7 +1300,7 @@ export const CONTRACT = `% Predicates you can rely on:
 %   c_level(C, L)  c_weight(C, W)   present only for a *soft* rule: violating it
 %                               costs W at priority L instead of being forbidden
 %   c_soft(C)                   derived: C is ranked rather than prohibited
-%   c_value(C, Pixels)          derived: numeral(resolved(cval(C)))
+%   c_value(C, Emu)             derived: numeral(resolved(cval(C)))
 %   gkind(K)                    K places its nodes rather than colours them
 %   gedge(E, x|y, pos|span|axis)   what an edge is
 %   gplace(E, lead|mid|trail)      and where on the node it sits
@@ -909,7 +1310,7 @@ export const CONTRACT = `% Predicates you can rely on:
 % derives no viol/1 for it — a rule of yours does, against the term the document
 % gave it. Add one in the Rules panel, name it, and write the condition:
 %
-%   viol(no_wide_gaps) :- lgap(row,G), G > 24.
+%   viol(no_wide_gaps) :- lgap(row,G), G > 24*emupx.
 %
 % That is a plain \`:- ...\` with two things added, and they are the two things a
 % bare integrity constraint can never have: an enable checkbox, and a name in
@@ -979,7 +1380,7 @@ export const CONTRACT = `% Predicates you can rely on:
 %   lopt(Setting, Word)         what a setting may say; Setting is one of
 %                               ${LAYOUT_PROP_NAMES.join(", ")}
 %   l_value(N, Setting, Lit)    derived: resolved(lval(N,Setting))
-%   layout(C, row|column)  lgap(C, Px)  lpad(C, Px)  lhug(C)
+%   layout(C, row|column)  lgap(C, Emu)  lpad(C, Emu)  lhug(C)
 %   lalign(C, A)  ljustify(C, J)  lgrow(N)  lalignself(N, A)
 %                               derived from those, and what the equations use
 %
@@ -988,13 +1389,13 @@ export const CONTRACT = `% Predicates you can rely on:
 % scale that treatment names. Nothing about the rows is per document — a row
 % declares the picks it holds for and the join is one generic rule:
 %
-%   lask(N, width|height, Px)   derived: what N asks to be with nothing pushing
+%   lask(N, width|height, Emu)  derived: what N asks to be with nothing pushing
 %                               on it. A plain fact where the document settles
 %                               it, which is most nodes
-%   lrow(N, I, width|height, Px)   one row of the table, where it does not
+%   lrow(N, I, width|height, Emu)  one row of the table, where it does not
 %   lrowif(N, I, Var, Alt)      row I holds only in universes where Var picked
 %                               Alt. A row with no lrowif holds in all of them
-%   laskdef(N, width|height, Px)   what N asks when no row holds at all: a
+%   laskdef(N, width|height, Emu)  what N asks when no row holds at all: a
 %                               measurement budget that dropped an axis, or an
 %                               alternative a rule of yours minted. Without it
 %                               such a node has no size equation and simplex
@@ -1021,13 +1422,55 @@ export const CONTRACT = `% Predicates you can rely on:
 % names — a constraint's dimension, a layout's settings — which is why
 % c_value/2 and l_value/3 are projected alongside rendered/3.
 %
+% Guides: margins, a grid of tracks, and lines drawn by hand. The settings are
+% values like a layout's, so what the equations read is derived per universe —
+% a count holding two alternatives is a responsive grid in one document:
+%
+%   ggrid(S)                    S is ruled with a grid. Assert it and the rest
+%                               follows; without it a surface has no grid at
+%                               all, which is not the same as a grid of one
+%   gline(S, G, x|y)            S carries the hand-drawn line G, on that axis
+%   gval(S, Setting)            the variable one setting is — Setting is one of
+%                               ${GUIDE_PROP_NAMES.join(", ")},
+%                               or at(G) for where a line sits
+%   g_value(S, Setting, Lit)    derived: resolved(gval(S,Setting))
+%   gtracks(S, A, N)            derived: how many tracks axis A is cut into,
+%                               through tally/2 — a count, never a length
+%   gmargin(S, A, lead|trail, Emu)   ggutter(S, A, Emu)    derived, per universe
+%   gtrack(S, A, K)             derived: track K exists on that axis, 1-based
+%   gpitch(S, A)                one track plus one gutter. A track's own width
+%                               is this less the gutter — and it is also what a
+%                               track's right datum comes back as minus its left
+%
+% A guide is not a line drawn on top of the design. It is a *datum*: one fixed
+% linear quantity that an ordinary geometric constraint can name exactly where
+% it names a node. So "pin this card to column three" is an align, with a name,
+% a switch, and a place in an unsat core like any other rule:
+%
+%   c_node(pin_to_col, cg(page,3,left)).
+%
+%   cg(S, K, E)                 one line of track K — left|centerX|right on a
+%                               column, top|centerY|bottom on a row
+%   gl(S, G)                    one hand-drawn line
+%   gdatum(D)                   derived: D is a datum rather than a node
+%   gdaxis(D, A)  gdon(D, S)    derived: which axis it lies along, and whose
+%   lv(D, A)                    where it sits inside its surface...
+%   wv(D, A)                    ...and where that lands on the canvas
+%
+% A datum is a zero-size box: lsz(D,_) is 0, so all six of its edges coincide
+% and the edge you name is saying which *line of the track* you mean rather
+% than which edge of the datum. align on left puts a card's left edge on the
+% line; align on centerX puts its centre there. It is deliberately never
+% gsolved — a datum is where the grid says it is, not near where it was drawn —
+% and a datum naming a track this universe does not have simply states nothing.
+%
 % Linear arithmetic (clingo-lpx) is available too. Variables here are not
 % atoms: they take values from a simplex solver, reported as __lpx(V,"N").
 % Values are exact rationals, and a constraint may relate any number of them —
 % &sum{ 2*c; -l; -r } = 0 centres c between l and r whatever their width.
 %
-%   &sum{ x; -y } >= 16.        x is at least 16 past y
-%   &dom{ 0..960 } = x.         bound a variable
+%   &sum{ x; -y } >= 16*emupx.  x is at least sixteen pixels past y
+%   &dom{ 0..960*emupx } = x.   bound a variable
 %   &minimize{ x }.             rank models by it; each model then also
 %                               reports __lpx_objective("N",Bounded)
 %
@@ -1040,8 +1483,8 @@ export const CONTRACT = `% Predicates you can rely on:
 % Examples:
 %   :- resolved(prop(card,fill), C), resolved(prop(badge,fill), C).
 %   :- frame(A,x,X), frame(B,x,X), child(P,A), child(P,B), A != B.
-%   gsolved(badge).  &sum{ wv(badge,x); -wv(card,x) } >= 24.
-%   node(shadow). child(card,shadow). frame(shadow,width,120).`;
+%   gsolved(badge).  &sum{ wv(badge,x); -wv(card,x) } >= 24*emupx.
+%   node(shadow). child(card,shadow). frame(shadow,width,120*emupx).`;
 
 function atom(name: string, ...args: Array<string | number>): string {
 	return `${name}(${args.join(",")}).`;
@@ -1148,6 +1591,15 @@ export interface CompileOptions {
  * canvas. A dropped axis is written into the program as a comment: the box is
  * then wrong in the universes that chose otherwise, and a wrong box is a
  * visibly wrong design, so it says so where the generated program is read.
+ *
+ * This is the one rounding in the file that survived EMU, and it is not a unit
+ * conversion: a measured box comes from the browser's font engine, which works
+ * in float pixels and cannot be asked to do otherwise, and a line height is a
+ * *ratio* — 1.35 times a 16px size is 205200 EMU exactly, but 1.3 times 15px is
+ * not. So the number arriving here is a fractional EMU by rights, and a fact
+ * has to be an integer. {@link wholeEmu} is the name that says the quantization
+ * happened; at 1/914400 of an inch it is invisible, which is precisely the
+ * claim the old whole-pixel `Math.round` could not make.
  */
 function emitAsked(
 	lines: string[],
@@ -1158,8 +1610,8 @@ function emitAsked(
 ): void {
 	const { axes, dropped } = askedAxes(scene, node, measurements);
 	const say = (name: string, size: Size, ...before: Array<string | number>) => {
-		lines.push(atom(name, node.id, ...before, "width", Math.round(size.width)));
-		lines.push(atom(name, node.id, ...before, "height", Math.round(size.height)));
+		lines.push(atom(name, node.id, ...before, "width", wholeEmu(size.width)));
+		lines.push(atom(name, node.id, ...before, "height", wholeEmu(size.height)));
 	};
 	if (axes.length === 0) {
 		say("lask", naturalSize(node, measurements, context));
@@ -1274,6 +1726,12 @@ export function compile(
 	const layoutLines: string[] = [];
 	let laidOut = false;
 	/**
+	 * Facts describing every grid and every hand-drawn line. As with a layout,
+	 * the rules that interpret them are generic — so a document with a grid on
+	 * three artboards is the same *program* as one with none, with more data.
+	 */
+	const guideFacts: string[] = [];
+	/**
 	 * What a hugging container comes to has to be worked out on this side —
 	 * a maximum over its children is not a linear constraint — and that
 	 * arithmetic reads values rather than numbers, so it needs the tokens.
@@ -1361,6 +1819,31 @@ export function compile(
 					if (value) emitValue(layoutVar(child.id, prop), value);
 				}
 			});
+		}
+		// The grid this surface is ruled with, and the lines drawn on it. Every
+		// setting is a variable for the same reason a layout's is — a margin may
+		// name the page's spacing token, a count may hold two alternatives and so
+		// be a responsive grid — and `gtracks/3` and friends are derived from the
+		// pick. See GUIDE_RULES.
+		//
+		// `isGridded` rather than `node.guides !== undefined`, because a grid
+		// stored on a rectangle is read rather than corrected on the way in and
+		// says nothing here, exactly as it says nothing to the editor.
+		if (isGridded(node)) {
+			guideFacts.push(atom("ggrid", node.id));
+			for (const prop of GUIDE_PROP_NAMES) {
+				emitValue(guideVar(node.id, prop), guideValueOf(node, prop) ?? []);
+			}
+		}
+		// A line is not part of the grid and does not need one — it is drawn on
+		// whatever it is drawn on, so it is emitted beside the grid rather than
+		// inside it, which is the same split the document makes between `guides`
+		// and `lines`. Its axis is a plain fact: an axis is not something a
+		// designer can express two answers to, so it is the one part of a guide
+		// that is not a value.
+		for (const guide of guideLines(node)) {
+			guideFacts.push(atom("gline", node.id, guide.id, guide.axis));
+			emitValue(guideAtVar(node.id, guide.id), guide.at);
 		}
 		for (const [prop, value] of Object.entries(node.props)) {
 			if (value) emitValue(propVar(node.id, prop), value);
@@ -1486,19 +1969,43 @@ export function compile(
 	 * What each literal reads as, where it reads as a number at all.
 	 *
 	 * The bridge between the value system, which is all strings, and the
-	 * geometry, which is all arithmetic: `"24px"` is text to a fill and 24 to a
-	 * gap. Emitted for every literal rather than only the ones a dimension uses,
-	 * because which literal a dimension resolves to is the solver's answer, not
-	 * something known here.
+	 * geometry, which is all arithmetic: `"24px"` is text to a fill and 228600 to
+	 * a gap. Emitted for every literal rather than only the ones a dimension
+	 * uses, because which literal a dimension resolves to is the solver's answer,
+	 * not something known here.
+	 *
+	 * Three bridges, because there are three quantities and a literal has no
+	 * type. The reader is chosen by what the value *is* rather than by who is
+	 * asking, exactly as it is on the TypeScript side:
+	 *
+	 *   numeral(Lit,N)  a length, in EMU. `emuOf`, exact or nothing — so the
+	 *                   `Math.round` that used to sit here is deleted rather
+	 *                   than moved, and "1.35" now emits no numeral at all where
+	 *                   it used to emit `numeral(l,1)` and mean nothing by it.
+	 *   tally(Lit,N)    a bare non-negative integer. The one quantity the
+	 *                   *grounder* reads: a track rule grounds `1..N`, and under
+	 *                   EMU `numeral/2` would hand it 114300 columns for "12".
+	 *   word(Lit,W)     a constant: a layout is described in `row` and `hug`,
+	 *                   and a rule can only read one of those as a term.
+	 *
+	 * All three are emitted for every literal that admits them, and a literal
+	 * happily carries two — `"12"` is both 114300 EMU and a tally of 12, because
+	 * a literal is interned by its text and the rule that reads it is what says
+	 * which it meant. Filtering by the value type was rejected: the literal table
+	 * is shared, so a text that arrived as a count in one place and a length in
+	 * another has no single answer. A weight of `"400"` emitting a numeral of
+	 * 3810000 is noise no rule reads.
 	 */
 	const numeralLines: string[] = [];
 	for (const text of literals.texts()) {
-		const n = numeralOf(text);
-		if (n !== undefined) {
-			numeralLines.push(atom("numeral", literals.id(text), Math.round(n)));
+		const emu = emuOf(text);
+		if (emu !== undefined) {
+			numeralLines.push(atom("numeral", literals.id(text), emu));
 		}
-		// The same bridge for the words: a layout is described in `row` and
-		// `hug`, and a rule can only read one of those as a constant.
+		const tally = tallyOf(text);
+		if (tally !== undefined) {
+			numeralLines.push(atom("tally", literals.id(text), tally));
+		}
 		const word = wordOf(text);
 		if (word !== undefined) {
 			numeralLines.push(atom("word", literals.id(text), word));
@@ -1506,9 +2013,22 @@ export function compile(
 	}
 
 	const generated = [
+		section("units", EMU_CONST),
 		section("tokens", tokenLines),
 		section("scene", nodeLines),
-		section("values", [...literals.facts(), ...valueLines, ...numeralLines]),
+		section("values", [
+			...literals.facts(),
+			...valueLines,
+			// Declared, because a document may hold no literal that reads as any of
+			// the three — a palette has no lengths and no counts — and a rule of
+			// yours reading one would then be told the predicate occurs in no head.
+			// That message is true and useless: it is about the document, not about
+			// the rule.
+			"#defined numeral/2.",
+			"#defined tally/2.",
+			"#defined word/2.",
+			...numeralLines,
+		]),
 		section("choices", [
 			"var(V) :- alt(V,_).",
 			"1 { pick(V,I) : alt(V,I) } 1 :- var(V).",
@@ -1548,6 +2068,15 @@ export function compile(
 			...GEOMETRY_RULES,
 			...FREEDOM_RULES,
 		]),
+		section("guides", guideFacts),
+		// Always emitted, like the geometry rules and for the same reason — plus
+		// one of its own: the two structural `gdatum/1` rules are what keep a
+		// datum out of `gsolved`, and a hand-written rule may name a line of a
+		// grid in a document whose own nodes hold none.
+		//
+		// After the geometry rules, which is where `gedge`, `goff`, `gspanof`
+		// and the world chain are said.
+		section("guide rules", [...GUIDE_FACTS, ...GUIDE_RULES]),
 		section("components", componentLines),
 		// Always emitted, like the geometry rules and for the same reason:
 		// `instance/2` is something a hand-written rule may assert — a row of
@@ -1756,6 +2285,14 @@ export function compile(
 			"% has asked to vary pays nothing here.",
 			"#defined f_value/3.",
 			"#project f_value/3.",
+			"% And a surface's guides, which is the same case a third time and the",
+			"% one the feature was worth building for: twelve columns on a wide",
+			"% screen and six on a narrow one differ in nothing but geometry, so",
+			"% without this the two collapse and a responsive grid is one universe",
+			"% claiming to be a choice. It also covers a hand-drawn line whose place",
+			"% names a token with two lengths, which is a guide that moves.",
+			"#defined g_value/3.",
+			"#project g_value/3.",
 		]),
 	]
 		.filter(Boolean)
@@ -1816,6 +2353,20 @@ export function variableCounts(scene: Scene): Record<string, number> {
 						out[layoutVar(child.id, prop)] = value.length;
 					}
 				}
+			}
+		}
+		// A grid's settings, on the same terms: only where the node actually
+		// holds a grid, since a `guides` field on a rectangle says nothing to
+		// the compiler either.
+		if (isGridded(node)) {
+			for (const prop of GUIDE_PROP_NAMES) {
+				const value = guideValueOf(node, prop);
+				if (value && value.length > 0) out[guideVar(node.id, prop)] = value.length;
+			}
+		}
+		for (const guide of guideLines(node)) {
+			if (guide.at.length > 0) {
+				out[guideAtVar(node.id, guide.id)] = guide.at.length;
 			}
 		}
 	}
@@ -1892,6 +2443,14 @@ export function unreadVariables(scene: Scene): Set<string> {
 				read.push(...CHILD_PROPS.map((p) => layoutValueOf(child, p)));
 			}
 		}
+		// A margin that names the page's spacing token reads that token, and so
+		// does a guide pinned to it. Left out, the token would be reported unread
+		// and the inspector would grey alternatives nothing had ruled out — which
+		// is the over-reporting this function exists to avoid.
+		if (isGridded(node)) {
+			read.push(...GUIDE_PROP_NAMES.map((p) => guideValueOf(node, p)));
+		}
+		read.push(...guideLines(node).map((g) => g.at));
 	}
 	// A switched-off constraint is out of the program, so what it links to is not
 	// read *through it* — the same reading the compiler applies by not emitting it.

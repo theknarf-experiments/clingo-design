@@ -37,18 +37,22 @@ import {
 	rangesOverGroup,
 	takesMembers,
 } from "./scene.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { lit } from "./values.ts";
 
 const RED = "#ff0000";
 
 /** Three rectangles, each free to take any of three fills. */
+/** A frame is EMU; these cases are stated in pixels. */
+const px = (n: number): number => n * EMU_PER_PX;
+
 function threeBoxes(): Scene {
 	let scene = emptyScene();
 	const palette = [lit(RED), lit("#00ff00"), lit("#0000ff")];
 	for (const id of ["a", "b", "c"]) {
 		scene = addNode(
 			scene,
-			makeNode("rect", { x: 0, y: 0, width: 40, height: 40 }, { id }),
+			makeNode("rect", { x: 0, y: 0, width: px(40), height: px(40) }, { id }),
 		);
 		scene = setProp(scene, [id], "fill", palette);
 	}
@@ -180,7 +184,9 @@ test("a custom rule coexists with a geometric kind, which still places nodes", a
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("rect", { x: 10, y: 0, width: 40, height: 40 }, { id: "a" }),
+		makeNode("rect", { x: px(10), y: 0, width: px(40), height: px(40) }, {
+			id: "a",
+		}),
 	);
 	scene = setProp(scene, ["a"], "fill", [lit(RED), lit("#00ff00")]);
 	const pin = addConstraint(scene, "pin", ["a"], undefined, "left");
@@ -194,7 +200,7 @@ test("a custom rule coexists with a geometric kind, which still places nodes", a
 	// The colour rule cuts the space in half; the pin still moves the box.
 	const result = await explore(scene, directSolver, { sample: "first" });
 	assert.equal(result.count, 1, "one fill survives");
-	assert.equal(result.universes[0].solved.a?.x, 100, "and the pin still holds");
+	assert.equal(result.universes[0].solved.a?.x, px(100), "and the pin still holds");
 
 	// Break the geometry instead, and the two kinds are blamed independently:
 	// the theory propagator reports through the same assumptions the property

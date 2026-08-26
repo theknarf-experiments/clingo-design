@@ -16,6 +16,7 @@ export type ValueType =
 	| "color"
 	| "length"
 	| "number"
+	| "count"
 	| "weight"
 	| "font"
 	| "align"
@@ -35,10 +36,39 @@ export interface ValueOption {
 	label: string;
 }
 
+/**
+ * The three numeric quantities a literal can be, and hence the three readers
+ * that turn one into a number.
+ *
+ * `length` is EMU and is read by `emuOf`, which is exact or nothing. `ratio` is
+ * a bare decimal with no unit — a line height, an opacity — and is read by
+ * {@link numeralOf}. `count` is a whole number of things and is read by
+ * {@link tallyOf}. They are three names rather than "the numeric-looking ones"
+ * because the sweep that turned every length into EMU had to be certain it was
+ * not turning 1.35 into 12350.
+ */
+export type Quantity = "length" | "ratio" | "count";
+
 export interface ValueTypeSpec {
 	label: string;
 	/** What an empty assignment of this type starts at, and falls back to. */
 	fallback: string;
+	/**
+	 * What kind of number this type holds, where it holds one at all.
+	 *
+	 * Absent for the enumerated and text types: a direction is a word and a
+	 * headline is prose, and neither is read as a quantity by anything. The
+	 * column is here rather than at the four call sites that used to ask
+	 * `type === "length"` by hand, because a table gets edited once and four
+	 * conditionals drift.
+	 *
+	 * A `weight` is filed under `ratio`, which it is not — 400 is an index into
+	 * a font family, not a proportion of anything. But "a bare number with no
+	 * unit, compared and interpolated as itself" is exactly what the ratio
+	 * reader does, and a fourth quantity naming one type would be a column with
+	 * a single inhabitant and no reader of its own.
+	 */
+	quantity?: Quantity;
 	/**
 	 * A closed set of choices. The editor offers a menu for these rather than a
 	 * text field, and the stored value is still the literal CSS the renderer
@@ -153,9 +183,17 @@ const GROWTH: ValueOption[] = [
  */
 export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
 	color: { label: "Colour", fallback: "#94a3b8" },
-	length: { label: "Length", fallback: "8px" },
-	number: { label: "Number", fallback: "1" },
-	weight: { label: "Weight", fallback: "400" },
+	length: { label: "Length", fallback: "8px", quantity: "length" },
+	number: { label: "Number", fallback: "1", quantity: "ratio" },
+	/**
+	 * How many of something — columns in a grid, rows in one.
+	 *
+	 * Not `number`, whose fallback is `"1"` and whose inhabitants are 1.35 line
+	 * heights: a count of 1.35 is a typo rather than a design, and a rule that
+	 * grounds `1..N` over one needs a whole number or it needs nothing.
+	 */
+	count: { label: "Count", fallback: "1", quantity: "count" },
+	weight: { label: "Weight", fallback: "400", quantity: "ratio" },
 	font: { label: "Font", fallback: FONTS[0].value, options: FONTS },
 	align: { label: "Alignment", fallback: ALIGNS[0].value, options: ALIGNS },
 	shadow: { label: "Shadow", fallback: SHADOWS[1].value, options: SHADOWS },
@@ -215,17 +253,63 @@ export const derive = (via: Derivation, from: string): Term => ({
 export const single = (value: string): Value => [lit(value)];
 
 /**
- * The number a literal reads as: `"24px"` is 24, `"1.5"` is 1.5.
+ * The bare number a literal reads as: `"1.35"` is 1.35, `"400"` is 400.
  *
- * The unit is optional and ignored, because a length in this document is
- * always pixels — but anything else (a percentage, a calc, a colour) reads as
- * nothing rather than as its leading digits, so a dimension driven by it
- * simply says nothing instead of quietly meaning something else.
+ * The reader for the `ratio` quantity, which is what this has quietly been all
+ * along — a line height, an opacity, a weight. It used to tolerate a `px`
+ * suffix and read `"24px"` as 24, because a length in this document was always
+ * pixels and always a float. It is not either any more: a length is EMU and is
+ * read by `emuOf`, which is exact or nothing, and the suffix is gone from this
+ * regex so that no length can reach a ratio's caller wearing its own numerals.
+ * The failure that guards against is quiet and total — an opacity of 0.5 read
+ * as a length is 4762 EMU, and read back as a ratio it is opaque.
+ *
+ * Anything else — a percentage, a calc, a colour — reads as nothing rather than
+ * as its leading digits, so a value driven by it says nothing instead of
+ * quietly meaning something else.
  */
 export function numeralOf(text: string): number | undefined {
-	const m = /^\s*(-?\d+(?:\.\d+)?)\s*(?:px)?\s*$/i.exec(text);
+	const m = /^\s*(-?\d+(?:\.\d+)?)\s*$/.exec(text);
 	return m ? Number(m[1]) : undefined;
 }
+
+/**
+ * A count of things past which nobody is describing a grid.
+ *
+ * A count is the one quantity the *grounder* reads: a track rule grounds
+ * `1..N`, so N facts exist before anything is solved, and a mistyped 100000
+ * would hang clingo rather than draw a wrong picture. A thousand tracks is
+ * already past every grid anyone has ruled; refusing beyond it turns a typo
+ * into a value that reads as nothing, which every caller already handles.
+ */
+export const MAX_TALLY = 1000;
+
+/**
+ * The whole number of things a literal counts: `"12"` is 12, `"0"` is 0.
+ *
+ * The reader for the `count` quantity. Deliberately narrower than
+ * {@link numeralOf} in three directions, each of which is a thing a count
+ * cannot be: fractional (there is no such thing as 1.35 columns), negative, or
+ * larger than {@link MAX_TALLY}. Each reads as no count at all, so a rule that
+ * wanted one goes unstated rather than grounding something absurd.
+ */
+export function tallyOf(text: string): number | undefined {
+	const m = /^\s*(\d+)\s*$/.exec(text);
+	if (!m) return undefined;
+	const n = Number(m[1]);
+	return n <= MAX_TALLY ? n : undefined;
+}
+
+/**
+ * Whether values of this type are lengths — and so whether a literal of it is
+ * read as EMU, migrated with the rest of the document's geometry, and ordered
+ * against its siblings by how much room it asks for.
+ *
+ * A lookup rather than `type === "length"`, so the day a second length-shaped
+ * type appears there is one place that has to hear about it.
+ */
+export const isLengthType = (type: ValueType): boolean =>
+	VALUE_TYPES[type].quantity === "length";
 
 /**
  * The bare ASP constant a literal reads as: `"row"` is `row`.
@@ -339,6 +423,38 @@ export const constraintVar = (constraintId: string): string =>
 export const layoutVar = (nodeId: string, field: string): string =>
 	`lval(${nodeId},${field})`;
 /**
+ * One setting of a surface's guides: a margin, a track count, a gutter — or,
+ * spelled `at(g1)`, where one hand-drawn guide sits.
+ *
+ * The same argument {@link layoutVar} makes, about the settings that rule a page
+ * rather than the ones that stack its children: a margin that names a `length`
+ * token *is* the page's spacing scale, and a column count with two alternatives
+ * is a responsive grid held in one document. So they are variables, picked and
+ * resolved per universe like anything else.
+ *
+ * One family for both halves of the guides — the grid's settings and the lines
+ * — because both are the same kind of thing to everything downstream: a value on
+ * a surface that resolves to a length. They cannot collide, because a line's
+ * field is wrapped: `gval(page,columns)` is a setting and `gval(page,at(g1))` is
+ * a line, and no {@link GuideProp} is spelled with brackets. Wrapping rather
+ * than a seventh variable key, so that the compiler emitting a surface's guides
+ * is one loop and the panel showing them is one list.
+ */
+export const guideVar = (nodeId: string, field: string): string =>
+	`gval(${nodeId},${field})`;
+/** Where one hand-drawn guide sits — see {@link guideVar}. */
+export const guideAtVar = (nodeId: string, guideId: string): string =>
+	guideVar(nodeId, `at(${guideId})`);
+/**
+ * The guide a {@link guideVar} field names, or nothing where the field is one of
+ * the grid's own settings. The inverse of {@link guideAtVar}'s wrapping, kept
+ * beside it so the spelling exists once.
+ */
+export function guideAtIn(field: string): string | undefined {
+	const atom = parseAtom(field);
+	return atom?.name === "at" && atom.args.length === 1 ? atom.args[0] : undefined;
+}
+/**
  * One of a node's four geometric dimensions — where it sits and how big it is.
  *
  * The last leaf to become a variable, and the one that turns "this sits here on
@@ -379,7 +495,7 @@ export const stylePartVar = (
 
 /**
  * The inverse of {@link tokenVar} / {@link propVar} / {@link constraintVar} /
- * {@link layoutVar} / {@link frameVar} / {@link styleVar}.
+ * {@link layoutVar} / {@link guideVar} / {@link frameVar} / {@link styleVar}.
  *
  * {@link stylePartVar} is deliberately absent. A part holds one alternative, so
  * it is never unsettled, never pinned and never shown — the callers that read a
@@ -391,6 +507,7 @@ export type Variable =
 	| { kind: "prop"; node: string; prop: string }
 	| { kind: "constraint"; constraint: string }
 	| { kind: "layout"; node: string; field: string }
+	| { kind: "guide"; node: string; field: string }
 	| { kind: "frame"; node: string; dim: string }
 	| { kind: "style"; style: string };
 
@@ -410,6 +527,9 @@ export function parseVariable(key: string): Variable | null {
 	}
 	if (atom.name === "lval" && arity === 2) {
 		return { kind: "layout", node: a, field: b };
+	}
+	if (atom.name === "gval" && arity === 2) {
+		return { kind: "guide", node: a, field: b };
 	}
 	if (atom.name === "fval" && arity === 2) {
 		return { kind: "frame", node: a, dim: b };

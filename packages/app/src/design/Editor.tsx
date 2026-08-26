@@ -1,7 +1,52 @@
+/**
+ * The pointer's half of the studio: what a drag, a resize, a marquee and a pen
+ * do to the document, and the outlines and guides that say so while they happen.
+ *
+ * It also reads the lines the design is *ruled* with — the margins, the column
+ * and row grid, the guides somebody pulled off a ruler — hands them to
+ * {@link Guides} to draw, and lets a drag catch on them. (Drawing them is that
+ * component's because every copy on the canvas needs the same picture and only
+ * this one needs the gestures.) Those are not decoration and they are not a
+ * second snapping system:
+ * every one of them is a datum with a name (`cg(page,3,left)`), read out of the
+ * answer set like any other geometry, and catching on one is the beginning of a
+ * rule rather than the end of a nudge. Which is why the release offers to write
+ * it: see {@link offer}. Hiding them is this component's business and never the
+ * document's — a design that changed when you hid the guides would be a bug.
+ *
+ * **Two units meet in this file and they are both `number`.** Everything the
+ * document says and everything `design-core` answers with is EMU; everything
+ * that reaches the DOM is CSS pixels, because that is what a browser lays out
+ * in. Between them sits a factor of 9525 and no type error.
+ *
+ * So the rule here is that the crossing happens at the edges and nowhere in
+ * between. A pointer event becomes a document point in {@link toDocument}, once,
+ * and from that line on every coordinate in this module — every gesture origin,
+ * every delta, every preview frame, every pen vertex, every snap guide — is EMU
+ * and is handed straight to `design-core`, which is EMU too. On the way back out
+ * every number that becomes a `left`, a `top`, an `x1` or a `points` attribute
+ * goes through `viewport.ts`, and nothing else in the file converts.
+ *
+ * That leaves the handful of constants below, which are the part worth being
+ * careful about, because a screen pixel and a canvas pixel are not the same
+ * thing either. A tolerance about *aim* — how near a click has to land to close
+ * a path — divides by the camera scale, so the target stays the same size under
+ * the cursor at every zoom. Everything else is furniture fixed in the document's
+ * own plane and is a pixel count times `EMU_PER_PX`. `geometry.ts` makes the
+ * same distinction about its own three constants and for the same reason: left
+ * as bare 2s and 4s they would still typecheck and would silently stop guarding
+ * anything at all, because two EMU is a five-thousandth of a pixel and every
+ * tremor of a hand clears it. Every click of the pen would leave a curve behind
+ * it and every drag that went nowhere would write an undo entry, and nothing
+ * anywhere would say why.
+ */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+	EMU_PER_PX,
 	type Annotation,
 	type DerivedNode,
+	type Edge,
+	EDGES,
 	type Frame,
 	type Freedom,
 	HANDLES,
@@ -13,6 +58,7 @@ import {
 	type Placed,
 	type Point,
 	type ResolveContext,
+	type RuledLine,
 	type Scene,
 	type SnapGuide,
 	type Universe,
@@ -20,8 +66,10 @@ import {
 	annotate,
 	boundsOf,
 	clampTo,
+	datumLabel,
 	derivedAt,
 	dropTargetAt,
+	edgeOn,
 	frameAncestorOf,
 	frameAt,
 	frameDim,
@@ -37,14 +85,21 @@ import {
 	makeNode,
 	makePath,
 	managedNodes,
+	moveGuide,
 	narrow,
 	normaliseFrame,
 	paintedOver,
 	parentMap,
 	findInTree,
 	movePathPoint,
+	pinToDatum,
+	pinnedTo,
+	removeGuide,
+	ruledLines,
+	setGuideLocked,
 	setPathHandle,
 	removePathPoint,
+	snapLines,
 	togglePathSmooth,
 	worldOrigin,
 	placedNodes,
@@ -63,22 +118,72 @@ import {
 import { Annotations } from "./Annotations";
 import { Artboard } from "./Artboard";
 import { cx } from "./cx";
+import { Guides } from "./Guides";
 import styles from "./Editor.module.css";
+import {
+	canvasPoint,
+	canvasPx,
+	canvasRect,
+	documentPoint,
+	documentSpan,
+} from "./viewport";
 
 export type Tool = "select" | NodeKind;
 
 /**
  * How near the first point a click must land to close a path, in screen
- * pixels — divided by the scale, so zooming does not change the target.
+ * pixels — divided by the scale, so zooming does not change the target. The
+ * only constant here that is about aim, and so the only one that goes through
+ * {@link documentSpan}.
  */
 const CLOSE_RADIUS = 10;
 
 /**
- * How far a travel mark reaches when the constraints never stop it, in
- * document units. A line to infinity is not a drawing, and the point being
- * made is "this end is open", which a long line with no tick already makes.
+ * How far the pointer must leave a just-placed point before the pen bends it
+ * into a curve: two canvas pixels, as EMU.
+ *
+ * A hand on a mouse is never quite still, and without a floor every click of
+ * the pen would leave a bezier behind it. Not scaled by the camera, because
+ * what it guards against is the shake, not the aim.
  */
-const OPEN = 200;
+const PEN_PULL = 2 * EMU_PER_PX;
+
+/**
+ * How far a drag has to have carried the selection before it counts as an edit:
+ * half a canvas pixel, as EMU.
+ *
+ * It is measured on the *allowed* movement, so a drag that went nowhere because
+ * the constraints left nowhere to go writes nothing and puts nothing in the undo
+ * stack. Half a pixel is well under the whole-pixel quantum a gesture is written
+ * at, so anything that survives this test is something that will visibly move.
+ */
+const MOVED = EMU_PER_PX / 2;
+
+/**
+ * A draw gesture narrower or shorter than this in either direction was a click
+ * rather than a drag, and places a default-sized node: four canvas pixels, as
+ * EMU.
+ *
+ * The same number as `MIN_NODE_SIZE` and not the same statement — that one is
+ * the smallest a node may be dragged *down* to, this one is the smallest drag
+ * that counts as one at all — so they are written twice on purpose.
+ */
+const CLICK_SIZE = 4 * EMU_PER_PX;
+
+/**
+ * How far a travel mark reaches when the constraints never stop it: two hundred
+ * canvas pixels, as EMU. A line to infinity is not a drawing, and the point
+ * being made is "this end is open", which a long line with no tick already
+ * makes.
+ */
+const OPEN = 200 * EMU_PER_PX;
+
+/**
+ * Half the length of the tick drawn across a travel mark's closed end, in
+ * canvas pixels. Applied after the mark's ends have crossed into the canvas,
+ * because it is a mark on the drawing rather than a distance in the design.
+ */
+const TICK = 4;
 
 /**
  * What the pointer is currently doing.
@@ -100,6 +205,8 @@ type Gesture =
 	| { kind: "marquee"; origin: Point }
 	/** Dragging away from a point the pen has just placed, to curve it. */
 	| { kind: "penPull"; origin: Point }
+	/** Dragging a line somebody drew, along the axis it is not on. */
+	| { kind: "guide"; surface: string; guide: string; axis: "x" | "y" }
 	/** Dragging one of a selected path's vertices. */
 	| { kind: "anchor"; id: string; index: number }
 	/** Dragging a vertex's curve handle. `mirror` keeps the far side opposite. */
@@ -121,12 +228,12 @@ export interface EditorProps {
 	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
 	tool: Tool;
 	onToolChange: (tool: Tool) => void;
-	/** Canvas scale, so pointer deltas convert to document units. */
+	/** Camera scale, so a screen distance converts to a canvas one. */
 	getScale: () => number;
 	/**
-	 * Canvas coordinate of this surface's top-left corner. Content is drawn
-	 * translated by its negation, so a node at document x always lands at
-	 * document x on screen no matter where the surface itself sits.
+	 * The document point this surface's top-left corner shows, in EMU. Content
+	 * is drawn translated by its negation, so a node at document x always lands
+	 * at document x on screen no matter where the surface itself sits.
 	 */
 	origin: Point;
 	/** Variable keys that are not settled, for the in-place overlay. */
@@ -144,6 +251,16 @@ export interface EditorProps {
 	 * reach them; what it may then do with one is select it and nothing more.
 	 */
 	derived?: readonly DerivedNode[];
+	/**
+	 * Whether the margins, the grid and the hand-drawn lines are on show.
+	 *
+	 * Editor state, never the document's, and it reaches no solve — a design that
+	 * changed when you hid the guides would be a bug. It does govern *snapping*,
+	 * though, and deliberately: catching on a line nobody can see is the drag
+	 * mysteriously refusing to go where it was aimed, which is exactly what "get
+	 * these off my screen" was asking to stop.
+	 */
+	showGuides?: boolean;
 	/** Right-click, in client coordinates. */
 	onContextMenu?: (at: { x: number; y: number }) => void;
 }
@@ -151,10 +268,12 @@ export interface EditorProps {
 /**
  * The editing surface laid over the document.
  *
- * Node frames are relative to their parent, but every pointer gesture happens
- * in canvas space, so the editor works in absolute frames throughout and
- * converts back once, on commit. Keeping the conversion at that one boundary
- * is what stops coordinate bugs leaking into the drag maths.
+ * Node frames are relative to their parent, but a pointer knows nothing about
+ * anyone's parent, so the editor works in absolute frames throughout and
+ * converts back into each node's own space once, on commit. Keeping that
+ * conversion at one boundary is what stops coordinate bugs leaking into the
+ * drag maths — and it is the same bargain the file header strikes for the other
+ * conversion, the one between the design's units and the screen's.
  */
 export function Editor({
 	scene,
@@ -169,6 +288,7 @@ export function Editor({
 	varying,
 	freedom = {},
 	derived = [],
+	showGuides = true,
 	onContextMenu,
 }: EditorProps) {
 	const surface = useRef<HTMLDivElement>(null);
@@ -199,7 +319,9 @@ export function Editor({
 	 */
 	const [dropTarget, setDropTarget] = useState<string | null>(null);
 	/**
-	 * Points the pen has placed, in canvas coordinates. Null when it is not
+	 * Points the pen has placed, in the document's coordinates — these are the
+	 * vertices `makePath` will store, so they are EMU from the moment the click
+	 * lands rather than pixels converted at the end. Null when it is not
 	 * drawing — a path is several clicks, so unlike every other tool it has a
 	 * state that outlives the pointer being down.
 	 */
@@ -246,6 +368,39 @@ export function Editor({
 	const managed = useMemo(() => managedNodes(scene.nodes), [scene.nodes]);
 
 	/**
+	 * Every line the design is ruled with, in canvas coordinates.
+	 *
+	 * Read out of the *answer set* — see `lines.ts` — so a document nobody has
+	 * solved yet has none, and the line drawn here is the same number a rule that
+	 * names it will hold something to.
+	 */
+	const lines = useMemo<RuledLine[]>(
+		() => (showGuides ? ruledLines(scene, universe.solved, context) : []),
+		[showGuides, scene, universe.solved, context],
+	);
+	const catchable = useMemo(() => snapLines(lines), [lines]);
+
+	/**
+	 * What the last drag could be made to say, and has not been asked to yet.
+	 *
+	 * **This is what the whole feature is for.** Dropping a card against column
+	 * three lines it up once; saying so keeps it lined up when the count changes,
+	 * when a token moves, when a responsive alternative is chosen. So the moment
+	 * a gesture catches a line, the editor offers to write the rule — one button,
+	 * on the line, gone as soon as anything else happens, because a drop that was
+	 * only ever a drop must cost nothing to walk away from.
+	 */
+	const [offer, setOffer] = useState<{
+		node: string;
+		term: string;
+		edge: Edge;
+		at: Point;
+	} | null>(null);
+	// A different selection is a different subject, and an offer about the node
+	// you just stopped looking at is noise.
+	useEffect(() => setOffer(null), [selection]);
+
+	/**
 	 * How far a set of nodes may be dragged along one axis, as a delta window.
 	 *
 	 * Three things narrow it, and the order matters. A node a layout places is
@@ -265,15 +420,17 @@ export function Editor({
 		return out;
 	}
 
-	/** Pointer position in canvas coordinates. */
-	function toCanvas(event: { clientX: number; clientY: number }): Point {
+	/**
+	 * Pointer position in the document's own coordinates.
+	 *
+	 * The one place in the editor where a screen pixel becomes an EMU — see the
+	 * file header. Everything downstream of this call, in this file and in
+	 * `design-core`, is the document's unit.
+	 */
+	function toDocument(event: { clientX: number; clientY: number }): Point {
 		const rect = surface.current?.getBoundingClientRect();
 		if (!rect) return { x: 0, y: 0 };
-		const scale = getScale();
-		return {
-			x: (event.clientX - rect.left) / scale + origin.x,
-			y: (event.clientY - rect.top) / scale + origin.y,
-		};
+		return documentPoint(event, rect, getScale(), origin);
 	}
 
 	const selected = [...selection]
@@ -360,7 +517,7 @@ export function Editor({
 		if (
 			points.length > 2 &&
 			Math.hypot(point.x - first.x, point.y - first.y) <
-				CLOSE_RADIUS / getScale()
+				documentSpan(CLOSE_RADIUS, getScale())
 		) {
 			finishPath(points, true);
 			return;
@@ -404,7 +561,10 @@ export function Editor({
 		// The canvas pans on empty space; anything the editor claims must not
 		// also start a pan.
 		event.stopPropagation();
-		const point = toCanvas(event);
+		// Whatever happens next, the last drop's offer has been declined by doing
+		// something else — which is how declining it should feel.
+		setOffer(null);
+		const point = toDocument(event);
 
 		if (tool !== "select") {
 			if (KINDS[tool].plotted) {
@@ -458,7 +618,7 @@ export function Editor({
 	/** Double-click reaches through a group or into a frame, to the leaf. */
 	function onDoubleClick(event: React.MouseEvent) {
 		if (tool !== "select") return;
-		const hit = hitTestTree(scene.nodes, toCanvas(event), universe.solved, context);
+		const hit = hitTestTree(scene.nodes, toDocument(event), universe.solved, context);
 		if (!hit) return;
 		event.stopPropagation();
 		onSelectionChange([hit.node.id]);
@@ -468,7 +628,7 @@ export function Editor({
 		if (!onContextMenu) return;
 		event.preventDefault();
 		event.stopPropagation();
-		const point = toCanvas(event);
+		const point = toDocument(event);
 		const hit = hitTestTree(scene.nodes, point, universe.solved, context);
 		const targetId = hit ? targetFor(hit.node.id) : null;
 		// A derived node is not something the menu's edits can act on, but
@@ -493,7 +653,7 @@ export function Editor({
 		setGesture({
 			kind: "resize",
 			handle,
-			origin: toCanvas(event),
+			origin: toDocument(event),
 			start: { ...selected[0].world },
 			id: selected[0].node.id,
 		});
@@ -528,7 +688,8 @@ export function Editor({
 		universe,
 		context,
 		managed,
-		toCanvas,
+		catchable,
+		toDocument,
 		targetFor,
 		windowFor,
 	});
@@ -540,7 +701,8 @@ export function Editor({
 		universe,
 		context,
 		managed,
-		toCanvas,
+		catchable,
+		toDocument,
 		targetFor,
 		windowFor,
 	};
@@ -598,11 +760,22 @@ export function Editor({
 			x: live.current.windowFor(moving, "x"),
 			y: live.current.windowFor(moving, "y"),
 		};
+		/**
+		 * The lines this gesture may catch on, fixed for its whole life like the
+		 * frames are — and for a stronger reason than they have: a drag that
+		 * caught a column line moves the card, the card moves nothing else, so
+		 * re-reading the lines mid-drag could only ever hand back the same
+		 * numbers. Except while a *guide* is being dragged, where they would
+		 * genuinely change, which is why a guide never snaps to anything.
+		 */
+		const catchable = live.current.catchable;
 
 		let moved = false;
+		/** What the last move caught, so the release can offer to say it. */
+		let caught: SnapGuide[] = [];
 
 		const move = (event: PointerEvent) => {
-			const point = live.current.toCanvas(event);
+			const point = live.current.toDocument(event);
 
 			if (gesture.kind === "move") {
 				// Where letting go would put them, worked out before the offset
@@ -620,7 +793,11 @@ export function Editor({
 				let snapped: SnapGuide[] = [];
 				if (bounds && !event.altKey) {
 					const from = { ...bounds, x: bounds.x + dx, y: bounds.y + dy };
-					const result = snapFrame(from, { targets, container });
+					const result = snapFrame(from, {
+						targets,
+						container,
+						lines: catchable,
+					});
 					dx += result.frame.x - from.x;
 					dy += result.frame.y - from.y;
 					snapped = result.guides;
@@ -639,18 +816,19 @@ export function Editor({
 				}
 				setPreview(next);
 				setGuides(snapped);
+				caught = snapped;
 				// Only worth showing when letting go would actually move the
 				// nodes somewhere else in the tree.
 				setDropTarget(rehoming ? drop.id : null);
 				// The *allowed* movement, so a drag that went nowhere because
 				// nowhere was left does not write an edit.
-				if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) moved = true;
+				if (Math.abs(dx) > MOVED || Math.abs(dy) > MOVED) moved = true;
 				return;
 			}
 
 			if (gesture.kind === "penPull") {
 				const pull = { x: point.x - gesture.origin.x, y: point.y - gesture.origin.y };
-				if (Math.hypot(pull.x, pull.y) < 2) return;
+				if (Math.hypot(pull.x, pull.y) < PEN_PULL) return;
 				setPen((run) => {
 					if (!run?.length) return run;
 					const last = run.length - 1;
@@ -661,6 +839,30 @@ export function Editor({
 					);
 				});
 				setCurrent(point);
+				return;
+			}
+
+			if (gesture.kind === "guide") {
+				// A guide is stored in its surface's own coordinates, the same space
+				// a child's frame is in, so the surface's world origin is the whole
+				// conversion. Written on every move rather than on release, under one
+				// coalesce key, so the design reflows under the line as it is dragged
+				// — which is the only way to see what moving it does.
+				const on = live.current.placed.byId.get(gesture.surface);
+				if (!on) return;
+				const local =
+					gesture.axis === "x" ? point.x - on.world.x : point.y - on.world.y;
+				onSceneChange(
+					(prev) =>
+						moveGuide(
+							prev,
+							gesture.surface,
+							gesture.guide,
+							local,
+							universe.pick,
+						),
+					`guide-${gesture.surface}-${gesture.guide}`,
+				);
 				return;
 			}
 
@@ -705,7 +907,7 @@ export function Editor({
 				if (!event.altKey) {
 					const result = snapFrame(
 						frame,
-						{ targets, container },
+						{ targets, container, lines: catchable },
 						handleEdges(gesture.handle),
 					);
 					frame = result.frame;
@@ -713,6 +915,7 @@ export function Editor({
 				}
 				setPreview(new Map([[gesture.id, normaliseFrame(frame)]]));
 				setGuides(snapped);
+				caught = snapped;
 				return;
 			}
 
@@ -721,7 +924,7 @@ export function Editor({
 
 		const up = (event: PointerEvent) => {
 			const now = live.current;
-			const point = now.toCanvas(event);
+			const point = now.toDocument(event);
 			const preview = now.preview;
 
 			/** Absolute frames back into each node's own parent space. */
@@ -738,6 +941,34 @@ export function Editor({
 				return out;
 			};
 
+			/**
+			 * What this gesture could be asked to say, if it caught a line.
+			 *
+			 * One node only. The snapping works on the selection's *bounds*, so
+			 * with several nodes moving there is no single edge that landed on the
+			 * line — three cards whose left edges differ all read as one box
+			 * touching column three, and the rule would move two of them.
+			 */
+			const offered = (id: string | undefined) => {
+				if (!id) return;
+				const line = caught.find((g) => g.id !== undefined && g.place !== undefined);
+				if (!line?.id || !line.place) return;
+				const edge = edgeOn(line.axis, line.place);
+				if (pinnedTo(now.scene, id, line.id, edge)) return;
+				const box = now.preview?.get(id) ?? now.placed.byId.get(id)?.world;
+				if (!box) return;
+				setOffer({
+					node: id,
+					term: line.id,
+					edge,
+					// On the line, beside the thing that landed on it.
+					at:
+						line.axis === "x"
+							? { x: line.at, y: box.y + box.height / 2 }
+							: { x: box.x + box.width / 2, y: line.at },
+				});
+			};
+
 			if (gesture.kind === "resize" && preview) {
 				const next = preview.get(gesture.id);
 				const frame = next
@@ -749,6 +980,7 @@ export function Editor({
 						(prev) => resizeSubtree(prev, gesture.id, frame, now.universe.pick),
 						"geometry",
 					);
+					offered(gesture.id);
 				}
 			} else if (gesture.kind === "move" && preview && moved) {
 				const local = toLocal(preview);
@@ -786,6 +1018,10 @@ export function Editor({
 					}
 					return next;
 				}, "geometry");
+				// A node that stayed where it is in the tree and landed on a line.
+				// Not one that was just reparented: it has a new home to settle into
+				// and a rule pinning it to a line of the old one would fight that.
+				if (moving.size === 1 && rehomed.length === 0) offered([...moving][0]);
 			} else if (gesture.kind === "marquee") {
 				const box = frameFromPoints(gesture.origin, point);
 				// Marquee selects whole groups, not the leaves inside them.
@@ -802,7 +1038,7 @@ export function Editor({
 			} else if (gesture.kind === "draw") {
 				let frame = frameFromPoints(gesture.origin, point);
 				// A click with no drag places a default-sized node.
-				if (frame.width < 4 || frame.height < 4) {
+				if (frame.width < CLICK_SIZE || frame.height < CLICK_SIZE) {
 					frame = {
 						x: gesture.origin.x,
 						y: gesture.origin.y,
@@ -810,7 +1046,10 @@ export function Editor({
 					};
 				}
 				if (!event.altKey) {
-					frame = snapFrame(frame, { targets }).frame;
+					// A new node lands on the grid as readily as an old one moves onto
+					// it: drawing a card inside column three is the commonest way of
+					// putting one there.
+					frame = snapFrame(frame, { targets, lines: catchable }).frame;
 				}
 
 				// A surface is drawn on the canvas; anything else lands inside
@@ -867,6 +1106,22 @@ export function Editor({
 	const dropHighlight = dropTarget
 		? placed.byId.get(dropTarget)?.world
 		: undefined;
+
+	/**
+	 * Which lines the live gesture is caught on, so they can say so.
+	 *
+	 * Memoised on the snap guides rather than rebuilt per render, because it is
+	 * one of `Guides`' props and a fresh `Set` every render would re-render the
+	 * whole grid on every pointermove — which is the cost that component is
+	 * memoised to avoid.
+	 */
+	const heldBy = useMemo(
+		() =>
+			new Set(
+				guides.map((g) => g.id).filter((id): id is string => id !== undefined),
+			),
+		[guides],
+	);
 
 	/**
 	 * The selection's remaining travel, drawn where it would travel.
@@ -930,13 +1185,15 @@ export function Editor({
 			onPointerDown={onPointerDown}
 			// Only while the pen is mid-path: every other tool tracks the
 			// pointer from the window, and only once a button is down.
-			onPointerMove={pen ? (e) => setCurrent(toCanvas(e)) : undefined}
+			onPointerMove={pen ? (e) => setCurrent(toDocument(e)) : undefined}
 			onDoubleClick={onDoubleClick}
 			onContextMenu={onContext}
 		>
+			{/* The whole overlay is drawn in canvas pixels inside here, which is
+			    why this offset crosses: `origin` is a point in the design. */}
 			<div
 				className={styles.content}
-				style={{ left: -origin.x, top: -origin.y }}
+				style={{ left: -canvasPx(origin.x), top: -canvasPx(origin.y) }}
 			>
 			<Artboard
 				scene={scene}
@@ -945,34 +1202,30 @@ export function Editor({
 				varying={varying}
 			/>
 
-			{topFrames.map((node) => (
-				<button
-					key={`label-${node.id}`}
-					type="button"
-					className={styles.frameLabel}
-					data-frame-label={node.id}
-					data-selected={selection.has(node.id) ? "" : undefined}
-					style={{
-						left: (
-							preview?.get(node.id) ??
-							placed.byId.get(node.id)?.world ??
-							frameOf(node, context)
-						).x,
-						top: (
-							preview?.get(node.id) ??
-							placed.byId.get(node.id)?.world ??
-							frameOf(node, context)
-						).y,
-					}}
-					onPointerDown={(e) => {
-						e.stopPropagation();
-						onSelectionChange([node.id]);
-						beginMove(toCanvas(e), new Set([node.id]));
-					}}
-				>
-					{node.name}
-				</button>
-			))}
+			{topFrames.map((node) => {
+				const at = canvasPoint(
+					preview?.get(node.id) ??
+						placed.byId.get(node.id)?.world ??
+						frameOf(node, context),
+				);
+				return (
+					<button
+						key={`label-${node.id}`}
+						type="button"
+						className={styles.frameLabel}
+						data-frame-label={node.id}
+						data-selected={selection.has(node.id) ? "" : undefined}
+						style={{ left: at.x, top: at.y }}
+						onPointerDown={(e) => {
+							e.stopPropagation();
+							onSelectionChange([node.id]);
+							beginMove(toDocument(e), new Set([node.id]));
+						}}
+					>
+						{node.name}
+					</button>
+				);
+			})}
 
 			{dropHighlight ? (
 				<div
@@ -982,6 +1235,36 @@ export function Editor({
 				/>
 			) : null}
 
+			{/* The margins, the grid and the hand-drawn lines — the same component
+			    every other copy on the canvas draws them with, handed the gestures
+			    that only the editable one has. A line only answers the pointer
+			    under the select tool, for the reason a path's vertices only appear
+			    under it: with the rectangle tool in hand, a press on a guide means
+			    "start a rectangle here", and a guide that swallowed it would be a
+			    hole in the canvas. */}
+			<Guides
+				scene={scene}
+				lines={lines}
+				held={heldBy}
+				editable={tool === "select"}
+				onGrab={(line, guide) =>
+					setGesture({
+						kind: "guide",
+						surface: line.surface,
+						guide,
+						axis: line.axis,
+					})
+				}
+				onLock={(line, guide) =>
+					onSceneChange((prev) =>
+						setGuideLocked(prev, line.surface, guide, !line.locked),
+					)
+				}
+				onRemove={(line, guide) =>
+					onSceneChange((prev) => removeGuide(prev, line.surface, guide))
+				}
+			/>
+
 
 			{/* A selected path's vertices. Drag one to move it, drag its dot to
 			    bend the curve, double-click to switch between corner and
@@ -990,12 +1273,14 @@ export function Editor({
 				const id = editing.node.id;
 				const ox = editing.world.x;
 				const oy = editing.world.y;
-				const at = { x: ox + pt.x, y: oy + pt.y };
+				// The vertex and its handles are in the document's units, like the
+				// frame they hang off; the dots that show them are DOM.
+				const at = canvasPoint({ x: ox + pt.x, y: oy + pt.y });
 				const sides = (["in", "out"] as const).filter((s) => pt[s]);
 				return (
 					<div key={`pt-${id}-${index}`}>
 						{sides.map((side) => {
-							const h = pt[side] as Point;
+							const h = canvasPoint(pt[side] as Point);
 							const to = { x: at.x + h.x, y: at.y + h.y };
 							return (
 								<div key={side}>
@@ -1060,12 +1345,19 @@ export function Editor({
 				<svg className={styles.travel} data-role="travel" aria-hidden="true">
 					{travelMarks.map((mark) => {
 						const horizontal = mark.axis === "x";
-						const a = horizontal
-							? { x: mark.from, y: mark.across }
-							: { x: mark.across, y: mark.from };
-						const b = horizontal
-							? { x: mark.to, y: mark.across }
-							: { x: mark.across, y: mark.to };
+						// A mark says how far the design may still move, so it is
+						// measured in the design and drawn on the canvas; only the
+						// end tick below is a pixel count either way.
+						const a = canvasPoint(
+							horizontal
+								? { x: mark.from, y: mark.across }
+								: { x: mark.across, y: mark.from },
+						);
+						const b = canvasPoint(
+							horizontal
+								? { x: mark.to, y: mark.across }
+								: { x: mark.across, y: mark.to },
+						);
 						return (
 							<g
 								key={`${mark.id}-${mark.axis}`}
@@ -1078,10 +1370,10 @@ export function Editor({
 										<line
 											key={`${end.x},${end.y}`}
 											className={styles.travelEnd}
-											x1={horizontal ? end.x : end.x - 4}
-											y1={horizontal ? end.y - 4 : end.y}
-											x2={horizontal ? end.x : end.x + 4}
-											y2={horizontal ? end.y + 4 : end.y}
+											x1={horizontal ? end.x : end.x - TICK}
+											y1={horizontal ? end.y - TICK : end.y}
+											x2={horizontal ? end.x : end.x + TICK}
+											y2={horizontal ? end.y + TICK : end.y}
 										/>
 									),
 								)}
@@ -1091,18 +1383,25 @@ export function Editor({
 				</svg>
 			) : null}
 
-			{guides.map((guide, i) => (
-				<div
-					key={i}
-					className={styles.guide}
-					data-guide={guide.axis}
-					style={
-						guide.axis === "x"
-							? { left: guide.at, top: guide.from, height: guide.to - guide.from }
-							: { top: guide.at, left: guide.from, width: guide.to - guide.from }
-					}
-				/>
-			))}
+			{guides.map((guide, i) => {
+				// `snapFrame` answers in the design's units, because that is where
+				// the edges it matched live.
+				const at = canvasPx(guide.at);
+				const from = canvasPx(guide.from);
+				const span = canvasPx(guide.to - guide.from);
+				return (
+					<div
+						key={i}
+						className={styles.guide}
+						data-guide={guide.axis}
+						style={
+							guide.axis === "x"
+								? { left: at, top: from, height: span }
+								: { top: at, left: from, width: span }
+						}
+					/>
+				);
+			})}
 
 			{/* An outline says "this is selected". A *placed* outline says the
 			    rules have answered the question the outline is about — there is
@@ -1159,23 +1458,30 @@ export function Editor({
 
 			{pen ? (
 				<svg className={styles.pen} aria-hidden="true">
+					{/* The run so far is already in the document's units — these are
+					    the vertices `makePath` will store — so the rubber band
+					    crosses on its way to the attribute. */}
 					<polyline
 						className={styles.penLine}
 						points={[...pen, ...(current ? [current] : [])]
+							.map(canvasPoint)
 							.map((p) => `${p.x},${p.y}`)
 							.join(" ")}
 					/>
-					{pen.map((p, i) => (
-						<circle
-							key={`${p.x},${p.y},${i}`}
-							className={styles.penPoint}
-							cx={p.x}
-							cy={p.y}
-							// The first point is the target that closes the path, so it
-							// is the one worth aiming at.
-							r={i === 0 ? 4 : 2.5}
-						/>
-					))}
+					{pen.map((p, i) => {
+						const at = canvasPoint(p);
+						return (
+							<circle
+								key={`${p.x},${p.y},${i}`}
+								className={styles.penPoint}
+								cx={at.x}
+								cy={at.y}
+								// The first point is the target that closes the path, so it
+								// is the one worth aiming at.
+								r={i === 0 ? 4 : 2.5}
+							/>
+						);
+					})}
 				</svg>
 			) : null}
 
@@ -1184,6 +1490,35 @@ export function Editor({
 					className={gesture.kind === "draw" ? styles.drawing : styles.marquee}
 					style={rectStyle(marquee)}
 				/>
+			) : null}
+
+			{/* The offer. A drop against a column is a coincidence until somebody
+			    says otherwise, and this is the somebody-says-otherwise: one click
+			    and it is an `align` with a name, a switch, a sentence in the why
+			    panel and a place in an unsat core. Declining costs nothing — the
+			    next thing the pointer does takes it away. */}
+			{offer ? (
+				<button
+					type="button"
+					className={styles.pinOffer}
+					data-role="pin-offer"
+					data-datum={offer.term}
+					data-edge={offer.edge}
+					title={`Align on ${EDGES[offer.edge].label} — a rule with a name, and a switch to turn it off again`}
+					style={{
+						left: canvasPx(offer.at.x),
+						top: canvasPx(offer.at.y),
+					}}
+					onPointerDown={(e) => e.stopPropagation()}
+					onClick={() => {
+						onSceneChange((prev) =>
+							pinToDatum(prev, offer.node, offer.term, offer.edge).scene,
+						);
+						setOffer(null);
+					}}
+				>
+					Pin to {datumLabel(scene, offer.term) ?? offer.term}
+				</button>
 			) : null}
 			</div>
 		</div>
@@ -1211,11 +1546,20 @@ function originOf(
 	};
 }
 
+/**
+ * A frame in the design, as the four numbers that draw a box over it.
+ *
+ * Every outline, highlight, marquee and handle box in the file goes through
+ * here, which is what makes it one of the two places the editor leaves the
+ * document's units — the frames it is handed come from `placedNodes`,
+ * `boundsOf` and `frameFromPoints`, all of which answer in EMU.
+ */
 function rectStyle(frame: Frame) {
+	const box = canvasRect(frame);
 	return {
-		left: frame.x,
-		top: frame.y,
-		width: frame.width,
-		height: frame.height,
+		left: box.x,
+		top: box.y,
+		width: box.width,
+		height: box.height,
 	};
 }

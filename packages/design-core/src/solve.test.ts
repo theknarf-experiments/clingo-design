@@ -23,6 +23,7 @@ import {
 import { Explorer, explore, varyingVars } from "./explore.ts";
 import { findTemplate } from "./templates/index.ts";
 import { type Scene, emptyScene } from "./scene.ts";
+import { EMU_PER_PX } from "./units.ts";
 import {
 	lit,
 	propVar,
@@ -32,6 +33,9 @@ import {
 	styleVar,
 	tokenVar,
 } from "./values.ts";
+
+/** A frame is EMU; the one case below that names a coordinate says it in px. */
+const px = (n: number): number => n * EMU_PER_PX;
 
 const card = () => findTemplate("card")!.create();
 const run = (scene: Scene, limit = 64) =>
@@ -181,10 +185,14 @@ test("identical literals intern to one id, so equality works across nodes", () =
 test("geometry stays a fact, never a choice", () => {
 	const scene = addNode(
 		{ ...emptyScene(), nodes: [] },
-		makeNode("rect", { x: 120, y: 80, width: 200, height: 140 }, { id: "box" }),
+		makeNode("rect", { x: px(120), y: px(80), width: px(200), height: px(140) }, {
+			id: "box",
+		}),
 	);
 	const { generated, variables } = compile(scene);
-	assert.match(generated, /frame\(box,x,120\)\./);
+	// The fact is exact EMU now: no `Math.round` stands between the document and
+	// the program, so 120px reaches gringo as the integer it converts to.
+	assert.match(generated, new RegExp(`frame\\(box,x,${px(120)}\\)\\.`));
 	assert.equal((generated.match(/frame\(box,/g) ?? []).length, 4);
 	// The only variables are the box's own properties, plus the tokens.
 	assert.ok(!Object.keys(variables).some((v) => v.includes("frame")));

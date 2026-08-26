@@ -35,7 +35,17 @@ import {
 import { explore } from "./explore.ts";
 import type { Scene, SceneNode } from "./scene.ts";
 import { component } from "./templates/component.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { derive, lit, propVar, ref, single } from "./values.ts";
+
+/**
+ * The button is laid out in pixels; the model reads back in EMU. Only the two
+ * cases that name a coordinate need to say so — everything else here is about
+ * which atoms exist and which picks are held, which no unit change touches.
+ */
+const P = EMU_PER_PX;
+
+const px = (n: number): number => n * P;
 
 /**
  * A button definition and however many uses of it.
@@ -46,7 +56,7 @@ import { derive, lit, propVar, ref, single } from "./values.ts";
  */
 function buttons(uses: Array<{ id: string; holds?: Record<string, number> }>): Scene {
 	const label: SceneNode = {
-		...makeNode("text", { x: 12, y: 14, width: 136, height: 20 }, {
+		...makeNode("text", { x: px(12), y: px(14), width: px(136), height: px(20) }, {
 			id: "label",
 			name: "Label",
 		}),
@@ -58,7 +68,7 @@ function buttons(uses: Array<{ id: string; holds?: Record<string, number> }>): S
 		},
 	};
 	const definition: SceneNode = {
-		...makeNode("frame", { x: 20, y: 20, width: 160, height: 48 }, {
+		...makeNode("frame", { x: px(20), y: px(20), width: px(160), height: px(48) }, {
 			id: "btn",
 			name: "Button",
 		}),
@@ -73,7 +83,7 @@ function buttons(uses: Array<{ id: string; holds?: Record<string, number> }>): S
 		rules: "",
 		nodes: [
 			{
-				...makeNode("frame", { x: 0, y: 0, width: 600, height: 400 }, {
+				...makeNode("frame", { x: 0, y: 0, width: px(600), height: px(400) }, {
 					id: "page",
 					name: "Page",
 				}),
@@ -81,7 +91,15 @@ function buttons(uses: Array<{ id: string; holds?: Record<string, number> }>): S
 				children: [
 					definition,
 					...uses.map((use, i) => ({
-						...makeNode("instance", { x: 300, y: 20 + i * 64, width: 160, height: 48 }, {
+						...makeNode(
+							"instance",
+							{
+								x: px(300),
+								y: px(20 + i * 64),
+								width: px(160),
+								height: px(48),
+							},
+							{
 							id: use.id,
 							name: use.id,
 						}),
@@ -183,14 +201,14 @@ test("an instance's contents are derived, not held by the document", async () =>
 	assert.deepEqual(model.byId["inst(one,btn)"].frame, {
 		x: 0,
 		y: 0,
-		width: 160,
-		height: 48,
+		width: px(160),
+		height: px(48),
 	});
 	assert.deepEqual(model.byId["inst(one,label)"].frame, {
-		x: 12,
-		y: 14,
-		width: 136,
-		height: 20,
+		x: px(12),
+		y: px(14),
+		width: px(136),
+		height: px(20),
 	});
 	assert.equal(model.byId["inst(one,btn)"].kind, "frame");
 	assert.equal(model.byId["inst(one,label)"].kind, "text");

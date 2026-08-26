@@ -1,12 +1,16 @@
+import { useState } from "react";
 import {
+	DEFAULT_UNIT,
 	DERIVATIONS,
 	type Derivation,
 	type Term,
+	type Unit,
 	VALUE_TYPES,
 	type Value,
 	type ValueType,
 	type Verdict,
 	derive,
+	isLengthType,
 	lit,
 	optionLabel,
 	ref,
@@ -17,6 +21,7 @@ import {
 
 import styles from "./ValueEditor.module.css";
 import { cx } from "./cx";
+import { shownLength, typedLength } from "./lengths";
 
 /**
  * The why-probe, as one row sees it.
@@ -88,6 +93,15 @@ export interface ValueEditorProps {
 	 * because those are questions about the answer, not about the document.
 	 */
 	readOnly?: boolean;
+	/**
+	 * The document's unit — what a length row reads out in, and what a number
+	 * typed into one with no suffix means.
+	 *
+	 * Every other type ignores it: a colour has no unit and a line height is a
+	 * ratio, and which is which is `isLengthType` off the value table rather
+	 * than a list of property names kept in this file.
+	 */
+	unit?: Unit;
 	fallback: string;
 	/** Layer names, so a derivation from another node reads as its name. */
 	names?: Readonly<Record<string, string>>;
@@ -128,6 +142,81 @@ export function termFor(option: string, fallback: string): Term {
 	return lit(fallback);
 }
 
+/**
+ * The one length field in the editor.
+ *
+ * Three panels want it — a frame's four coordinates, a gap or a stroke width,
+ * the distance a geometric rule holds to — and they want it to behave
+ * identically, because somebody who learns that `12pt` is accepted in one field
+ * will type it into all three. So it lives here beside {@link optionValue} and
+ * {@link termFor}, and a panel supplies nothing but its own chrome.
+ *
+ * It commits on every keystroke that reads as a length, and keeps a draft of
+ * what is actually in the box until the caret leaves. Both halves are load
+ * bearing and they pull against each other. Committing per keystroke is what
+ * makes the canvas follow a number as it is typed, which is most of why a field
+ * beats a dialogue. Keeping the draft is what stops the field arguing with the
+ * person using it: what is stored is canonical and what is shown is rounded
+ * into the document's unit, so a box that re-rendered from the document
+ * mid-word would turn `2` into `2px` under the caret and then have nowhere to
+ * put the `4`. Letting go of the draft on blur is how a person finds out what
+ * was kept — `0.5px` comes back as itself, `nonsense` was never written at all,
+ * and neither answer needed an error message to say so.
+ *
+ * Text that is not a length is simply not committed. That is a narrowing: a
+ * length field used to take any text at all, and `emuOf` is exact-or-nothing,
+ * so what "any text" now buys is a dimension that silently reads as zero.
+ */
+export function LengthInput({
+	value,
+	unit,
+	className,
+	role,
+	field,
+	title,
+	disabled,
+	onCommit,
+}: {
+	/** The stored literal — `"24px"`, `"210mm"`, `"4763emu"`. */
+	value: string;
+	unit: Unit;
+	className?: string;
+	/** `data-role`, and `data-field` — how each panel already addresses its own. */
+	role?: string;
+	field?: string;
+	title?: string;
+	disabled?: boolean;
+	/**
+	 * The new stored literal — and only once what is in the box reads as a
+	 * length, so half-typed text never reaches the document.
+	 */
+	onCommit: (text: string) => void;
+}) {
+	const [draft, setDraft] = useState<string | null>(null);
+	return (
+		<input
+			className={className}
+			data-role={role}
+			data-field={field}
+			title={title}
+			disabled={disabled}
+			value={draft ?? shownLength(value, unit)}
+			onChange={(e) => {
+				const text = e.target.value;
+				setDraft(text);
+				const read = typedLength(text, unit);
+				if (read) onCommit(read.text);
+			}}
+			onBlur={() => setDraft(null)}
+			onKeyDown={(e) => {
+				// Enter is how a person says "that is the number" in a form, and here
+				// it means "show me what you kept" — the blur drops the draft.
+				if (e.key === "Enter") e.currentTarget.blur();
+			}}
+		/>
+	);
+}
+
 export function ValueEditor({
 	label,
 	type,
@@ -143,6 +232,7 @@ export function ValueEditor({
 	why,
 	indices,
 	readOnly,
+	unit = DEFAULT_UNIT,
 	fallback,
 	names,
 	testId,
@@ -151,6 +241,15 @@ export function ValueEditor({
 	// position *is* the index, which is why nothing else in the row has to know.
 	const at = (position: number) => indices?.[position] ?? position;
 	const isColour = type === "color";
+	const isLength = isLengthType(type);
+	/**
+	 * How a literal of this type reads on screen: a length in the document's
+	 * unit, anything on a closed menu by the menu's own name, everything else as
+	 * itself. One function so the read-only row, the editable row and the little
+	 * resolved-value tag beside a token cannot drift apart.
+	 */
+	const shown = (text: string) =>
+		isLength ? shownLength(text, unit) : optionLabel(type, text);
 	const multiline = VALUE_TYPES[type].multiline === true;
 	// A closed set of choices is a menu. Typing a font stack or a box-shadow by
 	// hand is not editing, it is remembering.
@@ -262,7 +361,7 @@ export function ValueEditor({
 								// says so, and the Rules panel is where the rule is.
 								<span className={styles.text} data-role="literal-readonly">
 									{term.kind === "literal"
-										? optionLabel(type, term.value)
+										? shown(term.value)
 										: termLabel(tokens, term, names)}
 								</span>
 							) : term.kind === "literal" && options ? (
@@ -284,6 +383,18 @@ export function ValueEditor({
 										</option>
 									))}
 								</select>
+							) : term.kind === "literal" && isLength ? (
+								// A length is the one literal that is not stored as it is
+								// shown: the document keeps `"12pt"` and a millimetre document
+								// reads it out as `4.23333mm`. See {@link LengthInput}.
+								<LengthInput
+									className={styles.text}
+									role="literal"
+									value={term.value}
+									unit={unit}
+									title="A number in this document's unit, or one with its own — 12pt, 0.25in"
+									onCommit={(text) => replace(index, lit(text))}
+								/>
 							) : term.kind === "literal" ? (
 								multiline ? (
 									<textarea
@@ -309,7 +420,7 @@ export function ValueEditor({
 									{termLabel(tokens, term, names)}
 									{resolved ? (
 										<span className={styles.resolved}>
-											{optionLabel(type, resolved)}
+											{shown(resolved)}
 										</span>
 									) : (
 										<span className={styles.broken}>unresolved</span>

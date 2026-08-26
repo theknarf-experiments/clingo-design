@@ -11,9 +11,50 @@ import {
 	makeLayout,
 	frameOf,
 } from "./scene.ts";
+import type { Frame } from "./geometry.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { single } from "./values.ts";
 
 import { dropTargetAt, findInTree, mapTree } from "./tree.ts";
+
+/**
+ * Sizes go in as pixels and answers come back as pixels; EMU is what happens
+ * in between.
+ *
+ * Every case here is a piece of layout arithmetic stated in the words a
+ * designer would use — "10 padding + 100 wide + 10 gap" — and the whole value
+ * of the assertion is that a reader can check the sum. Multiplying every one of
+ * those numbers by 9525 would make the file unreadable and would test nothing
+ * extra, since the conversion is exact in both directions. So the boundary is
+ * drawn once, here.
+ *
+ * Note what does *not* need converting: `makeLayout`'s numbers. A bare number
+ * in a layout spec is already whole pixels by that function's own contract —
+ * gaps and padding are typed, never dragged — so `gap: 10` stays `gap: 10`.
+ */
+const P = EMU_PER_PX;
+
+const px = (n: number): number => n * P;
+
+const box = (x: number, y: number, width: number, height: number): Frame => ({
+	x: px(x),
+	y: px(y),
+	width: px(width),
+	height: px(height),
+});
+
+type Solved = Readonly<Record<string, Partial<Frame>>>;
+
+/** A solved frame's numbers, in pixels. */
+const pixels = (solved: Solved): Solved =>
+	Object.fromEntries(
+		Object.entries(solved).map(([id, frame]) => [
+			id,
+			Object.fromEntries(
+				Object.entries(frame).map(([dim, emu]) => [dim, (emu ?? 0) / P]),
+			),
+		]),
+	);
 
 /** A layout in plain words and numbers — the tests fix one arrangement. */
 type LayoutSpec = Partial<Record<ContainerProp, string | number>>;
@@ -36,21 +77,15 @@ function row(
 	scene = { ...scene, nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode(
-			"frame",
-			{ x: 0, y: 0, width: container.width, height: container.height },
-			{ id: "box" },
-		),
+		makeNode("frame", box(0, 0, container.width, container.height), {
+			id: "box",
+		}),
 	);
 	for (const child of children) {
 		scene = addNodeTo(
 			scene,
 			"box",
-			makeNode(
-				"rect",
-				{ x: 0, y: 0, width: child.width, height: child.height },
-				{ id: child.id },
-			),
+			makeNode("rect", box(0, 0, child.width, child.height), { id: child.id }),
 		);
 	}
 	return {
@@ -80,11 +115,15 @@ function row(
 	};
 }
 
-const solve = async (scene: Scene) => {
+/** The solver's answer, exactly as it comes: EMU, for handing back to an edit. */
+const solveEmu = async (scene: Scene): Promise<Solved> => {
 	const result = await explore(scene, directSolver, { sample: "first" });
 	assert.equal(result.count, 1, "layout must not multiply the universes");
 	return result.universes[0].solved;
 };
+
+/** The same answer in pixels, which is what every assertion below reads. */
+const solve = async (scene: Scene): Promise<Solved> => pixels(await solveEmu(scene));
 
 test("children are laid end to end from the padding", async () => {
 	const solved = await solve(
@@ -167,7 +206,7 @@ test("a container without a layout solves nothing", async () => {
 	scene = addNodeTo(
 		scene,
 		"frame1",
-		makeNode("rect", { x: 5, y: 7, width: 20, height: 20 }, { id: "free" }),
+		makeNode("rect", box(5, 7, 20, 20), { id: "free" }),
 	);
 	const solved = await solve(scene);
 	assert.deepEqual(solved, {}, "hand-placed nodes keep their own frames");
@@ -392,17 +431,17 @@ test("a hugging container nested in another composes", async () => {
 	scene = { ...scene, nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "outer" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "outer" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"outer",
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "inner" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "inner" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"inner",
-		makeNode("rect", { x: 0, y: 0, width: 50, height: 20 }, { id: "leaf" }),
+		makeNode("rect", box(0, 0, 50, 20), { id: "leaf" }),
 	);
 	const hug = makeLayout({ gap: 0, padding: 10 });
 	scene = {
@@ -424,23 +463,23 @@ function nested(outer: LayoutSpec): Scene {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 9, height: 9 }, { id: "outer" }),
+		makeNode("frame", box(0, 0, 9, 9), { id: "outer" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"outer",
-		makeNode("rect", { x: 0, y: 0, width: 40, height: 20 }, { id: "a" }),
+		makeNode("rect", box(0, 0, 40, 20), { id: "a" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"outer",
-		makeNode("frame", { x: 0, y: 0, width: 10, height: 10 }, { id: "inner" }),
+		makeNode("frame", box(0, 0, 10, 10), { id: "inner" }),
 	);
 	for (const id of ["p", "q"]) {
 		scene = addNodeTo(
 			scene,
 			"inner",
-			makeNode("rect", { x: 0, y: 0, width: 30, height: 25 }, { id }),
+			makeNode("rect", box(0, 0, 30, 25), { id }),
 		);
 	}
 	const base: LayoutSpec = { gap: 0, padding: 10 };
@@ -490,18 +529,18 @@ async function withLayout() {
 	scene = { ...scene, nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 100, y: 100, width: 10, height: 10 }, { id: "box" }),
+		makeNode("frame", box(100, 100, 10, 10), { id: "box" }),
 	);
 	for (const id of ["a", "b"]) {
 		scene = addNodeTo(
 			scene,
 			"box",
-			makeNode("rect", { x: 0, y: 0, width: 40, height: 20 }, { id }),
+			makeNode("rect", box(0, 0, 40, 20), { id }),
 		);
 	}
 	scene = addNode(
 		scene,
-		makeNode("rect", { x: 500, y: 300, width: 30, height: 30 }, { id: "loose" }),
+		makeNode("rect", box(500, 300, 30, 30), { id: "loose" }),
 	);
 	scene = {
 		...scene,
@@ -514,19 +553,23 @@ async function withLayout() {
 				: n,
 		),
 	};
-	return { scene, solved: await solve(scene) };
+	// Two views of one answer: `solved` is what the assertions read, and `emu`
+	// is what goes back into `reparent` and `dropTargetAt`, which take the
+	// solver's own numbers because they write them into a document.
+	const emu = await solveEmu(scene);
+	return { scene, solved: pixels(emu), emu };
 }
 
 test("leaving a layout keeps the node where the solver had put it", async () => {
-	const { scene, solved } = await withLayout();
+	const { scene, solved, emu } = await withLayout();
 	// b sits at x=60 inside a container at x=100, so its canvas x is 160.
 	assert.equal(solved.b.x, 60);
 
-	const moved = reparent(scene, "b", null, 2, solved);
+	const moved = reparent(scene, "b", null, 2, emu);
 	const b = findInTree(moved.nodes, "b");
 	assert.deepEqual(
 		b && frameOf(b),
-		{ x: 160, y: 110, width: 40, height: 20 },
+		box(160, 110, 40, 20),
 		"snapshotted in canvas coordinates, not the stale stored frame",
 	);
 	// And the container closes up around the one child that is left.
@@ -535,13 +578,13 @@ test("leaving a layout keeps the node where the solver had put it", async () => 
 });
 
 test("joining a layout hands its position over to the container", async () => {
-	const { scene, solved } = await withLayout();
-	const moved = reparent(scene, "loose", "box", 2, solved);
+	const { scene, emu } = await withLayout();
+	const moved = reparent(scene, "loose", "box", 2, emu);
 
 	// The stored frame is rebased into the container, but what it will *be* is
 	// the layout's business.
 	const loose = findInTree(moved.nodes, "loose");
-	assert.deepEqual(loose && frameOf(loose), { x: 400, y: 200, width: 30, height: 30 });
+	assert.deepEqual(loose && frameOf(loose), box(400, 200, 30, 30));
 
 	const after = await solve(moved);
 	assert.equal(after.loose.x, 110, "third in the row: 10 + 40 + 10 + 40 + 10");
@@ -550,21 +593,21 @@ test("joining a layout hands its position over to the container", async () => {
 });
 
 test("dropping at an index decides where in the arrangement it lands", async () => {
-	const { scene, solved } = await withLayout();
-	const first = await solve(reparent(scene, "loose", "box", 0, solved));
+	const { scene, emu } = await withLayout();
+	const first = await solve(reparent(scene, "loose", "box", 0, emu));
 	assert.equal(first.loose.x, 10, "inserted before both");
 	assert.equal(first.a.x, 50);
 });
 
 test("a node cannot be moved inside itself", async () => {
-	const { scene, solved } = await withLayout();
-	assert.equal(reparent(scene, "box", "a", 0, solved), scene);
-	assert.equal(reparent(scene, "box", "box", 0, solved), scene);
+	const { scene, emu } = await withLayout();
+	assert.equal(reparent(scene, "box", "a", 0, emu), scene);
+	assert.equal(reparent(scene, "box", "box", 0, emu), scene);
 });
 
 test("only a container can take children", async () => {
-	const { scene, solved } = await withLayout();
-	assert.equal(reparent(scene, "loose", "a", 0, solved), scene);
+	const { scene, emu } = await withLayout();
+	assert.equal(reparent(scene, "loose", "a", 0, emu), scene);
 });
 
 /* ------------------------------------------------------------------ */
@@ -573,9 +616,9 @@ test("only a container can take children", async () => {
 
 test("a drop lands in the container under the pointer, at the pointer", async () => {
 	// The row sits at (100,100) and is 110 wide: a spans 110..150, b 160..200.
-	const { scene, solved } = await withLayout();
+	const { scene, emu } = await withLayout();
 	const drop = (x: number) =>
-		dropTargetAt(scene.nodes, { x, y: 120 }, new Set(["loose"]), solved);
+		dropTargetAt(scene.nodes, { x: px(x), y: px(120) }, new Set(["loose"]), emu);
 
 	assert.deepEqual(drop(115), { id: "box", index: 0 }, "before a's middle");
 	assert.deepEqual(drop(155), { id: "box", index: 1 }, "between them");
@@ -583,27 +626,27 @@ test("a drop lands in the container under the pointer, at the pointer", async ()
 });
 
 test("a drop outside every surface is a drop on the canvas", async () => {
-	const { scene, solved } = await withLayout();
+	const { scene, emu } = await withLayout();
 	assert.deepEqual(
-		dropTargetAt(scene.nodes, { x: 900, y: 900 }, new Set(["loose"]), solved),
+		dropTargetAt(scene.nodes, { x: px(900), y: px(900) }, new Set(["loose"]), emu),
 		{ id: null, index: 1 },
 		"one top-level node stays behind once loose is lifted out",
 	);
 });
 
 test("what is being dragged cannot be what it is dropped into", async () => {
-	const { scene, solved } = await withLayout();
+	const { scene, emu } = await withLayout();
 	// The pointer is over the row, but the row is the thing in hand.
 	assert.deepEqual(
-		dropTargetAt(scene.nodes, { x: 150, y: 120 }, new Set(["box"]), solved),
+		dropTargetAt(scene.nodes, { x: px(150), y: px(120) }, new Set(["box"]), emu),
 		{ id: null, index: 1 },
 	);
 });
 
 test("a child dragged within its own layout counts only the siblings left", async () => {
-	const { scene, solved } = await withLayout();
+	const { scene, emu } = await withLayout();
 	assert.deepEqual(
-		dropTargetAt(scene.nodes, { x: 205, y: 120 }, new Set(["a"]), solved),
+		dropTargetAt(scene.nodes, { x: px(205), y: px(120) }, new Set(["a"]), emu),
 		{ id: "box", index: 1 },
 		"past the one remaining child",
 	);
@@ -613,14 +656,14 @@ test("a plain container takes a drop on top, order being nobody's business", asy
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 200, height: 200 }, { id: "plain" }),
+		makeNode("frame", box(0, 0, 200, 200), { id: "plain" }),
 	);
 	scene = addNodeTo(
 		scene,
 		"plain",
-		makeNode("rect", { x: 10, y: 10, width: 20, height: 20 }, { id: "kid" }),
+		makeNode("rect", box(10, 10, 20, 20), { id: "kid" }),
 	);
-	assert.deepEqual(dropTargetAt(scene.nodes, { x: 100, y: 100 }), {
+	assert.deepEqual(dropTargetAt(scene.nodes, { x: px(100), y: px(100) }), {
 		id: "plain",
 		index: 1,
 	});

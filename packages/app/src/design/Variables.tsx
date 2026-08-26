@@ -17,6 +17,7 @@ import {
 
 import { Styles } from "./Styles";
 import { ValueEditor, type WhyRow } from "./ValueEditor";
+import { documentUnit } from "./lengths";
 import styles from "./Variables.module.css";
 
 export interface VariablesProps {
@@ -179,6 +180,9 @@ export function Variables({
 							type={token.type}
 							value={token.value}
 							tokens={linkable}
+							// A length token is read out in the document's unit like every
+							// other length the editor shows — see `lengths.ts`.
+							unit={documentUnit(scene)}
 							fallback={VALUE_TYPES[token.type].fallback}
 							active={picks[variable]}
 							varying={varying.has(variable)}

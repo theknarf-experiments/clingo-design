@@ -17,7 +17,11 @@ import { type Scene, type SceneNode, frameOf, makeLayout } from "./scene.ts";
 import { card } from "./templates/card.ts";
 import { palette } from "./templates/palette.ts";
 import { flatten } from "./tree.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { lit, ref, single } from "./values.ts";
+
+/** A frame is EMU; the layout case below is stated in pixels. */
+const px = (n: number): number => n * EMU_PER_PX;
 
 /** One answer set for a scene, as atoms. */
 async function firstModel(scene: Scene): Promise<string[]> {
@@ -169,7 +173,10 @@ test("solved geometry wins over the stored frame", async () => {
 	// A row of three, so the solver rather than the document decides where the
 	// children sit and how big the container is.
 	const child = (id: string): SceneNode => ({
-		...makeNode("rect", { x: 0, y: 0, width: 40, height: 20 }, { id, name: id }),
+		...makeNode("rect", { x: 0, y: 0, width: px(40), height: px(20) }, {
+			id,
+			name: id,
+		}),
 		props: { fill: single("#000000") },
 	});
 	const scene: Scene = {
@@ -177,7 +184,7 @@ test("solved geometry wins over the stored frame", async () => {
 		tokens: [],
 		nodes: [
 			{
-				...makeNode("frame", { x: 10, y: 10, width: 999, height: 999 }, {
+				...makeNode("frame", { x: px(10), y: px(10), width: px(999), height: px(999) }, {
 					id: "row",
 					name: "Row",
 				}),
@@ -193,20 +200,20 @@ test("solved geometry wins over the stored frame", async () => {
 	const model = readModel(await firstModel(scene));
 	assert.deepEqual(
 		model.byId.a?.frame,
-		{ x: 5, y: 5, width: 40, height: 20 },
+		{ x: px(5), y: px(5), width: px(40), height: px(20) },
 	);
 	assert.deepEqual(
 		model.byId.b?.frame,
-		{ x: 55, y: 5, width: 40, height: 20 },
+		{ x: px(55), y: px(5), width: px(40), height: px(20) },
 	);
 	assert.deepEqual(
 		model.byId.c?.frame,
-		{ x: 105, y: 5, width: 40, height: 20 },
+		{ x: px(105), y: px(5), width: px(40), height: px(20) },
 	);
 	// The container hugs, so its stored 999x999 is not what it is.
 	assert.deepEqual(
 		model.byId.row?.frame,
-		{ x: 10, y: 10, width: 150, height: 30 },
+		{ x: px(10), y: px(10), width: px(150), height: px(30) },
 	);
 });
 

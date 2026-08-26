@@ -1,0 +1,144 @@
+/* Rulers overlay the canvas rather than taking a strip out of the layout.
+   Taking a strip would mean the canvas's viewport, its camera and everything
+   measured against them changed size the moment rulers appeared, which is a
+   lot of moving parts to buy a 22px margin. Overlaying costs the top-left
+   corner of an infinite surface, which there is a lot of. */
+.rulers {
+	position: absolute;
+	inset: 0;
+	/* Under the toolbar (50) and the zoom controls, over the canvas. */
+	z-index: 40;
+	/* The strips are chrome to read, not to hit: a press near the top edge still
+	   reaches the canvas beneath. The corner opts back in — see Rulers.tsx on
+	   why dragging out of a strip is deliberately left free. */
+	pointer-events: none;
+	font-size: 9px;
+	line-height: 1;
+	user-select: none;
+}
+
+/* The strips do take pointer events, and for one gesture only: pressing on one
+   and dragging out onto the design draws a guide. That is what the rulers are
+   for besides reading, and it is why the zero point lives on the corner. */
+.strip {
+	position: absolute;
+	background-color: var(--dc-raised);
+	color: var(--dc-dim);
+	pointer-events: auto;
+	cursor: crosshair;
+	/* A tick close to the far edge would otherwise put its label outside the
+	   canvas and over a panel. */
+	overflow: hidden;
+}
+
+/* The line being pulled out, before it belongs to anything. The same cyan a
+   drawn guide is painted in on the canvas, so what lands is what was dragged. */
+.pulled {
+	position: absolute;
+	background: #06b6d4;
+	opacity: 0.35;
+}
+
+.pulled[data-axis="x"] {
+	width: 1px;
+}
+
+.pulled[data-axis="y"] {
+	height: 1px;
+}
+
+/* Clear of the strip: this drop will draw a line. */
+.pulled[data-out] {
+	opacity: 1;
+}
+
+/* The minor marks are a tiled gradient set inline from the camera — the same
+   thing the canvas does with its dot grid, and for the same reason. */
+.across {
+	top: 0;
+	left: 0;
+	right: 0;
+	height: var(--ruler);
+	border-bottom: 1px solid var(--dc-line);
+}
+
+.down {
+	top: 0;
+	left: 0;
+	bottom: 0;
+	width: var(--ruler);
+	border-right: 1px solid var(--dc-line);
+}
+
+/* A labelled tick is a full-depth hairline with its number tucked against it,
+   so the number sits after the place it names rather than centred on it —
+   centring would put "0" half over the mark it belongs to and half over the
+   design's own edge. */
+.tick {
+	position: absolute;
+}
+
+.across .tick {
+	top: 0;
+	bottom: 0;
+	border-left: 1px solid var(--dc-line);
+}
+
+.down .tick {
+	left: 0;
+	right: 0;
+	border-top: 1px solid var(--dc-line);
+}
+
+.label {
+	position: absolute;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.across .label {
+	left: 3px;
+	top: 3px;
+}
+
+/* Down the page the numbers turn with the ruler. Reading a column of
+   right-way-up numbers means reading a column of numbers that each need
+   their own space, which is how a vertical ruler ends up twice as wide as a
+   horizontal one is tall. */
+.down .label {
+	left: 3px;
+	top: 3px;
+	writing-mode: vertical-rl;
+}
+
+.corner {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: var(--ruler);
+	height: var(--ruler);
+	padding: 0;
+	display: grid;
+	place-items: center;
+	pointer-events: auto;
+	background: var(--dc-raised);
+	border: 0;
+	border-right: 1px solid var(--dc-line);
+	border-bottom: 1px solid var(--dc-line);
+	color: var(--dc-dim);
+	font: inherit;
+	font-size: 9px;
+	cursor: crosshair;
+}
+
+/* Away from the document's own corner, the handle says so — otherwise every
+   number on both rulers is measured from somewhere the designer cannot see
+   and there is nothing on screen admitting it. */
+.corner:not([data-home]) {
+	color: var(--dc-accent);
+	background: var(--dc-accent-soft);
+}
+
+.corner:hover {
+	color: var(--dc-accent);
+}

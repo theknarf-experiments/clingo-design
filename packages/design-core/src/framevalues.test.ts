@@ -28,6 +28,7 @@ import {
 } from "./edits.ts";
 import { type Universe, explore } from "./explore.ts";
 import { readModel } from "./model.ts";
+import { normalizeScene } from "./project.ts";
 import {
 	DIMENSIONS,
 	type Dimension,
@@ -42,7 +43,22 @@ import {
 import { findInTree, mapTree, placedNodes } from "./tree.ts";
 import { PANEL_PLACES, places } from "./templates/places.ts";
 import { TEMPLATES } from "./templates/index.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { type Token, type Value, frameVar, lit, ref, single } from "./values.ts";
+
+/**
+ * The document is written in `px` strings and read back in EMU.
+ *
+ * That asymmetry is the whole shape of this phase and it is deliberate: a
+ * stored length is still the text a designer typed, so `lit("300px")` needs no
+ * translating, while everything the compiler, the solver and `frameOf` hand
+ * back is EMU. So the cases stay as they were and only the assertions carry the
+ * factor — which also means each one says out loud that the two sides are now
+ * the very same integer rather than two roundings that agree.
+ */
+const P = EMU_PER_PX;
+
+const px = (n: number): number => n * P;
 
 /** A frame holding one rect, whose geometry the caller supplies. */
 function board(
@@ -52,12 +68,16 @@ function board(
 	let scene: Scene = { ...emptyScene(), tokens, nodes: [] };
 	scene = addNode(
 		scene,
-		makeNode("frame", { x: 0, y: 0, width: 400, height: 300 }, { id: "page" }),
+		makeNode("frame", { x: 0, y: 0, width: px(400), height: px(300) }, {
+			id: "page",
+		}),
 	);
 	scene = addNodeTo(
 		scene,
 		"page",
-		makeNode("rect", { x: 20, y: 20, width: 60, height: 40 }, { id: "card" }),
+		makeNode("rect", { x: px(20), y: px(20), width: px(60), height: px(40) }, {
+			id: "card",
+		}),
 	);
 	return {
 		...scene,
@@ -86,10 +106,10 @@ test("a settled frame is still one design", async () => {
 	const list = await universes(board({}));
 	assert.equal(list.length, 1);
 	assert.deepEqual(list[0].model.byId.card?.frame, {
-		x: 20,
-		y: 20,
-		width: 60,
-		height: 40,
+		x: px(20),
+		y: px(20),
+		width: px(60),
+		height: px(40),
 	});
 });
 
@@ -99,15 +119,15 @@ test("two positions are two universes, and both of them render", async () => {
 	// two collapse into one universe drawn in one place.
 	const list = await universes(board({ x: [lit("20px"), lit("300px")] }));
 	assert.equal(list.length, 2, "here on desktop, there on mobile");
-	assert.deepEqual(drawnAt(list), [20, 300]);
+	assert.deepEqual(drawnAt(list), [px(20), px(300)]);
 	// And nothing else moved: one dimension branching is one decision.
-	for (const u of list) assert.equal(u.model.byId.card?.frame.y, 20);
+	for (const u of list) assert.equal(u.model.byId.card?.frame.y, px(20));
 });
 
 test("a size varies the same way a position does", async () => {
 	const list = await universes(board({ width: [lit("60px"), lit("200px")] }));
 	assert.equal(list.length, 2);
-	assert.deepEqual(drawnAt(list, "width"), [60, 200]);
+	assert.deepEqual(drawnAt(list, "width"), [px(60), px(200)]);
 });
 
 test("a dimension that names a token is a position driven by a parameter", async () => {
@@ -121,7 +141,7 @@ test("a dimension that names a token is a position driven by a parameter", async
 	];
 	const list = await universes(board({ x: [ref("inset")] }, tokens));
 	assert.equal(list.length, 2);
-	assert.deepEqual(drawnAt(list), [12, 48]);
+	assert.deepEqual(drawnAt(list), [px(12), px(48)]);
 });
 
 test("two dimensions branch independently, and the space is the product", async () => {
@@ -178,26 +198,51 @@ test("what the canvas paints is what hit testing reads, to the pixel", async () 
 	}
 });
 
-test("a fractional length rounds the same on both sides", async () => {
+test("a fractional length is settled on the way in, and then both sides agree", async () => {
+	// This used to be "both sides round to 21", which was true and was the best
+	// that could be said: the document read 20.5 and the compiler rounded it,
+	// and the agreement was an agreement between two roundings. Neither side
+	// rounds now, so half a pixel — 4762.5 EMU, and 9525 is odd — is not a length
+	// at all, and the two would agree on *nothing* instead: `frameOf` falls back
+	// to zero and no `numeral/2` is emitted, which is the same picture as a
+	// missing token. `normalizeScene` is what makes it a length again, once and
+	// visibly, and after it the two sides do not agree so much as read the very
+	// same integer.
 	const tokens: Token[] = [
 		{ id: "half", name: "half", type: "length", value: single("20.5px") },
 	];
-	const scene = board({ x: [ref("half")] }, tokens);
+	const scene = normalizeScene(board({ x: [ref("half")] }, tokens));
+	assert.deepEqual(scene.tokens[0].value, single("20.52px"), "snapped, not lost");
+
 	const list = await universes(scene);
 	const card = findInTree(scene.nodes, "card");
 	assert.ok(card);
-	assert.equal(frameOf(card, sceneContext(scene)).x, 21);
-	assert.equal(list[0].model.byId.card?.frame.x, 21, "the same 21, not 20.5");
+	assert.equal(frameOf(card, sceneContext(scene)).x, 195453);
+	assert.equal(
+		list[0].model.byId.card?.frame.x,
+		195453,
+		"the same 195453, not a rounding of it",
+	);
 });
 
 test("every write lands on a whole pixel", () => {
 	const scene = setFrames(
 		board({}),
-		new Map([["card", { x: 10.4, y: -0.4, width: 33.6, height: 40 }]]),
+		new Map([
+			[
+				"card",
+				{ x: px(10.4), y: px(-0.4), width: px(33.6), height: px(40) },
+			],
+		]),
 	);
 	const card = findInTree(scene.nodes, "card");
 	assert.ok(card);
-	assert.deepEqual(frameOf(card), { x: 10, y: 0, width: 34, height: 40 });
+	assert.deepEqual(frameOf(card), {
+		x: px(10),
+		y: px(0),
+		width: px(34),
+		height: px(40),
+	});
 	assert.deepEqual(card.frame.x, [lit("10px")]);
 });
 
@@ -209,7 +254,7 @@ test("a drag moves the alternative the visible universe picked", () => {
 	const scene = board({ x: [lit("20px"), lit("300px")] });
 	// Universe 1 is the one showing 300; dragging it 10 to the right must move
 	// that alternative and leave the other exactly as it was.
-	const moved = moveNodes(scene, ["card"], 10, 0, { "fval(card,x)": 1 });
+	const moved = moveNodes(scene, ["card"], px(10), 0, { "fval(card,x)": 1 });
 	const card = findInTree(moved.nodes, "card");
 	assert.ok(card);
 	assert.deepEqual(card.frame.x, [lit("20px"), lit("310px")]);
@@ -223,7 +268,7 @@ test("a drag never collapses a two-position node to one position", () => {
 		{ "fval(card,x)": 1 },
 	];
 	for (const picks of cases) {
-		const moved = moveNodes(scene, ["card"], 7, 3, picks);
+		const moved = moveNodes(scene, ["card"], px(7), px(3), picks);
 		const card = findInTree(moved.nodes, "card");
 		assert.equal(card?.frame.x.length, 2, "both positions survive the drag");
 		assert.equal(card?.frame.y.length, 1);
@@ -231,7 +276,12 @@ test("a drag never collapses a two-position node to one position", () => {
 });
 
 test("with no pick at all, a drag moves the first alternative", () => {
-	const moved = moveNodes(board({ x: [lit("20px"), lit("300px")] }), ["card"], 5, 0);
+	const moved = moveNodes(
+		board({ x: [lit("20px"), lit("300px")] }),
+		["card"],
+		px(5),
+		0,
+	);
 	assert.deepEqual(findInTree(moved.nodes, "card")?.frame.x, [
 		lit("25px"),
 		lit("300px"),
@@ -250,15 +300,15 @@ test("a dimension that names a token is the token's to change", () => {
 	assert.equal(frameFrozen(card, "x", sceneContext(scene)), true);
 	assert.equal(frameFrozen(card, "y", sceneContext(scene)), false);
 
-	const moved = moveNodes(scene, ["card"], 40, 40, {});
+	const moved = moveNodes(scene, ["card"], px(40), px(40), {});
 	const after = findInTree(moved.nodes, "card");
 	assert.deepEqual(after?.frame.x, [ref("inset")], "the link is untouched");
-	assert.equal(frameOf(after ?? card, sceneContext(moved)).y, 60, "y still moved");
+	assert.equal(frameOf(after ?? card, sceneContext(moved)).y, px(60), "y still moved");
 });
 
 test("duplicating carries every alternative, and nudges the visible one", () => {
 	const scene = board({ x: [lit("20px"), lit("300px")] });
-	const { scene: next, ids } = duplicateNodes(scene, ["card"], 16, {
+	const { scene: next, ids } = duplicateNodes(scene, ["card"], px(16), {
 		"fval(card,x)": 1,
 	});
 	const clone = findInTree(next.nodes, ids[0]);
@@ -285,7 +335,7 @@ test("a pin holds a position whatever the document says", async () => {
 	// the rule is what decides where the box ends up in each of them.
 	assert.equal(list.length, 2);
 	for (const u of list) {
-		assert.equal(u.solved.card?.x, 120, "the pin, not either stored x");
+		assert.equal(u.solved.card?.x, px(120), "the pin, not either stored x");
 	}
 });
 
@@ -304,7 +354,7 @@ test("the layout still owns the frames of the children it places", async () => {
 	// projected; one arrangement, because the container decides where its child
 	// goes and does not consult either of them.
 	assert.equal(list.length, 2);
-	for (const u of list) assert.equal(u.solved.card?.x, 10, "the padding");
+	for (const u of list) assert.equal(u.solved.card?.x, px(10), "the padding");
 });
 
 test("a varying frame still pulls a solved node toward the universe on screen", async () => {
@@ -317,7 +367,7 @@ test("a varying frame still pulls a solved node toward the universe on screen", 
 	assert.equal(list.length, 2);
 	assert.deepEqual(
 		list.map((u) => u.solved.card?.x).sort((a, b) => (a ?? 0) - (b ?? 0)),
-		[20, 300],
+		[px(20), px(300)],
 		"each universe lands on its own stored x",
 	);
 });
@@ -332,7 +382,7 @@ test("the two-places template really is two places", async () => {
 	assert.equal(list.length, 2, "one drawing, two designs");
 	assert.deepEqual(
 		list.map((u) => u.model.byId.panel?.frame.x).sort((a, b) => (a ?? 0) - (b ?? 0)),
-		[...PANEL_PLACES],
+		PANEL_PLACES.map(px),
 	);
 	// Everything else is the same picture in both, which is what makes the
 	// difference legible as a decision rather than as noise.
@@ -346,15 +396,15 @@ test("dragging in one design does not disturb the other", async () => {
 	const scene = places();
 	const list = await universes(scene);
 	const right = list.find(
-		(u) => u.model.byId.panel?.frame.x === PANEL_PLACES[1],
+		(u) => u.model.byId.panel?.frame.x === px(PANEL_PLACES[1]),
 	);
 	assert.ok(right, "expected a design with the panel on the right");
 	// Move it 12 further right in the universe that shows it there.
-	const moved = moveNodes(scene, ["panel"], 12, 0, right.pick);
+	const moved = moveNodes(scene, ["panel"], px(12), 0, right.pick);
 	const after = await universes(moved);
 	assert.deepEqual(
 		after.map((u) => u.model.byId.panel?.frame.x).sort((a, b) => (a ?? 0) - (b ?? 0)),
-		[PANEL_PLACES[0], PANEL_PLACES[1] + 12],
+		[px(PANEL_PLACES[0]), px(PANEL_PLACES[1] + 12)],
 		"the design that was not on screen is untouched",
 	);
 });
@@ -370,7 +420,11 @@ test("the default frame is one alternative and costs no variable", () => {
 	);
 	assert.deepEqual(keys, [], "nobody asked for a choice");
 	const { generated } = compile(scene);
-	assert.match(generated, /^frame\(card,x,20\)\.$/m, "a plain fact, as before");
+	assert.match(
+		generated,
+		new RegExp(`^frame\\(card,x,${px(20)}\\)\\.$`, "m"),
+		"a plain fact, as before — and now an exact one",
+	);
 	assert.doesNotMatch(generated, /alt\(fval\(card,x\)/);
 });
 
@@ -387,7 +441,11 @@ test("a dimension that branches is a variable the studio knows about", () => {
 		/^frame\(card,x,\d+\)\.$/m,
 		"derived from the pick, never stated",
 	);
-	assert.match(generated, /^frame\(card,width,60\)\.$/m, "and the rest still are");
+	assert.match(
+		generated,
+		new RegExp(`^frame\\(card,width,${px(60)}\\)\\.$`, "m"),
+		"and the rest still are",
+	);
 });
 
 test("setFrameValue is the one edit that changes how many positions there are", () => {
@@ -406,10 +464,10 @@ test("frameOf reads the universe it is given", () => {
 	const scene = board({ x: [lit("20px"), lit("300px")] });
 	const card = findInTree(scene.nodes, "card");
 	assert.ok(card);
-	assert.equal(frameOf(card).x, 20, "the first, with no pick");
+	assert.equal(frameOf(card).x, px(20), "the first, with no pick");
 	assert.equal(
 		frameOf(card, { tokens: [], picks: { [frameVar("card", "x")]: 1 } }).x,
-		300,
+		px(300),
 	);
 });
 
@@ -420,8 +478,8 @@ test("placedNodes places a nested node in the universe it is asked about", () =>
 			tokens: [],
 			picks: { [frameVar("card", "x")]: index },
 		}).find((p) => p.node.id === "card")?.world.x;
-	assert.equal(at(0), 20);
-	assert.equal(at(1), 300);
+	assert.equal(at(0), px(20));
+	assert.equal(at(1), px(300));
 });
 
 test("the geometry rules read a derived frame like any other", async () => {
@@ -441,7 +499,7 @@ test("the geometry rules read a derived frame like any other", async () => {
 		const xs = out.models
 			.map((m) => readModel(m).byId.card?.frame.x)
 			.sort((a, b) => (a ?? 0) - (b ?? 0));
-		assert.deepEqual(xs, [20, 300]);
+		assert.deepEqual(xs, [px(20), px(300)]);
 	} finally {
 		await session.close();
 	}

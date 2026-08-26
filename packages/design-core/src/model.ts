@@ -19,6 +19,7 @@
  */
 import { parseAtom, unquote } from "./atoms.ts";
 import type { Frame } from "./geometry.ts";
+import { type Emu, wholeEmu } from "./units.ts";
 import {
 	KINDS,
 	type NodeKind,
@@ -105,23 +106,38 @@ export interface ModelScene {
 }
 
 /**
- * Theory values arrive as exact rationals — `"320/3"` rather than `106.667`.
- * Only a renderer needs a float, so the conversion happens here and as late as
- * possible.
+ * A theory value, as EMU: `"320/3"` is 107.
+ *
+ * clingo-lpx answers in exact rationals, and it has to — three children sharing
+ * a container's leftover space is a third of something, and simplex has no way
+ * to say that in integers. Every length in the program is EMU, so what arrives
+ * is a *rational number of EMU*, and `320/3` is not one.
+ *
+ * So this is the one place the solver's answer is quantized, and it is worth
+ * being plain about rather than calling it a conversion. It is not that EMU
+ * absorbs the rationals — it is that a third of an EMU is a thirty-millionth of
+ * an inch, four decimal orders below what any output medium can hold, so the
+ * discarded remainder cannot reach a pixel, a printer or an export. Before EMU
+ * the same divide threw away a third of a *pixel*, which very much could.
+ *
+ * {@link wholeEmu} rather than a bare `Math.round`, so this rounding breaks its
+ * ties the same way every other rounding in the codebase does — away from zero
+ * — and so that the name says a quantization happened.
  */
-function rational(text: string): number | undefined {
+function emuFromRational(text: string): Emu | undefined {
 	const slash = text.indexOf("/");
 	const n =
 		slash === -1
 			? Number(text)
 			: Number(text.slice(0, slash)) / Number(text.slice(slash + 1));
-	return Number.isFinite(n) ? n : undefined;
+	return Number.isFinite(n) ? wholeEmu(n) : undefined;
 }
 
 const AXIS = { x: "x", y: "y", width: "width", height: "height" } as const;
 
 /**
- * Pulls `__lpx(lv(n,x),"12")` and `__lpx(lsz(n,width),"80")` out of a model.
+ * Pulls `__lpx(lv(n,x),"114300")` and `__lpx(lsz(n,width),"762000")` out of a
+ * model, in EMU.
  *
  * Parsed rather than matched, because a node id is no longer always a plain
  * constant: a rule that brings nodes into being names them with terms, and
@@ -139,7 +155,7 @@ export function readSolved(
 		if (!variable || variable.args.length !== 2) continue;
 		if (variable.name !== "lv" && variable.name !== "lsz") continue;
 		const axis = AXIS[variable.args[1] as keyof typeof AXIS];
-		const value = rational(unquote(outer.args[1]));
+		const value = emuFromRational(unquote(outer.args[1]));
 		if (axis === undefined || value === undefined) continue;
 		(out[variable.args[0]] ??= {})[axis] = value;
 	}

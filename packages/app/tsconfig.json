@@ -19,6 +19,11 @@
 		"erasableSyntaxOnly": true,
 		"resolveJsonModule": true,
 		"skipLibCheck": true,
+
+		// A `*.test.ts` beside the code is run by node directly, and node's
+		// resolver wants the extension it will actually open. Vite resolves the
+		// same specifier, so nothing else has to change.
+		"allowImportingTsExtensions": true,
 		"noEmit": true
 	},
 	"include": ["src", "vite.config.ts"]

@@ -27,6 +27,24 @@
  * literal rather than the name; the document has no account of it to read. That
  * is the only place tokens do not survive, and it is named in {@link ExportResult.lost}.
  *
+ * **Everything leaves in CSS pixels.** Internally a length is EMU — 1/914400 of
+ * an inch, so that nothing a designer types has to be rounded — and none of
+ * that is any of a stylesheet's business: `px` is the unit CSS was given, an
+ * exported file must open in a browser and look like the canvas did, and a
+ * document in whole pixels must come out byte for byte what it came out
+ * before. So the conversion sits at this file's edge, in {@link cssPx} and the
+ * three helpers beside it, and every number that reaches the output goes
+ * through one of them. There is a test for exactly that promise, in both
+ * directions: a document in whole pixels comes out in whole pixels, and the
+ * same design written in points comes out the same file.
+ *
+ * **Nothing that is furniture comes out.** Margins, the column grid and the
+ * guides a designer drew rule the design in the editor and are not part of it,
+ * so they reach neither target — and that costs no code at all, because a datum
+ * is not a node and this file never opens the fields they live in. It is still
+ * a promise rather than an accident, so it is asserted in the tests and named in
+ * {@link ExportResult.lost}; see {@link GRID_LOST}.
+ *
  * A style is the one thing here that is not a translation but an *identity*: a
  * style is a shared bundle of declarations under a name, and so is a CSS class.
  * So it comes out as one — see {@link styleClasses} — and a wearer's rule holds
@@ -36,7 +54,7 @@
 import type { Frame } from "./geometry.ts";
 import { pathData, scalePoints } from "./geometry.ts";
 import { parseInstancePart } from "./components.ts";
-import { lineHeightPx } from "./measure.ts";
+import { lineHeightEmu } from "./measure.ts";
 import type { ModelNode, ModelScene } from "./model.ts";
 import {
 	DOCUMENT_BASE,
@@ -44,16 +62,21 @@ import {
 	SHAPE_PAINT,
 	SURFACE_BOX,
 	arrowHead,
+	cssLength,
+	cssPx,
+	cssRound,
 	cssText,
+	cssValue,
 	type Declarations,
 	diagonalRun,
 	paintFor,
-	paintOf,
 } from "./paint.ts";
 import {
 	type Dimension,
 	DIMENSIONS,
 	FRAME_DIMS,
+	GUIDE_PROPS,
+	type GuideProp,
 	KINDS,
 	LAYOUT_PROPS,
 	type LayoutProp,
@@ -67,7 +90,9 @@ import {
 	drawsWords,
 	findStyle,
 	frameOf,
+	guideLines,
 	isDiagonal,
+	isGridded,
 	isPlotted,
 	propValueOf,
 	styleProps,
@@ -75,6 +100,7 @@ import {
 	wornProps,
 } from "./scene.ts";
 import { flatten } from "./tree.ts";
+import { type Emu, cssPxFromEmu, emuOf } from "./units.ts";
 import {
 	type Picks,
 	type Token,
@@ -82,9 +108,10 @@ import {
 	activeTerm,
 	findToken,
 	frameVar,
+	guideAtIn,
+	isLengthType,
 	layoutVar,
 	luminance,
-	numeralOf,
 	parseVariable,
 	propVar,
 	resolveValue,
@@ -153,6 +180,45 @@ const ALWAYS_LOST = [
 	"Token chains are flattened: a token that names another token exports as the value at the end of the chain, under the first name.",
 	"Component instances are flattened into ordinary elements; the definition they came from is not in the output.",
 ];
+
+/**
+ * The one loss worth naming only for the documents that have it.
+ *
+ * Margins, a column grid and the lines a designer drew are **furniture**: they
+ * are drawn on the design and never *by* it. Nothing here had to be taught to
+ * skip them — a datum is not a `node/1`, so it never reaches a {@link ModelScene},
+ * and `guides`/`lines` are fields of the document this file never opens — so
+ * this is a claim about the output rather than a filter over it, and the tests
+ * beside this file assert it in both targets.
+ *
+ * Which is exactly why it has to be said out loud. Every other entry in the list
+ * is something the exporter *could not* carry; this one is something it
+ * deliberately did not, and a designer who ruled a page into twelve columns and
+ * finds no grid in the file is owed the difference. The second sentence is the
+ * substance: a grid that decided a coordinate is *in* the file, as that
+ * coordinate. What is gone is the ability to move the line and have the design
+ * follow — the same loss the rules take one entry above.
+ *
+ * Conditional, unlike its neighbours, because a document with no grid loses no
+ * grid, and a list of losses that pads itself is one nobody finishes reading.
+ */
+const GRID_LOST =
+	"The grid. Margins, columns and the guides you drew are drawing aids: they rule the design in the editor and are not in the file. What they decided is here, as the coordinates the nodes they held came out at.";
+
+/**
+ * True when the document holds a grid or a line that means anything.
+ *
+ * The same two questions `compile()` asks before it emits `ggrid/1` and
+ * `gline/3`, so the note appears for exactly the documents whose program has
+ * guides in it: {@link isGridded} for the grid, because one stored on a
+ * rectangle is read rather than corrected and says nothing to anybody, and a
+ * plain count for the lines, which are drawn on whatever they are drawn on.
+ */
+function isRuled(scene: Scene): boolean {
+	return flatten(scene.nodes).some(
+		(node) => isGridded(node) || guideLines(node).length > 0,
+	);
+}
 
 export interface ExportResult {
 	target: ExportTarget;
@@ -299,11 +365,11 @@ function docNode(index: DocIndex, id: string): SceneNode | undefined {
  * the hex — the one thing this file exists to avoid — and it would be a class
  * full of hex codes, which is worse than an inline one.
  *
- * Four of `parseVariable`'s six tags fall through to `undefined`, and only one
+ * Five of `parseVariable`'s seven tags fall through to `undefined`, and only one
  * of those is a hole worth watching. Measured before believing it: every caller
- * passes a `propVar` or a `frameVar` — nothing constructs a layout, constraint
- * or style variable and asks this — so the fall-through is unreachable rather
- * than lossy. That is not an accident of the callers:
+ * passes a `propVar` or a `frameVar` — nothing constructs a layout, guide,
+ * constraint or style variable and asks this — so the fall-through is
+ * unreachable rather than lossy. That is not an accident of the callers:
  *
  *   * `layout` (`lval(N,gap)`) and `constraint` (`cval(C)`) both drive
  *     *geometry*, and this exporter is positioned. A gap becomes solved
@@ -312,6 +378,10 @@ function docNode(index: DocIndex, id: string): SceneNode | undefined {
  *     REVISIT: a flow-layout emitter would write a real `gap`, and then a gap
  *     naming a length token wants `var(--spacing)` and would silently get the
  *     number instead.
+ *   * `guide` (`gval(S,columns)`) drives geometry too, and less directly still:
+ *     a margin decides where a datum sits, a rule pins a node to the datum, and
+ *     what reaches the file is the node's own solved coordinate. Nothing a grid
+ *     says is ever a declaration, so there is nothing here to preserve.
  *   * `style` (`sty(S)`) has no `Value` to return at all — a style's
  *     alternatives are whole records, not terms. A style's *parts* are read
  *     through the `prop` branch above, which is why a styled fill keeps its
@@ -360,6 +430,37 @@ function tokenNamed(
 		: undefined;
 }
 
+/**
+ * The `--name: value` block for every token this layer ended up naming.
+ *
+ * One function rather than the two near-copies the two targets used to hold —
+ * they differed only in where the block is written, `:root` for a page and
+ * `svg` for a file that may be pasted into one. A length token is converted
+ * like any other length: it is the definition a `width` or a `font-size` will
+ * dereference, so it has to be legal CSS at the point of *use*, where nothing
+ * knows any more that a token was involved.
+ */
+function customProperties(
+	index: DocIndex,
+	picks: Picks,
+	used: ReadonlySet<string>,
+): Declarations {
+	const out: Declarations = {};
+	for (const token of index.scene.tokens) {
+		if (!used.has(token.id)) continue;
+		const value = resolveValue(
+			{ tokens: index.scene.tokens, picks },
+			token.value,
+			tokenVar(token.id),
+		);
+		if (value === undefined) continue;
+		out[`--${index.custom.get(token.id)}`] = isLengthType(token.type)
+			? cssLength(value)
+			: value;
+	}
+	return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* One layer of the output                                             */
 /* ------------------------------------------------------------------ */
@@ -400,7 +501,10 @@ function slotsOf(model: ModelScene): Slot[] {
 	return out;
 }
 
-/** The box every root sits inside, so a document away from the origin still tiles. */
+/**
+ * The box every root sits inside, so a document away from the origin still
+ * tiles. In EMU, like the frames it is taken over; its callers convert.
+ */
 function modelBounds(model: ModelScene): Frame {
 	if (model.roots.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
 	let left = Number.POSITIVE_INFINITY;
@@ -416,9 +520,44 @@ function modelBounds(model: ModelScene): Frame {
 	return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
-/** Coordinates are exact rationals upstream; four places is well past a pixel. */
-const round = (n: number): number => Math.round(n * 10000) / 10000;
-const px = (n: number): string => `${round(n)}px`;
+/* ------------------------------------------------------------------ */
+/* EMU in, CSS pixels out                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The rounding, the conversion and the literal reader are `paint.ts`'s, taken
+ * here under this file's own names.
+ *
+ * They used to live here, which was defensible while the exporter was the only
+ * thing that turned a stored length into CSS. It is not: the canvas paints the
+ * same properties out of the same table, and a second copy of "an `emu`
+ * literal is not CSS" is a copy that drifts — which it did, and the corner of a
+ * rectangle exported rounded and drew square. So the conversion moved next to
+ * the table, and what stays here is the SVG target's arithmetic, which is about
+ * numbers that have already crossed.
+ */
+const round = cssRound;
+
+/** A length as a CSS declaration takes it. */
+const px = (emu: Emu): string => `${cssPx(emu)}px`;
+
+/**
+ * A box in float CSS pixels, converted once at the top of whatever draws it.
+ *
+ * The SVG target does real arithmetic on a frame — a centre, a diagonal's run,
+ * an arrowhead's barbs — and every bit of it was written in pixels and has
+ * pixel constants inside it (`arrowHead` clamps its barbs between 8 and 24).
+ * Converting the box once and leaving that arithmetic alone is both the smaller
+ * change and the honest one: those constants are about what a picture looks
+ * like, not about what a document holds, and rewriting them in EMU would move
+ * the decision out of the file that owns it.
+ */
+const framePx = (frame: Frame): Frame => ({
+	x: cssPxFromEmu(frame.x),
+	y: cssPxFromEmu(frame.y),
+	width: cssPxFromEmu(frame.width),
+	height: cssPxFromEmu(frame.height),
+});
 
 /* ------------------------------------------------------------------ */
 /* A style, as a class                                                 */
@@ -578,7 +717,9 @@ function classRule(
 			? tokenNamed(index, layer.universe.pick, propVar(node.id, prop))
 			: undefined;
 		if (token) used.add(token.id);
-		const said = paint(token ? `var(--${index.custom.get(token.id)})` : value);
+		const said = paint(
+			token ? `var(--${index.custom.get(token.id)})` : cssValue(prop, value),
+		);
 		Object.assign(declarations, said);
 		keys.set(prop, Object.keys(said));
 	}
@@ -642,10 +783,14 @@ function declarationsFor(
 	useTokens: boolean,
 	used: Set<string>,
 ): Declarations {
-	if (!useTokens) return paintOf(node);
-	// The same walk `paintOf` does, with the token's name standing in for the
-	// literal wherever the document named one. Kept parallel deliberately: the
-	// property-to-CSS mapping stays in exactly one table.
+	// The same walk `paintOf` does — the canvas's — with two differences, and the
+	// second is why this no longer takes `paintOf`'s shortcut when there are no
+	// token names to keep. One: the token's name stands in for the literal
+	// wherever the document named one. Two: a length is converted on the way in.
+	// Turning names off must change only what a declaration *reads as*, never
+	// what it means, so both paths have to convert or neither does — the
+	// round-trip test that inlines every `var()` and expects the plain export
+	// back is exactly the assertion that they agree.
 	const box: Declarations = {};
 	if (KINDS[node.kind].surface) Object.assign(box, SURFACE_BOX);
 	const shape = SHAPE_PAINT[node.kind];
@@ -655,12 +800,14 @@ function declarationsFor(
 		if (value === undefined) continue;
 		const paint = paintFor(node.kind, prop);
 		if (!paint) continue;
-		const token = tokenNamed(index, layer.universe.pick, propVar(node.id, prop));
+		const token = useTokens
+			? tokenNamed(index, layer.universe.pick, propVar(node.id, prop))
+			: undefined;
 		if (token) {
 			used.add(token.id);
 			Object.assign(box, paint(`var(--${index.custom.get(token.id)})`));
 		} else {
-			Object.assign(box, paint(value));
+			Object.assign(box, paint(cssValue(prop, value)));
 		}
 	}
 	return box;
@@ -678,18 +825,28 @@ function htmlContent(
 	// answers the same three questions the same way.
 	if (drawsWords(node)) return escapeText(node.rendered.text ?? "");
 	const doc = docNode(index, node.id);
-	const frame = node.frame;
+	// Pixels from here down. The inner `<svg class="s">` has no viewBox, so its
+	// user units are the box's CSS pixels — see BASE_CSS.
+	const frame = framePx(node.frame);
 	if (isDiagonal(node)) {
 		const { y1, y2 } = diagonalRun(frame, doc?.diagonal);
 		const head =
 			node.kind === "arrow"
 				? `<polyline points="${escapeAttr(arrowHead(0, y1, frame.width, y2))}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`
 				: "";
-		return `<svg class="s" aria-hidden="true"><line x1="0" y1="${y1}" x2="${frame.width}" y2="${y2}" stroke-linecap="round" fill="none"/>${head}</svg>`;
+		// Rounded, unlike before: a coordinate used to arrive as a float the
+		// solver had already settled, and now it arrives one division by 9525
+		// later, which is where `12.340000000000002` comes from.
+		return `<svg class="s" aria-hidden="true"><line x1="0" y1="${round(y1)}" x2="${round(frame.width)}" y2="${round(y2)}" stroke-linecap="round" fill="none"/>${head}</svg>`;
 	}
 	if (isPlotted(node)) {
 		if (!doc) return "";
 		const context = { tokens: index.scene.tokens, picks: layer.universe.pick };
+		// The scale is a ratio, so handing it the box in the unit we want out
+		// converts and resizes in one step: the vertices are in the document's
+		// own EMU, `from` is the EMU box they were authored in, and `to` is that
+		// box in pixels. A separate conversion afterwards would be a second
+		// place for the two to disagree.
 		const d = pathData(
 			scalePoints(doc.points ?? [], frameOf(doc, context), frame),
 			doc.closed,
@@ -863,16 +1020,7 @@ function htmlExport(
 		};
 		for (const root of layer.universe.model.roots) walk(root, true);
 		// Custom properties are a layer's own, so a theme is one block of them.
-		const custom: Declarations = {};
-		for (const token of index.scene.tokens) {
-			if (!used.has(token.id)) continue;
-			const value = resolveValue(
-				{ tokens: index.scene.tokens, picks: layer.universe.pick },
-				token.value,
-				tokenVar(token.id),
-			);
-			if (value !== undefined) custom[`--${index.custom.get(token.id)}`] = value;
-		}
+		const custom = customProperties(index, layer.universe.pick, used);
 		if (Object.keys(custom).length > 0) out.set(":root", custom);
 		return out;
 	};
@@ -988,22 +1136,30 @@ function svgPaint(
 		if (token) used.add(token.id);
 		Object.assign(
 			box,
-			paint(token ? `var(--${index.custom.get(token.id)})` : value),
+			paint(token ? `var(--${index.custom.get(token.id)})` : cssValue(prop, value)),
 		);
 	}
 	return box;
 }
 
-/** The number a line height reads as, for the em maths a tspan needs. */
+/**
+ * The number a line height reads as, for the em maths a tspan needs.
+ *
+ * A ratio, so it is read as itself and never as a length: `1.35` here means
+ * 1.35 of the font size, exactly as CSS reads a unitless line-height. A
+ * document that stated its leading as a *length* falls back to the default
+ * rather than being converted, which is a hole this predates and does not
+ * widen — see {@link lineHeightEmu} for the reader that handles both.
+ */
 function lineHeightOf(node: ModelNode): number {
 	const n = Number(node.rendered.lineHeight);
 	return Number.isFinite(n) && n > 0 ? n : 1.35;
 }
 
-function svgText(node: ModelNode, style: string): string {
+/** `frame` is the node's box in CSS pixels — see {@link svgNode}. */
+function svgText(node: ModelNode, frame: Frame, style: string): string {
 	const align = node.rendered.align ?? "left";
-	const x =
-		align === "center" ? node.frame.width / 2 : align === "right" ? node.frame.width : 0;
+	const x = align === "center" ? frame.width / 2 : align === "right" ? frame.width : 0;
 	const lh = lineHeightOf(node);
 	// The first baseline sits half the leading below the top, plus the ascent.
 	// In em, so a font size that is itself a custom property still works out.
@@ -1028,7 +1184,10 @@ function svgNode(
 	clips: string[],
 ): string {
 	const pad = "\t".repeat(depth + 1);
-	const frame = node.frame;
+	// The whole of this function is CSS pixels: an SVG user unit is one, given
+	// the viewBox `svgExport` writes. Converted here, once, rather than at the
+	// eight attributes below.
+	const frame = framePx(node.frame);
 	const declarations = svgPaint(index, layer, node, useTokens, used);
 	const style =
 		Object.keys(declarations).length === 0
@@ -1038,7 +1197,7 @@ function svgNode(
 	let own = "";
 	const doc = docNode(index, node.id);
 	if (drawsWords(node)) {
-		own = svgText(node, style);
+		own = svgText(node, frame, style);
 	} else if (isDiagonal(node)) {
 		const { y1, y2 } = diagonalRun(frame, doc?.diagonal);
 		const head =
@@ -1048,6 +1207,7 @@ function svgNode(
 		own = `<line x1="0" y1="${round(y1)}" x2="${round(frame.width)}" y2="${round(y2)}" fill="none" stroke-linecap="round"${style}/>${head}`;
 	} else if (isPlotted(node)) {
 		const context = { tokens: index.scene.tokens, picks: layer.universe.pick };
+		// Scaled straight into pixels, for the reason `htmlContent` gives.
 		const d = doc
 			? pathData(scalePoints(doc.points ?? [], frameOf(doc, context), frame), doc.closed)
 			: "";
@@ -1128,16 +1288,7 @@ function svgExport(
 		)
 		.join("\n");
 
-	const custom: Declarations = {};
-	for (const token of index.scene.tokens) {
-		if (!used.has(token.id)) continue;
-		const value = resolveValue(
-			{ tokens: index.scene.tokens, picks: base.universe.pick },
-			token.value,
-			tokenVar(token.id),
-		);
-		if (value !== undefined) custom[`--${index.custom.get(token.id)}`] = value;
-	}
+	const custom = customProperties(index, base.universe.pick, used);
 	// `svg` rather than `:root`, so the definitions hold both in a standalone
 	// file and when this markup is pasted into an HTML page.
 	const definitions =
@@ -1146,8 +1297,9 @@ function svgExport(
 	const defs = clips.length === 0 ? "" : `\n<defs>\n\t${clips.join("\n\t")}\n</defs>`;
 	const title = options.title ? `\n<title>${escapeText(options.title)}</title>` : "";
 
-	const w = round(bounds.width);
-	const h = round(bounds.height);
+	// The viewBox is what makes a user unit a CSS pixel for everything inside.
+	const w = cssPx(bounds.width);
+	const h = cssPx(bounds.height);
 	return {
 		classes: [],
 		text: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" fill="#0f172a">${title}${style}${defs}
@@ -1314,7 +1466,10 @@ function breakpointCollapse(
 	narrowLabel: string,
 	wideLabel: string,
 ): Collapse {
-	const width = Math.ceil(modelBounds(wide.model).width);
+	// A media query is a statement about the viewport, so this one is in CSS
+	// pixels like every other number that leaves this file, and rounded up: at
+	// exactly the design's own width the wide layer should already hold.
+	const width = Math.ceil(cssPx(modelBounds(wide.model).width));
 	return {
 		kind: "breakpoint",
 		variable,
@@ -1510,26 +1665,32 @@ interface StyleChange {
  * *line*. Ordering by what is written is how a real responsive ramp — bigger
  * type, tighter leading — comes out as "the lengths disagree" and refuses.
  *
- * So the entry reads the leading in pixels, which is the same arithmetic the
+ * So the entry reads the leading as a length, which is the same arithmetic the
  * text measurement uses, and both halves of such a ramp then agree.
+ *
+ * Everything here is EMU, and only the *sign* of a difference is ever read —
+ * see {@link room} — so the unit matters solely in that all the entries share
+ * one. Reading a length with `emuOf` rather than a bare-number parser is what
+ * makes `18px` and `0.25in` comparable at all, which a type ramp written in
+ * points beside a margin written in pixels needs.
  *
  * Everything else stays out and stays out on purpose: no stylesheet can know
  * which of two weights, two families or two alignments belongs on a narrow
  * screen, and a table with an entry for them would be a guess wearing a number.
  */
 const ROOMINESS: Partial<
-	Record<PropName, (drawn: Partial<Record<PropName, string>>) => number | undefined>
+	Record<PropName, (drawn: Partial<Record<PropName, string>>) => Emu | undefined>
 > = {
 	...Object.fromEntries(
-		PROP_NAMES.filter((prop) => PROPS[prop].type === "length").map((prop) => [
+		PROP_NAMES.filter((prop) => isLengthType(PROPS[prop].type)).map((prop) => [
 			prop,
-			(drawn: Partial<Record<PropName, string>>) => numeralOf(drawn[prop] ?? ""),
+			(drawn: Partial<Record<PropName, string>>) => emuOf(drawn[prop] ?? ""),
 		]),
 	),
 	lineHeight: (drawn) =>
 		drawn.lineHeight === undefined
 			? undefined
-			: lineHeightPx(drawn.size, drawn.lineHeight),
+			: lineHeightEmu(drawn.size, drawn.lineHeight),
 };
 
 /** How much room one universe's reading asks for, if the property is orderable. */
@@ -1777,6 +1938,15 @@ function describe(scene: Scene, variable: string): string {
 	if (parsed.kind === "layout") {
 		return `${parsed.node}’s ${LAYOUT_PROPS[parsed.field as LayoutProp]?.label.toLowerCase() ?? parsed.field}`;
 	}
+	if (parsed.kind === "guide") {
+		// A line's field is `at(g1)`, which names no row of the settings table; the
+		// phrase then falls back to the guide's own name, which is what a refusal
+		// about it should say anyway.
+		const guide = guideAtIn(parsed.field);
+		return guide === undefined
+			? `${parsed.node}’s ${GUIDE_PROPS[parsed.field as GuideProp]?.label.toLowerCase() ?? parsed.field}`
+			: `${parsed.node}’s guide ${guide}`;
+	}
 	if (parsed.kind === "style") {
 		return `the style “${findStyle(scene.styles, parsed.style)?.name ?? parsed.style}”`;
 	}
@@ -1803,6 +1973,7 @@ function emit(
 				? svgExport(index, layers, options)
 				: htmlExport(index, layers, options);
 	const lost = [...ALWAYS_LOST, ...spec.loses];
+	if (isRuled(index.scene)) lost.push(GRID_LOST);
 	if (options.tokens === false) {
 		lost.push("Token names: every value is inlined as the literal it resolved to.");
 	}

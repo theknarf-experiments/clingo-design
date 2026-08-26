@@ -1,4 +1,4 @@
-import { frame, rect, text, wearing } from "./shared.ts";
+import { at, frame, rect, text, wearing } from "./shared.ts";
 import { makeNode } from "../edits.ts";
 import {
 	RULES_HEADER,
@@ -92,7 +92,9 @@ export function component(): Scene {
 		y: number,
 		holds?: Record<string, number>,
 	): SceneNode => ({
-		...makeNode("instance", { x: 328, y, width: 176, height: 48 }, { id, name }),
+		// Through `at` like every other box in the folder: `makeNode` takes EMU,
+		// and the one place a template's pixels become EMU is that helper.
+		...makeNode("instance", at([328, y, 176, 48]), { id, name }),
 		instanceOf: "button",
 		...(holds ? { holds } : {}),
 	});

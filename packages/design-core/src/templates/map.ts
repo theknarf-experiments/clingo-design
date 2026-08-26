@@ -118,7 +118,9 @@ const rules = (over: number) => `${RULES_HEADER}
 %
 % Not "width": a #const replaces that constant symbol *everywhere*, and this
 % program says frame(N,width,V) to place a node. Naming a constant x, y, width
-% or height silently rewrites every frame in the document.
+% or height silently rewrites every frame in the document — and so does naming
+% one "emupx", which is the pixel the generated program declares and which every
+% coordinate below is multiplied by.
 #const side=${SIDE}.
 #const walk=${SIDE * 2}.
 dim(1..side).
@@ -189,10 +191,14 @@ lake(X,Y) :- want(lakes), dim(X), dim(Y), solid(X+DX,Y+DY) : step(DX,DY); not so
 % The board and every tile are derived. child/2 is a set, so paint order is
 % order/2 and nothing else: the board sits above the ${over} layers the page
 % holds, and the tiles above that.
+%
+% frame/3 is in EMU, so the pixel counts below are multiplied by "emupx" — a
+% #const the generated program declares, which gringo folds while grounding.
+% Writing ${TILE}*emupx keeps the number the one a person chose.
 node(board). kind(board,rect). child(page,board).
-frame(board,x,${PAD}). frame(board,y,${TOP}).
-frame(board,width,W) :- W = side*${TILE}.
-frame(board,height,W) :- W = side*${TILE}.
+frame(board,x,${PAD}*emupx). frame(board,y,${TOP}*emupx).
+frame(board,width,W) :- W = side*${TILE}*emupx.
+frame(board,height,W) :- W = side*${TILE}*emupx.
 order(board,${over + 1}).
 rendered(board,fill,L) :- resolved(tok(muted),L).
 rendered(board,radius,"2px").
@@ -200,10 +206,10 @@ rendered(board,radius,"2px").
 node(t(X,Y)) :- dim(X), dim(Y).
 kind(t(X,Y),rect) :- dim(X), dim(Y).
 child(page,t(X,Y)) :- dim(X), dim(Y).
-frame(t(X,Y),x,PX) :- dim(X), dim(Y), PX = ${PAD} + (X-1)*${TILE}.
-frame(t(X,Y),y,PY) :- dim(X), dim(Y), PY = ${TOP} + (Y-1)*${TILE}.
-frame(t(X,Y),width,${TILE}) :- dim(X), dim(Y).
-frame(t(X,Y),height,${TILE}) :- dim(X), dim(Y).
+frame(t(X,Y),x,PX) :- dim(X), dim(Y), PX = (${PAD} + (X-1)*${TILE})*emupx.
+frame(t(X,Y),y,PY) :- dim(X), dim(Y), PY = (${TOP} + (Y-1)*${TILE})*emupx.
+frame(t(X,Y),width,${TILE}*emupx) :- dim(X), dim(Y).
+frame(t(X,Y),height,${TILE}*emupx) :- dim(X), dim(Y).
 order(t(X,Y),I) :- dim(X), dim(Y), I = ${over + 1} + (Y-1)*side + X.
 rendered(t(X,Y),radius,"0px") :- dim(X), dim(Y).
 

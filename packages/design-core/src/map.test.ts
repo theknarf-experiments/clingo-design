@@ -19,7 +19,11 @@ import { renameConstraint, updateConstraint, violRefs } from "./edits.ts";
 import { UnsatisfiableError, explore, type Universe } from "./explore.ts";
 import type { Scene } from "./scene.ts";
 import { findTemplate } from "./templates/index.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { propVar } from "./values.ts";
+
+/** The board is drawn in pixels; a frame in the answer set is EMU. */
+const px = (n: number): number => n * EMU_PER_PX;
 
 const level = () => findTemplate("map")!.create();
 
@@ -121,8 +125,8 @@ test("the board's own constants do not shadow a dimension name", async () => {
 	assert.deepEqual(universes[0].model.byId.page?.frame, {
 		x: 0,
 		y: 0,
-		width: 348,
-		height: 404,
+		width: px(348),
+		height: px(404),
 	});
 });
 

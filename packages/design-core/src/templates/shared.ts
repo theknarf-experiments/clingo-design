@@ -9,11 +9,32 @@
  */
 import { makeNode } from "../edits.ts";
 import type { Dimension, SceneNode } from "../scene.ts";
+import { EMU_PER_PX } from "../units.ts";
 import { type Token, type Value, single } from "../values.ts";
 
+/**
+ * A node's geometry as a template states it: **whole CSS pixels**, because that
+ * is the unit a person laying out a page on a screen thinks in and because
+ * every one of these numbers was chosen by eye.
+ */
 export type Box = [x: number, y: number, width: number, height: number];
 
-export const at = ([x, y, width, height]: Box) => ({ x, y, width, height });
+/**
+ * The box as a {@link Frame}, which is EMU.
+ *
+ * The one place the templates cross, and the reason a template can go on being
+ * literal data: `[0, 0, 720, 400]` still reads as a 720-by-400 page rather than
+ * as `[0, 0, 720 * EMU_PER_PX, 400 * EMU_PER_PX]` repeated four hundred times.
+ * A px *string* elsewhere in a template needs no such treatment — `"22px"` is a
+ * length in either era, which is exactly what keeping the storage format
+ * unit-suffixed bought — so this is the only conversion in the folder.
+ */
+export const at = ([x, y, width, height]: Box) => ({
+	x: x * EMU_PER_PX,
+	y: y * EMU_PER_PX,
+	width: width * EMU_PER_PX,
+	height: height * EMU_PER_PX,
+});
 
 /**
  * Templates go through {@link makeNode} like any other node, so per-kind

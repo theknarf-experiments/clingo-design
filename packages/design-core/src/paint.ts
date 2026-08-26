@@ -13,9 +13,17 @@
  * is the markup a kind draws inside its box — that is React on one side and a
  * string on the other, and there is nothing shared to factor out. What moved is
  * everything that decides how a box looks.
+ *
+ * The unit crossing for a *property* is here for the same reason: a document's
+ * lengths are EMU and CSS wants pixels, and a stored literal can be spelled in
+ * a unit no browser reads. {@link cssValue} is that one step, and both renderers
+ * take it — see the note there. Geometry crosses separately in each renderer,
+ * because a frame is arithmetic each of them does its own way.
  */
 import type { Frame } from "./geometry.ts";
 import { KINDS, type Kinded, type NodeKind, PROPS, type PropName } from "./scene.ts";
+import { type Emu, cssPxFromEmu, emuOf } from "./units.ts";
+import { isLengthType } from "./values.ts";
 
 /** CSS declarations, keyed the way the DOM keys them: `borderRadius`. */
 export type Declarations = Record<string, string>;
@@ -131,6 +139,63 @@ export const SURFACE_BOX: Declarations = {
 	overflow: "hidden",
 };
 
+/* ------------------------------------------------------------------ */
+/* EMU in, CSS pixels out                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Four places, which is well past a pixel and short of the noise.
+ *
+ * Coordinates are exact rationals upstream and a pixel is 9525 EMU, so a solved
+ * value that is a third of a box divides into something with a long tail. Four
+ * decimals is a hundredth of the thinnest hairline anyone can draw, and cutting
+ * it there is what keeps a diff between two exports readable.
+ */
+export const cssRound = (n: number): number => Math.round(n * 10000) / 10000;
+
+/** A length on its way out of the model, as a number a stylesheet can hold. */
+export const cssPx = (emu: Emu): number => cssRound(cssPxFromEmu(emu));
+
+/**
+ * A stored length literal as CSS: `"0.25in"` and `"24px"` both come out `24px`.
+ *
+ * It lives here beside the table rather than in the exporter because it is not
+ * the exporter's question. A document's lengths are EMU and its *literals* are
+ * spelled in whatever unit the designer typed, `"119063emu"` included — the
+ * escape `formatLength` falls back on when no CSS unit says a value exactly.
+ * `emu` is not CSS at all, and a browser silently drops a declaration it cannot
+ * parse, so a radius typed as `12.5` would have rounded no corner and said
+ * nothing about it, on the canvas, while the export drew it correctly. A
+ * property that paints differently in the two renderers is exactly what this
+ * module exists to prevent.
+ *
+ * Two smaller reasons, both about the exporter. A document written in points or
+ * millimetres would otherwise come out with its own units intact, which is
+ * defensible until a *class* holds one wearer's `pt` beside a node's own `px`
+ * and the two ramps stop being comparable. And a file that is the same picture
+ * ought to be the same file however the designer spelled it, which is the
+ * property the export test pins.
+ *
+ * A literal no unit spells — a `"20.5px"` from a document older than EMU —
+ * passes through untouched. It is already CSS and the browser reads it exactly;
+ * inventing a number for it here would be an opinion about a migration that
+ * belongs upstream.
+ */
+export const cssLength = (literal: string): string => {
+	const emu = emuOf(literal);
+	return emu === undefined ? literal : `${cssPx(emu)}px`;
+};
+
+/**
+ * One rendered property on its way into a declaration.
+ *
+ * Which properties are lengths is asked of the value-type table rather than
+ * named here, so a new length-shaped property is converted the day it is added
+ * and a line height — a ratio, and famously not a length — never is.
+ */
+export const cssValue = (prop: PropName, value: string): string =>
+	isLengthType(PROPS[prop].type) ? cssLength(value) : value;
+
 /**
  * Which function turns one property into declarations for one kind, if any.
  *
@@ -169,7 +234,12 @@ export function paintOf(
 		const value = node.rendered[prop];
 		if (value === undefined) continue;
 		const paint = paintFor(node.kind, prop);
-		if (paint) Object.assign(box, paint(value));
+		// Through {@link cssValue}, for the same reason the exporter's walk goes
+		// through it: what the document stores is a length, and what CSS takes is
+		// pixels. The exporter cannot share this loop — it has a token to write as
+		// a `var()` before any of this — but it must not part company with it over
+		// the conversion, which is why the conversion is one function and not two.
+		if (paint) Object.assign(box, paint(cssValue(prop, value)));
 	}
 	return box;
 }

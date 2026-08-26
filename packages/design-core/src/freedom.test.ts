@@ -28,7 +28,20 @@ import {
 } from "./freedom.ts";
 import { type Scene, emptyScene, makeLayout } from "./scene.ts";
 import { managedNodes } from "./tree.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { single } from "./values.ts";
+
+/**
+ * The probe answers in whatever unit the theory variables are in, which is EMU,
+ * so the two cases that name an actual coordinate carry the factor. The rest of
+ * this file compares an extreme against `null` or against the solver's own
+ * answer, and those say the same thing in any unit — as does the pure
+ * arithmetic at the bottom, which is about `travelFrom` rather than about a
+ * document.
+ */
+const P = EMU_PER_PX;
+
+const px = (n: number): number => n * P;
 
 const empty = (): Scene => ({ ...emptyScene(), nodes: [] });
 
@@ -36,7 +49,14 @@ const empty = (): Scene => ({ ...emptyScene(), nodes: [] });
 function loose(...boxes: Array<[string, number, number, number, number]>): Scene {
 	let scene = empty();
 	for (const [id, x, y, width, height] of boxes) {
-		scene = addNode(scene, makeNode("rect", { x, y, width, height }, { id }));
+		scene = addNode(
+			scene,
+			makeNode(
+				"rect",
+				{ x: px(x), y: px(y), width: px(width), height: px(height) },
+				{ id },
+			),
+		);
 	}
 	return scene;
 }
@@ -71,7 +91,7 @@ test("a pinned edge leaves that coordinate one legal value", async () => {
 		"left",
 	).scene;
 	const { freedom } = await freedomOf(scene, ["a"]);
-	assert.deepEqual(freedom.a.x, { min: 40, max: 40 }, "left is pinned to 40");
+	assert.deepEqual(freedom.a.x, { min: px(40), max: px(40) }, "left is pinned to 40");
 	assert.ok(isPinned(freedom.a.x), "and reads as pinned");
 	assert.deepEqual(
 		freedom.a.y,
@@ -178,12 +198,22 @@ test("a rule that bounds a coordinate reports the room it left", async () => {
 		undefined,
 		"top",
 	).scene;
-	scene = { ...scene, rules: "&sum{ lv(a,x) } >= 20.\n&sum{ lv(a,x) } <= 90." };
+	scene = {
+		...scene,
+		rules: `&sum{ lv(a,x) } >= ${px(20)}.\n&sum{ lv(a,x) } <= ${px(90)}.`,
+	};
 	const { freedom, solved } = await freedomOf(scene, ["a"]);
-	assert.deepEqual(freedom.a.x, { min: 20, max: 90 }, "that far and no further");
+	assert.deepEqual(
+		freedom.a.x,
+		{ min: px(20), max: px(90) },
+		"that far and no further",
+	);
 	assert.ok(!isPinned(freedom.a.x));
-	assert.equal(solved.a.x, 40, "and the design still sits where it was drawn");
-	assert.deepEqual(travelFrom(freedom.a.x, solved.a.x), { lo: -20, hi: 50 });
+	assert.equal(solved.a.x, px(40), "and the design still sits where it was drawn");
+	assert.deepEqual(travelFrom(freedom.a.x, solved.a.x), {
+		lo: px(-20),
+		hi: px(50),
+	});
 });
 
 /* ------------------------------------------------------------------ */
@@ -194,13 +224,15 @@ test("a rule that bounds a coordinate reports the room it left", async () => {
 function laidOut(): Scene {
 	let scene = addNode(
 		empty(),
-		makeNode("frame", { x: 0, y: 0, width: 400, height: 100 }, { id: "box" }),
+		makeNode("frame", { x: 0, y: 0, width: px(400), height: px(100) }, {
+			id: "box",
+		}),
 	);
 	for (const id of ["c1", "c2", "c3"]) {
 		scene = addNodeTo(
 			scene,
 			"box",
-			makeNode("rect", { x: 0, y: 0, width: 50, height: 30 }, { id }),
+			makeNode("rect", { x: 0, y: 0, width: px(50), height: px(30) }, { id }),
 		);
 	}
 	return setLayout(

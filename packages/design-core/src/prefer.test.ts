@@ -27,7 +27,11 @@ import {
 } from "./explore.ts";
 import { compareCosts } from "./sampling.ts";
 import { STRENGTHS, emptyScene, type Scene } from "./scene.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { lit, single } from "./values.ts";
+
+/** A frame is EMU; the one geometric case here is stated in pixels. */
+const px = (n: number): number => n * EMU_PER_PX;
 
 /** Three rectangles in a frame, each free to take any of three fills. */
 function threeBoxes(): Scene {
@@ -227,7 +231,11 @@ test("solved geometry lands where it should in a ranked document", async () => {
 	for (const id of ["a", "b"]) {
 		scene = addNode(
 			scene,
-			makeNode("rect", { x: id === "a" ? 0 : 100, y: 0, width: 40, height: 40 }, { id }),
+			makeNode(
+				"rect",
+				{ x: id === "a" ? 0 : px(100), y: 0, width: px(40), height: px(40) },
+				{ id },
+			),
 		);
 		scene = setProp(scene, [id], "fill", [lit("#ff0000"), lit("#00ff00")]);
 	}
@@ -242,7 +250,7 @@ test("solved geometry lands where it should in a ranked document", async () => {
 	for (const u of out.universes) {
 		// a stays where it was drawn; b sits exactly 20 past its right edge.
 		assert.equal(u.model.byId.a?.frame.x, 0);
-		assert.equal(u.model.byId.b?.frame.x, 60);
+		assert.equal(u.model.byId.b?.frame.x, px(60));
 	}
 });
 

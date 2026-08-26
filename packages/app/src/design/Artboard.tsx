@@ -18,6 +18,7 @@ import {
 } from "@clingo-design/design-core";
 
 import styles from "./Artboard.module.css";
+import { canvasRect } from "./viewport";
 
 /**
  * The two things the answer set does not carry, with the box they were authored
@@ -30,7 +31,11 @@ import styles from "./Artboard.module.css";
  */
 interface DocShape {
 	node: SceneNode;
-	/** The frame the vertices were authored against, in this universe. */
+	/**
+	 * The frame the vertices were authored against, in this universe — and in
+	 * the document's own EMU, like the vertices themselves. See {@link Plot}: it
+	 * is the `from` of the one scaling that turns both into pixels.
+	 */
 	authored: Frame;
 }
 
@@ -101,6 +106,12 @@ function Stroke({
  * They are stored against the frame the node was drawn at, but the frame it is
  * *rendered* at can differ — a live resize, or a stretch under an automatic
  * layout — so they are scaled into whichever one arrived here.
+ *
+ * That one step is also the unit crossing, exactly as it is in the exporter: the
+ * vertices are in the document's own EMU, `authored` is the EMU box they were
+ * drawn in, and `frame` is the box this node is being painted at, in canvas
+ * pixels. Converting them separately afterwards would be a second place for the
+ * two to disagree about the same shape.
  */
 function Plot({ frame, doc }: { frame: Frame; doc: DocShape | undefined }) {
 	if (!doc) return null;
@@ -155,9 +166,20 @@ export interface ArtboardProps {
  * bezier into ASP is a phase of its own. Everything the picture is *made of*
  * comes from the atoms.
  *
+ * What it draws is the design and *only* the design. The margins, the column
+ * grid and the guides a designer drew rule a design without being part of it —
+ * the same line the exporter draws, and for the same reason — so they are a
+ * sibling of this component rather than something inside it: whoever places an
+ * artboard places a `Guides` beside it in the same plane.
+ *
  * Frames are positioned relative to their parent, which is exactly what nested
  * absolutely-positioned elements already do — so the render is a plain
  * recursion with no coordinate maths.
+ *
+ * That plane is **canvas pixels**, and it is where the document's EMU stops.
+ * Everything from `design-core` is EMU; a browser lays out in CSS pixels and
+ * cannot be talked out of it; so the crossing is one call in {@link render} and
+ * one inside {@link Plot}, and nothing else in the file converts.
  *
  * Memoised because the editor above it re-renders on every pointermove, and
  * most gestures (marquee, draw) do not touch the document at all.
@@ -184,7 +206,16 @@ export const Artboard = memo(function Artboard({
 	function render(node: ModelNode) {
 		// The solver has not seen an uncommitted drag, so the one thing that
 		// still overrides the answer set is the frame the pointer is holding.
-		const frame = preview?.get(node.id) ?? node.frame;
+		//
+		// Converted here and once, the way the exporter's `framePx` does it and
+		// for the same reason: everything below this line is a browser's business
+		// — a `left`, an SVG user unit, an arrowhead clamped between 8 and 24 —
+		// and every one of those numbers was written in pixels. What arrives is
+		// EMU, because that is what the document says and what the answer set
+		// carries, and the two are both `number` with a factor of 9525 between
+		// them, so a frame that reached the DOM unconverted would draw a business
+		// card nine miles wide.
+		const frame = canvasRect(preview?.get(node.id) ?? node.frame);
 		const unsettled =
 			varying !== undefined &&
 			Object.keys(node.rendered).some((prop) =>

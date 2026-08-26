@@ -3,13 +3,30 @@
  *
  * Pure and framework-free, so the tricky parts — which are the ones that make
  * dragging feel right or wrong — are testable without a browser.
+ *
+ * **Every number in this file is EMU** — see `units.ts`. Nothing here converts:
+ * a {@link Frame} arrives from `frameOf` in EMU and leaves in EMU, and the
+ * pointer deltas a gesture adds to one crossed over from float CSS pixels once,
+ * at the canvas edge, through `emuFromCssPx`.
+ *
+ * That makes the three plain numbers below the whole risk of the move. Each is a
+ * statement about a hand and an eye rather than about a document — four pixels
+ * is the smallest thing worth dragging, six is how near your aim has to come —
+ * so each is a pixel count *times* {@link EMU_PER_PX} and none of them is
+ * allowed to stay a bare 4, 6 or 8. Left alone they would have failed silently
+ * and in the worst direction: a minimum size of 4 EMU is four ten-thousandths of
+ * a pixel, so it stops existing, and a snap threshold of 6 EMU is never met by
+ * anything, so object snapping simply never fires again and nobody gets an
+ * error to read.
  */
+import { EMU_PER_PX, quantizeGesture, wholeEmu } from "./units.ts";
+
 export interface Point {
 	x: number;
 	y: number;
 }
 
-/** Position and size, relative to whatever the node is placed in. */
+/** Position and size in EMU, relative to whatever the node is placed in. */
 export interface Frame {
 	x: number;
 	y: number;
@@ -17,8 +34,8 @@ export interface Frame {
 	height: number;
 }
 
-/** Smallest a node may be dragged down to, in canvas pixels. */
-export const MIN_NODE_SIZE = 4;
+/** Smallest a node may be dragged down to: four pixels, as EMU. */
+export const MIN_NODE_SIZE = 4 * EMU_PER_PX;
 
 /** The eight resize grips, plus the body for moving. */
 export type Handle =
@@ -62,7 +79,9 @@ export function framesIntersect(a: Frame, b: Frame): boolean {
 	);
 }
 
-/** The frame grown by `by` on every side. Negative shrinks, never past zero. */
+/**
+ * The frame grown by `by` EMU on every side. Negative shrinks, never past zero.
+ */
 export function expandFrame(frame: Frame, by: number): Frame {
 	return {
 		x: frame.x - by,
@@ -171,7 +190,14 @@ export function pathBounds(
 	return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
 }
 
-/** The SVG `d` for a path's points. */
+/**
+ * The SVG `d` for a path's points, in whatever unit the points are in.
+ *
+ * Which is EMU, like everything else here — so a caller drawing this into a
+ * browser has to hand over points already crossed to CSS pixels, exactly as it
+ * does for every other coordinate it paints. This module does not convert; it
+ * would be the one place that did.
+ */
 export function pathData(
 	points: readonly PathPoint[],
 	closed = false,
@@ -287,13 +313,25 @@ export function resizeFrame(
 	return { x, y, width, height };
 }
 
-/** Rounds to whole pixels and enforces a minimum size. */
+/**
+ * Puts a gesture on a whole pixel and enforces a minimum size.
+ *
+ * The rounding used to be load-bearing for a different reason: `frame/3` reached
+ * ASP through a `Math.round`, so a fractional number in the document would have
+ * put the canvas and the solver a sub-pixel apart. That reason is gone — EMU are
+ * integers by the time the parser is done with them — and this is what is left,
+ * which is a claim about the pointer rather than about the compiler. A hand
+ * moving a mouse means a pixel; without a quantum here every drag would write a
+ * length like `10.4px` into a shared document and fill its history with
+ * sub-pixel noise. See `quantizeGesture`, which is deliberately not the same
+ * thing as a unit's spellability lattice.
+ */
 export function normaliseFrame(frame: Frame): Frame {
 	return {
-		x: Math.round(frame.x),
-		y: Math.round(frame.y),
-		width: Math.max(MIN_NODE_SIZE, Math.round(frame.width)),
-		height: Math.max(MIN_NODE_SIZE, Math.round(frame.height)),
+		x: quantizeGesture(frame.x),
+		y: quantizeGesture(frame.y),
+		width: Math.max(MIN_NODE_SIZE, quantizeGesture(frame.width)),
+		height: Math.max(MIN_NODE_SIZE, quantizeGesture(frame.height)),
 	};
 }
 
@@ -308,12 +346,84 @@ export interface SnapGuide {
 	/** Span to draw, so the guide reaches both the moved and matched edges. */
 	from: number;
 	to: number;
+	/**
+	 * What was caught, when the thing caught had a name — see {@link SnapLine}.
+	 *
+	 * Absent for an ordinary edge, because there is nothing to say about it: two
+	 * boxes lining up is a fact about where they happen to be. A line has an
+	 * identity in the document, so a caller holding this can turn what the hand
+	 * just did into something the document says. That is the whole reason the
+	 * snapping knows about lines at all.
+	 */
+	id?: string;
+	/**
+	 * Which of the moved frame's own places landed on it: its near edge, its
+	 * middle or its far edge. Named the way {@link SnapLine} is rather than as an
+	 * `Edge`, because this module knows nothing about `EDGES` — but the words are
+	 * the same words, so `edgeOn(guide.axis, guide.place)` is the rule a caller
+	 * would write.
+	 */
+	place?: "lead" | "mid" | "trail";
+}
+
+/**
+ * **What may catch a dragged edge, strongest first.**
+ *
+ * The order is the point, and it is not a tie-break rule — a stronger line wins
+ * even when a weaker one is *nearer*. What separates the tiers is how much
+ * somebody meant it:
+ *
+ * | rank     | what it is                        | who said so                        |
+ * | -------- | --------------------------------- | ---------------------------------- |
+ * | `drawn`  | a line a designer pulled out       | a person, for this exact purpose   |
+ * | `ruled`  | a margin or a column line          | the document, as a grid setting    |
+ * | `object` | another node's edge or centre      | nobody — it is where things landed |
+ *
+ * A hand-drawn guide beats a column line because pulling one out is a thing you
+ * do *when the grid is not what you want*; both beat an object edge because a
+ * card that happens to line up with the card above it is a coincidence, and a
+ * coincidence a pixel nearer should not steal the drop from the column the
+ * designer was aiming at. Below all three sits the fallback grid, which is not a
+ * rank at all: it only fires when nothing was caught, because aligning to
+ * something always beats aligning to nothing.
+ */
+export type SnapRank = "drawn" | "ruled" | "object";
+
+const RANKS: Record<SnapRank, number> = { drawn: 3, ruled: 2, object: 1 };
+
+/**
+ * One line to snap against — a hand-drawn guide, a margin, a column edge.
+ *
+ * In the same absolute coordinates the frames are, because that is where the
+ * pointer is. `id` is what the caller gets back on {@link SnapGuide} when this
+ * line is the one that caught, and in this codebase it is a datum term.
+ */
+export interface SnapLine {
+	axis: "x" | "y";
+	at: number;
+	rank: SnapRank;
+	id?: string;
 }
 
 export interface SnapResult {
 	frame: Frame;
 	guides: SnapGuide[];
 }
+
+/**
+ * How near an edge has to come before it is caught: six pixels, as EMU.
+ *
+ * A tolerance is about aim, not about the design, which is why it is stated in
+ * pixels and why it is *not* scaled by the camera — zoom in far enough and six
+ * canvas pixels is a hair on screen. That was already true before EMU and is
+ * left alone here deliberately: the fix is to divide by the camera scale at the
+ * one call site that has a camera, and doing it inside a pure module would mean
+ * passing one in.
+ */
+export const SNAP_THRESHOLD = 6 * EMU_PER_PX;
+
+/** The lattice a gesture falls back to when nothing is near: eight pixels, as EMU. */
+export const SNAP_GRID = 8 * EMU_PER_PX;
 
 export interface SnapOptions {
 	/** Frames to align against — everything except what is being dragged. */
@@ -323,10 +433,27 @@ export interface SnapOptions {
 	 * a node sits directly on the canvas.
 	 */
 	container?: Frame;
-	/** Screen-independent tolerance, in canvas pixels. */
+	/**
+	 * Lines to align against, over and above the frames — see {@link SnapLine}.
+	 *
+	 * Separate from `targets` rather than folded in as a zero-width frame, and
+	 * that is worth a sentence: a frame contributes three candidates on each of
+	 * two axes and has no name, while a line contributes one on one axis and has
+	 * one. Squeezing a line into a frame would mean six candidates where one was
+	 * meant, five of them on quantities the line has no opinion about.
+	 */
+	lines?: readonly SnapLine[];
+	/** Screen-independent tolerance in EMU — {@link SNAP_THRESHOLD} by default. */
 	threshold?: number;
-	/** Fall back to this grid when nothing else is near. 0 disables. */
+	/** Fall back to this grid when nothing else is near, in EMU. 0 disables. */
 	grid?: number;
+}
+
+/** One thing a dragged edge may land on, with how much it was meant. */
+interface Candidate {
+	at: number;
+	rank: SnapRank;
+	id?: string;
 }
 
 function edgesOf(frame: Frame) {
@@ -337,11 +464,13 @@ function edgesOf(frame: Frame) {
 }
 
 /**
- * Nudges `frame` onto nearby edges and centres.
+ * Nudges `frame` onto nearby lines, edges and centres.
  *
- * Object snapping is tried first and only falls back to the grid when nothing
- * is in range, so aligning to a neighbour always beats aligning to nothing.
- * `moving` controls which of the frame's own edges may be snapped: when
+ * Everything in range is tried first and only falls back to the grid when
+ * nothing is, so aligning to something always beats aligning to nothing. Among
+ * the things in range it is {@link SnapRank} that decides, and only then the
+ * distance — a line somebody drew outranks a box that happens to be a pixel
+ * nearer. `moving` controls which of the frame's own edges may be snapped: when
  * resizing, only the dragged side should move.
  */
 export function snapFrame(
@@ -354,48 +483,85 @@ export function snapFrame(
 		bottom: true,
 	},
 ): SnapResult {
-	const threshold = options.threshold ?? 6;
-	const grid = options.grid ?? 8;
+	const threshold = options.threshold ?? SNAP_THRESHOLD;
+	const grid = options.grid ?? SNAP_GRID;
 	const guides: SnapGuide[] = [];
 
-	const candidatesX: number[] = [];
-	const candidatesY: number[] = [];
+	const candidatesX: Candidate[] = [];
+	const candidatesY: Candidate[] = [];
 	if (options.container) {
 		const c = options.container;
-		candidatesX.push(c.x, c.x + c.width / 2, c.x + c.width);
-		candidatesY.push(c.y, c.y + c.height / 2, c.y + c.height);
+		for (const at of [c.x, c.x + c.width / 2, c.x + c.width]) {
+			candidatesX.push({ at, rank: "object" });
+		}
+		for (const at of [c.y, c.y + c.height / 2, c.y + c.height]) {
+			candidatesY.push({ at, rank: "object" });
+		}
 	}
 	for (const target of options.targets) {
 		const e = edgesOf(target);
-		candidatesX.push(...e.x);
-		candidatesY.push(...e.y);
+		for (const at of e.x) candidatesX.push({ at, rank: "object" });
+		for (const at of e.y) candidatesY.push({ at, rank: "object" });
+	}
+	for (const line of options.lines ?? []) {
+		const into = line.axis === "x" ? candidatesX : candidatesY;
+		into.push({ at: line.at, rank: line.rank, id: line.id });
 	}
 
 	const own = edgesOf(frame);
-	// Which of our own edges are eligible, as [value, offsetFromFrameOrigin].
-	const ownX: Array<[number, number]> = [];
-	if (moving.left !== false) ownX.push([own.x[0], 0]);
+	// Which of our own edges are eligible, as [value, offsetFromFrameOrigin], and
+	// which place on the node each of them is — the third field is what lets a
+	// caught line say *what* landed on it, which is the difference between "these
+	// two numbers agree" and "this card's centre is on column three".
+	type Own = [number, number, "lead" | "mid" | "trail"];
+	const ownX: Own[] = [];
+	if (moving.left !== false) ownX.push([own.x[0], 0, "lead"]);
 	if (moving.left !== false && moving.right !== false)
-		ownX.push([own.x[1], frame.width / 2]);
-	if (moving.right !== false) ownX.push([own.x[2], frame.width]);
+		ownX.push([own.x[1], frame.width / 2, "mid"]);
+	if (moving.right !== false) ownX.push([own.x[2], frame.width, "trail"]);
 
-	const ownY: Array<[number, number]> = [];
-	if (moving.top !== false) ownY.push([own.y[0], 0]);
+	const ownY: Own[] = [];
+	if (moving.top !== false) ownY.push([own.y[0], 0, "lead"]);
 	if (moving.top !== false && moving.bottom !== false)
-		ownY.push([own.y[1], frame.height / 2]);
-	if (moving.bottom !== false) ownY.push([own.y[2], frame.height]);
+		ownY.push([own.y[1], frame.height / 2, "mid"]);
+	if (moving.bottom !== false) ownY.push([own.y[2], frame.height, "trail"]);
 
-	function best(
-		edges: ReadonlyArray<[number, number]>,
-		candidates: readonly number[],
-	): { delta: number; at: number } | null {
-		let found: { delta: number; at: number } | null = null;
-		for (const [value] of edges) {
+	interface Hit {
+		delta: number;
+		at: number;
+		id?: string;
+		place: "lead" | "mid" | "trail";
+		rank: SnapRank;
+	}
+
+	/**
+	 * The strongest thing in range, and among equals the nearest.
+	 *
+	 * Written as a comparison rather than as a filtered pass per rank because a
+	 * rank that catches nothing must not stop a weaker one that does: "the
+	 * nearest of the strongest that caught anything" is one loop, and "the
+	 * strongest rank, then the nearest within it" is two loops with a bug in the
+	 * empty case.
+	 */
+	function best(edges: readonly Own[], candidates: readonly Candidate[]): Hit | null {
+		let found: Hit | null = null;
+		for (const [value, , place] of edges) {
 			for (const candidate of candidates) {
-				const delta = candidate - value;
+				const delta = candidate.at - value;
 				if (Math.abs(delta) > threshold) continue;
-				if (!found || Math.abs(delta) < Math.abs(found.delta)) {
-					found = { delta, at: candidate };
+				const better =
+					!found ||
+					RANKS[candidate.rank] > RANKS[found.rank] ||
+					(RANKS[candidate.rank] === RANKS[found.rank] &&
+						Math.abs(delta) < Math.abs(found.delta));
+				if (better) {
+					found = {
+						delta,
+						at: candidate.at,
+						id: candidate.id,
+						place,
+						rank: candidate.rank,
+					};
 				}
 			}
 		}
@@ -414,6 +580,8 @@ export function snapFrame(
 			at: snapX.at,
 			from: Math.min(next.y, span?.y ?? next.y),
 			to: Math.max(next.y + next.height, span ? span.y + span.height : next.y + next.height),
+			id: snapX.id,
+			place: snapX.place,
 		});
 	} else if (grid > 0) {
 		applyDelta(next, "x", roundTo(next.x, grid) - next.x, moving);
@@ -427,6 +595,8 @@ export function snapFrame(
 			at: snapY.at,
 			from: Math.min(next.x, span?.x ?? next.x),
 			to: Math.max(next.x + next.width, span ? span.x + span.width : next.x + next.width),
+			id: snapY.id,
+			place: snapY.place,
 		});
 	} else if (grid > 0) {
 		applyDelta(next, "y", roundTo(next.y, grid) - next.y, moving);
@@ -435,8 +605,17 @@ export function snapFrame(
 	return { frame: next, guides };
 }
 
+/**
+ * The nearest multiple of `step` — how the fallback grid catches a value.
+ *
+ * `wholeEmu` does the rounding, and what it is rounding is a count of grid steps
+ * rather than a length. It is here anyway because the tie rule is the whole
+ * question at exactly half a step out, and the tree should hold one of those:
+ * `units.ts` breaks ties away from zero, so a frame nudged onto the grid and the
+ * same frame written into the document agree about which way half goes.
+ */
 function roundTo(value: number, step: number): number {
-	return Math.round(value / step) * step;
+	return wholeEmu(value / step) * step;
 }
 
 /** Moving both edges translates; moving one edge resizes. */

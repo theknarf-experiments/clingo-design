@@ -16,6 +16,8 @@ import {
 	STRENGTH_NAMES,
 	type Scene,
 	type Strength,
+	UNITS,
+	type Unit,
 	isSoft,
 	addConstraint,
 	addCustomConstraint,
@@ -24,14 +26,15 @@ import {
 	constraintValue,
 	deadlock,
 	deleteConstraint,
-	dimension,
 	findInTree,
+	formatLength,
 	groupProps,
 	rangesOverGroup,
 	ref,
 	renameConstraint,
 	retargetConstraint,
 	sharedProps,
+	single,
 	takesMembers,
 	termLabel,
 	tokensOfType,
@@ -39,8 +42,10 @@ import {
 	violRefs,
 } from "@clingo-design/design-core";
 
+import { LengthInput } from "./ValueEditor";
 import styles from "./Constraints.module.css";
 import { cx } from "./cx";
+import { documentUnit, shownEmu } from "./lengths";
 
 export interface ConstraintsProps {
 	scene: Scene;
@@ -96,16 +101,19 @@ function Dimension({
 	scene,
 	constraint,
 	spec,
+	unit,
 	onSceneChange,
 }: {
 	scene: Scene;
 	constraint: Constraint;
 	spec: ConstraintSpec;
+	/** What the document is measured in — see the inspector's unit menu. */
+	unit: Unit;
 	onSceneChange: ConstraintsProps["onSceneChange"];
 }) {
 	if (!spec.valueType) return null;
 	const term = constraint.value?.[0];
-	// What it comes to right now. Without a universe in hand this is the
+	// What it comes to right now, in EMU. Without a universe in hand this is the
 	// token's first alternative, which is what the canvas would show anyway.
 	const resolved = constraintValue(scene, constraint);
 	const driven = term !== undefined && term.kind !== "literal";
@@ -120,22 +128,30 @@ function Dimension({
 				>
 					{termLabel(scene.tokens, term)}
 					<span className={styles.resolved}>
-						{resolved === undefined ? "?" : resolved}
+						{resolved === undefined ? "?" : shownEmu(resolved, unit)}
 					</span>
 				</span>
 			) : (
-				<input
-					type="number"
-					className={styles.limit}
-					data-role="constraint-value"
-					value={resolved ?? 0}
-					title="Pixels"
-					onChange={(e) =>
+				// The same field the inspector's coordinates use, for the same reason:
+				// a rule that holds two edges 12pt apart is a statement in points, so
+				// what is typed is what is stored. `dimension()` quantizes to a whole
+				// pixel and is still the right writer where a distance is *measured*
+				// off the design rather than said — which is what `addConstraint` and
+				// `retargetConstraint` do when a rule is created or changes kind.
+				<LengthInput
+					className={cx(styles.limit, styles.length)}
+					role="constraint-value"
+					value={
+						term?.kind === "literal"
+							? term.value
+							: formatLength(resolved ?? 0, unit)
+					}
+					unit={unit}
+					title={`How far apart, in ${UNITS[unit].label.toLowerCase()} — or with a unit of its own, like 12pt`}
+					onCommit={(text) =>
 						onSceneChange(
 							(prev) =>
-								updateConstraint(prev, constraint.id, {
-									value: dimension(Number(e.target.value) || 0),
-								}),
+								updateConstraint(prev, constraint.id, { value: single(text) }),
 							`constraint-value:${constraint.id}`,
 						)
 					}
@@ -152,12 +168,16 @@ function Dimension({
 						updateConstraint(prev, constraint.id, {
 							// Dropping a link keeps the number it was resolving to, so
 							// nothing jumps at the moment of unlinking.
-							value: link ? [ref(link[1])] : dimension(resolved ?? 0),
+							value: link
+								? [ref(link[1])]
+								: single(formatLength(resolved ?? 0, unit)),
 						}),
 					);
 				}}
 			>
-				<option value="">px</option>
+				{/* What "hold a number" is measured in, which is the document's unit
+				    and no longer always pixels. */}
+				<option value="">{UNITS[unit].symbol}</option>
 				{tokensOfType(scene, spec.valueType).map((t) => (
 					<option key={t.id} value={`ref:${t.id}`}>
 						{t.name}
@@ -197,6 +217,8 @@ export function Constraints({
 }: ConstraintsProps) {
 	const selected = [...selection];
 	const groups = Object.keys(model?.groups ?? {}).sort();
+	/** Every distance in this panel is read and written in it — see `lengths.ts`. */
+	const unit = documentUnit(scene);
 	/**
 	 * Blamed rules the *document* can explain, which is a different question from
 	 * the one the core answers.
@@ -299,7 +321,9 @@ export function Constraints({
 	function dimensionOf(c: Constraint): string {
 		const term = c.value?.[0];
 		if (term && term.kind !== "literal") return termLabel(scene.tokens, term);
-		return `${constraintValue(scene, c) ?? 0}px`;
+		// In the document's unit, like every other number in the editor — the
+		// sentence this lands in is read beside the panel that says `mm`.
+		return shownEmu(constraintValue(scene, c) ?? 0, unit);
 	}
 
 	function describe(c: Constraint): string {
@@ -684,6 +708,7 @@ export function Constraints({
 								scene={scene}
 								constraint={c}
 								spec={spec}
+								unit={unit}
 								onSceneChange={onSceneChange}
 							/>
 						</div>

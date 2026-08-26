@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { directSolver } from "./directSolver.ts";
+import { makeNode } from "./edits.ts";
 import { explore } from "./explore.ts";
 import {
 	EXPORT_TARGET_NAMES,
@@ -23,16 +24,20 @@ import {
 	exportSpace,
 	exportUniverse,
 } from "./export.ts";
-import { DOCUMENT_BASE, PAINT, cssName } from "./paint.ts";
+import { DOCUMENT_BASE, PAINT, cssName, paintOf } from "./paint.ts";
 import {
 	KINDS,
 	PROPS,
 	PROP_NAMES,
+	type PropName,
 	RULES_HEADER,
 	type Scene,
+	type SceneNode,
 	type Style,
+	makeGuides,
 	makeLayout,
 	starterTokens,
+	trackDatum,
 } from "./scene.ts";
 import { TEMPLATES } from "./templates/index.ts";
 import { card } from "./templates/card.ts";
@@ -41,7 +46,16 @@ import { places } from "./templates/places.ts";
 import { rail } from "./templates/rail.ts";
 import { typography } from "./templates/typography.ts";
 import { frame, rect, text, wearing, withToken } from "./templates/shared.ts";
-import { lit, ref, single } from "./values.ts";
+import { findInTree } from "./tree.ts";
+import {
+	EMU_PER_PX,
+	type Unit,
+	cssPxFromEmu,
+	emuOf,
+	formatLength,
+	nearestEmu,
+} from "./units.ts";
+import { type Value, isLengthType, lit, ref, single } from "./values.ts";
 
 /** A document whose universes differ only by a container's direction. */
 function flow(): Scene {
@@ -270,6 +284,140 @@ test("every kind the studio can draw reaches both targets", async () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* Furniture does not come out                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The same page said two ways.
+ *
+ * `held` is ruled into four columns, carries a hand-drawn line, and holds its
+ * card to column three with a rule. `settled` has no grid, no line and no rule,
+ * and its card simply sits at 480 — which is where the grid put the other one.
+ *
+ * They are the same *design*, and an export that carried any of the furniture
+ * would be the one place that could tell them apart.
+ */
+function ruledPage(held: boolean): Scene {
+	const card = rect("card", "Card", [held ? 0 : 480, 40, 120, 100], {
+		fill: [ref("accent")],
+	});
+	const page = frame("page", "Page", [0, 0, 960, 640], { fill: [ref("surface")] }, [
+		card,
+	]);
+	return {
+		styles: [],
+		tokens: starterTokens(),
+		nodes: [
+			held
+				? {
+						...page,
+						guides: makeGuides({
+							columns: 4,
+							gutter: 0,
+							marginLeft: 0,
+							marginRight: 0,
+						}),
+						lines: [{ id: "g1", axis: "y", at: single("220px") }],
+					}
+				: page,
+		],
+		constraints: held
+			? [
+					{
+						id: "third",
+						kind: "align",
+						prop: "fill",
+						nodes: ["card", trackDatum("page", 3, "left")],
+						edge: "left",
+						enabled: true,
+					},
+				]
+			: [],
+		rules: RULES_HEADER,
+	};
+}
+
+const onlyUniverse = async (scene: Scene) => {
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	assert.equal(exploration.universes.length, 1);
+	return exploration.universes[0];
+};
+
+test("a page ruled into columns exports the design, not the grid", async () => {
+	// The strongest form the promise has: the ruled document and the settled one
+	// are the same *file*, byte for byte, in both targets. Nothing about a margin,
+	// a column, a guide or the rule that read them survives — and the coordinate
+	// they decided does, because that is the design.
+	const held = ruledPage(true);
+	const settled = ruledPage(false);
+	const a = await onlyUniverse(held);
+	const b = await onlyUniverse(settled);
+	assert.equal(a.model.byId.card.frame.x, 480 * EMU_PER_PX, "the grid placed it");
+
+	for (const target of EXPORT_TARGET_NAMES) {
+		const out = exportUniverse(held, a, { target, title: "page" });
+		assert.equal(
+			out.text,
+			exportUniverse(settled, b, { target, title: "page" }).text,
+			`${target}: the grid left a mark on the file`,
+		);
+		// Said again directly, because the equality above would also hold if both
+		// files carried the same furniture. `220px` is the hand-drawn line's own
+		// place and is a number nothing else in this design has.
+		assert.doesNotMatch(out.text, /cg\(|gl\(|220px/);
+		// One target says `left: 480px` and the other `translate(480,40)`, so the
+		// claim is about the number: what the grid decided is in the file.
+		assert.match(out.text, /480/);
+	}
+});
+
+test("an export says it left the grid behind, and only where there was one", async () => {
+	// The one loss in the list that is a decision rather than a limitation, so it
+	// is the one that has to be said out loud. Conditional, because a list of
+	// losses that pads itself is one nobody finishes reading.
+	const grid = (out: { lost: string[] }) => out.lost.filter((l) => /^The grid\./.test(l));
+
+	const held = ruledPage(true);
+	const a = await onlyUniverse(held);
+	for (const target of EXPORT_TARGET_NAMES) {
+		const note = grid(exportUniverse(held, a, { target }));
+		assert.equal(note.length, 1, `${target}: expected the grid to be named once`);
+		// It has to say the second half too: the grid is gone, what it *decided* is
+		// not, and a designer who read only the first clause would go looking for a
+		// coordinate that is right there.
+		assert.match(note[0], /coordinates/);
+	}
+
+	const settled = ruledPage(false);
+	assert.deepEqual(
+		grid(exportUniverse(settled, await onlyUniverse(settled), { target: "html" })),
+		[],
+	);
+});
+
+test("a grid on something that is not a surface is not a grid to lose", async () => {
+	// The same question `compile()` asks before it emits `ggrid/1`: a grid stored
+	// on a rectangle is read rather than corrected on the way in, and says nothing
+	// to anybody. An export claiming to have dropped it would be claiming to have
+	// dropped something the document never had.
+	const scene = ruledPage(false);
+	const page = scene.nodes[0];
+	scene.nodes = [
+		{
+			...page,
+			children: [
+				{ ...page.children![0], guides: makeGuides({ columns: 12 }) },
+			],
+		},
+	];
+	const out = exportUniverse(scene, await onlyUniverse(scene), { target: "html" });
+	assert.equal(
+		out.lost.some((l) => /^The grid\./.test(l)),
+		false,
+	);
+});
+
+/* ------------------------------------------------------------------ */
 /* The space as one artefact                                           */
 /* ------------------------------------------------------------------ */
 
@@ -339,8 +487,17 @@ test("universes that differ only by direction are one artefact with a breakpoint
 		(u) => u.model.byId.b.frame.x !== u.model.byId.a.frame.x,
 	);
 	assert.ok(column && row);
-	assert.match(out.text, new RegExp(`top: ${column.model.byId.b.frame.y}px;`));
-	assert.match(media[2], new RegExp(`left: ${row.model.byId.b.frame.x}px;`));
+	// The model is EMU and the stylesheet is pixels, so the two are held against
+	// each other through the one conversion. This used to compare a coordinate
+	// with itself, which was true of the numbers and said nothing about them.
+	assert.match(
+		out.text,
+		new RegExp(`top: ${cssPxFromEmu(column.model.byId.b.frame.y)}px;`),
+	);
+	assert.match(
+		media[2],
+		new RegExp(`left: ${cssPxFromEmu(row.model.byId.b.frame.x)}px;`),
+	);
 	// The DOM is shared: one element per node, whatever the viewport.
 	assert.equal(out.text.match(/data-node="b"/g)?.length, 1);
 });
@@ -747,4 +904,226 @@ test("a document declares every property it would otherwise inherit", async () =
 			`.design is missing ${cssName(key)}`,
 		);
 	}
+});
+
+/* ------------------------------------------------------------------ */
+/* EMU stays inside                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A document with a length of every kind it can hold: a coordinate, a size, a
+ * radius, a stroke width, a font size, a length token, and — the one that must
+ * *not* be a length — a line height.
+ *
+ * Written as literals rather than through the geometry helpers on purpose. What
+ * these two tests are about is the spelling in the document, so the document
+ * has to say it out loud; a frame built from numbers would be testing whichever
+ * unit `makeFrame` happens to write in.
+ */
+function inPixels(): Scene {
+	const said = (
+		node: SceneNode,
+		box: [number, number, number, number],
+	): SceneNode => ({
+		...node,
+		frame: {
+			x: single(`${box[0]}px`),
+			y: single(`${box[1]}px`),
+			width: single(`${box[2]}px`),
+			height: single(`${box[3]}px`),
+		},
+	});
+	// The frame handed to `makeNode` is thrown away by `said`; only the kind's
+	// own defaults survive, which is what these nodes are here for.
+	const bare = { x: 0, y: 0, width: 0, height: 0 };
+	const panel = said(makeNode("rect", bare, { id: "panel", name: "Panel" }), [
+		24, 12, 300, 120,
+	]);
+	const headline = said(
+		makeNode("text", bare, { id: "headline", name: "Headline", text: "Hello" }),
+		[24, 156, 300, 48],
+	);
+	const rule = said(makeNode("line", bare, { id: "rule", name: "Rule" }), [
+		24, 228, 300, 24,
+	]);
+	return {
+		styles: [],
+		tokens: [
+			...starterTokens(),
+			{ id: "gutter", name: "gutter", type: "length", value: single("24px") },
+		],
+		nodes: [
+			said(makeNode("frame", bare, { id: "page", name: "Page" }), [
+				0, 0, 480, 300,
+			]),
+		].map((page) => ({
+			...page,
+			props: { fill: [ref("muted")] },
+			children: [
+				{
+					...panel,
+					props: {
+						fill: [ref("accent")],
+						radius: [ref("gutter")],
+						stroke: [lit("#0f172a")],
+						strokeWidth: [lit("6px")],
+					},
+				},
+				{
+					...headline,
+					props: {
+						...headline.props,
+						size: single("24px"),
+						lineHeight: single("1.35"),
+					},
+				},
+				{ ...rule, props: { ...rule.props, strokeWidth: single("3px") } },
+			],
+		})),
+		constraints: [],
+		rules: RULES_HEADER,
+	};
+}
+
+/**
+ * The same document with every length respelled in `unit`.
+ *
+ * Length-typed only, and the table says which: a `weight` of `"400"` and a
+ * `lineHeight` of `"1.35"` are bare numbers that `emuOf` would happily read as
+ * pixels, and respelling either would be this helper inventing a design rather
+ * than restating one. That is the same distinction the exporter's own
+ * {@link cssValue} turns on, so the two agreeing is part of what is being
+ * tested.
+ */
+function respelled(scene: Scene, unit: Unit): Scene {
+	const say = (value: Value): Value =>
+		value.map((term) => {
+			if (term.kind !== "literal") return term;
+			const emu = emuOf(term.value);
+			return emu === undefined ? term : lit(formatLength(emu, unit));
+		});
+	const walk = (node: SceneNode): SceneNode => ({
+		...node,
+		frame: {
+			x: say(node.frame.x),
+			y: say(node.frame.y),
+			width: say(node.frame.width),
+			height: say(node.frame.height),
+		},
+		props: Object.fromEntries(
+			Object.entries(node.props).map(([prop, value]) => [
+				prop,
+				isLengthType(PROPS[prop as PropName].type) ? say(value) : value,
+			]),
+		),
+		...(node.children ? { children: node.children.map(walk) } : {}),
+	});
+	return {
+		...scene,
+		nodes: scene.nodes.map(walk),
+		tokens: scene.tokens.map((token) =>
+			isLengthType(token.type) ? { ...token, value: say(token.value) } : token,
+		),
+	};
+}
+
+test("a document in whole pixels comes out in whole pixels", async () => {
+	// The promise EMU is allowed to make: geometry is 1/914400 of an inch on the
+	// inside and the file is unchanged on the outside. Every number below is the
+	// one the document states, and none of them acquired a fraction on the way
+	// through the solver, the answer set and two emitters.
+	const scene = inPixels();
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+
+	const html = exportUniverse(scene, universe, { target: "html" }).text;
+	assert.ok(block(html, ".n1")?.includes("left: 24px;"));
+	assert.ok(block(html, ".n1")?.includes("top: 12px;"));
+	assert.ok(block(html, ".n1")?.includes("width: 300px;"));
+	assert.ok(block(html, ".n1")?.includes("height: 120px;"));
+	// A length that names a token is the token, and the definition is pixels.
+	assert.ok(block(html, ".n1")?.includes("border-radius: var(--gutter);"));
+	assert.ok(block(html, ":root")?.includes("--gutter: 24px;"));
+	assert.ok(block(html, ".n1")?.includes("border-width: 6px;"));
+	assert.ok(block(html, ".n2")?.includes("font-size: 24px;"));
+	// The design's own box, which is the bounds of every root — and `block`
+	// would find BASE_CSS's `.design` first, so this one is matched whole.
+	assert.match(html, /\n\.design \{\n\twidth: 480px;\n\theight: 300px;\n\}/);
+
+	const svg = exportUniverse(scene, universe, { target: "svg" }).text;
+	assert.match(svg, /viewBox="0 0 480 300"/);
+	assert.match(svg, /<g transform="translate\(24,12\)" data-node="panel"/);
+	assert.match(svg, /<rect width="300" height="120"/);
+	// A diagonal's own arithmetic is in pixels too, barbs and all.
+	assert.match(svg, /data-node="rule"[\s\S]*?<line x1="0" y1="0" x2="300" y2="24"/);
+
+	// And the whole of it, rather than the numbers anyone thought to name: a
+	// fraction anywhere is a conversion that leaked.
+	for (const text of [html, svg]) {
+		for (const [, n] of text.matchAll(/(-?\d+(?:\.\d+)?)px/g)) {
+			assert.ok(Number.isInteger(Number(n)), `${n}px is not a whole pixel`);
+		}
+	}
+});
+
+test("the same design said in points is the same file", async () => {
+	// The other half of the same promise, and the sharper half. A document holds
+	// the unit its designer typed — 18pt stays 18pt on disk, which is the whole
+	// reason the storage form kept its suffixes — and an export must carry none
+	// of that: the file is the picture, the picture is identical, so the bytes
+	// are identical. Points because every whole pixel is exactly 0.75 of one, so
+	// the two documents can say the same design with nothing rounded.
+	const pixels = inPixels();
+	const points = respelled(pixels, "pt");
+	assert.notDeepEqual(points.nodes, pixels.nodes, "the documents differ, as they must");
+	assert.deepEqual(
+		findInTree(points.nodes, "panel")?.frame.x[0],
+		lit("18pt"),
+		"24px, in the unit the designer typed",
+	);
+	assert.deepEqual(
+		findInTree(points.nodes, "headline")?.props.lineHeight,
+		single("1.35"),
+		"a ratio is not a length and is left alone",
+	);
+
+	for (const target of EXPORT_TARGET_NAMES) {
+		const [a, b] = await Promise.all(
+			[pixels, points].map(async (scene) => {
+				const universe = (await explore(scene, directSolver, { limit: 1 }))
+					.universes[0];
+				return exportUniverse(scene, universe, { target, title: "units" }).text;
+			}),
+		);
+		assert.equal(a, b, `${target}: the unit a designer typed reached the file`);
+	}
+});
+
+test("a length no CSS unit spells reaches the canvas as pixels too", async () => {
+	// The literal `formatLength` falls back on when nothing says a value exactly.
+	// Typing `12.5` into a Radius field gives 119063 EMU — half a thousandth of a
+	// pixel off twelve and a half, and no CSS unit spells it — so the document
+	// records `"119063emu"`, which is a real spelling and not a corrupt one.
+	//
+	// `emu` is not CSS, and a browser drops a declaration it cannot parse in
+	// silence. Handed straight to the canvas the corner would simply not round,
+	// while the exporter converted and wrote the radius correctly: a property
+	// that paints differently in the two renderers, which is the one thing
+	// `paint.ts` exists to prevent. So both renderers are asked here, in one
+	// test, because the claim is about the two of them agreeing.
+	const emu = nearestEmu("12.5px");
+	assert.ok(emu !== undefined);
+	const radius = formatLength(emu, "px");
+	assert.equal(radius, "119063emu", "no CSS unit spells this value exactly");
+
+	assert.deepEqual(paintOf({ kind: "rect", rendered: { radius } }), {
+		borderRadius: "12.5001px",
+	});
+
+	const scene = inPixels();
+	const panel = findInTree(scene.nodes, "panel");
+	assert.ok(panel);
+	panel.props.radius = single(radius);
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+	const html = exportUniverse(scene, universe, { target: "html" }).text;
+	assert.ok(block(html, ".n1")?.includes("border-radius: 12.5001px;"));
 });

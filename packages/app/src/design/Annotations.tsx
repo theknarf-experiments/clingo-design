@@ -1,11 +1,20 @@
 import type { Annotation } from "@clingo-design/design-core";
 
 import styles from "./Annotations.module.css";
+import { canvasPoint } from "./viewport";
 
-/** How far a dimension's end ticks reach either side of it, in document units. */
+/**
+ * How far a dimension's end ticks reach either side of it, in canvas pixels.
+ *
+ * Pixels, not EMU, and applied only after the mark's own coordinates have
+ * crossed. A tick is a piece of notation about the design rather than a length
+ * in it — four pixels is what makes it read as a tick — and if it scaled with
+ * the drawing it would grow into a bar on a poster and vanish on a business
+ * card.
+ */
 const TICK = 4;
 
-/** How far a label floats off the mark it belongs to. */
+/** How far a label floats off the mark it belongs to, likewise in pixels. */
 const LIFT = 5;
 
 export interface AnnotationsProps {
@@ -22,8 +31,11 @@ export interface AnnotationsProps {
  * mistaken for. It takes no pointer events at all, so nothing here can get in
  * the way of a drag.
  *
- * Everything is in document coordinates, inside a one-pixel anchor at the
- * origin that overflows — the same trick the pen uses.
+ * Everything is drawn inside a one-pixel anchor at the origin that overflows —
+ * the same trick the pen uses — so the marks share the editor's canvas
+ * coordinates. What `annotate` answers with is the *design's* coordinates,
+ * which are EMU, so each end of a mark crosses through `viewport.ts` on its way
+ * into an attribute; only the notation around it is a pixel count.
  */
 export function Annotations({ notes }: AnnotationsProps) {
 	if (notes.length === 0) return null;
@@ -38,12 +50,14 @@ export function Annotations({ notes }: AnnotationsProps) {
 						? { along: note.axis === "x" ? "y" : "x", at: note.at }
 						: { along: note.axis, at: note.at };
 				const horizontal = line.along === "x";
-				const a = horizontal
-					? { x: note.from, y: line.at }
-					: { x: line.at, y: note.from };
-				const b = horizontal
-					? { x: note.to, y: line.at }
-					: { x: line.at, y: note.to };
+				const a = canvasPoint(
+					horizontal
+						? { x: note.from, y: line.at }
+						: { x: line.at, y: note.from },
+				);
+				const b = canvasPoint(
+					horizontal ? { x: note.to, y: line.at } : { x: line.at, y: note.to },
+				);
 				const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 				return (
 					<g

@@ -33,7 +33,11 @@ import {
 } from "./edits.ts";
 import type { Scene } from "./scene.ts";
 import { findTemplate } from "./templates/index.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { lit } from "./values.ts";
+
+/** A frame is EMU; the one case that drags something says the drag in pixels. */
+const px = (n: number): number => n * EMU_PER_PX;
 
 const card = (): Scene => findTemplate("card")!.create();
 const palette = (): Scene => findTemplate("palette")!.create();
@@ -90,14 +94,21 @@ test("a node's name is the only label the program never sees", async () => {
 test("a drag re-grounds, because a coordinate is a term", async () => {
 	const base = card();
 	// The badge sits at 40,40 and is 64x26; this is one pixel of drag.
-	const moved = setFrame(base, "badge", { x: 41, y: 40, width: 64, height: 26 });
+	const moved = setFrame(base, "badge", {
+		x: px(41),
+		y: px(40),
+		width: px(64),
+		height: px(26),
+	});
 	assert.equal(await reuses(base, moved), false);
-	// And this is why it cannot be an external: the atom `frame(badge,x,41)` is
-	// not in the old grounding at all. Making it so means grounding every
-	// coordinate a node could hold, which is measured in the header of
-	// explore.ts and is two orders of magnitude the wrong way.
+	// And this is why it cannot be an external: the atom `frame(badge,x,390525)`
+	// is not in the old grounding at all. Making it so means grounding every
+	// coordinate a node could hold — and EMU makes that argument stronger rather
+	// than weaker, since the lattice a coordinate lives on is now 9525 times
+	// finer. It is measured in the header of explore.ts and is orders of
+	// magnitude the wrong way.
 	assert.ok(
-		addedLines(base, moved).includes("frame(badge,x,41)."),
+		addedLines(base, moved).includes(`frame(badge,x,${px(41)}).`),
 		"the moved coordinate arrives as a brand-new atom",
 	);
 });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+	DUPLICATE_OFFSET,
 	addNode,
 	deleteNodes,
 	duplicateNodes,
@@ -14,15 +15,33 @@ import {
 	setProp,
 	setText,
 } from "./edits.ts";
+import { type Frame, MIN_NODE_SIZE } from "./geometry.ts";
 import { type Scene, emptyScene, frameOf } from "./scene.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { lit, propVar, ref, resolveValue, single } from "./values.ts";
+
+/**
+ * Cases are stated in pixels and frames are read in EMU, so the two helpers
+ * below do the multiplying. Nothing an edit does cares which unit it is in —
+ * the arithmetic would be the same in furlongs — but a document's minimum size
+ * and a gesture's quantum are both pixel counts, so the cases that are *about*
+ * those two have to be written in a unit that can express them.
+ */
+const P = EMU_PER_PX;
+
+const box = (x: number, y: number, width: number, height: number): Frame => ({
+	x: x * P,
+	y: y * P,
+	width: width * P,
+	height: height * P,
+});
 
 function withBoxes(n: number): Scene {
 	let scene: Scene = { ...emptyScene(), nodes: [] };
 	for (let i = 0; i < n; i++) {
 		scene = addNode(
 			scene,
-			makeNode("rect", { x: i * 50, y: 0, width: 40, height: 40 }, {
+			makeNode("rect", box(i * 50, 0, 40, 40), {
 				id: `b${i}`,
 				name: `Box ${i}`,
 			}),
@@ -34,15 +53,17 @@ function withBoxes(n: number): Scene {
 const ids = (scene: Scene) => scene.nodes.map((n) => n.id);
 
 test("makeNode gives a rect sensible defaults", () => {
-	const node = makeNode("rect", { x: 5.4, y: 5.6, width: 100, height: 80 });
+	const node = makeNode("rect", box(5.4, 5.6, 100, 80));
 	assert.equal(node.kind, "rect");
-	assert.deepEqual(frameOf(node), { x: 5, y: 6, width: 100, height: 80 });
+	// The fractional pixels are gone: a frame arrives from a gesture, and a
+	// gesture means a whole pixel however finely the pointer reports it.
+	assert.deepEqual(frameOf(node), box(5, 6, 100, 80));
 	assert.equal(node.props.fill?.[0]?.kind, "literal");
 	assert.ok(node.id.length > 0);
 });
 
 test("makeNode gives a text node content", () => {
-	const node = makeNode("text", { x: 0, y: 0, width: 100, height: 20 });
+	const node = makeNode("text", box(0, 0, 100, 20));
 	assert.equal(node.kind, "text");
 	// Content is a property now, so a new text node arrives with one alternative.
 	assert.equal(node.props.text?.length, 1);
@@ -51,7 +72,7 @@ test("makeNode gives a text node content", () => {
 
 test("new node ids are unique", () => {
 	const seen = new Set(
-		Array.from({ length: 200 }, () => makeNode("rect", { x: 0, y: 0, width: 1, height: 1 }).id),
+		Array.from({ length: 200 }, () => makeNode("rect", box(0, 0, 1, 1)).id),
 	);
 	assert.equal(seen.size, 200);
 });
@@ -65,27 +86,27 @@ test("add and delete", () => {
 });
 
 test("moveNodes translates only the named nodes", () => {
-	const moved = moveNodes(withBoxes(3), ["b0", "b2"], 10, -5);
-	assert.deepEqual(frameOf(moved.nodes[0]), { x: 10, y: -5, width: 40, height: 40 });
-	assert.deepEqual(frameOf(moved.nodes[1]), { x: 50, y: 0, width: 40, height: 40 });
-	assert.deepEqual(frameOf(moved.nodes[2]), { x: 110, y: -5, width: 40, height: 40 });
+	const moved = moveNodes(withBoxes(3), ["b0", "b2"], 10 * P, -5 * P);
+	assert.deepEqual(frameOf(moved.nodes[0]), box(10, -5, 40, 40));
+	assert.deepEqual(frameOf(moved.nodes[1]), box(50, 0, 40, 40));
+	assert.deepEqual(frameOf(moved.nodes[2]), box(110, -5, 40, 40));
 });
 
 test("moveNodes rounds to whole pixels", () => {
-	const moved = moveNodes(withBoxes(1), ["b0"], 0.4, 0.6);
-	assert.deepEqual(frameOf(moved.nodes[0]), { x: 0, y: 1, width: 40, height: 40 });
+	// Still whole pixels, and now for the only reason left: a hand means a
+	// pixel, and a shared document should not fill up with sub-pixel diffs. The
+	// compiler no longer needs it — see `normaliseFrame`.
+	const moved = moveNodes(withBoxes(1), ["b0"], 0.4 * P, 0.6 * P);
+	assert.deepEqual(frameOf(moved.nodes[0]), box(0, 1, 40, 40));
 });
 
 test("setFrame and setFrames enforce the minimum size", () => {
-	const one = setFrame(withBoxes(1), "b0", { x: 0, y: 0, width: 0, height: 0 });
-	assert.ok(frameOf(one.nodes[0]).width >= 4);
+	const one = setFrame(withBoxes(1), "b0", box(0, 0, 0, 0));
+	assert.ok(frameOf(one.nodes[0]).width >= MIN_NODE_SIZE);
 
-	const many = setFrames(
-		withBoxes(2),
-		new Map([["b1", { x: 9, y: 9, width: 11, height: 12 }]]),
-	);
-	assert.deepEqual(frameOf(many.nodes[1]), { x: 9, y: 9, width: 11, height: 12 });
-	assert.deepEqual(frameOf(many.nodes[0]), { x: 0, y: 0, width: 40, height: 40 });
+	const many = setFrames(withBoxes(2), new Map([["b1", box(9, 9, 11, 12)]]));
+	assert.deepEqual(frameOf(many.nodes[1]), box(9, 9, 11, 12));
+	assert.deepEqual(frameOf(many.nodes[0]), box(0, 0, 40, 40));
 });
 
 test("setProp replaces the whole list of alternatives", () => {
@@ -157,7 +178,11 @@ test("reorder one step at a time", () => {
 
 test("duplicate offsets the copies and reports their ids", () => {
 	const scene = withBoxes(2);
-	const { scene: next, ids: created } = duplicateNodes(scene, ["b0"], 16);
+	const { scene: next, ids: created } = duplicateNodes(
+		scene,
+		["b0"],
+		DUPLICATE_OFFSET,
+	);
 
 	assert.equal(next.nodes.length, 3);
 	assert.equal(created.length, 1);
@@ -167,7 +192,7 @@ test("duplicate offsets the copies and reports their ids", () => {
 	const byId = (s: Scene, id: string) => s.nodes.find((n) => n.id === id);
 	const copy = byId(next, created[0]);
 	assert.ok(copy);
-	assert.deepEqual(frameOf(copy), { x: 16, y: 16, width: 40, height: 40 });
+	assert.deepEqual(frameOf(copy), box(16, 16, 40, 40));
 	assert.notEqual(created[0], "b0");
 
 	// The copy is independent of the original.
@@ -181,7 +206,7 @@ test("duplicate offsets the copies and reports their ids", () => {
 test("edits never mutate the input scene", () => {
 	const scene = withBoxes(2);
 	const snapshot = JSON.stringify(scene);
-	moveNodes(scene, ["b0"], 10, 10);
+	moveNodes(scene, ["b0"], 10 * P, 10 * P);
 	deleteNodes(scene, ["b0"]);
 	setProp(scene, ["b0"], "fill", single("#fff"));
 	reorderNodes(scene, ["b0"], "front");

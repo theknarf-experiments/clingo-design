@@ -6,7 +6,15 @@ const PAGE = { width: 640, height: 380 };
 const PANEL = { width: 180, height: 212 };
 const GUTTER = 24;
 
-/** Where the panel sits in each design: against the near edge, or the far one. */
+/**
+ * Where the panel sits in each design: against the near edge, or the far one.
+ *
+ * In **pixels**, like every other number in this folder, and so is the `"px"`
+ * literal spelled from it below — which is why the frame `at` converts and the
+ * alternative it spells do not have to agree about anything but the number. A
+ * reader comparing one of these against solved geometry is comparing against
+ * EMU and has to say so.
+ */
 export const PANEL_PLACES = [
 	GUTTER + 16,
 	PAGE.width - PANEL.width - GUTTER - 16,

@@ -22,15 +22,19 @@ import {
 import { UnsatisfiableError, explore } from "./explore.ts";
 import { findWays } from "./relax.ts";
 import { dimension, emptyScene, type Scene } from "./scene.ts";
+import { EMU_PER_PX } from "./units.ts";
 import { lit, propVar } from "./values.ts";
 
 /** Boxes that may each take any of `palette`. */
+/** A frame and a `dimension` are EMU; these cases are stated in pixels. */
+const px = (n: number): number => n * EMU_PER_PX;
+
 function boxes(ids: string[], palette = ["#ff0000", "#00ff00", "#0000ff"]): Scene {
 	let scene = emptyScene();
 	for (const id of ids) {
 		scene = addNode(
 			scene,
-			makeNode("rect", { x: 0, y: 0, width: 40, height: 40 }, { id }),
+			makeNode("rect", { x: 0, y: 0, width: px(40), height: px(40) }, { id }),
 		);
 		scene = setProp(scene, [id], "fill", palette.map(lit));
 	}
@@ -173,9 +177,9 @@ test("two rules have to go, and every minimal pair is offered", async () => {
 test("a geometric contradiction is relaxed the same way a colour one is", async () => {
 	let scene = boxes(["a", "b"]);
 	const near = addConstraint(scene, "gap", ["a", "b"], undefined, "left");
-	scene = updateConstraint(near.scene, near.id, { value: dimension(20) });
+	scene = updateConstraint(near.scene, near.id, { value: dimension(px(20)) });
 	const far = addConstraint(scene, "gap", ["a", "b"], undefined, "left");
-	scene = updateConstraint(far.scene, far.id, { value: dimension(500) });
+	scene = updateConstraint(far.scene, far.id, { value: dimension(px(500)) });
 
 	const error = await impossible(scene);
 	assert.deepEqual(
@@ -185,7 +189,7 @@ test("a geometric contradiction is relaxed the same way a colour one is", async 
 	// The surviving rule is honoured in the preview, which is only true because
 	// the relaxed solve keeps `gpull` on and reads the simplex answer.
 	for (const relaxation of error.relaxations) {
-		const kept = relaxation.rules[0] === near.id ? 500 : 20;
+		const kept = relaxation.rules[0] === near.id ? px(500) : px(20);
 		const { a, b } = relaxation.universe.solved;
 		assert.ok(a || b, "the geometry the solver decided has to come back");
 		const frames = relaxation.universe.model.byId;

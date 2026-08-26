@@ -14,6 +14,10 @@ import {
 	frameOf,
 	propVar,
 } from "./index.ts";
+import { EMU_PER_PX } from "./units.ts";
+
+/** A frame is EMU, and the sizes below are the pixel counts a person says. */
+const px = (n: number): number => n * EMU_PER_PX;
 
 test("the toolbar holds exactly the kinds a pointer can draw out", () => {
 	for (const kind of NODE_KINDS) {
@@ -47,22 +51,32 @@ test("the shape slot holds the shapes, in declaration order", () => {
 
 test("an ellipse has a fill and nothing that needs corners", () => {
 	assert.ok(!KINDS.ellipse.props.includes("radius"));
-	const node = makeNode("ellipse", { x: 0, y: 0, width: 60, height: 40 });
+	const node = makeNode("ellipse", { x: 0, y: 0, width: px(60), height: px(40) });
 	assert.equal(node.props.fill?.[0]?.kind, "literal");
 	assert.equal(node.props.radius, undefined);
 	assert.equal(node.diagonal, undefined);
 });
 
 test("a line is a box plus which way it leans", () => {
-	const down = makeNode("line", { x: 10, y: 20, width: 100, height: 60 });
+	const down = makeNode("line", {
+		x: px(10),
+		y: px(20),
+		width: px(100),
+		height: px(60),
+	});
 	assert.equal(down.diagonal, "down");
-	assert.deepEqual(frameOf(down), { x: 10, y: 20, width: 100, height: 60 });
+	assert.deepEqual(frameOf(down), {
+		x: px(10),
+		y: px(20),
+		width: px(100),
+		height: px(60),
+	});
 	assert.equal(down.props.stroke?.[0]?.kind, "literal");
 	assert.equal(down.props.strokeWidth?.[0]?.kind, "literal");
 
 	const up = makeNode(
 		"arrow",
-		{ x: 0, y: 0, width: 80, height: 40 },
+		{ x: 0, y: 0, width: px(80), height: px(40) },
 		{ diagonal: "up" },
 	);
 	assert.equal(up.diagonal, "up");
@@ -71,7 +85,7 @@ test("a line is a box plus which way it leans", () => {
 test("a diagonal is only carried by the kinds that lean", () => {
 	const rect = makeNode(
 		"rect",
-		{ x: 0, y: 0, width: 40, height: 40 },
+		{ x: 0, y: 0, width: px(40), height: px(40) },
 		{ diagonal: "up" },
 	);
 	assert.ok(!("diagonal" in rect));
