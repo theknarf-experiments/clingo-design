@@ -31,6 +31,7 @@ export function pair(): Scene {
 	return {
 		tokens,
 		styles: [],
+		machines: [],
 		nodes: [
 			frame(
 				"mobile",

@@ -10,8 +10,12 @@ import {
 	type ValueType,
 	type Verdict,
 	derive,
+	durationUnitOf,
 	isLengthType,
+	isTimeType,
 	lit,
+	nearestMs,
+	writeDuration,
 	optionLabel,
 	ref,
 	termLabel,
@@ -217,6 +221,71 @@ export function LengthInput({
 	);
 }
 
+/**
+ * The one duration field, and the twin of {@link LengthInput} down to the draft.
+ *
+ * A duration is the fourth quantity and it needs its own field for the reason a
+ * length needed one: `msOf` is exact-or-nothing, so a plain text input commits
+ * `"200m"` on the way to `"200ms"` and the transition it paces silently falls
+ * back to the table's 200 while somebody is still typing. Committing only what
+ * reads as a duration is what makes the half-typed state harmless.
+ *
+ * Two things it deliberately does *not* borrow from its twin. There is no
+ * document-wide unit, so what is shown is what is stored — `"0.2s"` stays
+ * `"0.2s"` — and {@link durationUnitOf} keeps whichever of the two the person
+ * was typing in, because a document whose motion scale is written in seconds
+ * should stay in seconds across an edit. And it commits through `nearestMs`
+ * rather than `msOf`, which is the one editorial rounding this feature allows
+ * and the one that names its caller: a field a person is typing into. `1.5ms`
+ * is not a whole millisecond and the program can only carry whole ones, so the
+ * choice is between rounding it here, where it is visible in the box the moment
+ * the caret leaves, and refusing it, which would look like the field being
+ * broken.
+ */
+export function DurationInput({
+	value,
+	className,
+	role,
+	field,
+	title,
+	disabled,
+	onCommit,
+}: {
+	/** The stored literal — `"200ms"`, `"0.2s"`, `"0"`. */
+	value: string;
+	className?: string;
+	role?: string;
+	field?: string;
+	title?: string;
+	disabled?: boolean;
+	/** The new stored literal, once what is in the box reads as a duration. */
+	onCommit: (text: string) => void;
+}) {
+	const [draft, setDraft] = useState<string | null>(null);
+	return (
+		<input
+			className={className}
+			data-role={role}
+			data-field={field}
+			title={title}
+			disabled={disabled}
+			value={draft ?? value}
+			onChange={(e) => {
+				const text = e.target.value;
+				setDraft(text);
+				const ms = nearestMs(text);
+				if (ms !== undefined) {
+					onCommit(writeDuration(ms, durationUnitOf(text, durationUnitOf(value))));
+				}
+			}}
+			onBlur={() => setDraft(null)}
+			onKeyDown={(e) => {
+				if (e.key === "Enter") e.currentTarget.blur();
+			}}
+		/>
+	);
+}
+
 export function ValueEditor({
 	label,
 	type,
@@ -242,6 +311,7 @@ export function ValueEditor({
 	const at = (position: number) => indices?.[position] ?? position;
 	const isColour = type === "color";
 	const isLength = isLengthType(type);
+	const isTime = isTimeType(type);
 	/**
 	 * How a literal of this type reads on screen: a length in the document's
 	 * unit, anything on a closed menu by the menu's own name, everything else as
@@ -393,6 +463,18 @@ export function ValueEditor({
 									value={term.value}
 									unit={unit}
 									title="A number in this document's unit, or one with its own — 12pt, 0.25in"
+									onCommit={(text) => replace(index, lit(text))}
+								/>
+							) : term.kind === "literal" && isTime ? (
+								// And the fourth quantity, for the reason the third one is
+								// here: `msOf` is exact or nothing, so a plain input would
+								// commit `200m` on the way to `200ms`. See
+								// {@link DurationInput}.
+								<DurationInput
+									className={styles.text}
+									role="literal"
+									value={term.value}
+									title="How long, in milliseconds or seconds — 200ms, 0.2s"
 									onCommit={(text) => replace(index, lit(text))}
 								/>
 							) : term.kind === "literal" ? (

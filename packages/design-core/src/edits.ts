@@ -11,9 +11,17 @@
 import {
 	componentDef,
 	componentDefs,
+	holdsInstancePart,
 	instanceVariable,
+	isDefinition,
+	isInstance,
 	openVariables,
 } from "./components.ts";
+import {
+	findMachine,
+	holdsStateCopy,
+	machineForRoot,
+} from "./machines.ts";
 import {
 	DEFAULT_UNIT,
 	EMU_PER_PX,
@@ -45,15 +53,21 @@ import {
 	type Guide,
 	type GuideProp,
 	KINDS,
+	type Machine,
+	type MachineState,
 	type NodeKind,
 	PROPS,
 	type PropName,
 	type Scene,
 	type SceneNode,
 	type Sizing,
+	type StatePart,
 	type Style,
 	type StyleVariant,
 	type SurfaceGuides,
+	TRIGGERS,
+	type Transition,
+	type Trigger,
 	dimension,
 	edgeOn,
 	findGuide,
@@ -70,6 +84,7 @@ import {
 	rangesOverGroup,
 	sceneContext,
 	sharedPropsOfKinds,
+	stateTouches,
 	styleProps,
 	uniqueName,
 	withFrame,
@@ -93,6 +108,7 @@ import {
 	single,
 	styleVar,
 	tokenVar,
+	wordOf,
 	wouldCycle,
 } from "./values.ts";
 import {
@@ -385,20 +401,32 @@ export function addNode(scene: Scene, node: SceneNode): Scene {
 	return { ...scene, nodes: [...scene.nodes, node] };
 }
 
-/** Removes the named nodes and everything beneath them. */
+/**
+ * Removes the named nodes and everything beneath them.
+ *
+ * The two prunes run in this order and the order is a decision.
+ * {@link pruneConstraints} asks {@link holdsStateCopy} whether a cross-state
+ * member is still real, and that question is answered through the machine — so
+ * running {@link pruneMachines} first means a rule about a component whose whole
+ * definition has just been deleted is dropped along with it, rather than left
+ * ranging over a ghost until the next unrelated edit noticed. Which is the
+ * sentence `pruneConstraints` opens with, applied one link further out.
+ */
 export function deleteNodes(
 	scene: Scene,
 	ids: readonly string[],
 	picks: Picks = {},
 ): Scene {
 	const drop = new Set(ids);
-	return pruneConstraints({
-		...scene,
-		nodes: refreshGroups(
-			mapTree(scene.nodes, (node) => (drop.has(node.id) ? null : node)),
-			sceneContext(scene, picks),
-		),
-	});
+	return pruneConstraints(
+		pruneMachines({
+			...scene,
+			nodes: refreshGroups(
+				mapTree(scene.nodes, (node) => (drop.has(node.id) ? null : node)),
+				sceneContext(scene, picks),
+			),
+		}),
+	);
 }
 
 /**
@@ -1782,12 +1810,43 @@ export function sharedProps(
  * *or* a datum the document still holds, and without the second half the first
  * node anybody deleted would strip every datum out of every rule, taking the
  * whole rule with it wherever that dropped it below `minNodes`.
+ *
+ * A **state copy** is the third such member, and it had to be added here for
+ * exactly the same reason with a sharper edge. `stt(b1,hover,label)` is neither
+ * a node nor a datum, so without {@link holdsStateCopy} the next call to this —
+ * from `deleteNodes`, `groupNodes`, `setGuides` or `removeGuide`, none of which
+ * has anything to do with the machine — would quietly strip every cross-state
+ * rule of its members and then delete the rule for falling below `minNodes`. "The
+ * label does not jump when you hover" would disappear because somebody deleted
+ * an unrelated rectangle.
+ *
+ * `holdsStateCopy` is blunt on purpose, as `holdsDatum` is about a track index:
+ * it asks whether the instance exists and its machine has that state, not whether
+ * the *copy* currently exists. Asking the sharper question would delete the rule
+ * the moment a designer cleared the delta that made the part materialise, and
+ * getting it back would mean retyping the rule rather than the delta.
+ *
+ * An **instance part** — `inst(b1,label)` — is the fourth, and it is the oldest
+ * hole of the four: it was never a node either, and a rule naming one has always
+ * been stripped and then deleted by the next unrelated delete. Nothing hit it
+ * because nothing offered such a member; the canvas selects an instance, not its
+ * parts. States are what made it reachable — `materializedParts` treats the part,
+ * the instance's copy and one state's copy as three spellings of the same
+ * request, so the two spellings a designer is now offered side by side had better
+ * survive a delete side by side. {@link holdsInstancePart} is blunt in the same
+ * way its three siblings are.
  */
 export function pruneConstraints(scene: Scene): Scene {
 	const alive = new Set(flatten(scene.nodes).map((n) => n.id));
 	const next: Constraint[] = [];
 	for (const c of scene.constraints) {
-		const nodes = c.nodes.filter((id) => alive.has(id) || holdsDatum(scene, id));
+		const nodes = c.nodes.filter(
+			(id) =>
+				alive.has(id) ||
+				holdsDatum(scene, id) ||
+				holdsStateCopy(scene, id) ||
+				holdsInstancePart(scene, id),
+		);
 		// A group's members are the rule's business: deleting a document node
 		// says nothing about them, and a constraint over one is never a ghost.
 		if (c.group === undefined && nodes.length < CONSTRAINT_KINDS[c.kind].minNodes) {
@@ -2416,4 +2475,665 @@ export function setVariant(
 			? ({ ...node, holds: undefined } as SceneNode)
 			: { ...node, holds: { ...picks } },
 	);
+}
+
+/* ------------------------------------------------------------------ */
+/* State machines                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Every edit below writes a record whose *identifiers* reach the generated
+ * program as terms — `machine(m1)`, `mstate(m1,hover)`, `mtrans(m1,press)`,
+ * `stt(b1,hover,label)` — which is what makes this section different from the
+ * styles above it, where only the id of the style itself is a term.
+ *
+ * Two consequences run through all of it.
+ *
+ * **Every id these mint is checked against `wordOf` before it is used.** Not as
+ * defensive tidiness: `normalizeScene` drops a machine, a state or a transition
+ * whose id is not an ASP constant, so an id these functions minted badly would
+ * survive in memory, be edited against, and then vanish the next time the
+ * document was read back — a loss with no error and no place to look. Minting
+ * one that can never be dropped is the only way to keep the round trip honest.
+ *
+ * **A name is not an id and renaming never touches one.** A state id is inside
+ * every `stt(I,S,N)` term a cross-state rule names, inside every `sprop`/`sfval`
+ * variable key a pin refers to, and inside every `data-state` an exported file
+ * switches on. Renaming a state therefore changes what a person reads and
+ * nothing else — which is the same split {@link renameNode} keeps, one register
+ * louder, because here the id is visible in somebody else's browser.
+ */
+
+/** Replaces one machine, if the document holds it — the twin of `mapStyle`. */
+function mapMachine(
+	scene: Scene,
+	id: string,
+	fn: (machine: Machine) => Machine,
+): Scene {
+	const machines = scene.machines.map((m) => (m.id === id ? fn(m) : m));
+	return machines.some((m, i) => m !== scene.machines[i])
+		? { ...scene, machines }
+		: scene;
+}
+
+/** Replaces one state of one machine, if it holds it. */
+function mapState(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	fn: (state: MachineState) => MachineState,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const states = machine.states.map((s) => (s.id === stateId ? fn(s) : s));
+		return states.some((s, i) => s !== machine.states[i])
+			? { ...machine, states }
+			: machine;
+	});
+}
+
+/**
+ * The bare constant a typed name reduces to, or nothing where it reduces to
+ * nothing readable.
+ *
+ * A state's id is derived from its name rather than generated, and that is the
+ * opposite of what {@link addStyle} does with a style's id. The difference is
+ * who reads it. A style's id appears in `sty(s_3f2a)` and in a pin key, and
+ * nobody is ever shown it; a state's id appears in `[data-state="hover"]` in
+ * the stylesheet this tool exports, in `stt(b1,hover,label)` in a rule a
+ * designer types, and in a `mstate(m1,hover)` fact they read in the program
+ * panel. `s_3f2a` in all three places would be a machine nobody could write a
+ * rule about.
+ *
+ * Camel case is the spelling ASP takes and this document already uses for its
+ * multi-word constants (`spaceBetween`, `easeInOut`), so "Pointer Down" becomes
+ * `pointerDown` rather than `pointer_down`: one house spelling, and it is the
+ * one the enumerated values are already written in.
+ */
+function constantFrom(name: string): string | undefined {
+	const words = name
+		.trim()
+		.split(/[^A-Za-z0-9]+/)
+		.filter((word) => word.length > 0);
+	if (words.length === 0) return undefined;
+	const head = words[0].toLowerCase();
+	const rest = words
+		.slice(1)
+		.map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase());
+	return wordOf(head + rest.join(""));
+}
+
+/**
+ * `base`, `base2`, `base3`, … — the first spelling this machine has not taken.
+ *
+ * {@link uniqueName} with no separator, because the result is a term rather
+ * than a sentence: `hover-2` is not a constant, and `hover_2` would be the one
+ * place in this feature spelled with an underscore. The names people read go
+ * through `uniqueName` proper; this is only for the ids underneath them.
+ */
+function uniqueConstant(taken: Iterable<string>, base: string): string {
+	return uniqueName(taken, base, "");
+}
+
+/**
+ * A fresh machine on a definition, with the one state it cannot do without.
+ *
+ * **One state, not two.** A machine begins as a description of what the
+ * component already is — its rest state, whose delta is empty because the
+ * definition *is* that delta — and becomes behaviour the moment somebody adds a
+ * second state and an edge between them. Starting with a rest/hover pair would
+ * be asserting a behaviour nobody has stated yet, which is `addStyle`'s
+ * argument for one variant word for word.
+ *
+ * The empty delta is load-bearing rather than a placeholder. `stateTouches`
+ * reads it as saying nothing, so `materializedParts` returns the empty set, so
+ * the program gains no `mpart/2`, no `mcopy/3` and not one state copy: a
+ * document that has just gained a machine grounds to exactly what it grounded
+ * to a moment ago. The feature costs nothing until it is used.
+ *
+ * **Refused on a node that is not a definition**, unlike {@link machineForRoot}
+ * which answers for one anyway. The two are asymmetric on purpose: a machine
+ * whose root was *released* is a record worth keeping and repairing, and both
+ * panels are built to show one, but a machine created on a rectangle is a
+ * mistake at the moment it is made and there is nothing yet to lose by saying
+ * so.
+ *
+ * **One machine per root.** The compiler's `machineForRoot` takes the first and
+ * the exporter, the canvas and the inspector all follow it, so a second machine
+ * on one definition is a record nothing reads pretending to be a behaviour. The
+ * existing one's id comes back instead, which is what a panel that just asked
+ * for "the machine for this component" wanted.
+ */
+export function addMachine(
+	scene: Scene,
+	root: string,
+	name?: string,
+): { scene: Scene; id: string } {
+	const existing = machineForRoot(scene, root);
+	if (existing) return { scene, id: existing.id };
+	const node = findInTree(scene.nodes, root);
+	if (!node || !isDefinition(node)) return { scene, id: "" };
+	const machine: Machine = {
+		// Generated rather than derived from the name, which is the one id in
+		// this section that is: a machine's id is never typed into a rule and
+		// never exported — every predicate carries it as an argument the panel
+		// supplies — so there is nothing for a readable one to buy.
+		id: uniqueConstant(
+			scene.machines.map((m) => m.id),
+			newNodeId().replace("n_", "m_"),
+		),
+		name: uniqueName(
+			scene.machines.map((m) => m.name),
+			name?.trim() || node.name || "states",
+			" ",
+		),
+		root,
+		states: [{ id: "rest", name: "Rest", parts: {} }],
+		transitions: [],
+	};
+	return { scene: { ...scene, machines: [...scene.machines, machine] }, id: machine.id };
+}
+
+/**
+ * Takes the machine away. The instances keep their `state`.
+ *
+ * Nothing is repaired on the way out, exactly as nothing is repaired on the way
+ * in: an instance drawn in `hover` still says so, `shownState` reads it as the
+ * initial state of a machine that is not there, and undo puts every one of them
+ * back where it was. Stripping the field would make deleting a machine
+ * destructive in a way undo could not reach, and it would do it silently, to
+ * nodes the person deleting the machine was not looking at.
+ *
+ * Cross-state rules are left alone for the same reason and one stronger: a
+ * constraint naming `stt(b1,hover,label)` simply stops holding — `mcopy/3`
+ * derives nothing, so the member says nothing — and it comes back word for word
+ * when the machine does. Deleting the rule would make undo restore the machine
+ * and not the sentence about it.
+ */
+export function deleteMachine(scene: Scene, id: string): Scene {
+	const machines = scene.machines.filter((m) => m.id !== id);
+	return machines.length === scene.machines.length ? scene : { ...scene, machines };
+}
+
+export function renameMachine(scene: Scene, id: string, name: string): Scene {
+	const trimmed = name.trim();
+	if (!trimmed) return scene;
+	return mapMachine(scene, id, (m) => (m.name === trimmed ? m : { ...m, name: trimmed }));
+}
+
+/**
+ * A state, with an empty delta and an id derived from what it is called.
+ *
+ * The delta is empty because a state is a *diff*: a new one that copied the
+ * rest state's values would be a state that says everything and means nothing,
+ * and the first edit anybody made to the component would have to be made twice.
+ * This is where {@link StatePart}'s absent-is-inherit pays for itself — an empty
+ * state is the same picture as the initial one, costs no copy, and becomes a
+ * state the moment one field is written.
+ *
+ * Placed at the end, which is what keeps the initial state where it was:
+ * `initialState` is `states[0]` and there is no flag, so appending is the only
+ * insertion that cannot change what every instance of the definition draws.
+ * {@link reorderState} is how somebody changes it on purpose.
+ */
+export function addState(
+	scene: Scene,
+	machineId: string,
+	name?: string,
+): { scene: Scene; id: string } {
+	const machine = findMachine(scene.machines, machineId);
+	if (!machine) return { scene, id: "" };
+	const taken = machine.states.map((s) => s.id);
+	const label = name?.trim() || "";
+	const id = uniqueConstant(taken, constantFrom(label) ?? "state");
+	const state: MachineState = {
+		id,
+		name: uniqueName(machine.states.map((s) => s.name), label || "State", " "),
+		parts: {},
+	};
+	return {
+		scene: mapMachine(scene, machineId, (m) => ({ ...m, states: [...m.states, state] })),
+		id,
+	};
+}
+
+/**
+ * Renames a state. **The name, never the id.**
+ *
+ * The id is in every `stt(I,S,N)` a cross-state rule names, in every
+ * `sprop`/`sfval` key a pin is recorded under, and in every `data-state` the
+ * exported file switches on. Renaming through to the id was considered and
+ * rejected on the strength of the third of those: an exported page and the
+ * document that produced it would silently stop agreeing, and the failure would
+ * only show up in a browser. Rules were the second reason and pins the third,
+ * and any one of them is enough.
+ *
+ * A state whose name a person has never touched reads as its id, which is why
+ * `hover` is a perfectly good name to leave alone.
+ */
+export function renameState(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	name: string,
+): Scene {
+	const trimmed = name.trim();
+	if (!trimmed) return scene;
+	return mapState(scene, machineId, stateId, (s) =>
+		s.name === trimmed ? s : { ...s, name: trimmed },
+	);
+}
+
+/**
+ * Removes a state, and every transition that had an end in it.
+ *
+ * The transitions go because an edge with one end missing is not a dangling
+ * reference, it is half an edge: `mdangling/2` exists to report the *document's*
+ * mistakes back to the person who made them, and an edge this edit orphaned is
+ * not one of those. Keeping it would put a violation in the panel that the
+ * designer did not write and cannot read the cause of.
+ *
+ * The last state stays, for the reason {@link deleteStyleVariant} keeps the last
+ * variant: `initialState` is `states[0]`, so a machine with none has no state to
+ * draw an instance in, and `normalizeScene` would drop the whole record the next
+ * time the document was read. Somebody who wants the machine gone deletes the
+ * machine.
+ *
+ * Deleting the initial state promotes the next one, and that falls out of the
+ * order being the answer rather than being arranged for here. Every instance of
+ * the definition then draws the new first state, which is the honest consequence
+ * of deleting the state they were drawing.
+ */
+export function deleteState(scene: Scene, machineId: string, stateId: string): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		if (machine.states.length <= 1) return machine;
+		if (!machine.states.some((s) => s.id === stateId)) return machine;
+		return {
+			...machine,
+			states: machine.states.filter((s) => s.id !== stateId),
+			transitions: machine.transitions.filter(
+				(t) => t.from !== stateId && t.to !== stateId,
+			),
+		};
+	});
+}
+
+/**
+ * Moves a state to a position in the list — which, for position 0, is how the
+ * machine's initial state changes.
+ *
+ * One edit rather than two, and that is the whole reason there is no `initial`
+ * flag to set: a flag and an order can disagree, and the shape that disagrees is
+ * a machine whose panel shows one state first and whose instances draw another.
+ *
+ * `to` is clamped rather than refused. This is a drag, and a drag past the end
+ * of a list means the end of the list in every other reorder in this file.
+ */
+export function reorderState(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	to: number,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const from = machine.states.findIndex((s) => s.id === stateId);
+		if (from === -1) return machine;
+		const target = Math.max(0, Math.min(machine.states.length - 1, Math.trunc(to)));
+		if (target === from) return machine;
+		const states = [...machine.states];
+		const [moved] = states.splice(from, 1);
+		states.splice(target, 0, moved);
+		return { ...machine, states };
+	});
+}
+
+/**
+ * Writes one field of one state's delta, and takes the delta away when the last
+ * field goes.
+ *
+ * "This state changes nothing about this part" has **one** spelling — no entry —
+ * and this is the function that keeps it that way. An entry left behind holding
+ * `{ props: {} }` would be a second spelling of the same claim, and the two
+ * would drift: `stateTouches` reads them alike, so nothing downstream can tell
+ * them apart, but a panel listing "what this state changes" would list a part it
+ * changes nothing about, and a diff between two documents would show an edit
+ * that changed no design.
+ *
+ * Deliberately the opposite judgement to `normalizeStateParts`, which keeps an
+ * empty entry it is handed. The difference is who is speaking: an edit is a
+ * person saying something, and a reader is being handed a file it has no
+ * business rewriting.
+ */
+function writeDelta(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	part: string,
+	fn: (delta: StatePart) => StatePart,
+): Scene {
+	return mapState(scene, machineId, stateId, (state) => {
+		const current = state.parts[part] ?? {};
+		const next = fn(current);
+		// Nothing usable left in it is the same claim as no entry at all, so it
+		// leaves as an entry rather than as an empty one.
+		const keep = stateTouches(next);
+		if (!keep && state.parts[part] === undefined) return state;
+		const parts = { ...state.parts };
+		if (keep) parts[part] = next;
+		else delete parts[part];
+		return { ...state, parts };
+	});
+}
+
+/**
+ * What one state says about one property of one definition part.
+ *
+ * A whole {@link Value} rather than a {@link Term}, which is where this parts
+ * company with {@link setStylePart} and the reason is the invariant. A style
+ * variant holds one answer per property because a list there would branch on its
+ * own and reintroduce the cross product the style exists to collapse. A state's
+ * delta may hold alternatives, because the branching a state can legitimately
+ * cause is *exactly* this: two fills written inside one delta is a design
+ * decision like any other and mints one `sprop(I,S,N,P)` variable with two
+ * alternatives, which is two designs. What it is not is a state branching — the
+ * state is still one state, true at once with all the others.
+ *
+ * `undefined` clears the property, which is not the same as writing the
+ * definition's value into the delta: cleared, the state reads `prop(inst(I,N),P)`
+ * — the instance's one shared variable — and follows it wherever it goes. A
+ * delta holding a copy of today's answer would stop following it, silently, at
+ * the moment the definition changed.
+ */
+export function setStateProp(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	part: string,
+	prop: PropName,
+	value: Value | undefined,
+): Scene {
+	if (!Object.hasOwn(PROPS, prop)) return scene;
+	return writeDelta(scene, machineId, stateId, part, (delta) => {
+		const props = { ...delta.props };
+		if (value === undefined || value.length === 0) delete props[prop];
+		else props[prop] = value;
+		return { ...delta, props };
+	});
+}
+
+/**
+ * The same for one of the four dimensions, in the part's own *parent-relative*
+ * coordinates.
+ *
+ * Which is what makes the materialisation analysis affordable rather than being
+ * a detail of storage: a state that moves a container moves everything inside it
+ * with no copy for any of them, so the analysis closes upward only and the usual
+ * "the whole card lifts on hover" costs exactly one state copy.
+ */
+export function setStateFrame(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	part: string,
+	dim: Dimension,
+	value: Value | undefined,
+): Scene {
+	if (!DIMENSIONS.includes(dim)) return scene;
+	return writeDelta(scene, machineId, stateId, part, (delta) => {
+		const frame = { ...delta.frame };
+		if (value === undefined || value.length === 0) delete frame[dim];
+		else frame[dim] = value;
+		return { ...delta, frame };
+	});
+}
+
+/**
+ * Takes a part out of the picture in this state, or puts it back.
+ *
+ * `true` or absent with no `false`, matching {@link StatePart.hidden}: a part is
+ * drawn unless a state says otherwise, so "shown" needs no spelling and storing
+ * one would give the document two ways to say the same thing. Unhiding is
+ * therefore a delete, and where it was the only thing the delta said the whole
+ * entry goes with it — which is {@link writeDelta}'s rule, applied here without
+ * a case of its own.
+ */
+export function setStateHidden(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	part: string,
+	hidden: boolean,
+): Scene {
+	return writeDelta(scene, machineId, stateId, part, (delta) => {
+		if (hidden) return { ...delta, hidden: true };
+		const { hidden: _shown, ...rest } = delta;
+		return rest;
+	});
+}
+
+/**
+ * "This state changes nothing about this part", said in one gesture.
+ *
+ * The entry goes rather than being emptied, for {@link writeDelta}'s reason, and
+ * this is the function that name is a promise about: a Clear button that left
+ * `{}` behind would leave the part listed in a panel whose heading is what this
+ * state changes.
+ */
+export function clearStatePart(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	part: string,
+): Scene {
+	return mapState(scene, machineId, stateId, (state) => {
+		if (state.parts[part] === undefined) return state;
+		const parts = { ...state.parts };
+		delete parts[part];
+		return { ...state, parts };
+	});
+}
+
+/**
+ * The word a fresh transition is called, taken from what makes it fire.
+ *
+ * A transition carries no `name` field — an edge is not a thing a designer names
+ * twice — so its id is the only word anybody reads it by: it is what
+ * `motionLabel` capitalises into "Press · Duration" on a motion row, and what a
+ * `why` sentence says when a duration token is the reason. `t_9f31` in those two
+ * places would be a receipt rather than a sentence.
+ *
+ * A verb rather than the trigger itself, because the trigger is the *input* and
+ * the id is read as the *move*: "Pointerdown · Duration" describes the mouse and
+ * "Press · Duration" describes the button. Where a machine has two edges on one
+ * trigger they come out `press` and `press2`, which is a machine
+ * `mnondet/3` is about to have something to say about anyway.
+ */
+const TRANSITION_VERBS: Record<Trigger, string> = {
+	pointerenter: "enter",
+	pointerleave: "leave",
+	pointerdown: "press",
+	pointerup: "release",
+	focus: "focus",
+	blur: "blur",
+	click: "click",
+	load: "load",
+};
+
+/**
+ * An edge, from a state to a state, on a trigger.
+ *
+ * Nothing about the pacing is written down: absent `duration`, `delay`,
+ * `stagger` and `easing` are the point rather than an omission. A transition
+ * that says nothing falls to `mdefdur/1` in the program and to `MOTION_PROPS`
+ * in the panel — one number, in one place, that every unpaced transition in the
+ * document follows — so a designer who wants everything a little slower changes
+ * one thing. Seeding `200ms` into each edge would make that same change N edits,
+ * and would do it by writing a number nobody typed.
+ *
+ * `from` and `to` are **not** checked against the machine's states. That looks
+ * like a missing guard and is the same judgement `normalizeTransitions` makes
+ * one line at a time: a dangling edge is the one broken thing this document is
+ * built to *report*, `mdangling/2` derives it, the Machines panel offers a
+ * one-click rule that forbids it by name, and an edit that refused to make one
+ * would take away the symptom along with any way of finding out. What is checked
+ * is that both ends are spellable as constants, because `mto(m1,t1,Not A State)`
+ * is a syntax error rather than a mistake.
+ */
+export function addTransition(
+	scene: Scene,
+	machineId: string,
+	from: string,
+	to: string,
+	trigger: Trigger,
+): { scene: Scene; id: string } {
+	const machine = findMachine(scene.machines, machineId);
+	if (!machine) return { scene, id: "" };
+	if (!Object.hasOwn(TRIGGERS, trigger)) return { scene, id: "" };
+	if (wordOf(from) !== from || wordOf(to) !== to) return { scene, id: "" };
+	const id = uniqueConstant(
+		machine.transitions.map((t) => t.id),
+		TRANSITION_VERBS[trigger],
+	);
+	const transition: Transition = { id, from, to, trigger, enabled: true };
+	return {
+		scene: mapMachine(scene, machineId, (m) => ({
+			...m,
+			transitions: [...m.transitions, transition],
+		})),
+		id,
+	};
+}
+
+/**
+ * Changes an edge — its ends, its trigger, its pacing, its switch.
+ *
+ * One function with a patch rather than eight setters, which is
+ * {@link updateLayout}'s shape and it earns it for the same reason: every field
+ * of a transition is edited from one row of one panel, and a row that had to
+ * know which of eight functions to call for each of its controls would be eight
+ * places to get a coalescing key wrong.
+ *
+ * The **id is not patchable**, which is why the type says `Omit<…, "id">`. It is
+ * a term in `mtrans/2`, in three `mval` variable keys and therefore in any pin
+ * on a motion setting; changing it would silently drop the pins and leave the
+ * panel showing a duration nobody chose. Somebody who wants a differently named
+ * edge deletes this one and adds one, which is one gesture more and loses
+ * nothing that was not about to be lost anyway.
+ */
+export function updateTransition(
+	scene: Scene,
+	machineId: string,
+	transitionId: string,
+	patch: Partial<Omit<Transition, "id">>,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const transitions = machine.transitions.map((t) => {
+			if (t.id !== transitionId) return t;
+			const next: Transition = { ...t, ...patch };
+			// The same three checks `normalizeTransitions` makes, in the one other
+			// place a transition can be written: an end that is not a constant or a
+			// trigger the table has not got would reach the program as a syntax
+			// error or as a fact no rule matches, and this is the edit that would
+			// have put it there.
+			if (wordOf(next.from) !== next.from) return t;
+			if (wordOf(next.to) !== next.to) return t;
+			if (!Object.hasOwn(TRIGGERS, next.trigger)) return t;
+			// A patch that says what the transition already said is not an edit.
+			// Spread alone would mint a new object every time, and the house rule
+			// this file keeps is that an edit which changed nothing returns the
+			// same scene — undo is a stack of documents and React's memos are
+			// identity comparisons, so a new object is a change to both of them.
+			// Compared with `Object.is`, so a caller handing over a freshly built
+			// `Value` is writing even where the alternatives read the same: that is
+			// a value the panel just resolved, and pretending otherwise would make
+			// the one case where the identity matters the one case we got wrong.
+			const keys = Object.keys(patch) as Array<keyof Omit<Transition, "id">>;
+			return keys.every((key) => Object.is(t[key], next[key])) ? t : next;
+		});
+		return transitions.some((t, i) => t !== machine.transitions[i])
+			? { ...machine, transitions }
+			: machine;
+	});
+}
+
+export function deleteTransition(
+	scene: Scene,
+	machineId: string,
+	transitionId: string,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const transitions = machine.transitions.filter((t) => t.id !== transitionId);
+		return transitions.length === machine.transitions.length
+			? machine
+			: { ...machine, transitions };
+	});
+}
+
+/**
+ * Which state this instance is drawn in, or `null` to follow the machine.
+ *
+ * The twin of {@link setHold} and structurally its exact match: both record a
+ * decision about *one use* of a shared definition, both name something the
+ * definition owns, and both leave every other use alone. The difference is which
+ * way the decision cuts — a hold narrows the design space, a state selects one of
+ * the behaviours — and the two are orthogonal, so an instance may hold a variant
+ * and be drawn in a state, and the pair is a cell of a matrix rather than a point
+ * in a product of universes.
+ *
+ * **Read on an instance and nowhere else**, so this refuses everything else
+ * rather than writing a field that would never be read. A definition on the
+ * canvas is always its rest state: a definition part's frame is a *fact* the
+ * compiler emits, a fact cannot be un-said by a rule, and every instance of the
+ * definition inherits it — so drawing the definition in another state would move
+ * the component itself, for everyone, because of an editor-ish field. The
+ * Machines panel plays a state on the canvas instead, which touches no document
+ * at all.
+ *
+ * The state is **not** checked against the machine. `shownState` falls back to
+ * the initial one, so a machine edited down leaves its instances legal, and a
+ * name kept through a state's deletion and undone comes back meaning what it
+ * meant. Checking here would make undo restore the state and not the instances
+ * that were drawn in it.
+ */
+export function setNodeState(
+	scene: Scene,
+	nodeId: string,
+	state: string | null,
+): Scene {
+	const node = findInTree(scene.nodes, nodeId);
+	if (!node || !isInstance(node)) return scene;
+	if ((node.state ?? null) === state) return scene;
+	return mapSelected(scene, [nodeId], (n) =>
+		state === null
+			? ({ ...n, state: undefined } as SceneNode)
+			: { ...n, state },
+	);
+}
+
+/**
+ * Drops machines whose root is no longer in the document.
+ *
+ * The counterpart of {@link pruneConstraints}, and deliberately narrower than
+ * it: a machine is dropped when the node it names has been **deleted**, and not
+ * when that node has merely stopped being a definition.
+ *
+ * The distinction is the difference between a record that can be repaired and
+ * one that cannot. A released definition is still a subtree sitting on the
+ * canvas — {@link releaseComponent} keeps its instances alive for exactly this
+ * reason, "so marking it again brings them back" — and the machine on it is in
+ * the same position: it says nothing to the program, because `machine_of(M,R)`
+ * joins `instance(I,R)` and finds nobody, and the inspector has a sentence for
+ * that state which offers the repair ("mark that subtree as a component again
+ * and they come back"). Deleting the machine there would take away every state,
+ * every delta and every transition on the strength of one click that a second
+ * click undoes, and it would make that sentence a lie.
+ *
+ * A deleted root is different in kind. There is no subtree to mark again, no
+ * gesture that brings the definition back other than undo — which restores the
+ * machine along with it — and the record left behind names nothing at all.
+ */
+export function pruneMachines(scene: Scene): Scene {
+	if (scene.machines.length === 0) return scene;
+	const alive = new Set(flatten(scene.nodes).map((n) => n.id));
+	const machines = scene.machines.filter((m) => alive.has(m.root));
+	return machines.length === scene.machines.length ? scene : { ...scene, machines };
 }

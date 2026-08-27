@@ -323,3 +323,138 @@
 .styledFoot .follow {
 	margin: 0 0 0 auto;
 }
+
+/* ------------------------------------------------------------------ */
+/* States                                                              */
+/* ------------------------------------------------------------------ */
+
+/* The authoring chooser. A strip like the variants above it, because it is the
+   same shape of question — one of a small closed set — and deliberately *not*
+   the same styling: a variant is a point in the design space and a state is a
+   situation the design is in, and a panel that painted them alike would be
+   inviting the one confusion this whole block exists to prevent. */
+.stateBar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 3px;
+	margin: 0.25rem 0;
+}
+
+.state {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25rem;
+	padding: 0.2rem 0.45rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid transparent;
+	border-radius: 999px;
+	cursor: pointer;
+}
+
+/* Base is the way out and the way in: the block opens on it, and while it is
+   chosen nothing in the block edits a state at all. Outlined rather than
+   filled, so "on Base" reads as the resting position rather than as a mode. */
+.stateBase {
+	border-color: var(--dc-line);
+	opacity: 1;
+	font-weight: 600;
+}
+
+/* And the mode itself, which has to be visible from the far side of the room.
+   The filled chip, the banner under it and the border on every row it writes
+   are three signals for one fact — which is the right number for a fact whose
+   cost of going unnoticed is an edit to the component instead of to its
+   hover. */
+.stateOn {
+	background: var(--dc-accent);
+	border-color: var(--dc-accent);
+	color: var(--dc-on-accent, #fff);
+	font-weight: 600;
+}
+
+/* This state already changes something about this part. A dot rather than a
+   count: which properties is what the rows below say, and the strip's job is
+   only to stop a designer opening four states to find the one with the delta
+   in it. */
+.touched {
+	font-size: 0.9em;
+	line-height: 1;
+	opacity: 0.75;
+}
+
+/* The banner. Words, above the rows, naming the state — because a tint is read
+   as decoration and a border is read as nothing at all. */
+.authoring {
+	margin: 0.15rem 0 0.35rem;
+	padding: 0.35rem 0.5rem;
+	font-size: 0.72rem;
+	line-height: 1.45;
+	border-radius: 5px;
+	border-left: 3px solid var(--dc-accent);
+	background: color-mix(in srgb, var(--dc-accent) 14%, var(--dc-sunken));
+}
+
+/* One property this state overrides. The same left rule the style rows use,
+   solid and in the full accent rather than the soft one: a style deciding a
+   property is a fact about the document, and a state deciding it is a mode the
+   panel is currently in. */
+.delta {
+	border-left: 3px solid var(--dc-accent);
+	border-radius: 0 6px 6px 0;
+	background: color-mix(in srgb, var(--dc-accent) 7%, transparent);
+	padding-right: 0.1rem;
+}
+
+/* One this state says nothing about: what the definition decided, and an offer.
+   Compact, because most properties are in this row most of the time and a
+   block of full editors for values this state does not hold would bury the two
+   it does. */
+.baseRow {
+	display: flex;
+	align-items: baseline;
+	gap: 0.35rem;
+	padding: 0.1rem 0 0.1rem 0.5rem;
+	font-size: 0.74rem;
+}
+
+.baseValue {
+	flex: 1;
+	min-width: 0;
+	font-family: var(--dc-mono, ui-monospace, monospace);
+	font-size: 0.72rem;
+	opacity: 0.7;
+	overflow-wrap: anywhere;
+}
+
+.change {
+	flex: none;
+	padding: 0.1rem 0.3rem;
+	font: inherit;
+	font-size: 0.64rem;
+	color: inherit;
+	background: none;
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	opacity: 0.55;
+	cursor: pointer;
+}
+
+.change:hover {
+	opacity: 1;
+	border-color: var(--dc-accent);
+}
+
+/* The reminder that the rest of the panel is still the definition. Quiet, but
+   not a `.note`: it is the boundary between two things that look alike, and a
+   50%-opacity sentence is a sentence nobody reads. */
+.baseLine {
+	margin: 0.4rem 0 0;
+	padding: 0.25rem 0 0.25rem 0.5rem;
+	font-size: 0.7rem;
+	line-height: 1.4;
+	border-left: 2px dashed var(--dc-line);
+	opacity: 0.8;
+}

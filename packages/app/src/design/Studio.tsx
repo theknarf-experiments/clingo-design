@@ -3,10 +3,13 @@ import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import {
 	CONSTRAINT_KINDS,
+	DEFAULT_EASING,
 	DEFAULT_UNIT,
 	DUPLICATE_OFFSET,
+	EASINGS,
 	EMU_PER_PX,
 	LAYOUT_PROPS,
+	MOTION_PROPS,
 	type LayoutProp,
 	DRAW_KINDS,
 	type Edge,
@@ -46,9 +49,18 @@ import {
 	variantLabel,
 	drawGuideAt,
 	flatten,
+	machineForNode,
+	machineTable,
+	motionLabel,
+	parseStatePart,
 	parseVariable,
+	placedNodes,
 	reachableAlternatives,
 	sceneContext,
+	shownState,
+	stateCopyIds,
+	stateLabel,
+	stateVarLabel,
 	takesMembers,
 	variableCounts,
 	reorderNodes,
@@ -57,7 +69,11 @@ import {
 	updateConstraint,
 	unreadVariables,
 	varyingVars,
+	msOf,
+	type Machine,
 	type ModelScene,
+	type Transition,
+	type Trigger,
 	wrapInLayout,
 	wrapsChildren,
 } from "@clingo-design/design-core";
@@ -75,6 +91,7 @@ import { Editor, type Tool } from "./Editor";
 import { Guides } from "./Guides";
 import { Inspector } from "./Inspector";
 import { LayerList } from "./LayerList";
+import { Machines } from "./Machines";
 import { ProgramPanel } from "./ProgramPanel";
 import { PanelResizer, usePanelWidth } from "./PanelResizer";
 import { Rulers } from "./Rulers";
@@ -88,6 +105,7 @@ import { layoutArtboards } from "./layout";
 import { measureScene } from "./measureText";
 import { useCulling } from "./useCulling";
 import { useExploration } from "./useExploration";
+import { useMachinePlayback } from "./useMachinePlayback";
 import { canvasPx, canvasRect } from "./viewport";
 import styles from "./Studio.module.css";
 import tabStyles from "./tabs.module.css";
@@ -137,10 +155,43 @@ type View = (typeof VIEWS)[number]["id"];
 const PANELS = [
 	{ id: "properties", label: "Properties" },
 	{ id: "variables", label: "Variables" },
+	// "States" rather than "Machines", and the tab is where the difference is
+	// worth insisting on: a state is a thing a designer draws, a machine is the
+	// bookkeeping that connects them. The panel edits both; the tab is named for
+	// the half somebody goes looking for.
+	{ id: "machines", label: "States" },
 	{ id: "constraints", label: "Rules" },
 ] as const;
 
 type Panel = (typeof PANELS)[number]["id"];
+
+/**
+ * How far below the document the state strip hangs, in the document's units.
+ *
+ * A pixel count times `EMU_PER_PX`, like every other statement about a hand
+ * rather than about a design — `PAD` above, `NUDGE` below, `DUPLICATE_OFFSET`
+ * in design-core. Written bare it would be a five-thousandth of a pixel and the
+ * strip would sit exactly on top of the design it is about.
+ */
+const STRIP_GAP = 56 * EMU_PER_PX;
+
+/** The gutter between two states of the strip, same units and same argument. */
+const STRIP_STEP = 24 * EMU_PER_PX;
+
+/**
+ * What a transition is paced at when nothing in this universe answers.
+ *
+ * Read out of `MOTION_PROPS` through `msOf`, which is the same table and the
+ * same reader the compiler emits `mdefdur/1` from — so the canvas and the
+ * program cannot hold two different opinions about what "no duration" means.
+ * A table entry no unit spells reads as nothing here and emits no default
+ * there, which is a table to fix rather than a number to invent, so the `?? 0`
+ * is a type obligation rather than a second policy.
+ */
+const MOTION_FALLBACK = {
+	duration: msOf(MOTION_PROPS.duration.fallback) ?? 0,
+	delay: msOf(MOTION_PROPS.delay.fallback) ?? 0,
+};
 
 /**
  * The toolbar's slots, in the order the kinds are declared.
@@ -265,6 +316,56 @@ export function Studio({
 	 * you hid the guides would be a bug, not a feature.
 	 */
 	const [showGuides, setShowGuides] = useState(true);
+	/**
+	 * Whether the canvas is running the document's machines instead of editing
+	 * it.
+	 *
+	 * The third member of the family the zero point and the guides toggle belong
+	 * to — editor state, never the document's, reaching no solve and no export —
+	 * and the one with the sharpest reason for being explicit rather than
+	 * inferred. A machine's triggers are `pointerenter`, `pointerdown` and
+	 * `click`, which are the events a drag is made of; a canvas that fired them
+	 * while somebody was moving a button would hover it on the way past and click
+	 * it on release, and the design would appear to be moving on its own. So it
+	 * is a mode, it is off, and while it is on there is nothing to edit.
+	 *
+	 * It is deliberately not a third entry in the view switcher — see the toolbar
+	 * below, and the note on {@link ViewSwitcher}.
+	 */
+	const [previewing, setPreviewing] = useState(false);
+	/**
+	 * Which state each instance is being played in, and the four ways to change
+	 * it.
+	 *
+	 * **Playback costs no solve.** Every state of every instance is already in
+	 * the one answer set — the invariant the whole feature turns on — so drawing
+	 * a different one is the canvas reading a different key out of
+	 * `ModelScene.states`. Nothing recompiles, nothing re-grounds, nothing lands
+	 * in undo. The act that *does* all three is `SceneNode.state`, which is a
+	 * different verb with a different button, and the panels say so in words.
+	 */
+	const playback = useMachinePlayback(scene);
+	/**
+	 * How the transition that fired most recently is paced, for the canvas.
+	 *
+	 * Held rather than derived because it is a fact about an *event*: which edge
+	 * was taken is not recoverable from where the machine ended up — two edges
+	 * may arrive at the same state and be paced quite differently — so it is
+	 * recorded when the edge is followed and read on the render that follows.
+	 *
+	 * The stagger is deliberately not here. `mstagger` delays each *changed part*
+	 * by its position in `order/2` sequence, which the exporter works out because
+	 * it is writing one rule per node and knows which nodes it wrote; the canvas
+	 * paces every node with one inherited declaration, and giving each its own
+	 * delay would mean a second account of which parts a state changes, living
+	 * here rather than in the answer set. So a staggered transition plays on the
+	 * canvas as an unstaggered one of the same duration, and the exported file is
+	 * where the rhythm is. Named rather than silently dropped, because the two
+	 * *do* differ and a designer comparing them deserves to know which is which.
+	 */
+	const [motion, setMotion] = useState<
+		{ duration: number; delay: number; easing: string } | undefined
+	>(undefined);
 	const [leftWidth, setLeftWidth] = usePanelWidth("clingo-design.panel.left", 190);
 	const [rightWidth, setRightWidth] = usePanelWidth("clingo-design.panel.right", 260);
 	// Text sizes itself, and only something with a canvas can say how big it
@@ -567,7 +668,41 @@ export function Studio({
 	 * answers for the edit.
 	 */
 	const derived = useMemo(
-		() => (primary ? derivedNodes(primary.model, new Set(byId.keys())) : []),
+		() =>
+			primary
+				? derivedNodes(primary.model, new Set(byId.keys())).filter(
+						/**
+						 * **A state copy is never a layer.**
+						 *
+						 * Of the two ways out — leave them out, or nest them under their
+						 * state — this is the first, and the argument is that the second
+						 * is answering a question nobody asked. A layer list is the
+						 * document's structure: what is in the design, in paint order,
+						 * selectable and draggable. A state copy is none of those. It is
+						 * not in the document, it is not painted (only the *shown* one is,
+						 * through the `inst(I,N)` alias), it cannot be dragged, and there
+						 * are `states × parts` of them per instance — so nesting a
+						 * four-state button's copies under headings would quadruple the
+						 * list to say four times over what one row already says. Where the
+						 * other states *are* readable is the Machines panel and the strip
+						 * on the canvas, both of which show them as pictures rather than
+						 * as rows, which is what somebody comparing two states is actually
+						 * looking at.
+						 *
+						 * Almost always this filter removes nothing, because a state copy
+						 * is deliberately not a `node/1` and so never reaches `byId`,
+						 * `roots` or `derivedNodes` at all. Almost. `node/1` is a
+						 * derivable predicate — that is the whole reason `derivedNodes`
+						 * exists — so a hand-written rule may perfectly well assert
+						 * `node(stt(i1,hover,label))`, and then a four-state machine on a
+						 * twelve-part definition floods this panel with 48 rows that
+						 * cannot be selected into anything. The structural guarantee is
+						 * about what the *compiler* emits; this is about what a document
+						 * may say. Both are needed, and this is the cheap one.
+						 */
+						(d) => parseStatePart(d.node.id) === null,
+					)
+				: [],
 		[primary, byId],
 	);
 	/**
@@ -652,9 +787,39 @@ export function Studio({
 			 * A component instance's parts are derived, so the document has no name
 			 * for `inst(primary,buttonLabel)` — but the definition does, and a
 			 * caption reading an ASP term is a caption nobody reads.
+			 *
+			 * Four readings, tried in order, each for a term the document itself
+			 * cannot name: a component part, a datum, and now a state copy. A
+			 * variable a state's delta minted belongs to `stt(b1,hover,label)`, and
+			 * "Label · Hover — Button 1 fill" is the sentence; the raw term in the
+			 * middle of a caption is where a reader stops reading.
 			 */
 			const nameOf = (id: string) =>
-				byId.get(id)?.name ?? partLabel(scene, id) ?? id;
+				byId.get(id)?.name ??
+				partLabel(scene, id) ??
+				datumLabel(scene, id) ??
+				stateLabel(scene, id) ??
+				id;
+			/**
+			 * The two keys `parseVariable` deliberately refuses, asked first.
+			 *
+			 * `sprop`, `sfval` and `mval` join `spart` in the set that never parses
+			 * back, and the reason is recorded there: every caller that reads a key
+			 * back is asking about something the *inspector's generic rows* can act
+			 * on, and three cases none of them could act on would be three cases all
+			 * of them had to handle. But this caller is not asking what to *do* with
+			 * a variable — it is asking what to call one — and there the answer
+			 * exists and lives in `machines.ts`, beside the grammar that mints the
+			 * key. So the two labellers are tried here rather than the parser being
+			 * widened for one reader.
+			 *
+			 * Without them a caption over a hovered fill read `sprop(b1,hover,label,fill)`,
+			 * which is a receipt rather than a sentence — and this is the one place
+			 * the multiverse explains itself to somebody.
+			 */
+			const machineName = stateVarLabel(scene, key) ?? motionLabel(scene, key);
+			if (machineName !== undefined) return machineName;
+
 			const parsed = parseVariable(key);
 			if (!parsed) return key;
 			if (parsed.kind === "prop") {
@@ -716,7 +881,16 @@ export function Studio({
 					.slice(0, 2)
 					.map(
 						(n) =>
-							byId.get(n)?.name ?? partLabel(scene, n) ?? datumLabel(scene, n) ?? n,
+							byId.get(n)?.name ??
+							partLabel(scene, n) ??
+							datumLabel(scene, n) ??
+							// A rule that says "the label does not jump when you hover" is
+							// an ordinary `align` over two state copies, so this is the
+							// fourth reading and the last: it is what makes the why panel
+							// able to answer "Align on Label · Rest — Button 1, Label ·
+							// Hover — Button 1" instead of naming two ASP terms.
+							stateLabel(scene, n) ??
+							n,
 					)
 					.join(", ")}${c.nodes.length > 2 ? "…" : ""}`;
 			const label = CONSTRAINT_KINDS[c.kind].label;
@@ -1181,6 +1355,171 @@ export function Studio({
 		[unsettled, labelFor],
 	);
 
+	/* ---------------------------------------------------------------- */
+	/* State machines                                                    */
+	/* ---------------------------------------------------------------- */
+
+	/**
+	 * State copies a rule may name, offered in the Rules panel's member picker
+	 * beside the node ids and the datums.
+	 *
+	 * A cross-state rule — "the label does not jump when you hover" — is an
+	 * ordinary `align` with an unusual member, and this is the only place in the
+	 * studio that has to know such a member exists: `c_node/2` takes the term
+	 * exactly where it takes a node id, and the geometric rules relate it through
+	 * a frame and a world chain it already has.
+	 */
+	const stateMembers = useMemo(() => stateCopyIds(scene), [scene]);
+
+	/**
+	 * The edge a trigger takes at an instance right now, or nothing.
+	 *
+	 * A second reading of what `stepMachine` answers, and the duplication is
+	 * deliberate and narrow: the step decides *where the machine goes*, which
+	 * must have exactly one answer shared with the exported file, while this
+	 * decides *how the move is paced*, which the file gets from the same document
+	 * by a different route. The two are kept in step by being written to the same
+	 * three conditions `machineTable` filters on — enabled, both ends real, first
+	 * in document order — so the transition found here is the transition the
+	 * table's edge came from.
+	 */
+	function edgeAt(
+		instance: string,
+		trigger: Trigger,
+	): { machine: Machine; transition: Transition } | undefined {
+		const node = byId.get(instance);
+		if (!node) return undefined;
+		const machine = machineForNode(scene, node);
+		if (!machine) return undefined;
+		const from = playback.playing[instance] ?? shownState(machine, node);
+		const ids = new Set(machine.states.map((s) => s.id));
+		const transition = machine.transitions.find(
+			(t) =>
+				t.enabled &&
+				t.trigger === trigger &&
+				t.from === from &&
+				ids.has(t.from) &&
+				ids.has(t.to),
+		);
+		return transition ? { machine, transition } : undefined;
+	}
+
+	/**
+	 * A trigger the canvas saw, followed.
+	 *
+	 * Two acts in one, and the order matters: the pacing is recorded *before* the
+	 * state changes, so that the render which draws the new state is the same
+	 * render that carries the duration it should get there in. React batches both
+	 * updates out of one event handler, so the browser never sees the new frames
+	 * with the old transition on them — which, when it was the other way round,
+	 * showed up as the first hover of a session snapping and every one after it
+	 * easing.
+	 *
+	 * Where the machine ends up is entirely `stepMachine`'s answer, through the
+	 * playback hook. Nothing here can move a machine somewhere the exported file
+	 * would not.
+	 */
+	function onTrigger(instance: string, trigger: Trigger) {
+		const edge = edgeAt(instance, trigger);
+		if (edge) {
+			const timing = answer?.machines[edge.machine.id];
+			setMotion({
+				duration: timing?.duration[edge.transition.id] ?? MOTION_FALLBACK.duration,
+				delay: timing?.delay[edge.transition.id] ?? MOTION_FALLBACK.delay,
+				easing: EASINGS[edge.transition.easing ?? DEFAULT_EASING].css,
+			});
+		}
+		playback.fire(instance, trigger);
+	}
+
+	/**
+	 * Switching preview on starts every machine, the way loading the exported
+	 * page would.
+	 *
+	 * A `load` trigger has no event: it fires once, when a runtime starts, and it
+	 * is how a machine says "settle into this state" rather than "wait to be
+	 * poked". The chain is followed to the end — a→b, b→c ends at c, because
+	 * stopping one edge short is an arbitrary place to stop — and a cycle stops
+	 * *before* going round rather than after, so the machine ends in the last
+	 * state it had not already been in. `MACHINE_RUNTIME` settles the same chains
+	 * by the same rule; a state strip that disagreed with the exported file about
+	 * where a machine starts would be the one disagreement this whole design is
+	 * arranged to prevent.
+	 *
+	 * Note that no health check catches a load cycle: a two-state one is
+	 * reachable, leaves both states and is deterministic. This loop is what
+	 * stands between a designer and a preview that spins.
+	 */
+	useEffect(() => {
+		if (!previewing) return;
+		for (const instance of Object.keys(machineTable(scene).instances)) {
+			const seen = new Set<string>();
+			for (;;) {
+				const at = playback.fire(instance, "load");
+				if (at === null || seen.has(at)) break;
+				seen.add(at);
+			}
+		}
+		// Keyed on the toggle and deliberately on nothing else, `scene` and
+		// `playback` included. Re-running it whenever the document changed would
+		// restart every machine each time a colour was nudged, which is not what a
+		// load edge means and would yank the design out from under whoever was
+		// pointing at it. `playback.fire` reads the machine's current state from a
+		// ref rather than from this closure, so a stale one here cannot make the
+		// chain start from the wrong place.
+	}, [previewing]);
+
+	/**
+	 * The subject of the canvas state strip: one instance, and the machine
+	 * driving it.
+	 *
+	 * Read off the selection rather than chosen in a panel, so the strip is a
+	 * view on what is selected in the same way the inspector is — select a
+	 * button, see its states; select something else, the strip goes away.
+	 *
+	 * **Selecting the definition borrows an instance of it, and it has to.** A
+	 * definition on the canvas is always its rest state, because a definition
+	 * part's frame is a *fact* the compiler emits and every instance inherits it
+	 * — drawing the definition in another state would move the component itself.
+	 * The state copies exist per instance, so the strip draws a use of the
+	 * definition and says as much by putting that instance's name on it. A
+	 * definition with a machine and no instances anywhere gets no strip: there
+	 * would be nothing in the answer set to draw, and inventing something is how
+	 * a preview starts lying.
+	 */
+	const stateStrip = useMemo(() => {
+		if (selection.size !== 1) return undefined;
+		const id = [...selection][0];
+		const node = byId.get(id);
+		if (!node) return undefined;
+		const machine = machineForNode(scene, node);
+		if (!machine || machine.states.length === 0) return undefined;
+		const subject =
+			node.instanceOf !== undefined
+				? node
+				: flatten(scene.nodes).find((n) => n.instanceOf === machine.root);
+		if (!subject) return undefined;
+		const world = placedNodes(scene.nodes, primary?.solved ?? {}, context).find(
+			(p) => p.node.id === subject.id,
+		)?.world;
+		if (!world || world.width <= 0 || world.height <= 0) return undefined;
+		return {
+			machine,
+			instance: subject.id,
+			name: subject.name,
+			world,
+			drawn: shownState(machine, subject),
+			// Built here rather than inline in the render so each cell hands the
+			// artboard the *same object* on every render: `Artboard` is memoised,
+			// and a fresh `{ [id]: state }` per render would re-render every copy in
+			// the strip on every pointermove over the canvas.
+			cells: machine.states.map((state) => ({
+				state,
+				playing: { [subject.id]: state.id } as Readonly<Record<string, string>>,
+			})),
+		};
+	}, [selection, byId, scene, primary, context]);
+
 	return (
 		<div className={styles.studio}>
 			<div
@@ -1267,6 +1606,10 @@ export function Studio({
 											freedom={freedom}
 											derived={derived}
 											showGuides={showGuides}
+											previewing={previewing}
+											playing={playback.playing}
+											onTrigger={onTrigger}
+											motion={motion}
 											onContextMenu={(at) => {
 												const box = host.current?.getBoundingClientRect();
 												setMenu({
@@ -1327,6 +1670,126 @@ export function Studio({
 								</div>
 							);
 						})}
+
+						{/*
+						 * The state strip: the subject drawn once per state, side by side,
+						 * under the design it belongs to.
+						 *
+						 * **On the canvas rather than in a third view, and that is the
+						 * answer to the view switcher's argument.** `ViewSwitcher` says a
+						 * toggle with three states is a menu, and it is right; the mistake
+						 * would be to conclude that the strip therefore has to be a menu
+						 * entry. It is not a *view* of the document at all — a view is what
+						 * the whole canvas shows and there are two of those, the one design
+						 * you edit and the space it came from. A strip of one component's
+						 * states is an annotation on the design in front of you, appearing
+						 * because something is selected and going away when nothing is,
+						 * which is exactly what `AlignTools` and the rulers already do.
+						 * Putting it here also keeps the one property that makes it worth
+						 * having: it is in the design's own coordinates, at the design's
+						 * own scale, so zooming in to compare two states is the same
+						 * gesture as zooming in on anything else.
+						 *
+						 * Every cell costs one lookup and no solve. All of these states are
+						 * in the same answer set as the picture above them — that is the
+						 * invariant — so this is `Artboard` reading `model.states` five
+						 * times rather than five solves, and a machine with eight states is
+						 * as cheap as one with two.
+						 */}
+						{view === "design" && !showingWays && primary && stateStrip ? (
+							<div
+								className={styles.strip}
+								data-role="state-strip"
+								data-machine={stateStrip.machine.id}
+								data-instance={stateStrip.instance}
+								style={{
+									left: canvasPx(bounds.x),
+									top: canvasPx(bounds.y + bounds.height + STRIP_GAP),
+								}}
+								// The strip is furniture on the canvas, so a press on it must
+								// not also start a pan — the same stop the multiverse's
+								// clickable copies make.
+								onPointerDown={(e) => e.stopPropagation()}
+							>
+								<div className={styles.stripName}>
+									{stateStrip.machine.name || stateStrip.machine.id} ·{" "}
+									{stateStrip.name}
+								</div>
+								{stateStrip.cells.map(({ state, playing }, at) => {
+									const live = playback.playing[stateStrip.instance] === state.id;
+									return (
+										<div
+											key={state.id}
+											className={styles.stateCell}
+											data-role="state-preview"
+											data-state={state.id}
+											data-drawn={state.id === stateStrip.drawn ? "" : undefined}
+											data-playing={live ? "" : undefined}
+											style={{
+												left: at * (canvasPx(stateStrip.world.width) + canvasPx(STRIP_STEP)),
+												width: canvasPx(stateStrip.world.width),
+												height: canvasPx(stateStrip.world.height),
+											}}
+										>
+											<span className={styles.stateName}>
+												{state.name || state.id}
+											</span>
+											<span className={styles.stateInk}>
+												{/* Packed against the subject's own top-left, the way a
+												    read-only copy of the whole document is: the artboard
+												    draws the entire design and the cell shows the one
+												    box worth looking at. Cheaper than building a second
+												    renderer that knows how to draw a subtree, and — more
+												    to the point — it is the *same* renderer, so a state
+												    cell cannot draw a component differently from the
+												    canvas above it. */}
+												<span
+													className={styles.copy}
+													style={{
+														left: -canvasPx(stateStrip.world.x),
+														top: -canvasPx(stateStrip.world.y),
+													}}
+												>
+													<Artboard
+														scene={scene}
+														universe={primary}
+														playing={playing}
+													/>
+												</span>
+											</span>
+											{/* The whole cell is the target, as an element of its own
+											    rather than a `<button>` wrapped round the drawing: an
+											    artboard is divs, a button may only hold phrasing
+											    content, and a picture nested illegally inside a control
+											    is a picture assistive technology reads as the control's
+											    name. */}
+											<button
+												type="button"
+												className={styles.stateHit}
+												data-role="play-state"
+												data-state={state.id}
+												aria-pressed={live}
+												title={
+													live
+														? `Stop playing “${state.name || state.id}” — hand the canvas back to the document`
+														: `Play “${state.name || state.id}” on the canvas. Nothing is written down and nothing solves.`
+												}
+												onClick={() =>
+													playback.play(
+														stateStrip.instance,
+														live ? null : state.id,
+													)
+												}
+											>
+												<span className={styles.hidden}>
+													{state.name || state.id}
+												</span>
+											</button>
+										</div>
+									);
+								})}
+							</div>
+						) : null}
 					</InfiniteCanvas>
 
 					{/* Only over the design, and that is a claim about coordinates
@@ -1409,6 +1872,47 @@ export function Studio({
 								>
 									Guides
 								</button>
+								{/*
+								 * Running the document, rather than a third view of it.
+								 *
+								 * A mode and not a guess: the triggers a machine listens for
+								 * are the events a drag is made of, so a canvas that fired
+								 * them all the time would hover every button somebody dragged
+								 * past. Beside Guides because it is the same kind of switch —
+								 * a decision about the person looking, not about the design,
+								 * reaching no solve, no export and no undo entry.
+								 *
+								 * Offered only where there is something to run. A toggle that
+								 * does nothing on most documents is a toggle people learn to
+								 * ignore on all of them.
+								 */}
+								{scene.machines.length > 0 ? (
+									<button
+										type="button"
+										className={cx(styles.tool, previewing && styles.toolActive)}
+										data-role="preview"
+										data-active={previewing ? "" : undefined}
+										title={
+											previewing
+												? "Stop running the machines and go back to editing"
+												: "Run the machines: hover and click the design and watch it move. Nothing is written down."
+										}
+										onClick={() =>
+											setPreviewing((on) => {
+												if (on) {
+													// Leaving hands the canvas back to the document in
+													// one act: the played states go, and so does the
+													// pacing, or the next edit would ease into place.
+													playback.clear();
+													setMotion(undefined);
+												}
+												return !on;
+											})
+										}
+									>
+										Preview
+									</button>
+								) : null}
 								<button
 									type="button"
 									className={styles.tool}
@@ -1526,7 +2030,14 @@ export function Studio({
 											// document whose only variable was a style read "Variables"
 											// with no badge at all.
 											scene.tokens.length + scene.styles.length
-										: scene.constraints.length;
+										: p.id === "machines"
+											? // Machines, not states: the badge counts the records the
+												// panel lists, the way the Rules badge counts rules
+												// rather than the members they range over. Summing the
+												// states would make one four-state button read the same
+												// as four machines.
+												scene.machines.length
+											: scene.constraints.length;
 							return (
 								<button
 									key={p.id}
@@ -1573,6 +2084,8 @@ export function Studio({
 								everywhere={everywhere}
 								variables={minted}
 								onSelectionChange={selectionIds}
+								playing={playback.playing}
+								onPlay={playback.play}
 							/>
 						) : panel === "variables" ? (
 							<Variables
@@ -1588,6 +2101,36 @@ export function Studio({
 								onSelectionChange={selectionIds}
 								derivedWears={answer?.wears}
 							/>
+						) : panel === "machines" ? (
+							/*
+							 * The machines, edited where the styles and the rules are edited.
+							 *
+							 * It takes the same six props every panel that holds values takes
+							 * — picks, varying, reach, pins, onPin, why — and that is the
+							 * point rather than an accident: a state's delta and a
+							 * transition's duration are `Value`s like any other, so they
+							 * vary, grey, pin, take a token and answer a why-question through
+							 * exactly the rows the rest of the studio already has. Nothing
+							 * about a machine needed a second kind of variable, because
+							 * nothing about a machine is a design-space choice.
+							 */
+							<Machines
+								scene={scene}
+								onSceneChange={onSceneChange}
+								picks={picks}
+								varying={varying}
+								reach={reach}
+								pins={pins}
+								onPin={pin}
+								why={whyFor}
+								selection={selection}
+								onSelectionChange={selectionIds}
+								playing={playback.playing}
+								onPlay={playback.play}
+								health={answer?.machines}
+								broken={broken}
+								conflict={blamed}
+							/>
 						) : (
 							<Constraints
 								scene={scene}
@@ -1601,6 +2144,7 @@ export function Studio({
 								onRelax={applyRelaxation}
 								onSelectionChange={selectionIds}
 									model={answer}
+								stateMembers={stateMembers}
 							/>
 						)}
 					</div>

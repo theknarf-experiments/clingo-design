@@ -53,9 +53,22 @@
  */
 import type { Frame } from "./geometry.ts";
 import { pathData, scalePoints } from "./geometry.ts";
-import { parseInstancePart } from "./components.ts";
-import { lineHeightEmu } from "./measure.ts";
-import type { ModelNode, ModelScene } from "./model.ts";
+import { instanceNodes, instancePart, parseInstancePart } from "./components.ts";
+import {
+	MEASURED_PROPS,
+	autoSizes,
+	lineHeightEmu,
+} from "./measure.ts";
+import {
+	initialState,
+	machineForNode,
+	machineTable,
+	stateName,
+	statePart,
+	statePropVar,
+	shownState,
+} from "./machines.ts";
+import type { ModelNode, ModelScene, ModelState } from "./model.ts";
 import {
 	DOCUMENT_BASE,
 	PAINT,
@@ -63,6 +76,7 @@ import {
 	SURFACE_BOX,
 	arrowHead,
 	cssLength,
+	cssName,
 	cssPx,
 	cssRound,
 	cssText,
@@ -72,21 +86,28 @@ import {
 	paintFor,
 } from "./paint.ts";
 import {
+	DEFAULT_EASING,
 	type Dimension,
 	DIMENSIONS,
+	EASINGS,
 	FRAME_DIMS,
 	GUIDE_PROPS,
 	type GuideProp,
 	KINDS,
 	LAYOUT_PROPS,
 	type LayoutProp,
+	type Machine,
+	type MachineState,
 	type NodeKind,
 	PROP_NAMES,
 	PROPS,
 	type PropName,
 	type Scene,
 	type SceneNode,
+	type StatePart,
 	type Style,
+	TRIGGERS,
+	type Transition,
 	drawsWords,
 	findStyle,
 	frameOf,
@@ -94,11 +115,13 @@ import {
 	isDiagonal,
 	isGridded,
 	isPlotted,
+	motionMs,
 	propValueOf,
 	styleProps,
 	variantLabel,
 	wornProps,
 } from "./scene.ts";
+import { runtimeScript } from "./runtime.ts";
 import { flatten } from "./tree.ts";
 import { type Emu, cssPxFromEmu, emuOf } from "./units.ts";
 import {
@@ -166,6 +189,12 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 			"Shadows are dropped — SVG needs a filter per elevation, and a filter is not the declaration a designer wrote.",
 			"Text does not wrap. Each line of the document's own text becomes a tspan; a line the canvas broke because the box was narrow comes out unbroken.",
 			"A text baseline is computed from the font size rather than measured, so a face with unusual metrics sits a pixel or two off.",
+			// Unconditional, unlike the machine losses the HTML target adds, and the
+			// asymmetry is the point: HTML *can* carry a state and names the ones it
+			// could not, while SVG carries none of them and would say the same
+			// sentence about every machine in the document. One sentence about the
+			// format beats N about the documents it cannot hold.
+			"Behaviour. An SVG has no states: what is here is the one state each instance is drawn in, and the transitions, the triggers and the other states are not in the file.",
 		],
 	},
 };
@@ -422,8 +451,28 @@ function tokenNamed(
 	picks: Picks,
 	variable: string,
 ): Token | undefined {
-	const value = documentValue(index, variable, picks);
-	if (!value) return undefined;
+	return valueNamed(index, picks, documentValue(index, variable, picks), variable);
+}
+
+/**
+ * The same question asked of a {@link Value} somebody already has in hand.
+ *
+ * Split out of {@link tokenNamed} for the one caller that cannot go through
+ * `parseVariable`: a state's delta is stored under `sprop(I,S,N,P)`, and that key
+ * is deliberately absent from `parseVariable` — see the note in `machines.ts`, and
+ * `spart(S,I,P)` before it, which is absent for exactly the same reason. The
+ * *value* is right there in the document all the same, so the walk that turns a
+ * link into `var(--accent)` works perfectly well when it is handed the value
+ * rather than asked to find one. Which is the whole difference between a hole in
+ * the design system and a lookup with two front doors.
+ */
+function valueNamed(
+	index: DocIndex,
+	picks: Picks,
+	value: Value | undefined,
+	variable: string,
+): Token | undefined {
+	if (!value || value.length === 0) return undefined;
 	const term = activeTerm(value, variable, picks);
 	return term?.kind === "token"
 		? findToken(index.scene.tokens, term.token)
@@ -955,6 +1004,8 @@ interface Emitted {
 	text: string;
 	/** The styles that came out as classes. */
 	classes: StyleClass[];
+	/** What this target could not carry about *this* document, if anything. */
+	lost: string[];
 }
 
 function htmlExport(
@@ -965,7 +1016,13 @@ function htmlExport(
 	const useTokens = options.tokens !== false;
 	const base = layers[0];
 	const slots = slotsOf(base.universe.model);
+	const slotOf = new Map(slots.map((s) => [s.id, s] as const));
 	const used = new Set<string>();
+	// Before the layers are read, because a state that names a token has to have
+	// added it to `used` by the time `readLayer` writes the `:root` block — that
+	// block is built at the end of the base layer's own walk, and a token collected
+	// after it would have a `var()` in the file and no definition for it.
+	const machines = planMachines(index, base, useTokens, used);
 	const classes = styleClasses(index, base);
 	/** Which class a wearer carries, for the markup. */
 	const wearing = new Map<string, string>();
@@ -1001,9 +1058,8 @@ function htmlExport(
 				shared.set(id, taken);
 			}
 		}
-		const byId = new Map(slots.map((s) => [s.id, s] as const));
 		const walk = (node: ModelNode, root: boolean): void => {
-			const slot = byId.get(node.id);
+			const slot = slotOf.get(node.id);
 			if (slot) {
 				const own: Declarations = {
 					...geometry(index, layer, node, root, origin, useTokens, used),
@@ -1027,9 +1083,31 @@ function htmlExport(
 
 	const baseRules = readLayer(base);
 
+	// The `transition:` a machine wants on a node's base rule, by selector.
+	//
+	// Kept *beside* `baseRules` rather than merged into it, which looks like
+	// bookkeeping and is load-bearing: every collapsed layer below is a `diff`
+	// against `baseRules`, and `diff` unsays anything the base holds that the layer
+	// does not. A transition merged in before that loop would come out as
+	// `transition: unset` in every theme and every breakpoint — the machine and the
+	// collapse would eat each other, which is exactly the composition this file
+	// promises they do not.
+	const paced = new Map<string, Declarations>();
+	for (const layer of machines.layers) {
+		for (const [id, declarations] of layer.transitions) {
+			const slot = slotOf.get(id);
+			if (!slot) continue;
+			// First state to ask for it wins, in document order. A node two states
+			// both move is one element with one base rule, and two `transition`
+			// declarations in it would be one declaration: the later one.
+			if (!paced.has(`.${slot.className}`)) paced.set(`.${slot.className}`, declarations);
+		}
+	}
+
 	const css: string[] = [BASE_CSS];
 	for (const [selector, declarations] of baseRules) {
-		const block = rule(selector, declarations, "");
+		const extra = paced.get(selector);
+		const block = rule(selector, extra ? { ...declarations, ...extra } : declarations, "");
 		if (block) css.push(block);
 	}
 
@@ -1050,9 +1128,40 @@ function htmlExport(
 		);
 	}
 
+	// Last in the file, and the only rules here with any selector weight at all.
+	//
+	// A state is meant to beat the picture — that is what "this is what it looks
+	// like on hover" means — which is the exact opposite of a style class, whose
+	// `:where()` makes it lose to every wearer that overrode it. So these are
+	// written plainly, after everything else, and a state under a theme wins over
+	// both because it is more specific than the node's own rule and later than the
+	// media query.
+	for (const layer of machines.layers) {
+		const host = slotOf.get(layer.instance);
+		if (!host) continue;
+		const blocks: string[] = [];
+		for (const [id, declarations] of layer.changed) {
+			const slot = slotOf.get(id);
+			if (!slot) continue;
+			const block = rule(`.${host.className}${layer.on} .${slot.className}`, declarations, "");
+			if (block) blocks.push(block);
+		}
+		if (blocks.length === 0) continue;
+		css.push(`/* ${layer.label} */`);
+		css.push(blocks.join("\n"));
+	}
+
 	const title = escapeText(options.title ?? "Design");
+	// At the end of the body, where a script that reads the document has to be:
+	// the runtime's first act is one `querySelectorAll("[data-node]")` pass, and in
+	// the head it would find nothing. `defer` would work too and would be a second
+	// thing to be right about — see `runtime.ts`, which is deliberately a plain
+	// ES5 body with no dependency on when it runs beyond the elements existing.
+	const script =
+		machines.runtime === null ? "" : `\n<script>\n${machines.runtime}\n</script>`;
 	return {
 		classes,
+		lost: machines.lost,
 		text: `<!doctype html>
 <html lang="en">
 <head>
@@ -1066,7 +1175,7 @@ ${css.join("\n")}
 <body>
 \t<div class="design">
 ${htmlBody(index, slots, base, wearing)}
-\t</div>
+\t</div>${script}
 </body>
 </html>
 `,
@@ -1302,6 +1411,10 @@ function svgExport(
 	const h = cssPx(bounds.height);
 	return {
 		classes: [],
+		// Nothing conditional: what this target loses about a machine it loses about
+		// every machine, so it is one unconditional sentence in `EXPORT_TARGETS`
+		// rather than a list assembled per document.
+		lost: [],
 		text: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" fill="#0f172a">${title}${style}${defs}
 ${body}
 </svg>
@@ -1954,6 +2067,634 @@ function describe(scene: Scene, variable: string): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* A state, as a selector                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * **Why this is not `collapseSpace`, and must never be routed through it.**
+ *
+ * The two mechanisms both end up emitting extra CSS rules on top of a base
+ * layer, which is the whole of what they have in common, and it is a coincidence
+ * of the medium rather than a shared idea. Collapsing a space takes N *universes*
+ * — N different answers to a question the document asked, each a complete design
+ * — and folds them into one file under a condition the browser evaluates
+ * (`prefers-color-scheme`, a width). It is allowed to do that only where the
+ * document says which universe is which, which is why `collapseSpace` spends most
+ * of its length refusing.
+ *
+ * A machine's states are not universes and there is nothing to refuse. Every
+ * state of every instance is already in the *one* answer set beside the picture —
+ * that is the invariant the whole feature is built on, see `machines.ts` — so
+ * there is no choice being folded, no variable being switched, and no question
+ * about which state is "the narrow one". The states of an instance are a matrix
+ * cell beside its variant, not a point in a product of universes, and the two
+ * compose exactly because they are separate: a themed export of a document with a
+ * hover state has a media query *and* a `:hover` rule, and neither eats the
+ * other.
+ *
+ * Stretching one mechanism over both would have broken the honest half. A state
+ * routed through `collapseSpace` would have to pass `disagreements()`, which
+ * compares `pick`s — and a state changes no pick at all, so every state would
+ * read as "these universes make the same decisions" and collapse to nothing. Made
+ * to pass, it would then have to be *refused* wherever the space is genuinely not
+ * collapsible, which would mean a document that cannot be themed also cannot
+ * hover. There is no version of one function that is right about both.
+ *
+ * So: two mechanisms, one file, and the layering below is deliberate. The base
+ * rules are the picture. The collapse's layers, if any, are conditional
+ * *redefinitions* of that picture. The state rules come last and are the only
+ * thing in the file with real selector weight, because a state is meant to win
+ * over whatever the picture currently says — which is the exact opposite of what
+ * a style class is for, and why they are wrapped in `:where()` and these are not.
+ */
+
+/**
+ * One state of one machine, as the selector a stylesheet switches on.
+ *
+ * Not a {@link Layer}: a layer is a whole universe under a media query, and a
+ * state is the same universe under a different selector on one element.
+ */
+export interface StateLayer {
+	machine: string;
+	/** The instance's node id, whose element carries the selector. */
+	instance: string;
+	state: string;
+	/**
+	 * What is appended to the instance's own class selector: `":hover"`,
+	 * `":active"`, `":focus-visible"`, or `'[data-state="open"]'`.
+	 */
+	on: string;
+	/** Per node id, only what this state changes from the base. */
+	changed: Map<string, Declarations>;
+	/** `transition:` to put on each changed node's *base* rule. */
+	transitions: Map<string, Declarations>;
+	label: string;
+}
+
+export interface MachineExport {
+	layers: StateLayer[];
+	/** The `<script>` body, or null where every state is a pseudo-class. */
+	runtime: string | null;
+	/** What the file does not carry — appended to {@link ExportResult.lost}. */
+	lost: string[];
+}
+
+/**
+ * Which pseudo-class a state collapses to, or nothing where it needs the script.
+ *
+ * The test is deliberately strict, and every clause of it is protecting the same
+ * claim: that `.n6:hover .n7 { … }` is *the whole behaviour*, with nothing left
+ * over that a reader of the file would have to be told about. CSS has no memory,
+ * so a pseudo-class can only stand for a state the browser is already tracking
+ * for us — which means the state has to be entered exactly one way, left exactly
+ * one way, and the two ways have to be the two halves of one condition.
+ *
+ *   - **exactly one enabled edge in, from the base state, on a trigger CSS has a
+ *     name for.** Two ways in means the state is reached from somewhere the
+ *     pseudo-class knows nothing about.
+ *   - **exactly one enabled edge out, back to the base state, on that trigger's
+ *     pair.** `pointerenter` in and `click` out is a state you enter by hovering
+ *     and leave by clicking, and `:hover` would leave it the moment the pointer
+ *     did — which is a different machine from the one that was drawn.
+ *   - **nothing else touches it.** Any other edge is behaviour the file would be
+ *     silently dropping.
+ *
+ * `TRIGGERS[g].css` and `.pair` are read off the table rather than decided here,
+ * so a new trigger with a pseudo-class is one entry in `scene.ts` and no change
+ * at all in this file.
+ */
+function pseudoClassFor(
+	machine: Machine,
+	base: string,
+	state: string,
+): string | null {
+	const enabled = machine.transitions.filter((t) => t.enabled);
+	const into = enabled.filter((t) => t.to === state);
+	const outOf = enabled.filter((t) => t.from === state);
+	if (into.length !== 1 || outOf.length !== 1) return null;
+	const [enter] = into;
+	const [leave] = outOf;
+	if (enter.from !== base || leave.to !== base) return null;
+	const spec = TRIGGERS[enter.trigger];
+	if (spec.css === null || spec.pair !== leave.trigger) return null;
+	return `:${spec.css}`;
+}
+
+/**
+ * Everything one state copy paints, with a token the document named kept as one.
+ *
+ * The twin of {@link declarationsFor}, over a {@link ModelState} instead of a
+ * {@link ModelNode}, and it is a second function rather than a shared one for a
+ * reason that is not laziness: a state copy has no kind of its own — the copy is
+ * a parallel *description*, and what it is is decided by the definition part,
+ * which is a node of the picture and already says so — and it looks its token
+ * names up in two places rather than one.
+ *
+ * Those two places are the whole of the invariant, showing through at the export:
+ *
+ *   - a property the state's delta answers has its own variable,
+ *     `sprop(I,S,N,P)`, and the name is read from the delta's own {@link Value};
+ *   - a property the state says nothing about is read from the *instance's* one
+ *     shared `prop(inst(I,N),P)` — the same variable every other state of the
+ *     same instance reads, which is why four states of a two-alternative fill are
+ *     two designs and not sixteen.
+ *
+ * Getting that order wrong in either direction is a wrong file rather than an
+ * untidy one: reading the instance's variable for a property the state overrode
+ * would name the token the *base* wears while writing the state's colour beside
+ * it, which is a stylesheet that lies about its own design system.
+ *
+ * The kind's constant furniture — {@link SURFACE_BOX}, a shape's `box` — is
+ * deliberately absent. Every copy of one part has the same kind and so the same
+ * furniture, so it is identical on both sides of every diff this feeds and would
+ * cancel; and the base rule the state sits on top of already carries it.
+ */
+function copyPaint(
+	index: DocIndex,
+	layer: Layer,
+	kind: NodeKind,
+	instance: string,
+	part: string,
+	state: string,
+	delta: StatePart | undefined,
+	copy: ModelState,
+	useTokens: boolean,
+	used: Set<string>,
+): Declarations {
+	const out: Declarations = {};
+	for (const prop of KINDS[kind].props) {
+		const value = copy.rendered[prop];
+		if (value === undefined) continue;
+		const paint = paintFor(kind, prop);
+		if (!paint) continue;
+		const said = delta?.props?.[prop];
+		const token = !useTokens
+			? undefined
+			: said !== undefined && said.length > 0
+				? valueNamed(
+						index,
+						layer.universe.pick,
+						said,
+						statePropVar(instance, state, part, prop),
+					)
+				: tokenNamed(
+						index,
+						layer.universe.pick,
+						propVar(instancePart(instance, part), prop),
+					);
+		if (token) {
+			used.add(token.id);
+			Object.assign(out, paint(`var(--${index.custom.get(token.id)})`));
+		} else {
+			Object.assign(out, paint(cssValue(prop, value)));
+		}
+	}
+	return out;
+}
+
+/**
+ * Which CSS properties a transition names, filtered by the transition's `only`.
+ *
+ * `display` is struck out unconditionally and that is not a filter, it is the
+ * truth: there is nothing between shown and not shown to interpolate, so naming
+ * it would produce a `transition` declaration a browser ignores and a reader
+ * believes. The loss says so out loud instead.
+ *
+ * An `only` list is {@link PropName}s and the changed set is CSS keys, so the
+ * translation goes through {@link paintFor} — the same table the declarations
+ * came out of, asked the same question — rather than through a second mapping
+ * that could disagree with the first. Geometry survives no `only` list at all,
+ * because a frame dimension is not a `PropName` and never will be: "only tween
+ * the fill" is a sentence about paint, and a designer who wrote it did not mean
+ * to keep the box moving.
+ */
+function tweenedKeys(
+	kind: NodeKind,
+	only: readonly PropName[] | undefined,
+	changed: Declarations,
+): string[] {
+	const keys = Object.keys(changed).filter((key) => key !== "display");
+	if (only === undefined) return keys.map(cssName);
+	const allowed = new Set<string>();
+	for (const prop of only) {
+		const paint = paintFor(kind, prop);
+		if (paint) for (const key of Object.keys(paint(""))) allowed.add(key);
+	}
+	return keys.filter((key) => allowed.has(key)).map(cssName);
+}
+
+/** A whole number of milliseconds as CSS writes one. */
+const ms = (n: number): string => `${Math.round(n)}ms`;
+
+/**
+ * How long a transition takes in *this* universe, and how it is paced.
+ *
+ * The answer set first, the document second, and the order matters: a duration
+ * is a {@link Value}, so it may name a `duration` token whose alternatives the
+ * solver picked between, and `mdur/3` is that pick resolved. The document reader
+ * is the fallback for an answer set that was asked for without `scenery` — the
+ * same reading, arrived at without the solver — rather than a second opinion.
+ */
+function pacing(
+	model: ModelScene,
+	machine: Machine,
+	transition: Transition,
+	picks: Picks,
+	tokens: readonly Token[],
+): { duration: number; delay: number; stagger: number; easing: string } {
+	const said = model.machines[machine.id];
+	const context = { tokens, picks };
+	const read = (prop: "duration" | "delay" | "stagger"): number =>
+		said?.[prop][transition.id] ?? motionMs(machine, transition, prop, context);
+	return {
+		duration: read("duration"),
+		delay: read("delay"),
+		stagger: read("stagger"),
+		easing: EASINGS[transition.easing ?? DEFAULT_EASING].css,
+	};
+}
+
+/**
+ * The edge a state is entered by, which is the one whose pacing the file writes.
+ *
+ * Preferring the edge from the base state because that is the move a reader of
+ * the exported page will actually make: the base is what the file draws, so
+ * "going into hover" is the transition being described. Anything else entering
+ * the state is a fallback so that a state reached only from elsewhere still gets
+ * paced rather than snapping.
+ */
+function entryEdge(
+	machine: Machine,
+	base: string,
+	state: string,
+): Transition | undefined {
+	const enabled = machine.transitions.filter((t) => t.enabled && t.to === state);
+	return enabled.find((t) => t.from === base) ?? enabled[0];
+}
+
+/** True where a kind draws its real geometry inside its box — see {@link drawnGeometry}. */
+const drawsOwnGeometry = (kind: NodeKind): boolean =>
+	KINDS[kind].diagonal || KINDS[kind].plotted;
+
+/** A phrase for a node in the losses: its name where the document has one. */
+function nodeLabel(index: DocIndex, id: string): string {
+	const doc = docNode(index, id);
+	return doc ? `${KINDS[doc.kind].label} “${doc.name}”` : `“${id}”`;
+}
+
+/**
+ * Every machine in the document, as selectors over the base layer.
+ *
+ * The signature this file's callers use is {@link exportMachines}; this is the
+ * same work with the two things the HTML emitter has and a bare caller does not —
+ * whether token names are wanted, and the set of tokens the file has ended up
+ * using, which a state naming one has to be able to add to. Splitting them is
+ * what keeps `used` a single set: a `duration` token pointed at by a hover state
+ * has to reach `:root` like any other, and a second collection reconciled
+ * afterwards is how one would go missing.
+ */
+function planMachines(
+	index: DocIndex,
+	base: Layer,
+	useTokens: boolean,
+	used: Set<string>,
+): MachineExport {
+	const model = base.universe.model;
+	const layers: StateLayer[] = [];
+	const lost: string[] = [];
+	const say = (line: string): void => {
+		if (!lost.includes(line)) lost.push(line);
+	};
+	let scripted = false;
+
+	for (const node of instanceNodes(index.scene)) {
+		const machine = machineForNode(index.scene, node);
+		if (!machine || machine.states.length === 0) continue;
+		if (!model.byId[node.id]) continue;
+		const init = initialState(machine).id;
+		// The state the *picture* is in, which is the state this file's own rules
+		// are. §8.1 of the spec asks for the machine's initial state instead and
+		// re-seated base rules to get there; this does the nearer-correct thing and
+		// says so. Two reasons, and the second is the one that decided it. A file
+		// whose base is a state the runtime immediately writes over shows the wrong
+		// design until the script runs, which is a flash of the wrong colour on
+		// every load. And where the two differ the collapse to a pseudo-class is not
+		// available anyway — `:hover` can add a state to what is drawn, never
+		// subtract one — so re-seating would have bought a flash and nothing else.
+		// Where the instance is drawn in the initial state, which is every document
+		// that does not say otherwise, the two readings are the same reading.
+		const drawnIn = model.shown[node.id] ?? shownState(machine, node);
+		if (drawnIn !== init) {
+			say(
+				`“${node.name}” is drawn in ${stateName(machine, drawnIn)}, so that is the state this file's own rules are and the one it starts in. Every other state of “${machine.name}” — the machine's initial one included — is a data-state rule rather than a pseudo-class, because a selector can add to what is drawn and cannot subtract from it.`,
+			);
+		}
+
+		for (const state of machine.states) {
+			if (state.id === drawnIn) continue;
+			const layer = stateLayerFor(
+				index,
+				base,
+				machine,
+				node,
+				drawnIn,
+				state,
+				useTokens,
+				used,
+				say,
+			);
+			if (!layer) continue;
+			if (!layer.on.startsWith(":")) scripted = true;
+			layers.push(layer);
+		}
+	}
+
+	return {
+		layers,
+		// One script for the whole document, or none at all. The table already holds
+		// every machine, so a second data-state layer costs nothing; and a document
+		// whose states all collapsed to pseudo-classes gets no `<script>` tag,
+		// which is the case the pseudo-class rules exist to produce.
+		runtime: scripted ? runtimeScript(machineTable(index.scene)) : null,
+		lost,
+	};
+}
+
+/** One instance in one state, or nothing where the state changes nothing at all. */
+function stateLayerFor(
+	index: DocIndex,
+	base: Layer,
+	machine: Machine,
+	instance: SceneNode,
+	drawnIn: string,
+	state: MachineState,
+	useTokens: boolean,
+	used: Set<string>,
+	say: (line: string) => void,
+): StateLayer | null {
+	const model = base.universe.model;
+	const changed = new Map<string, Declarations>();
+	const hiddenHere: string[] = [];
+
+	// Whatever the answer set holds a copy of, which is the materialisation
+	// analysis's answer arrived at from the other end. Reading `model.states`
+	// rather than re-running `materializedParts` is deliberate: a hand-written rule
+	// may describe a copy the analysis never minted, and the file should carry what
+	// the picture actually says rather than what the document predicted it would.
+	for (const copy of Object.values(model.states)) {
+		if (copy.instance !== instance.id || copy.state !== state.id) continue;
+		const nodeId = instancePart(instance.id, copy.part);
+		const drawn = model.byId[nodeId];
+		const from = model.states[statePart(instance.id, drawnIn, copy.part)];
+		if (!drawn || !from) {
+			// Two ways to get here and they share a cause — the part is not in the
+			// picture, and a selector can restyle an element but cannot write one —
+			// and then part company over what a person can do about it.
+			//
+			// The first way is the common one and it is the spec's own headline
+			// example: the state this file is drawn in *hides* the part, so a
+			// dropdown drawn in `closed` has no panel in its markup and its `open`
+			// state finds nothing to restyle. The whole machine then exports inert,
+			// which is a bad way to learn that the file is written from one state. It
+			// has a one-click answer — draw the use in the state that shows the most
+			// — so the loss says it rather than leaving a reader to deduce it.
+			//
+			// The second is a copy a rule minted for a part the instance does not
+			// draw at all. There is nothing to re-seat and no state that would help,
+			// so it gets the bare sentence.
+			const hiddenThere = from?.hidden === true;
+			say(
+				`${stateName(machine, state.id)} describes “${copy.part}” of “${instance.name}”, which this design is not drawing. A selector can restyle an element and cannot write one, so that part of the state is not in the file.` +
+					(hiddenThere
+						? ` ${stateName(machine, drawnIn)} — the state this use is drawn in — takes it out of the picture, and the markup is written from that state. Draw this use in a state that shows “${copy.part}” and the rest of the machine follows it into the file.`
+						: ""),
+			);
+			continue;
+		}
+		if (copy.hidden) {
+			changed.set(nodeId, { display: "none" });
+			hiddenHere.push(nodeId);
+			continue;
+		}
+		const delta = state.parts[copy.part];
+		if (!index.byId.has(copy.part)) {
+			// A part the document has no node for: a rule minted this copy, and a
+			// rule can do that — `frame(stt(i1,hover,x),y,10)` is as legal as any
+			// other fact. What it cannot do is bring a *name* with it. Every token
+			// name in this file is read back out of the document, because the program
+			// interns literals and by the time a colour reaches `rendered/3` it is a
+			// hex code; a copy the document has no account of therefore exports as
+			// the literal. The same loss `ModelScene.wears`' derived wearers take,
+			// one mechanism over.
+			say(
+				`${stateName(machine, state.id)} describes “${copy.part}”, which a rule made rather than the document. Its values are in the file as the literals they resolved to: there is no stored value to read a token name off, so a link to a token is not in this file under that name.`,
+			);
+		}
+		// Asked before anything is diffed, because the answer is a fact about the
+		// *document* rather than about the declarations — and because a state that
+		// changes only the wording produces no declarations at all, so a check made
+		// after the diff would fall silent in exactly the case it exists for.
+		if ((delta?.props?.text?.length ?? 0) > 0) {
+			say(
+				`${stateName(machine, state.id)} changes the words in ${nodeLabel(index, nodeId)}. Text is markup and not a declaration — a selector can restyle an element and cannot rewrite it — so the file holds the wording the picture was drawn with.`,
+			);
+		}
+		if (retypes(index, state, copy.part)) {
+			say(
+				`${stateName(machine, state.id)} restyles the words in ${nodeLabel(index, nodeId)}, which takes its size from them, and nothing in the file re-measures them: the box is the one the picture was drawn at.`,
+			);
+		}
+		const before = copyPaint(
+			index,
+			base,
+			drawn.kind,
+			instance.id,
+			copy.part,
+			drawnIn,
+			machine.states.find((s) => s.id === drawnIn)?.parts[copy.part],
+			from,
+			useTokens,
+			used,
+		);
+		const after = copyPaint(
+			index,
+			base,
+			drawn.kind,
+			instance.id,
+			copy.part,
+			state.id,
+			delta,
+			copy,
+			useTokens,
+			used,
+		);
+		const declarations = diff(before, after);
+
+		const moved = DIMENSIONS.some((dim) => copy.frame[dim] !== from.frame[dim]);
+		if (moved && drawsOwnGeometry(drawn.kind)) {
+			// The one geometry a class cannot carry, and it is named rather than
+			// approximated for the same reason `collapseSpace` refuses it: a line, an
+			// arrow and a path put their numbers in the markup — a `<line>`'s
+			// coordinates, a `<path>`'s `d` — and the markup is written once, from
+			// the picture. A rule that moved the box would slide the frame out from
+			// under a shape that stayed where it was drawn.
+			say(
+				`${stateName(machine, state.id)} moves ${nodeLabel(index, nodeId)}, and a line, an arrow and a path draw their own geometry inside their box — that markup is written once, so this state is in the file as a class that cannot move it.`,
+			);
+		} else if (moved) {
+			Object.assign(declarations, moveDeclarations(from, copy));
+		}
+		if (Object.keys(declarations).length === 0) continue;
+		changed.set(nodeId, declarations);
+	}
+
+	if (changed.size === 0) return null;
+	if (hiddenHere.length > 0) {
+		say(
+			`${stateName(machine, state.id)} takes ${hiddenHere.map((id) => nodeLabel(index, id)).join(", ")} out of the picture. display:none is in the file and it is instant: there is nothing between shown and not shown for a transition to tween, however long the transition says.`,
+		);
+	}
+
+	const on =
+		pseudoClassFor(machine, drawnIn, state.id) ?? `[data-state="${state.id}"]`;
+	return {
+		machine: machine.id,
+		instance: instance.id,
+		state: state.id,
+		on,
+		changed,
+		transitions: transitionsFor(index, base, machine, drawnIn, state, changed, say),
+		label: `${machine.name} · ${stateName(machine, state.id)} on “${instance.name}”, as ${on}`,
+	};
+}
+
+/**
+ * A state that moves a box, written so the browser can move it cheaply.
+ *
+ * Solved geometry leaves this file as absolute `left`/`top` — that is what
+ * `geometry()` writes and what {@link ExportResult.lost} already says about it —
+ * and animating either of those is a layout on every frame. The *difference*
+ * between two states is a translation, which the compositor does on its own
+ * thread, so a state that moves a node writes the offset rather than the
+ * coordinate. The base rule needs nothing at all for this to work: `transform`
+ * starts at `none`, which interpolates against a translation as the identity.
+ *
+ * A size still leaves as `width`/`height`, and deliberately so. `scale` is the
+ * compositor's answer to a size and it is a different picture — it stretches the
+ * border, the corner radius and the words inside — so writing it would be
+ * exporting a design nobody drew in exchange for a frame rate.
+ */
+function moveDeclarations(from: ModelState, to: ModelState): Declarations {
+	const out: Declarations = {};
+	const dx = to.frame.x - from.frame.x;
+	const dy = to.frame.y - from.frame.y;
+	if (dx !== 0 || dy !== 0) {
+		out.transform = `translate(${cssPx(dx)}px, ${cssPx(dy)}px)`;
+	}
+	if (to.frame.width !== from.frame.width) out.width = px(to.frame.width);
+	if (to.frame.height !== from.frame.height) out.height = px(to.frame.height);
+	return out;
+}
+
+/**
+ * True where this state changes something a hugging box is sized by.
+ *
+ * {@link MEASURED_PROPS} rather than a list written out here, because "what
+ * changes how big the words are" is a question `measure.ts` already answers and
+ * a second list is a second list to keep in step. {@link autoSizes} is the other
+ * half: a part with a fixed size is not sized by its words, so restyling them
+ * costs the file nothing worth naming.
+ */
+function retypes(index: DocIndex, state: MachineState, part: string): boolean {
+	const doc = index.byId.get(part);
+	if (!doc || !autoSizes(doc)) return false;
+	const delta = state.parts[part];
+	return MEASURED_PROPS.some((prop) => (delta?.props?.[prop]?.length ?? 0) > 0);
+}
+
+/**
+ * The `transition:` declaration each changed node's base rule takes.
+ *
+ * On the **base** rule rather than on the state's, which is what makes one
+ * declaration pace the move in both directions: a rule that only exists while the
+ * pointer is over the button cannot describe the move away from it. The price is
+ * that a machine whose two edges are paced differently gets one of the two, and
+ * the loss says which.
+ *
+ * The stagger is folded into each node's own delay here rather than left for
+ * something at run time to schedule, and that is the whole reason the exported
+ * runtime has no timers in it. A `transition-delay` is the browser's own
+ * scheduler, on the compositor, exact and interruptible; a script counting
+ * milliseconds beside it would apply the same delay twice and turn a rhythm into
+ * a stutter. Which node is "first" is `order/2` — the paint order, which is the
+ * only sequence the document actually states — with the id as the same tie-break
+ * `byOrder` uses, so the rhythm is a property of the design rather than of the
+ * order a map happened to be built in.
+ */
+function transitionsFor(
+	index: DocIndex,
+	base: Layer,
+	machine: Machine,
+	drawnIn: string,
+	state: MachineState,
+	changed: ReadonlyMap<string, Declarations>,
+	say: (line: string) => void,
+): Map<string, Declarations> {
+	const out = new Map<string, Declarations>();
+	const edge = entryEdge(machine, drawnIn, state.id);
+	if (!edge) return out;
+	const model = base.universe.model;
+	const { duration, delay, stagger, easing } = pacing(
+		model,
+		machine,
+		edge,
+		base.universe.pick,
+		index.scene.tokens,
+	);
+	const leaving = machine.transitions.find(
+		(t) => t.enabled && t.from === state.id && t.to === drawnIn,
+	);
+	if (leaving) {
+		const back = pacing(model, machine, leaving, base.universe.pick, index.scene.tokens);
+		if (back.duration !== duration || back.easing !== easing || back.delay !== delay) {
+			say(
+				`How “${stateName(machine, state.id)}” is paced on the way out. One transition declaration on the base rule paces the move both ways, so the file uses the edge going in and the edge coming back runs at the same speed.`,
+			);
+		}
+	}
+	if (duration <= 0) return out;
+
+	const ordered = [...changed.keys()].sort((a, b) => {
+		const x = model.byId[a];
+		const y = model.byId[b];
+		return (x?.order ?? 1) - (y?.order ?? 1) || (a < b ? -1 : a > b ? 1 : 0);
+	});
+	ordered.forEach((id, i) => {
+		const kind = model.byId[id]?.kind;
+		if (!kind) return;
+		const keys = tweenedKeys(kind, edge.only, changed.get(id) ?? {});
+		if (keys.length === 0) return;
+		out.set(id, {
+			transition: `${keys.join(", ")} ${ms(duration)} ${easing} ${ms(delay + i * stagger)}`,
+		});
+	});
+	return out;
+}
+
+/**
+ * Every machine in the document, as selectors over the base layer.
+ *
+ * The public reading, for a caller that wants the states without the file. It
+ * keeps token names — that is what an export does unless asked otherwise — and
+ * collects the tokens it named into a set it then drops, because a caller holding
+ * one layer has nowhere to put a `:root` block. {@link htmlExport} calls the
+ * planner directly for exactly that reason.
+ */
+export function exportMachines(scene: Scene, base: Layer): MachineExport {
+	return planMachines(indexDocument(scene), base, true, new Set());
+}
+
+/* ------------------------------------------------------------------ */
 /* The two entry points                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1968,11 +2709,11 @@ function emit(
 	const spec = EXPORT_TARGETS[options.target];
 	const out: Emitted =
 		layers.length === 0
-			? { text: "", classes: [] }
+			? { text: "", classes: [], lost: [] }
 			: options.target === "svg"
 				? svgExport(index, layers, options)
 				: htmlExport(index, layers, options);
-	const lost = [...ALWAYS_LOST, ...spec.loses];
+	const lost = [...ALWAYS_LOST, ...spec.loses, ...out.lost];
 	if (isRuled(index.scene)) lost.push(GRID_LOST);
 	if (options.tokens === false) {
 		lost.push("Token names: every value is inlined as the literal it resolved to.");

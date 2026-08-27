@@ -7,7 +7,22 @@ export interface ViewOption<T extends string> {
 }
 
 export interface ViewSwitcherProps<T extends string> {
-	/** Exactly two: a toggle with three states is a menu. */
+	/**
+	 * Exactly two: a toggle with three states is a menu.
+	 *
+	 * The rule has been tested once and held. A component's state machine wants
+	 * its states drawn side by side, which looks at first like a third view and
+	 * is not one: a view is what the *whole canvas* shows, and there are two of
+	 * those — the one design you are editing, and the space it came from. A strip
+	 * of one component's states is an annotation on the design in front of you.
+	 * It appears because something is selected and goes away when nothing is,
+	 * which is what the align tools and the rulers already do, so it lives on the
+	 * canvas in the design's own coordinates and this control stayed a toggle.
+	 *
+	 * Recorded here rather than only at the strip, because the pressure to widen
+	 * a two-way switch arrives from somewhere else every time, and the argument
+	 * has to be findable from the thing being widened.
+	 */
 	options: readonly [ViewOption<T>, ViewOption<T>];
 	value: T;
 	onChange: (next: T) => void;

@@ -220,6 +220,7 @@ export function sudoku(): Scene {
 	return {
 		tokens: starterTokens(),
 		styles: [],
+		machines: [],
 		nodes: [
 			frame(
 				"page",

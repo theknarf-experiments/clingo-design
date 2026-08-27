@@ -1,0 +1,415 @@
+import {
+	DEFAULT_EASING,
+	EASINGS,
+	EASING_NAMES,
+	type Easing,
+	MOTION_PROPS,
+	MOTION_PROP_NAMES,
+	type Machine,
+	type ModelMachine,
+	type MotionProp,
+	type Picks,
+	type Scene,
+	TRIGGERS,
+	TRIGGER_NAMES,
+	type Term,
+	type Transition,
+	type Trigger,
+	type Value,
+	addTransition,
+	deleteTransition,
+	easingOf,
+	findState,
+	initialState,
+	motionVar,
+	propValues,
+	resolveValue,
+	stateName,
+	tokensOfType,
+	updateTransition,
+} from "@clingo-design/design-core";
+
+import { ValueEditor } from "./ValueEditor";
+import { cx } from "./cx";
+import styles from "./Transitions.module.css";
+
+/**
+ * The edges of one machine: when it moves, and how long the move takes.
+ *
+ * A list under the state strip rather than arrows drawn between the chips, and
+ * the argument is the strip's own one level down: an arrow can show that
+ * `rest → hover` exists, and everything a designer comes here to *change* about
+ * it — the trigger, three durations that may each name a token and hold
+ * alternatives, an easing, a property filter, a switch — has no room on an
+ * arrow. So the shape of the machine is the strip and this list read together,
+ * and what is wrong with the shape is said in words by `machineHealth` rather
+ * than left to be seen in a picture.
+ *
+ * **A transition carries no geometry and no appearance.** It says *when* the
+ * machine moves and *how long* the move takes, and nothing about what the design
+ * looks like at either end — that is entirely the two states' business. Keeping
+ * the two apart is exactly what lets the export collapse a rest/hover pair into
+ * `:hover` plus a `transition:` declaration and ship a file with no behaviour in
+ * it at all.
+ *
+ * **The three motion settings are values, not numbers**, and every one of them
+ * goes through the same {@link ValueEditor} a fill does. That is the whole
+ * reason `duration` is a `ValueType`: a token holding `["120ms", "240ms"]` *is*
+ * a motion scale — one place that decides how quickly the whole design moves —
+ * and pointing every transition at it is the same act as pointing every gap at a
+ * spacing token. Which also means a motion setting really can branch the design
+ * space, and `#project mdur/3` is what makes the brisk document and the
+ * considered one two universes rather than one with an arbitrary pick.
+ */
+export interface TransitionsProps {
+	scene: Scene;
+	machine: Machine;
+	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
+	picks: Picks;
+	varying: ReadonlySet<string>;
+	reach?: Readonly<Record<string, Set<number>>>;
+	pins: Readonly<Record<string, number>>;
+	onPin: (variable: string, index: number | null) => void;
+	/** Per transition, what this universe resolved its motion settings to. */
+	timing?: Readonly<
+		Record<string, { duration: number; delay: number; stagger: number }>
+	>;
+	/** Transitions the answer set calls dangling or nondeterministic. */
+	health?: ModelMachine;
+	/** Play the transition on the canvas: drive `from`, then `to`. */
+	onPlay?: (transition: string) => void;
+}
+
+/**
+ * A `<select>` over the machine's states that can also show a state the machine
+ * has not got.
+ *
+ * The extra option is the point rather than a defensive branch. A transition
+ * naming a missing state is the one broken thing this document is built to
+ * *report* — `mdangling/2` derives it, the Machines panel offers a one-click rule
+ * that forbids it by name — and a select that silently snapped such an end to its
+ * first legal value would repair the document under the designer and take the
+ * symptom away with it. So the missing name is listed, marked, and stays until
+ * somebody changes it on purpose.
+ */
+function StateSelect({
+	machine,
+	role,
+	value,
+	title,
+	onChange,
+}: {
+	machine: Machine;
+	role: string;
+	value: string;
+	title: string;
+	onChange: (next: string) => void;
+}) {
+	const known = findState(machine, value) !== undefined;
+	return (
+		<select
+			className={cx(styles.select, !known && styles.broken)}
+			data-role={role}
+			aria-label={title}
+			title={title}
+			value={value}
+			onChange={(e) => onChange(e.target.value)}
+		>
+			{known ? null : <option value={value}>{value} — no such state</option>}
+			{machine.states.map((state) => (
+				<option key={state.id} value={state.id}>
+					{state.name}
+				</option>
+			))}
+		</select>
+	);
+}
+
+/** One edge, and everything a person can say about it. */
+function Row({
+	scene,
+	machine,
+	transition,
+	picks,
+	varying,
+	reach,
+	pins,
+	onPin,
+	timing,
+	health,
+	onPlay,
+	onSceneChange,
+}: {
+	transition: Transition;
+} & Omit<TransitionsProps, "timing"> & {
+		timing?: { duration: number; delay: number; stagger: number };
+	}) {
+	const context = {
+		tokens: scene.tokens,
+		picks,
+		props: propValues(scene.nodes),
+	};
+	const write = (patch: Partial<Omit<Transition, "id">>, coalesce?: string) =>
+		onSceneChange(
+			(prev) => updateTransition(prev, machine.id, transition.id, patch),
+			coalesce,
+		);
+
+	const dangling = health?.dangling.includes(transition.id) === true;
+	const nondet =
+		health?.nondeterministic.some(
+			([state, trigger]) =>
+				state === transition.from && trigger === transition.trigger,
+		) === true;
+
+	/**
+	 * One motion setting, as the variable it is: `mval(m1,press,duration)`.
+	 *
+	 * Per machine *and* per transition, which is why the predicate is `mdur/3`
+	 * rather than the `mdur/2` the design started with: a state id and a
+	 * transition id are unique within their own machine and nowhere wider, so
+	 * `hover` is what every machine in the document calls that state and `press`
+	 * is what every one of them calls that edge. Making those collide would be
+	 * making machines rename each other.
+	 */
+	const motionRow = (prop: MotionProp) => {
+		const spec = MOTION_PROPS[prop];
+		const variable = motionVar(machine.id, transition.id, prop);
+		const value: Value = transition[prop] ?? [];
+		return (
+			<div
+				key={prop}
+				className={styles.motion}
+				data-role={`transition-${prop}`}
+				data-transition={transition.id}
+			>
+				<ValueEditor
+					testId={`transition-${prop}`}
+					label={spec.label}
+					type={spec.type}
+					value={value}
+					tokens={tokensOfType(scene, spec.type)}
+					fallback={spec.fallback}
+					active={picks[variable]}
+					varying={varying.has(variable)}
+					reachable={reach?.[variable]}
+					pinned={pins[variable]}
+					onPin={(index) => onPin(variable, index)}
+					preview={(term: Term) => resolveValue(context, [term], variable)}
+					onChange={(next) =>
+						write(
+							{ [prop]: next.length > 0 ? next : undefined },
+							`motion-${machine.id}-${transition.id}-${prop}`,
+						)
+					}
+				/>
+			</div>
+		);
+	};
+
+	return (
+		<div
+			className={cx(
+				styles.transition,
+				!transition.enabled && styles.off,
+				(dangling || nondet) && styles.flagged,
+			)}
+			data-role="transition"
+			data-transition={transition.id}
+		>
+			<div className={styles.head}>
+				<label
+					className={styles.switch}
+					title={
+						transition.enabled
+							? "On. Switching it off keeps the edge in the document and out of the program — the machine stops moving that way without anybody having to remember how it was wired."
+							: "Off: in the document, out of the program. It is not in the exported runtime either, and a state it was the only way into is now unreachable."
+					}
+				>
+					<input
+						type="checkbox"
+						checked={transition.enabled}
+						onChange={(e) => write({ enabled: e.target.checked })}
+					/>
+				</label>
+
+				<StateSelect
+					machine={machine}
+					role="transition-from"
+					value={transition.from}
+					title="Leaves this state"
+					onChange={(from) => write({ from })}
+				/>
+				<span className={styles.arrow}>→</span>
+				<StateSelect
+					machine={machine}
+					role="transition-to"
+					value={transition.to}
+					title="Arrives at this state"
+					onChange={(to) => write({ to })}
+				/>
+
+				<select
+					className={styles.select}
+					data-role="transition-trigger"
+					aria-label="Trigger"
+					title="What makes it fire. Half of these collapse to a CSS pseudo-class when the machine has a matching edge back, and that pair exports as a stylesheet with no script in it at all."
+					value={transition.trigger}
+					onChange={(e) => write({ trigger: e.target.value as Trigger })}
+				>
+					{TRIGGER_NAMES.map((trigger) => (
+						<option key={trigger} value={trigger}>
+							{TRIGGERS[trigger].label}
+						</option>
+					))}
+				</select>
+
+				{onPlay ? (
+					<button
+						type="button"
+						className={styles.action}
+						data-role="play-transition"
+						title="Play it on the canvas: the from state, then the to state after the delay and the duration. The canvas draws states rather than tweening between them, so what this previews is the pacing."
+						onClick={() => onPlay(transition.id)}
+					>
+						▶
+					</button>
+				) : null}
+
+				<button
+					type="button"
+					className={styles.action}
+					data-role="delete-transition"
+					title="Delete this edge. The states stay."
+					onClick={() =>
+						onSceneChange((prev) =>
+							deleteTransition(prev, machine.id, transition.id),
+						)
+					}
+				>
+					×
+				</button>
+			</div>
+
+			{dangling ? (
+				<p className={styles.finding} data-role="transition-dangling">
+					It names a state this machine has not got, so it can never fire.
+				</p>
+			) : null}
+			{nondet ? (
+				<p className={styles.finding} data-role="transition-nondet">
+					Another edge leaves {stateName(machine, transition.from)} on the same
+					trigger. The studio and the exported file both take the first one in
+					this list, which is an answer rather than a decision.
+				</p>
+			) : null}
+
+			<div className={styles.settings}>
+				<select
+					className={styles.select}
+					data-role="transition-easing"
+					aria-label="Easing"
+					title="The shape of the curve. A word rather than a value: five curves with no arithmetic in them, nothing scales one, and a `duration` token is where a document says all its motion moves together."
+					value={easingOf(transition)}
+					onChange={(e) => write({ easing: e.target.value as Easing })}
+				>
+					{EASING_NAMES.map((easing) => (
+						<option key={easing} value={easing}>
+							{EASINGS[easing].label}
+							{easing === DEFAULT_EASING ? " (default)" : ""}
+						</option>
+					))}
+				</select>
+
+				{timing ? (
+					<span className={styles.resolved} data-role="transition-timing">
+						{timing.duration}ms
+						{timing.delay !== 0 ? `, after ${timing.delay}ms` : ""}
+						{timing.stagger !== 0 ? `, ${timing.stagger}ms apart` : ""}
+					</span>
+				) : null}
+			</div>
+
+			{MOTION_PROP_NAMES.map(motionRow)}
+		</div>
+	);
+}
+
+export function Transitions({
+	scene,
+	machine,
+	onSceneChange,
+	picks,
+	varying,
+	reach,
+	pins,
+	onPin,
+	timing,
+	health,
+	onPlay,
+}: TransitionsProps) {
+	const first = initialState(machine);
+
+	return (
+		<div className={styles.transitions} data-role="transitions">
+			<div className={styles.listHead}>
+				<span className={styles.title}>Transitions</span>
+				<button
+					type="button"
+					className={styles.add}
+					data-role="add-transition"
+					title="An edge from the initial state to the next one, on a pointer enter. Nothing about its pacing is written down: an edge that says nothing follows the document's one default, so making everything a little slower is one change rather than N."
+					disabled={machine.states.length === 0}
+					onClick={() =>
+						onSceneChange(
+							(prev) =>
+								addTransition(
+									prev,
+									machine.id,
+									first?.id ?? "",
+									// The second state where there is one, and back to the
+									// first where there is not: a self-edge is a legal thing
+									// to write and an honest starting point, where guessing
+									// at a state that does not exist would make the first
+									// thing the panel says about a new machine a `mdangling`
+									// finding the designer did not cause.
+									(machine.states[1] ?? first)?.id ?? "",
+									"pointerenter",
+								).scene,
+						)
+					}
+				>
+					+ Transition
+				</button>
+			</div>
+
+			{machine.transitions.length === 0 ? (
+				<p className={styles.empty} data-role="no-transitions">
+					No edges yet, so every state but{" "}
+					<strong>{first ? stateName(machine, first.id) : "the first"}</strong> is
+					unreachable — the states exist and nothing can get to them. A rest/hover
+					pair on pointer enter and pointer leave is the one that exports with no
+					script in the file.
+				</p>
+			) : (
+				machine.transitions.map((transition) => (
+					<Row
+						key={transition.id}
+						scene={scene}
+						machine={machine}
+						transition={transition}
+						picks={picks}
+						varying={varying}
+						reach={reach}
+						pins={pins}
+						onPin={onPin}
+						timing={timing?.[transition.id]}
+						health={health}
+						onPlay={onPlay}
+						onSceneChange={onSceneChange}
+					/>
+				))
+			)}
+		</div>
+	);
+}

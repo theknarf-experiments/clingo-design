@@ -17,6 +17,7 @@ export type ValueType =
 	| "length"
 	| "number"
 	| "count"
+	| "duration"
 	| "weight"
 	| "font"
 	| "align"
@@ -37,17 +38,27 @@ export interface ValueOption {
 }
 
 /**
- * The three numeric quantities a literal can be, and hence the three readers
- * that turn one into a number.
+ * The numeric quantities a literal can be, and hence the readers that turn one
+ * into a number. There is exactly one reader per name, and that is the whole
+ * test for whether a name belongs here — see {@link ValueTypeSpec.quantity}.
  *
  * `length` is EMU and is read by `emuOf`, which is exact or nothing. `ratio` is
  * a bare decimal with no unit — a line height, an opacity — and is read by
  * {@link numeralOf}. `count` is a whole number of things and is read by
- * {@link tallyOf}. They are three names rather than "the numeric-looking ones"
+ * {@link tallyOf}. They are names rather than "the numeric-looking ones"
  * because the sweep that turned every length into EMU had to be certain it was
  * not turning 1.35 into 12350.
+ *
+ * `time` is the fourth, and the first that is not a distance, a proportion or a
+ * tally of things: a whole number of milliseconds, read by {@link msOf}. It is
+ * a quantity of its own rather than a `count` of milliseconds because the two
+ * readers disagree about the text — a count refuses a suffix and `time` demands
+ * one, `"200"` is two hundred columns and no duration at all, and `"0.2s"` is
+ * two hundred milliseconds and no count. Filing time under count would make
+ * `"200"` a fifth of a second on a machine and two hundred tracks on a grid,
+ * decided by which caller happened to ask.
  */
-export type Quantity = "length" | "ratio" | "count";
+export type Quantity = "length" | "ratio" | "count" | "time";
 
 export interface ValueTypeSpec {
 	label: string;
@@ -65,8 +76,14 @@ export interface ValueTypeSpec {
 	 * A `weight` is filed under `ratio`, which it is not — 400 is an index into
 	 * a font family, not a proportion of anything. But "a bare number with no
 	 * unit, compared and interpolated as itself" is exactly what the ratio
-	 * reader does, and a fourth quantity naming one type would be a column with
-	 * a single inhabitant and no reader of its own.
+	 * reader does, and a quantity naming one type and calling {@link numeralOf}
+	 * would be a column that changed no answer.
+	 *
+	 * The test is therefore a *reader*, never a count of inhabitants. `time` has
+	 * one inhabitant too — `duration` — and it earns its column anyway, because
+	 * {@link msOf} reads text no other reader accepts and refuses text they all
+	 * take: `"200ms"` is a duration and nothing else, `"200"` is a count and no
+	 * duration at all. A weight has no such text of its own.
 	 */
 	quantity?: Quantity;
 	/**
@@ -193,6 +210,22 @@ export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
 	 * grounds `1..N` over one needs a whole number or it needs nothing.
 	 */
 	count: { label: "Count", fallback: "1", quantity: "count" },
+	/**
+	 * How long something takes — the fourth quantity, and the first one that is
+	 * not a distance, a proportion or a tally of things.
+	 *
+	 * A duration is a value like any other, which is the whole reason it is a
+	 * type rather than a number on a transition: a `duration` token holding
+	 * `["120ms", "240ms"]` *is* a motion scale, one place that decides how
+	 * quickly the whole design moves, and pointing every transition at it is the
+	 * same act as pointing every gap at a spacing token. Nothing else in the
+	 * system had to learn a word for that to be true.
+	 *
+	 * Read by {@link msOf}, which is exact or nothing for the same reason
+	 * `emuOf` is: a duration reaches ASP as an integer count of milliseconds,
+	 * and a fact has to be an integer.
+	 */
+	duration: { label: "Duration", fallback: "200ms", quantity: "time" },
 	weight: { label: "Weight", fallback: "400", quantity: "ratio" },
 	font: { label: "Font", fallback: FONTS[0].value, options: FONTS },
 	align: { label: "Alignment", fallback: ALIGNS[0].value, options: ALIGNS },
@@ -301,6 +334,121 @@ export function tallyOf(text: string): number | undefined {
 }
 
 /**
+ * The longest duration a document may name, in milliseconds.
+ *
+ * Ten minutes. Not a limit anybody will meet on purpose — the argument is
+ * {@link MAX_TALLY}'s, one step weaker: nothing grounds a range over a duration,
+ * but a stagger is multiplied by a sibling index on a right-hand side, and
+ * gringo's integers are 32-bit and wrap in silence. A mistyped `200000s` is a
+ * typo, not a transition, and reading it as no duration at all is what every
+ * caller already handles.
+ */
+export const MAX_MS = 600_000;
+
+/**
+ * A number, optionally fractional, optionally carrying `ms` or `s`.
+ *
+ * Narrower than `units.ts`'s `LENGTH` in two ways that are both deliberate. No
+ * leading `+`, because nothing writes one and a duration is not a delta. And a
+ * closed set of two suffixes rather than any word, because the unit table a
+ * length consults does not exist here: CSS defines exactly two time units, and
+ * a third spelling is a typo rather than a unit this module has not heard of.
+ * Everything else — `"200px"`, `"1e3ms"`, `".5s"` — falls off the end and reads
+ * as no duration at all.
+ */
+const DURATION = /^\s*(-?)(\d+)(?:\.(\d+))?\s*(ms|s)?\s*$/i;
+
+/**
+ * The exact value of a literal, as the fraction `ms / scale` milliseconds.
+ *
+ * Kept as a fraction rather than evaluated, for exactly the reason `units.ts`
+ * keeps a length as one: whether it is a whole millisecond at all is the
+ * question `ms % scale` answers, and a float multiply throws that away before
+ * anyone can ask. `1.005 * 1000` is 1004.9999999999999 in binary floating
+ * point, and 1.005s is one thousand and five milliseconds in every other sense
+ * — so evaluating first would refuse a duration that is exact, silently, on a
+ * value nobody could look at and see the problem in.
+ */
+interface Duration {
+	ms: bigint;
+	scale: bigint;
+}
+
+function parseDuration(text: string): Duration | undefined {
+	const m = DURATION.exec(text);
+	if (!m) return undefined;
+	const [, sign, whole, fraction = "", suffix = ""] = m;
+	const unit = suffix === "" ? undefined : suffix.toLowerCase();
+	const digits = BigInt(whole + fraction);
+	// Unitless is refused except for zero, which is what CSS does and for the
+	// same reason: `200` is ambiguous between two units that differ by a factor
+	// of a thousand, and guessing would make a design that animates for three
+	// minutes look like a bug in the browser. `0` needs no unit because both
+	// readings agree.
+	if (unit === undefined && digits !== 0n) return undefined;
+	const scaled = (unit === "s" ? 1000n : 1n) * digits;
+	return {
+		ms: sign === "-" ? -scaled : scaled,
+		scale: 10n ** BigInt(fraction.length),
+	};
+}
+
+const MAX_MS_EXACT = BigInt(MAX_MS);
+
+/**
+ * The whole number of milliseconds a literal reads as: `"200ms"` is 200,
+ * `"0.2s"` is 200, `"0"` is 0.
+ *
+ * The reader for the `time` quantity, and it is exact or nothing, exactly as
+ * `emuOf` is. `"1.5ms"` is not a whole millisecond, so it reads as no duration
+ * at all rather than as 1 or as 2 — a caller that wanted a rounding asks for
+ * one by name ({@link nearestMs}), and the fact the compiler emits is never a
+ * number nobody typed.
+ *
+ * The suffix is matched case-insensitively because CSS units are, and a
+ * designer who types `200MS` has typed a duration. The *number* is not
+ * normalised anywhere: what the document stores is what was typed, exactly as a
+ * length keeps its own unit across an edit.
+ *
+ * Negative is read and returned as negative. Only a transition's delay may use
+ * one — a negative delay starts the move partway through, which is a real thing
+ * to ask for — and duration and stagger clamp at zero where they are read. The
+ * clamp is at the reading, not here, so that one reader serves all three.
+ */
+export function msOf(text: string): number | undefined {
+	const q = parseDuration(text);
+	if (!q || q.ms % q.scale !== 0n) return undefined;
+	const ms = q.ms / q.scale;
+	return ms > MAX_MS_EXACT || ms < -MAX_MS_EXACT ? undefined : Number(ms);
+}
+
+/**
+ * The nearest whole millisecond a text reads as, for the one caller that is
+ * allowed to round: a field a person is typing into.
+ *
+ * The twin of `nearestEmu`, and it exists for the twin reason — {@link msOf} is
+ * exact or nothing, so a half-millisecond typed into the inspector would read
+ * as no duration and the row would go blank while the user was still typing.
+ * This is an editorial act with a name and a caller, never something a
+ * conversion does behind anyone's back.
+ *
+ * Ties go away from zero, which is the rounding convention `nearestEmu`,
+ * `snapToUnit` and `wholeEmu` all use — one rule to remember rather than a
+ * fifth place where a half rounds toward positive infinity and `-0.5ms` comes
+ * back as a negative zero.
+ */
+export function nearestMs(text: string): number | undefined {
+	const q = parseDuration(text);
+	if (!q) return undefined;
+	const whole = q.ms / q.scale; // BigInt division truncates toward zero
+	const rest = q.ms % q.scale; // and leaves a remainder of the same sign
+	const magnitude = rest < 0n ? -rest : rest;
+	const away = rest < 0n ? -1n : 1n;
+	const ms = 2n * magnitude >= q.scale ? whole + away : whole;
+	return ms > MAX_MS_EXACT || ms < -MAX_MS_EXACT ? undefined : Number(ms);
+}
+
+/**
  * Whether values of this type are lengths — and so whether a literal of it is
  * read as EMU, migrated with the rest of the document's geometry, and ordered
  * against its siblings by how much room it asks for.
@@ -310,6 +458,14 @@ export function tallyOf(text: string): number | undefined {
  */
 export const isLengthType = (type: ValueType): boolean =>
 	VALUE_TYPES[type].quantity === "length";
+
+/**
+ * True when values of this type are durations — the twin of
+ * {@link isLengthType}, and a lookup for the same reason: the day a second
+ * time-shaped type appears there is one place that has to hear about it.
+ */
+export const isTimeType = (type: ValueType): boolean =>
+	VALUE_TYPES[type].quantity === "time";
 
 /**
  * The bare ASP constant a literal reads as: `"row"` is `row`.
@@ -492,6 +648,24 @@ export const stylePartVar = (
 	variant: number,
 	prop: string,
 ): string => `spart(${styleId},${variant},${prop})`;
+/**
+ * One motion setting of one transition: `mval(m1,press,duration)`.
+ *
+ * A variable rather than a number for the reason a constraint's dimension is
+ * one: point it at a `duration` token and the token's alternatives drive every
+ * transition wearing it, with no second kind of parameter anywhere.
+ *
+ * Machine-scoped in its first argument, and that is not decoration. A state id
+ * and a transition id are unique within their own machine only — `hover` is
+ * what every machine in the document calls that state — so a key that named the
+ * transition alone would collide the moment a document held two machines, and
+ * collide silently, because both halves resolve to a duration.
+ */
+export const motionVar = (
+	machineId: string,
+	transitionId: string,
+	field: string,
+): string => `mval(${machineId},${transitionId},${field})`;
 
 /**
  * The inverse of {@link tokenVar} / {@link propVar} / {@link constraintVar} /
@@ -501,6 +675,16 @@ export const stylePartVar = (
  * it is never unsettled, never pinned and never shown — the callers that read a
  * variable key back are all asking about something a designer can choose, and a
  * sixth case none of them could act on would be a case they all had to handle.
+ *
+ * {@link motionVar} is absent for the same reason, and so are the two keys a
+ * state's delta mints in `machines.ts`. A motion setting *is* something a
+ * designer chooses, so the first half of that argument does not apply to it;
+ * the second half decides it anyway. Every caller that reads a key back is
+ * asking a question the inspector's generic rows can act on — pin this, unsettle
+ * that, caption the other — and the panel that owns a transition builds its own
+ * keys and already knows what they are. Three cases none of the generic readers
+ * could act on would be three cases all of them had to handle, in exchange for
+ * a label the Machines panel can write without asking.
  */
 export type Variable =
 	| { kind: "token"; token: string }

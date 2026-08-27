@@ -253,6 +253,24 @@ test("the contract documents the resolved predicate", () => {
 	assert.match(CONTRACT, /prop\(Node, Property\)/);
 });
 
+test("the contract documents the state machine a rule may read and place", () => {
+	// The contract block is documentation a designer reads in the Rules panel, so
+	// what a rule can *do* with a machine has to be in it — not only the predicate
+	// list. The three things a person cannot work out from the names: that a state
+	// is never a design, that `stt/3` is a member `c_node/2` takes where it takes a
+	// node id, and that time is the fourth quantity beside length, count and ratio.
+	assert.match(CONTRACT, /stt\(I, S, N\)/);
+	assert.match(CONTRACT, /\*\*Never a node\/1\*\*/);
+	assert.match(CONTRACT, /leaves the number of universes exactly where it was/);
+	assert.match(CONTRACT, /c_node\(no_jump, stt\(b1,rest,label\)\)\./);
+	assert.match(CONTRACT, /millis\(Lit, Ms\)/);
+	assert.match(CONTRACT, /mshadow\(inst\(I,N\), P\)/);
+	// And the two lines an existing entry gained, so a reader of `rendered/3` or of
+	// an instance's frame is told where the value actually came from.
+	assert.match(CONTRACT, /where mshadow\(N,Prop\) holds/);
+	assert.match(CONTRACT, /frame and rendered come from the shown state's\n%\s+copy/);
+});
+
 test("Explorer still reuses the grounding when nothing structural changed", async () => {
 	const explorer = new Explorer(directSolver);
 	try {

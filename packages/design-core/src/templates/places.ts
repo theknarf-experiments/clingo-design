@@ -46,6 +46,7 @@ export function places(): Scene {
 	return {
 		tokens: starterTokens(),
 		styles: [],
+		machines: [],
 		nodes: [
 			frame("page", "Page", [0, 0, PAGE.width, PAGE.height], { fill: [ref("muted")] }, [
 				rect("header", "Header", [GUTTER, GUTTER, PAGE.width - GUTTER * 2, 56], {

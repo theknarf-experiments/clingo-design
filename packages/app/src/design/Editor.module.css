@@ -14,6 +14,33 @@
 	height: 0;
 }
 
+/*
+ * While the document is running, there is nothing to edit — so nothing that
+ * edits is drawn.
+ *
+ * One rule rather than a condition around each overlay, because it is one
+ * statement. The artboard is the only child that survives; every sibling of it
+ * inside `.content` is a selection outline, a resize handle, a guide, a path
+ * vertex, an annotation, a travel mark, a marquee or a frame label, and each of
+ * them is either an offer to change the document or a report about a shape that
+ * is mid-transition and therefore not where the overlay thinks it is. Leaving
+ * handles on a button that is easing into its pressed state would be inviting a
+ * drag against a frame the document does not hold.
+ *
+ * Selected by `[data-artboard]` rather than by a class, because the artboard's
+ * class is hashed inside its own module and this file cannot spell it. The
+ * attribute is already there, is already the artboard's public mark on the DOM,
+ * and is what the export's own markup uses too.
+ */
+.surface[data-previewing] > .content > *:not([data-artboard]) {
+	display: none;
+}
+
+/* A running design is something to point at, not something to aim with. */
+.surface[data-previewing] {
+	cursor: default;
+}
+
 /* An artboard's name tag, above and outside the frame like a design tool. */
 .frameLabel {
 	position: absolute;

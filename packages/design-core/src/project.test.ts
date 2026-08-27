@@ -13,6 +13,7 @@ import {
 import {
 	CHILD_PROPS,
 	CONTAINER_PROPS,
+	DEFAULT_EASING,
 	DEFAULT_FRAME,
 	DIMENSIONS,
 	GUIDE_PROPS,
@@ -24,6 +25,7 @@ import {
 	type SceneNode,
 	constraintValue,
 	dimension,
+	easingOf,
 	emptyScene,
 	frameDim,
 	frameOf,
@@ -33,9 +35,17 @@ import {
 	guideLines,
 	isGridded,
 	layoutLength,
+	stateTouches,
 } from "./scene.ts";
 import { EMU_PER_PX, UNIT_NAMES, UNITS, emuOf } from "./units.ts";
-import { type Value, type ValueType, isLengthType, lit, single } from "./values.ts";
+import {
+	type Value,
+	type ValueType,
+	isLengthType,
+	lit,
+	msOf,
+	single,
+} from "./values.ts";
 
 const P = EMU_PER_PX;
 
@@ -667,4 +677,377 @@ test("nothing a migrated document calls a length is unreadable", () => {
 	for (const [where, text] of ruled) {
 		assert.notEqual(emuOf(text), undefined, `${where} holds "${text}"`);
 	}
+});
+
+/* ------------------------------------------------------------------ */
+/* Machines                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A document with a two-state machine on a component definition, as a document
+ * stores one.
+ *
+ * A plain object rather than a `Scene`, for the reason {@link written} is one:
+ * the point of a reader is what it does with shapes this code did not write,
+ * and typing the fixture would let the type checker answer the questions the
+ * test is asking.
+ */
+const wired = (machine: Record<string, unknown> = {}) => ({
+	tokens: [],
+	styles: [],
+	nodes: [
+		{
+			id: "btn",
+			kind: "frame",
+			name: "Button",
+			frame: { x: 0, y: 0, width: 120, height: 40 },
+			props: { fill: [lit("#2563eb")] },
+			component: true,
+			children: [
+				{
+					id: "label",
+					kind: "text",
+					name: "Label",
+					frame: { x: 12, y: 10, width: 96, height: 20 },
+					props: { text: [lit("Save")] },
+				},
+			],
+		},
+		{
+			id: "b1",
+			kind: "instance",
+			name: "Button 1",
+			frame: { x: 400, y: 40, width: 120, height: 40 },
+			props: {},
+			instanceOf: "btn",
+			state: "hover",
+		},
+	],
+	constraints: [],
+	rules: "",
+	unit: "px",
+	machines: [
+		{
+			id: "m1",
+			name: "Button",
+			root: "btn",
+			states: [
+				{ id: "rest", name: "Rest", parts: {} },
+				{
+					id: "hover",
+					name: "Hover",
+					parts: {
+						btn: { props: { fill: [lit("#1d4ed8")] } },
+						label: { frame: { y: [lit("8px")] } },
+					},
+				},
+			],
+			transitions: [
+				{
+					id: "over",
+					from: "rest",
+					to: "hover",
+					trigger: "pointerenter",
+					duration: [lit("200ms")],
+					easing: "easeOut",
+					enabled: true,
+				},
+				{
+					id: "out",
+					from: "hover",
+					to: "rest",
+					trigger: "pointerleave",
+					enabled: true,
+				},
+			],
+			...machine,
+		},
+	],
+});
+
+test("a document written before machines existed reads back with none", () => {
+	// Which is what every document written before them *was* — the same answer
+	// the styles get, and for the same reason: absence is not a malformed
+	// machine, it is a component with no behaviour, which is what every
+	// component in every document already is.
+	assert.deepEqual(normalizeScene({}).machines, []);
+	assert.deepEqual(normalizeScene({ machines: "soon" }).machines, []);
+	assert.deepEqual(emptyScene().machines, []);
+});
+
+test("a machine survives a round trip whole", () => {
+	const scene = normalizeScene(wired());
+	assert.equal(scene.machines.length, 1);
+	const m = scene.machines[0];
+	assert.deepEqual(
+		m.states.map((s) => s.id),
+		["rest", "hover"],
+		"the order is the answer: the first state is the initial one",
+	);
+	assert.deepEqual(m.states[1].parts.btn.props?.fill, [lit("#1d4ed8")]);
+	// A delta's frame is per dimension, and the dimensions it says nothing about
+	// stay unsaid — unlike a node's frame, which is defaulted to all four,
+	// because the program's guard is per dimension and silence is what lets the
+	// instance's own width through.
+	assert.deepEqual(Object.keys(m.states[1].parts.label.frame ?? {}), ["y"]);
+	assert.equal(m.transitions[0].trigger, "pointerenter");
+	assert.equal(m.transitions[0].easing, "easeOut");
+	assert.deepEqual(m.transitions[0].duration, [lit("200ms")]);
+	assert.equal(m.transitions[1].duration, undefined, "absent takes the table's");
+	// The instance's drawn state is a decision about this use of the definition,
+	// and it comes back untouched.
+	assert.equal(scene.nodes[1].state, "hover");
+});
+
+test("a machine the program could not hold is dropped, the document is not", () => {
+	const scene = normalizeScene({
+		...wired(),
+		machines: [
+			// An id that is not an ASP constant is not a badly named machine, it
+			// is `machine(My Machine)` in the generated text and a syntax error
+			// that takes the whole document down with it.
+			{ ...wired().machines[0], id: "My Machine" },
+			// A machine with no states has no initial state, so `minitial/2` is
+			// empty and every instance of the definition is drawn in no state at
+			// all — the shape a `Style` with no variants has, and the same call.
+			{ ...wired().machines[0], id: "m0", states: [] },
+			{ ...wired().machines[0], id: "m2", states: "none" },
+			// A root that is not a string at all: `machine_of(M,R)` has nothing to
+			// join `instance(I,R)` against.
+			{ ...wired().machines[0], id: "m3", root: 7 },
+			"nonsense",
+			wired().machines[0],
+			// Two machines answering to one name are one machine as far as the
+			// solver is concerned, and which one it turns out to be is whichever
+			// fact grounds last.
+			{ ...wired().machines[0], name: "Impostor" },
+		],
+	});
+	assert.deepEqual(
+		scene.machines.map((m) => m.id),
+		["m1"],
+	);
+	assert.equal(scene.machines[0].name, "Button", "the first of a name wins");
+	assert.equal(scene.nodes.length, 2, "the document outlives the machine");
+
+	// A root naming a node the document has not got is *kept*, which is the
+	// twin of a dangling `instanceOf`: it says nothing rather than failing, and
+	// a definition released and re-made brings its machine back with it.
+	const orphan = normalizeScene({
+		...wired(),
+		machines: [{ ...wired().machines[0], root: "gone" }],
+	});
+	assert.equal(orphan.machines[0].root, "gone");
+});
+
+test("a state id is unique in its machine, and the first of a name wins", () => {
+	const scene = normalizeScene(
+		wired({
+			states: [
+				{ id: "rest", name: "Rest", parts: {} },
+				// Dropping the *first* instead could change which state a machine
+				// starts in, and a reader that can re-point a machine's initial
+				// state is a reader that changes what every instance draws.
+				{ id: "rest", name: "Impostor", parts: {} },
+				{ id: "Hover State", name: "Hover", parts: {} },
+				{ id: 4, name: "Four", parts: {} },
+				{ id: "hover", name: "Hover", parts: {} },
+			],
+		}),
+	);
+	assert.deepEqual(
+		scene.machines[0].states.map((s) => `${s.id}:${s.name}`),
+		["rest:Rest", "hover:Hover"],
+	);
+});
+
+test("a transition naming a state the machine has not got is kept", () => {
+	// `mdangling/2` exists to report exactly this, the Machines panel offers a
+	// canned rule that forbids it by name, and a reader that deleted the edge
+	// would take away both the symptom and any way of finding out.
+	const scene = normalizeScene(
+		wired({
+			transitions: [
+				{ id: "away", from: "rest", to: "gone", trigger: "click", enabled: true },
+				// These three are different: none of them could reach the program
+				// as the thing it claims to be. An id that is not a constant names
+				// `mtrans(M,T)` and three variable keys; a `from` that is not one
+				// names something no state could ever be called, so it is a syntax
+				// error rather than a dangling reference; and a trigger the table
+				// has not got is a fact no rule matches and no browser fires.
+				{ id: "Bad Id", from: "rest", to: "hover", trigger: "click", enabled: true },
+				{ id: "loose", from: "Not A State", to: "hover", trigger: "click", enabled: true },
+				{ id: "swipe", from: "rest", to: "hover", trigger: "longpress", enabled: true },
+				{ id: "away", from: "hover", to: "rest", trigger: "click", enabled: true },
+			],
+		}),
+	);
+	assert.deepEqual(
+		scene.machines[0].transitions.map((t) => t.id),
+		["away"],
+	);
+	assert.equal(scene.machines[0].transitions[0].to, "gone");
+});
+
+test("a transition's pacing is normalised, and only its trigger is load-bearing", () => {
+	const scene = normalizeScene(
+		wired({
+			transitions: [
+				{
+					id: "press",
+					from: "rest",
+					to: "hover",
+					trigger: "pointerdown",
+					// Stored before a motion setting was a value, and as the two
+					// other shapes `settingValue` has always read.
+					duration: "120ms",
+					delay: 0,
+					stagger: [lit("40ms")],
+					// An easing the table has not got falls back rather than losing
+					// the transition: a trigger decides *whether* the machine ever
+					// moves, while an easing is only the shape of the curve.
+					easing: "bouncy",
+					only: ["fill", "sideways", 7],
+					enabled: false,
+				},
+			],
+		}),
+	);
+	const t = scene.machines[0].transitions[0];
+	assert.deepEqual(t.duration, single("120ms"));
+	// A bare number in a duration stays a bare number: `msOf` refuses it as
+	// ambiguous by a factor of a thousand, so the transition falls to the
+	// table's default rather than to a unit somebody guessed.
+	assert.deepEqual(t.delay, single("0"));
+	assert.equal(msOf("0"), 0, "except zero, which reads the same either way");
+	assert.deepEqual(t.stagger, [lit("40ms")]);
+	assert.equal(t.easing, undefined);
+	assert.equal(easingOf(t), DEFAULT_EASING);
+	assert.deepEqual(t.only, ["fill"]);
+	assert.equal(t.enabled, false, "off keeps it in the document, out of the program");
+
+	// Absent and empty mean different things — everything the delta touches,
+	// against nothing at all — so the one that is not a list becomes absent and
+	// the one that filters down to nothing stays empty.
+	const loose = normalizeScene(
+		wired({
+			transitions: [
+				{ id: "a", from: "rest", to: "hover", trigger: "click", only: "fill" },
+				{ id: "b", from: "rest", to: "hover", trigger: "click", only: ["nope"] },
+			],
+		}),
+	).machines[0].transitions;
+	assert.equal(loose[0].only, undefined);
+	assert.deepEqual(loose[1].only, []);
+	// A transition written before the switch existed is one somebody wanted.
+	assert.equal(loose[0].enabled, true);
+});
+
+test("a delta decides more than a style variant, and drops what it cannot", () => {
+	const scene = normalizeScene(
+		wired({
+			states: [
+				{ id: "rest", name: "Rest", parts: {} },
+				{
+					id: "busy",
+					name: "Busy",
+					parts: {
+						label: {
+							props: {
+								// `text` and `opacity` are exactly the two properties a
+								// style may not decide, and a state may: "the label
+								// says Saving…" is what a state is *for*, while a
+								// treatment several nodes wear must not put words in
+								// any of their mouths.
+								text: [lit("Saving…")],
+								opacity: [lit("0.5")],
+								// A length in a delta is one more home for the lattice
+								// sweep, and one more place a half-pixel would have
+								// read as no length at all.
+								radius: [lit("20.5px")],
+								sideways: [lit("yes")],
+								size: "16px",
+							},
+							frame: { y: [lit("2px")], sideways: [lit("4px")] },
+							hidden: false,
+						},
+						// A key naming a part the definition has not got is kept: the
+						// materialisation analysis skips it, so it emits nothing, and
+						// a part deleted and drawn again finds its delta waiting.
+						ghost: { hidden: true },
+						// An entry that says nothing is kept too. `clearStatePart`
+						// removes one because a person asked; a reader is not being
+						// asked anything, and `stateTouches` already reads an empty
+						// delta and an absent one as the same claim.
+						quiet: { props: { fill: [] } },
+						broken: "nonsense",
+					},
+				},
+			],
+		}),
+	);
+	const busy = scene.machines[0].states[1];
+	assert.deepEqual(Object.keys(busy.parts).sort(), ["ghost", "label", "quiet"]);
+	const label = busy.parts.label;
+	assert.deepEqual(label.props?.text, [lit("Saving…")]);
+	assert.deepEqual(label.props?.opacity, [lit("0.5")]);
+	assert.deepEqual(label.props?.radius, [lit("20.52px")]);
+	assert.equal(emuOf("20.52px") !== undefined, true, "and it reads as a length now");
+	assert.ok(!("sideways" in (label.props ?? {})), "a property PROPS has not got");
+	assert.equal(label.props?.size, undefined, "a value that is not a list of them");
+	assert.deepEqual(label.frame, { y: [lit("2px")] });
+	// `true` or absent, with no `false`: a part is drawn unless a state says
+	// otherwise, so a stored `false` is the same statement as silence.
+	assert.equal(label.hidden, undefined);
+	assert.equal(busy.parts.ghost.hidden, true);
+	assert.equal(stateTouches(busy.parts.quiet), false);
+	assert.equal(stateTouches(busy.parts.ghost), true);
+});
+
+test("a drawn state is a string or nothing, and is never corrected", () => {
+	const scene = normalizeScene({
+		...wired(),
+		nodes: [
+			...wired().nodes,
+			{ ...wired().nodes[1], id: "b2", state: 3 },
+			{ ...wired().nodes[1], id: "b3", state: "gone" },
+		],
+	});
+	const by = (id: string) => scene.nodes.find((n) => n.id === id);
+	assert.equal(by("b1")?.state, "hover");
+	// The same string-or-nothing question `style` is asked, so `shownState` has
+	// one shape to think about everywhere downstream.
+	const b2 = by("b2");
+	assert.ok(b2 && !("state" in b2));
+	// But a state the machine no longer has is *kept*. `shownState` already
+	// falls back to the initial one, and a reader that rewrote the field would
+	// spend a real edit — one a collaborator pulls — on a question that answers
+	// itself every time it is asked.
+	assert.equal(by("b3")?.state, "gone");
+});
+
+test("a document with a machine is read once, however many times it is opened", () => {
+	// The store normalises on every load and writes back whatever moved, so a
+	// reader that answered differently the second time would walk the machine a
+	// little further away every time somebody opened the file.
+	const once = normalizeScene(wired());
+	const twice = normalizeScene(JSON.parse(JSON.stringify(once)));
+	assert.deepEqual(twice, once);
+
+	// And the same over the document that exercises every branch above, where
+	// the second read is the one that sees this reader's own output.
+	const messy = normalizeScene({
+		...wired({
+			states: [
+				{ id: "rest", name: "Rest", parts: { label: { props: { size: "16px" } } } },
+				{ id: "Bad", name: "Bad", parts: {} },
+			],
+			transitions: [
+				{ id: "away", from: "rest", to: "gone", trigger: "click" },
+				{ id: "swipe", from: "rest", to: "hover", trigger: "longpress" },
+			],
+		}),
+		nodes: [...wired().nodes, { ...wired().nodes[1], id: "b2", state: 3 }],
+	});
+	assert.deepEqual(normalizeScene(JSON.parse(JSON.stringify(messy))), messy);
 });

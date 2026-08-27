@@ -105,6 +105,7 @@ export function component(): Scene {
 	return {
 		tokens: starterTokens(),
 		styles: [labelStyle],
+		machines: [],
 		nodes: [
 			frame("page", "Page", [0, 0, 560, 340], { fill: [ref("surface")] }, [
 				text("title", "Title", [48, 36, 464, 26], "One button, four variants", {

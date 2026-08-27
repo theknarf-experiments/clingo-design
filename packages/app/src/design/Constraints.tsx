@@ -24,6 +24,7 @@ import {
 	constrainsProp,
 	constraintTermError,
 	constraintValue,
+	datumLabel,
 	deadlock,
 	deleteConstraint,
 	findInTree,
@@ -35,6 +36,7 @@ import {
 	retargetConstraint,
 	sharedProps,
 	single,
+	stateLabel,
 	takesMembers,
 	termLabel,
 	tokensOfType,
@@ -82,6 +84,25 @@ export interface ConstraintsProps {
 	 * are exactly the ones that exist.
 	 */
 	model?: ModelScene;
+	/**
+	 * State copies a rule may name, as `stateCopyIds` lists them — offered beside
+	 * the node ids and the datums a rule can already be about.
+	 *
+	 * A cross-state rule is an **ordinary rule with an unusual member**, and this
+	 * one prop is the only place the panel has to learn that. `Constraint.nodes`
+	 * is already `string[]` and already carries terms that are not document nodes
+	 * — a guide, one line of a column grid — and the compiler emits `c_node(C,N)`
+	 * for whatever string is there, so "the label does not jump when you hover" is
+	 * an `align` over two members and needs no kind, no field and no machinery of
+	 * its own.
+	 *
+	 * It arrives as a prop rather than being computed here because the list is the
+	 * materialisation analysis's answer: a term for a part with no copy is a
+	 * member that would silently never hold, and the studio has already run that
+	 * analysis for the canvas. Computing it again in a panel would be the same
+	 * walk twice, with two chances to disagree.
+	 */
+	stateMembers?: readonly string[];
 }
 
 /**
@@ -214,6 +235,7 @@ export function Constraints({
 	onRelax,
 	onSelectionChange,
 	model,
+	stateMembers,
 }: ConstraintsProps) {
 	const selected = [...selection];
 	const groups = Object.keys(model?.groups ?? {}).sort();
@@ -290,7 +312,43 @@ export function Constraints({
 	/** Whether anything can be added *about what is selected*, for the tooltip. */
 	const canTarget = CONSTRAINT_NAMES.some((k) => takesMembers(k) && offered(k));
 
-	const nameOf = (id: string) => findInTree(scene.nodes, id)?.name ?? id;
+	/**
+	 * What a member is called, whatever kind of thing it is.
+	 *
+	 * The chain is the one the studio's own label chain is, in the same order and
+	 * for the same reason: a member is a node most of the time, a datum sometimes
+	 * — a guide, one line of a column grid — and a state copy where a rule relates
+	 * two states of a component. All three are strings in `Constraint.nodes`, and
+	 * without the last two links a rule about a hover state read as the raw term
+	 * `stt(b1,hover,label)` in the one place a person goes to find out what a rule
+	 * is about. Falling through to the id is deliberate rather than a last resort:
+	 * a rule may name a term a hand-written rule invented, and a receipt is more
+	 * use than a blank.
+	 */
+	const nameOf = (id: string) =>
+		findInTree(scene.nodes, id)?.name ??
+		datumLabel(scene, id) ??
+		stateLabel(scene, id) ??
+		id;
+
+	/**
+	 * State copies this rule could still take, in the order the panel lists them.
+	 *
+	 * Filtered against what the rule already names, and against the kind's
+	 * `maxNodes`, because `shapeFor` slices extra members off the end: offering a
+	 * third member to a `gap` would be offering a choice that silently does
+	 * nothing. Nothing is offered where the rule ranges over a group instead —
+	 * a group *is* the membership, and adding a listed member beside it would be
+	 * two answers to one question.
+	 */
+	const spareStates = (c: Constraint): readonly string[] => {
+		if (stateMembers === undefined || stateMembers.length === 0) return [];
+		if (c.group !== undefined) return [];
+		const held = new Set(c.nodes);
+		return c.nodes.length >= CONSTRAINT_KINDS[c.kind].maxNodes
+			? []
+			: stateMembers.filter((term) => !held.has(term));
+	};
 
 	/** The "what it ranges over" control, for the head and for each rule. */
 	function overSelect(
@@ -747,6 +805,39 @@ export function Constraints({
 												`${c.group} ${describe(c)}`
 											: `${members.length} in ${c.group} ${describe(c)}`}
 								</button>
+
+								{/* A state copy cannot be selected on the canvas — it is not a
+								    node, deliberately, which is what keeps it out of the layer
+								    list and out of both exports — so it is the one member the
+								    panel has to be able to add without a selection. A menu
+								    rather than a mode: the list is short, it is exactly the
+								    copies that exist, and picking one appends it the way
+								    picking a group retargets. */}
+								{spareStates(c).length > 0 ? (
+									<select
+										className={styles.kind}
+										data-role="constraint-add-state"
+										aria-label="Add a state copy"
+										title="Name one state of one component as a member. A rule over two states of the same part — “the label does not jump when you hover” — is an ordinary rule with an unusual member: every state is true at once in this one answer set, so simplex places both."
+										value=""
+										onChange={(e) => {
+											const term = e.target.value;
+											if (!term) return;
+											onSceneChange((prev) =>
+												updateConstraint(prev, c.id, {
+													nodes: [...c.nodes, term],
+												}),
+											);
+										}}
+									>
+										<option value="">+ state…</option>
+										{spareStates(c).map((term) => (
+											<option key={term} value={term}>
+												{nameOf(term)}
+											</option>
+										))}
+									</select>
+								) : null}
 							</div>
 						) : (
 							<div className={styles.memberRow}>

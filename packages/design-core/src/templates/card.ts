@@ -20,6 +20,7 @@ export function card(): Scene {
 	return {
 		tokens,
 		styles: [],
+		machines: [],
 		nodes: [
 			frame("page", "Page", [0, 0, 720, 480], { fill: [ref("muted")] }, [
 				frame(

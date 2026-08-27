@@ -21,6 +21,7 @@ import { lit } from "./values.ts";
 function board(rules: string): Scene {
 	return {
 		styles: [],
+		machines: [],
 		tokens: [],
 		constraints: [],
 		nodes: [

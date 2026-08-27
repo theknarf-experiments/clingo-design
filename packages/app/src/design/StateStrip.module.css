@@ -1,0 +1,131 @@
+.strip {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+}
+
+/* Wraps rather than scrolls. A machine with six states is a machine somebody is
+   still reading the whole of, and a strip that scrolled would hide the state
+   they were looking for behind a gesture. */
+.row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.25rem;
+}
+
+.chip {
+	display: flex;
+	align-items: center;
+	gap: 0.1rem;
+	padding: 0.1rem 0.2rem;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 999px;
+}
+
+/* The state the document draws this use in: an outline, because it is a fact
+   about the document. */
+.drawn {
+	border-color: color-mix(in srgb, var(--dc-accent) 55%, transparent);
+}
+
+/* The state the canvas is playing: filled, because it is a fact about the
+   picture in front of you and it goes away when you stop. */
+.played {
+	background: color-mix(in srgb, var(--dc-accent) 16%, var(--dc-sunken));
+	border-color: var(--dc-accent);
+}
+
+/* Nothing reaches it from the start, so it is a state that can never be seen.
+   Dimmed rather than hidden: it is still editable, and the way out is a
+   transition. */
+.unreachable {
+	opacity: 0.45;
+}
+
+.name {
+	min-width: 3rem;
+	padding: 0.1rem 0.25rem;
+	font: inherit;
+	font-size: 0.74rem;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+}
+
+.name:focus {
+	background: var(--dc-raised);
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+.label {
+	padding: 0.1rem 0.25rem;
+	font-size: 0.74rem;
+}
+
+/* "start" rather than a dot, because a dot would need a legend. */
+.initial {
+	padding: 0 0.25rem;
+	font-size: 0.6rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.55;
+}
+
+.action,
+.move {
+	flex: none;
+	padding: 0 0.2rem;
+	font: inherit;
+	font-size: 0.7rem;
+	line-height: 1.4;
+	color: inherit;
+	background: transparent;
+	border: none;
+	border-radius: 4px;
+	opacity: 0.55;
+	cursor: pointer;
+}
+
+.action:hover:not(:disabled),
+.move:hover:not(:disabled) {
+	background: var(--dc-raised);
+	opacity: 1;
+}
+
+.action:disabled,
+.move:disabled {
+	opacity: 0.2;
+	cursor: default;
+}
+
+.on {
+	color: var(--dc-accent);
+	opacity: 1;
+}
+
+.add {
+	flex: none;
+	padding: 0.15rem 0.4rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	background: transparent;
+	border: 1px dashed var(--dc-line);
+	border-radius: 999px;
+	cursor: pointer;
+}
+
+.add:hover {
+	background: var(--dc-raised);
+}
+
+.note {
+	margin: 0;
+	font-size: 0.68rem;
+	line-height: 1.4;
+	opacity: 0.55;
+}

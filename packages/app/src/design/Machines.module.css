@@ -1,0 +1,301 @@
+.machines {
+	display: flex;
+	flex-direction: column;
+	gap: 0.4rem;
+}
+
+.head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 0.5rem;
+}
+
+.head .add {
+	flex: none;
+	white-space: nowrap;
+}
+
+.hint {
+	font-size: 0.72rem;
+	line-height: 1.4;
+	opacity: 0.5;
+}
+
+.empty {
+	margin: 0;
+	font-size: 0.74rem;
+	line-height: 1.45;
+	opacity: 0.5;
+}
+
+/* One machine, as one card: the states, what a state changes, the edges, and
+   what is wrong with it — in that order, because that is the order somebody
+   builds one in. */
+.machine {
+	display: flex;
+	flex-direction: column;
+	gap: 0.3rem;
+	padding: 0.3rem;
+	border: 1px solid var(--dc-line);
+	border-radius: 6px;
+}
+
+.machineHead {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.name {
+	flex: 1;
+	min-width: 0;
+	padding: 0.15rem 0.3rem;
+	font: inherit;
+	font-size: 0.78rem;
+	font-weight: 600;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+}
+
+.name:focus {
+	background: var(--dc-raised);
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+/* What the panel is looking at — the component, the use, the part. Underlined
+   because every one of them is a way to go and select the thing, which is how
+   the panel and the canvas stay talking about the same subject. */
+.subject {
+	flex: none;
+	max-width: 9rem;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	padding: 0 0.2rem;
+	font: inherit;
+	font-size: 0.64rem;
+	color: inherit;
+	background: none;
+	border: 0;
+	opacity: 0.55;
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+.subject:hover {
+	opacity: 1;
+}
+
+/* Nothing to point at: a machine with no definition, or a component with no
+   use. Both are legal, both say nothing to the program, and both are worth
+   saying out loud rather than leaving as an empty space. */
+.orphan {
+	flex: none;
+	font-size: 0.64rem;
+	opacity: 0.35;
+}
+
+.subjectLine {
+	display: flex;
+	align-items: baseline;
+	gap: 0.3rem;
+}
+
+.uses {
+	margin-left: auto;
+	font-size: 0.62rem;
+	opacity: 0.4;
+	font-variant-numeric: tabular-nums;
+}
+
+.delete {
+	flex: none;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	font: inherit;
+	line-height: 1;
+	color: inherit;
+	opacity: 0.4;
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.delete:hover {
+	opacity: 1;
+	color: #dc2626;
+}
+
+/* The delta: what this state changes about this part, and nothing else. */
+.deltas {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+	padding: 0.25rem;
+	border-radius: 6px;
+	background: var(--dc-sunken);
+}
+
+.deltaHead {
+	display: flex;
+	align-items: baseline;
+	gap: 0.3rem;
+}
+
+/* Whether this part gets a copy per state — the grounding cost, said in the
+   one place a designer's edit decides it. */
+.copies {
+	margin-left: auto;
+	font-size: 0.62rem;
+	opacity: 0.4;
+}
+
+.hidden {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+	font-size: 0.68rem;
+	opacity: 0.7;
+	cursor: pointer;
+}
+
+.delta {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.15rem;
+}
+
+.delta > :first-child {
+	flex: 1;
+	min-width: 0;
+}
+
+.clear {
+	flex: none;
+	width: 15px;
+	height: 15px;
+	padding: 0;
+	font: inherit;
+	font-size: 0.72rem;
+	line-height: 1;
+	color: inherit;
+	opacity: 0.3;
+	background: none;
+	border: 0;
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+.clear:hover:not(:disabled) {
+	opacity: 1;
+	background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.clear:disabled {
+	opacity: 0.12;
+	cursor: default;
+}
+
+.deltaFoot {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+}
+
+.add {
+	padding: 0.1rem 0.3rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	opacity: 0.6;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.add:hover:not(:disabled) {
+	opacity: 1;
+}
+
+.add:disabled {
+	opacity: 0.25;
+	cursor: default;
+}
+
+/* The four checks. Reported always, forbidden only where somebody asks — so a
+   failing row is drawn as news rather than as an error. */
+.checks {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.check {
+	display: flex;
+	align-items: baseline;
+	gap: 0.3rem;
+	padding: 0.1rem 0.2rem;
+	border-radius: 4px;
+}
+
+.checkLabel {
+	display: flex;
+	align-items: center;
+	flex: none;
+	gap: 0.25rem;
+	font-size: 0.68rem;
+	opacity: 0.6;
+	cursor: pointer;
+}
+
+/* The one check that takes a number. It edits the rule's own body, which is why
+   it is disabled until the rule is in the document to edit. */
+.budget {
+	width: 3.2rem;
+	padding: 0 0.15rem;
+	font: inherit;
+	font-size: 0.66rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	font-variant-numeric: tabular-nums;
+}
+
+.budget:disabled {
+	opacity: 0.4;
+	background: transparent;
+}
+
+.finding {
+	flex: 1;
+	min-width: 0;
+	font-size: 0.64rem;
+	opacity: 0.35;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.failing .finding {
+	opacity: 0.8;
+	color: #b45309;
+}
+
+/* An unsat core blames the rule this row added: the same red the Rules panel
+   marks a blamed rule in, because it is the same claim about the same rule. */
+.blamed {
+	background: color-mix(in srgb, #dc2626 10%, transparent);
+}
+
+.blamed .finding {
+	color: #dc2626;
+}
+

@@ -1,0 +1,148 @@
+.transitions {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.listHead {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.4rem;
+}
+
+.title {
+	font-size: 0.68rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.55;
+}
+
+.add {
+	flex: none;
+	padding: 0.15rem 0.4rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	background: transparent;
+	border: 1px dashed var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.add:hover:not(:disabled) {
+	background: var(--dc-raised);
+}
+
+.add:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.empty {
+	margin: 0;
+	font-size: 0.72rem;
+	line-height: 1.45;
+	opacity: 0.55;
+}
+
+.transition {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+	padding: 0.25rem;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+/* Switched off is dimmed and still fully editable — the point of a switch is
+   that the edge stays in the document, wired, while the machine stops moving
+   that way. */
+.off {
+	opacity: 0.5;
+}
+
+.flagged {
+	border-color: color-mix(in srgb, var(--dc-bad, #fca5a5) 45%, transparent);
+}
+
+.head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.2rem;
+}
+
+.switch {
+	display: flex;
+	align-items: center;
+}
+
+.select {
+	min-width: 0;
+	padding: 0.1rem 0.2rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+/* An end naming a state the machine has not got. Marked rather than repaired:
+   `mdangling/2` reports it, and a select that snapped it to something legal
+   would take the symptom away. */
+.broken {
+	color: var(--dc-bad, #fca5a5);
+	border-color: color-mix(in srgb, var(--dc-bad, #fca5a5) 55%, transparent);
+}
+
+.arrow {
+	font-size: 0.72rem;
+	opacity: 0.5;
+}
+
+.action {
+	flex: none;
+	padding: 0 0.25rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	background: transparent;
+	border: none;
+	border-radius: 4px;
+	opacity: 0.55;
+	cursor: pointer;
+}
+
+.action:hover {
+	background: var(--dc-raised);
+	opacity: 1;
+}
+
+.finding {
+	margin: 0;
+	font-size: 0.68rem;
+	line-height: 1.4;
+	color: var(--dc-bad, #fca5a5);
+}
+
+.settings {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+}
+
+/* What this universe actually paces it at — the answer set's number where there
+   is one, so a duration that names a token reads as the number on screen rather
+   than as the token's name. */
+.resolved {
+	font-size: 0.68rem;
+	opacity: 0.55;
+}
+
+.motion {
+	display: flex;
+	flex-direction: column;
+}

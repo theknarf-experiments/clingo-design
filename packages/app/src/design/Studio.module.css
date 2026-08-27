@@ -190,6 +190,111 @@
 	white-space: nowrap;
 }
 
+/*
+ * The state strip: one component's states, side by side, under the design.
+ *
+ * Positioned in canvas space like every other copy on the canvas, so it pans
+ * and zooms with the design rather than floating over it. That is what makes
+ * comparing two states the same gesture as looking closely at one.
+ *
+ * Zero-sized and absolute, so the cells position themselves against the strip's
+ * origin and nothing here is in flow — the cell sizes come from the subject's
+ * own frame, which is a number in the document rather than a number in this
+ * file.
+ */
+.strip {
+	position: absolute;
+	width: 0;
+	height: 0;
+}
+
+.stripName {
+	position: absolute;
+	bottom: 100%;
+	left: 0;
+	margin-bottom: 18px;
+	font-size: 11px;
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+	opacity: 0.45;
+	white-space: nowrap;
+}
+
+/* One state. The box is the subject's own, so the cells are all the same size
+   whatever the states do to what is inside them — a state that grows a button
+   should look like a button that grew, not like a bigger cell. */
+.stateCell {
+	position: absolute;
+	top: 0;
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+/* The state the document draws this instance in: the one the canvas above is
+   already showing, and therefore the one that needs no explaining. */
+.stateCell[data-drawn] {
+	border-color: color-mix(in srgb, currentColor 40%, var(--dc-line));
+}
+
+/* The state the canvas is playing. Loud, because it is the only thing on the
+   screen saying that the design above is not the document's own answer. */
+.stateCell[data-playing] {
+	border-color: var(--dc-accent);
+	box-shadow: 0 0 0 2px color-mix(in srgb, var(--dc-accent) 35%, transparent);
+}
+
+.stateName {
+	position: absolute;
+	bottom: 100%;
+	left: 0;
+	margin-bottom: 3px;
+	font-size: 11px;
+	opacity: 0.6;
+	white-space: nowrap;
+}
+
+.stateCell[data-playing] .stateName {
+	color: var(--dc-accent);
+	opacity: 1;
+}
+
+/* The picture, clipped to the subject's box. The artboard inside draws the
+   whole document; this is the window onto the part of it worth looking at. */
+.stateInk {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	border-radius: 3px;
+}
+
+/* The click target: the whole cell, over the drawing rather than around it, so
+   that a picture is never nested inside a control. */
+.stateHit {
+	position: absolute;
+	inset: 0;
+	padding: 0;
+	background: transparent;
+	border: 0;
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+.stateHit:hover,
+.stateHit:focus-visible {
+	background: color-mix(in srgb, var(--dc-accent) 10%, transparent);
+}
+
+/* Named for assistive technology and for nobody else: the cell's name is drawn
+   above it, and repeating it inside would be reading the label twice. */
+.hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
 .back {
 	display: flex;
 	align-items: center;

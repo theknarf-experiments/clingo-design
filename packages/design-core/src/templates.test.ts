@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { directSolver } from "./directSolver.ts";
 import { updateConstraint } from "./edits.ts";
+import { exportUniverse } from "./export.ts";
 import { explore, varyingVars } from "./explore.ts";
 import { compareCosts } from "./sampling.ts";
 import { frameOf, sceneContext, wornProps } from "./scene.ts";
@@ -183,4 +184,166 @@ test("two typographies is one variable, and both of its designs are coherent", a
 	const title = findInTree(scene.nodes, "title");
 	assert.ok(title);
 	assert.deepEqual(wornProps(scene, title), ["fontFamily", "lineHeight"]);
+});
+
+/* ------------------------------------------------------------------ */
+/* States                                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The `machine` template exists to make one claim, so these are that claim as
+ * assertions, in the order the template's own doc-comment makes them.
+ *
+ * The first is the load-bearing one and it is deliberately first: a document
+ * with a three-state machine, and the same document with the machine cut out of
+ * it, enumerate the same designs. Every other test in this block would pass
+ * under the cheap encoding — a choice rule over the states — and this one is the
+ * one that would not.
+ */
+test("states are not a design space: the machine changes no universe count", async () => {
+	const scene = findTemplate("machine")!.create();
+
+	const withMachine = await explore(scene, directSolver, { limit: 64 });
+	const without = await explore({ ...scene, machines: [] }, directSolver, {
+		limit: 64,
+	});
+
+	// The same *variables*, not merely the same number of them. A count could
+	// coincide; two identical lists cannot, and this is what says the machine
+	// added no axis rather than adding one and removing another.
+	assert.deepEqual(
+		varyingVars(withMachine).sort(),
+		varyingVars(without).sort(),
+		"a machine is behaviour, not a design decision",
+	);
+	assert.equal(withMachine.count, without.count);
+	assert.ok(withMachine.count > 1, "there is a space for the machine not to change");
+
+	// And a fourth state is free, which is the claim in the form somebody would
+	// actually hit it: adding a state must not multiply anything. Under a choice
+	// rule this would be `count * 4/3`.
+	const fourth = {
+		...scene,
+		machines: scene.machines.map((m) => ({
+			...m,
+			states: [...m.states, { id: "busy", name: "Busy", parts: {} }],
+		})),
+	};
+	assert.equal((await explore(fourth, directSolver, { limit: 64 })).count, withMachine.count);
+
+	// No variable anywhere is a state, and no answer set holds a pick over one.
+	for (const variable of varyingVars(withMachine)) {
+		assert.ok(!variable.includes("stt("), `${variable} is a state copy`);
+		assert.ok(!variable.startsWith("sprop("), `${variable} branches per state`);
+	}
+});
+
+test("every state of the button is in the one answer set, beside the picture", async () => {
+	const scene = findTemplate("machine")!.create();
+	const out = await explore(scene, directSolver, { limit: 8 });
+	const model = out.universes[0].model;
+
+	// Three states, two materialised parts, two uses. The label is materialised
+	// because `pressed` gives it a delta; nothing else in the definition is,
+	// which is the analysis paying for itself.
+	assert.deepEqual(
+		Object.keys(model.states).sort(),
+		[
+			"stt(hovering,hover,button)",
+			"stt(hovering,hover,label)",
+			"stt(hovering,pressed,button)",
+			"stt(hovering,pressed,label)",
+			"stt(hovering,rest,button)",
+			"stt(hovering,rest,label)",
+			"stt(resting,hover,button)",
+			"stt(resting,hover,label)",
+			"stt(resting,pressed,button)",
+			"stt(resting,pressed,label)",
+			"stt(resting,rest,button)",
+			"stt(resting,rest,label)",
+		],
+		"every state of every use, in one answer set",
+	);
+
+	// A state copy is never a node, which is what keeps it out of the layer list,
+	// out of hit testing and out of both exporters — none of which had to learn a
+	// case for it.
+	for (const id of Object.keys(model.byId)) {
+		assert.ok(!id.startsWith("stt("), `${id} is drawn, and a state copy must not be`);
+	}
+
+	// The three states really are three pictures: the lift, the rest, the press.
+	const y = (state: string) => model.states[`stt(resting,${state},button)`].frame.y;
+	assert.ok(y("hover") < y("rest"), "hover lifts");
+	assert.ok(y("pressed") > y("rest"), "a press takes the weight");
+
+	// Two uses in two states at once, each drawing its own — which is the thing a
+	// sprite sheet cannot do, since the two would be in two answer sets.
+	assert.deepEqual(model.shown, { resting: "rest", hovering: "hover" });
+	assert.equal(model.byId["inst(resting,button)"].frame.y, y("rest"));
+	assert.equal(model.byId["inst(hovering,button)"].frame.y, y("hover"));
+
+	// What a state does not touch, it shares. Hover says nothing about the fill,
+	// so its copy paints the literal the instance's own one variable resolved to
+	// — not a second variable that happens to agree.
+	assert.equal(
+		model.states["stt(resting,hover,button)"].rendered.fill,
+		model.byId["inst(resting,button)"].rendered.fill,
+	);
+	// And the one property a state does own is the one that differs.
+	assert.notEqual(
+		model.states["stt(resting,pressed,button)"].rendered.fill,
+		model.states["stt(resting,rest,button)"].rendered.fill,
+	);
+
+	// The machine is sound, and the answer set says so in the four predicates the
+	// canned checks read. A template that shipped with a finding in it would be
+	// teaching the finding.
+	const health = model.machines.buttonStates;
+	assert.deepEqual(health.unreachable, []);
+	assert.deepEqual(health.deadEnds, []);
+	assert.deepEqual(health.nondeterministic, []);
+	assert.deepEqual(health.dangling, []);
+	// The motion scale resolved, and the one edge that names its own number kept
+	// it: a press is immediate, everything else follows the token.
+	assert.deepEqual(health.duration, {
+		enter: 160,
+		leave: 160,
+		release: 160,
+		press: 60,
+	});
+});
+
+test("the button leaves as a stylesheet with the states in it", async () => {
+	const scene = findTemplate("machine")!.create();
+	const out = await explore(scene, directSolver, { limit: 8 });
+	const html = exportUniverse(scene, out.universes[0], {
+		target: "html",
+		title: "machine",
+	});
+
+	// `pressed` is entered and left by a pointer down and up *from hover* rather
+	// than from the initial state, so it is not a pseudo-class state and the file
+	// carries the table-driven runtime instead. The rest/hover pair on its own
+	// would have collapsed to `:hover` and emitted no script at all.
+	assert.match(html.text, /\[data-state="pressed"\]/);
+	assert.match(html.text, /<script>/);
+	// Paced from the answer set rather than from a number in the emitter.
+	assert.match(html.text, /transition:[^;]*160ms/);
+
+	// And what it cannot carry, it says: the second use is drawn in a state other
+	// than the machine's initial one, so the file starts there and every state is
+	// a data-state rule.
+	assert.ok(
+		html.lost.some((entry) => entry.includes("Hovering")),
+		"the export names the state it starts in",
+	);
+
+	// SVG has no states at all, and says so rather than shipping a still frame
+	// that looks like the whole design.
+	const svg = exportUniverse(scene, out.universes[0], {
+		target: "svg",
+		title: "machine",
+	});
+	assert.ok(svg.lost.some((entry) => entry.startsWith("Behaviour.")));
 });

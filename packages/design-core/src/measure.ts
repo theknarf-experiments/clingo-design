@@ -25,10 +25,28 @@
  * alternative. {@link MeasureAxis} is one place in that tuple, {@link Measured}
  * is the table, and the solver selects a row from it through `lrowif/4`. See
  * `emitAsked` in compile.ts for the other half.
+ *
+ * **And a state is not a pick.** A machine's states are all true at once in one
+ * answer set — that is the invariant the whole feature is built on — so a state
+ * that changes a font size, a weight, a family or the words themselves has a box
+ * of its own that no axis of that table could ever address. It gets a table of
+ * its own instead, filed under the copy's `stt(I,S,N)` term rather than under a
+ * node id, because a state copy is deliberately not a `node/1` and there is no
+ * node anywhere to hang one off. {@link stateMeasures} is that pass,
+ * {@link stateBudget} is what it costs, and {@link measuredSize} is the one row
+ * lookup both kinds of table are read by.
  */
+import { componentDef, instanceNodes, instanceVariable } from "./components.ts";
+import {
+	machineForNode,
+	materializedParts,
+	statePart,
+	statePropVar,
+} from "./machines.ts";
 import type { ModelScene } from "./model.ts";
 import {
 	KINDS,
+	type MachineState,
 	type PropName,
 	PROPS,
 	type Scene,
@@ -40,10 +58,11 @@ import {
 	layoutLength,
 	layoutValueOf,
 	layoutWord,
+	propValueOf,
 	styleOf,
 	wornProps,
 } from "./scene.ts";
-import { findInTree, flatten } from "./tree.ts";
+import { findInTree, flatten, propValues } from "./tree.ts";
 import {
 	EMU_PER_PX,
 	type Emu,
@@ -63,6 +82,7 @@ import {
 	numeralOf,
 	propVar,
 	referencedTokens,
+	resolveValue,
 	stylePartVar,
 	styleVar,
 	tokenVar,
@@ -309,13 +329,25 @@ export const MEASURED_PROPS: readonly PropName[] = [
  * there is nothing for an axis to range over. Compared term by term rather than
  * resolved, because two variants holding the same token link are the same
  * treatment as far as the box is concerned however the token is defined.
+ *
+ * `overridden` is the properties something later in the precedence chain has
+ * already answered, and it exists for exactly one caller: a **state copy**,
+ * where a delta saying `weight: bold` means the style's disagreement about the
+ * weight no longer reaches the box. Without it a hover state that pins down
+ * every property the style moves would still carry the style as an axis, and
+ * the copy would be measured twice to produce the same two rows. Empty for a
+ * document node, which is the only reason {@link measureAxes} is unchanged.
  */
-function styleAffectsSize(scene: Scene, node: SceneNode): boolean {
+function styleAffectsSize(
+	scene: Scene,
+	node: SceneNode,
+	overridden: ReadonlySet<PropName> = new Set(),
+): boolean {
 	const style = styleOf(scene, node);
 	if (!style || style.variants.length < 2) return false;
 	const worn = wornProps(scene, node);
 	return MEASURED_PROPS.some((prop) => {
-		if (!worn.includes(prop)) return false;
+		if (overridden.has(prop) || !worn.includes(prop)) return false;
 		const first = termKey(style.variants[0].parts[prop]);
 		return style.variants.some((v) => termKey(v.parts[prop]) !== first);
 	});
@@ -332,7 +364,26 @@ const termKey = (term: Term | undefined): string =>
 				: `d:${term.via}:${term.from}`;
 
 /**
- * Every pick that can change the box the host measures for this node.
+ * One property answered by something ahead of the node in the precedence chain
+ * — a state's delta, and nothing else today.
+ *
+ * Carries the variable as well as the value because the two come apart exactly
+ * where a copy does: what a hover state says about the wording is the
+ * definition's part `label` and the instance's `sprop(i1,hover,label,text)`, and
+ * an axis has to be keyed by the variable the *program* branches on or the
+ * `lrowif/4` it becomes matches no `pick/2` at all.
+ */
+interface Override {
+	value: Value;
+	variable: string;
+}
+
+/** Nothing overrides anything: the document node's own case. */
+const NO_OVERRIDE = (): Override | undefined => undefined;
+
+/**
+ * Every pick that can change the box the host measures for this node, over one
+ * namespace of variables.
  *
  * This is the honest indexing, and it is honest by construction rather than by
  * enumeration: for each property the measurement reads, whatever holds it
@@ -341,17 +392,39 @@ const termKey = (term: Term | undefined): string =>
  * without being special-cased. A node with a style but one wording and one
  * variant has no axes at all; a node with three wordings and no style has the
  * one axis it always had.
+ *
+ * Two of the three sources are parameters rather than fixtures because a state
+ * copy reads the same document through different variables — see
+ * {@link stateMeasures}. `ownVar` is where the node's own value branches
+ * (`prop(t,text)` for a document node, `prop(inst(i1,label),text)` for an
+ * instance's copy of a definition part) and `override` is what a delta says
+ * instead. The **style** axes are not parameterised, and that is a claim rather
+ * than an omission: `sty(S)` is one variable for the whole document — the
+ * component rules re-mint a definition's *property* variables per instance and
+ * deliberately not its wearing — so every copy of every instance in every state
+ * reads the same treatment pick, and a second key would be a second answer to a
+ * question with one.
  */
-export function measureAxes(scene: Scene, node: SceneNode): MeasureAxis[] {
-	if (!autoSizes(node)) return [];
+function typeAxes(
+	scene: Scene,
+	node: SceneNode,
+	ownVar: (prop: PropName) => string,
+	override: (prop: PropName) => Override | undefined = NO_OVERRIDE,
+): MeasureAxis[] {
 	const style = styleOf(scene, node);
 	const worn = style ? wornProps(scene, node) : [];
-	const styleMatters = styleAffectsSize(scene, node);
+	const overridden = new Set(MEASURED_PROPS.filter((p) => override(p) !== undefined));
+	const styleMatters = styleAffectsSize(scene, node, overridden);
 	const out: MeasureAxis[] = [];
 	for (const prop of MEASURED_PROPS) {
+		const said = override(prop);
+		if (said) {
+			out.push(...valueAxes(scene.tokens, said.value, said.variable));
+			continue;
+		}
 		const own = node.props[prop];
 		if (own && own.length > 0) {
-			out.push(...valueAxes(scene.tokens, own, propVar(node.id, prop)));
+			out.push(...valueAxes(scene.tokens, own, ownVar(prop)));
 			continue;
 		}
 		if (!style || !worn.includes(prop)) continue;
@@ -369,6 +442,12 @@ export function measureAxes(scene: Scene, node: SceneNode): MeasureAxis[] {
 		});
 	}
 	return dedupe(out);
+}
+
+/** Every pick that can change the box the host measures for this node. */
+export function measureAxes(scene: Scene, node: SceneNode): MeasureAxis[] {
+	if (!autoSizes(node)) return [];
+	return typeAxes(scene, node, (prop) => propVar(node.id, prop));
 }
 
 /** The measured table for a node, if the host supplied one that applies. */
@@ -554,6 +633,27 @@ function rawAskedAxes(
 /* ------------------------------------------------------------------ */
 
 /**
+ * The row of a table one universe reads, or nothing where there is no table.
+ *
+ * Split out of {@link askedSize} so that the one thing that knows how a table is
+ * addressed is reachable without a {@link SceneNode} — which is what a **state
+ * copy** is: `stt(i1,hover,label)` has a table of its own and no node anywhere
+ * to hang it off, because a copy is deliberately not a `node/1`. Both readers
+ * therefore land on the same row for the same picks, which is the only reason a
+ * copy's box and its instance's box can be compared at all.
+ *
+ * Out of range falls back to the first row: an alternative can be deleted
+ * between a measurement and the solve that reads it.
+ */
+export function measuredSize(
+	table: Measured | undefined,
+	context?: ResolveContext,
+): Size | undefined {
+	if (!table) return undefined;
+	return table.sizes[rowIndex(table.axes, context?.picks)] ?? table.sizes[0];
+}
+
+/**
  * What a node asks to be: its measurement if it has one, otherwise its frame.
  *
  * `context.picks` is the universe being asked about, and it selects the row —
@@ -568,12 +668,7 @@ export function askedSize(
 	measured?: Measurements,
 	context?: ResolveContext,
 ): Size {
-	const table = measuredTable(node, measured);
-	// Out of range falls back to the first: an alternative can be deleted
-	// between a measurement and the solve that reads it.
-	const size = table
-		? (table.sizes[rowIndex(table.axes, context?.picks)] ?? table.sizes[0])
-		: undefined;
+	const size = measuredSize(measuredTable(node, measured), context);
 	if (size) return size;
 	const frame = frameOf(node, context);
 	return { width: frame.width, height: frame.height };
@@ -636,6 +731,307 @@ export function naturalSize(
 /** The nodes the host should measure, at any depth. */
 export function toMeasure(nodes: readonly SceneNode[]): SceneNode[] {
 	return flatten(nodes).filter(autoSizes);
+}
+
+/* ------------------------------------------------------------------ */
+/* The same words, in another state's typography                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What one state copy asks the font engine for, in one universe: the words, and
+ * the four fields that decide the box they need.
+ *
+ * Strings rather than {@link Value}s because every pick has already been made by
+ * the time one of these exists — a row *is* a combination — and strings rather
+ * than a {@link FontSpec} because the fallbacks are the host's to supply and not
+ * this side's to guess. `undefined` here means the document says nothing about
+ * that field, which is a different claim from the empty string: the artboard's
+ * own family is a fact about the canvas the text will be painted on, and it
+ * lives beside the canvas.
+ *
+ * `text` is the one field with a floor, and only because a measurement of no
+ * words is still a measurement — a state that clears a label is a state whose
+ * box is empty, not one with no box.
+ */
+export interface TextRow {
+	text: string;
+	family?: string;
+	size?: string;
+	weight?: string;
+	lineHeight?: string;
+}
+
+/**
+ * One state copy the host should measure, and everything it needs to do it.
+ *
+ * Not a {@link SceneNode}, and the absence is the design rather than an
+ * inconvenience. A state copy is not a `node/1` — the canvas, the layer list,
+ * hit-testing and both export renderers must never see one — so handing the host
+ * a synthetic node with a `stt(i1,hover,label)` id would be handing every reader
+ * of `scene.nodes` a thing this whole feature exists to keep out of them. The
+ * host does not need a node: it needs a key to file the table under, the axes to
+ * key the rows by, and the strings to measure. That is exactly this.
+ *
+ * The `id` is the copy's term, so the table lands in {@link Measurements} beside
+ * the document's own tables and is read back by {@link measuredSize} with the
+ * same arithmetic.
+ */
+export interface StateMeasure {
+	/** The key the table goes under: `stt(i1,hover,label)`. */
+	id: string;
+	/** The instance node the copy belongs to. */
+	instance: string;
+	state: string;
+	/** The definition part being measured. */
+	part: string;
+	axes: MeasureAxis[];
+	/** Variables left out of `axes` to stay inside the budget — see {@link stateBudget}. */
+	dropped: string[];
+	/** One per combination of `axes`, in {@link rowPicks} order. */
+	rows: TextRow[];
+}
+
+/**
+ * How many rows one *copy* of a part may have, given how many copies of it there
+ * are to measure.
+ *
+ * {@link MEASURE_BUDGET} is a budget per table, and a machine does not make one
+ * table bigger — it makes more tables. So the extension is not a second budget
+ * with a second number to justify; it is the same budget, asked the one question
+ * states introduce: **who pays for the copies.** Two answers, and both of them
+ * are the invariant, one level down from where it is usually stated.
+ *
+ * **The document's own node keeps its budget whole.** `askedAxes` for a document
+ * node is what it was, to the row, whatever machines the document holds. This is
+ * the measurement-side of "adding a four-state machine must not change the
+ * document": if a hover state could cost the base node an axis, adding a state
+ * would move a box in the *rest* state — the picture the designer is actually
+ * looking at — and a feature that repaints what it was not asked to change is
+ * not a feature, it is a bug with a panel.
+ *
+ * **The copies share one budget between them.** All the copies of one part get
+ * `MEASURE_BUDGET` rows between them, so a part measured in two states gets 16
+ * rows each and one measured in four gets 8. Which bounds the whole feature's
+ * measurement cost at **twice** a machine-less document's — the same shape of
+ * promise the universe count makes, in milliseconds instead of designs.
+ *
+ * The floor is one row, and it is where that bound stops being exactly twice.
+ * Past thirty-two copies of a single part there is nothing left to divide, and a
+ * copy with no rows is not a cheap copy, it is a copy with no box: the row lookup
+ * would fall through to a frame the definition drew before any state existed. So
+ * a machine with more states than the budget has rows costs one measurement per
+ * state, which is the least anybody could have meant by measuring them, and it is
+ * linear rather than a cliff.
+ *
+ * Evenly, and not weighted toward the state the instance is drawn in, though
+ * that copy is the one whose box is on screen. Which state is shown is an
+ * *edit*, so a budget that favoured it would re-measure the document every time
+ * somebody clicked along the state strip — and playing a state costing nothing
+ * is the whole reason the strip works. A budget that changes with a selection is
+ * a budget that makes the tool feel broken in exactly the interaction it was
+ * added for.
+ *
+ * What gets dropped *within* a copy is not decided here and needs no new rule:
+ * {@link capAxes} keeps the first axis whatever it costs and eats the tail, and
+ * the axes arrive in {@link MEASURED_PROPS} order — so the **wording survives
+ * and the treatment goes first**, in a copy for the same reason and by the same
+ * line as in the node it is a copy of. Ordering by {@link byInfluence} instead
+ * would need the boxes to have been measured already, and this is the pass that
+ * measures them; that ordering is the compiler's, where the numbers exist.
+ */
+export const stateBudget = (copies: number, budget = MEASURE_BUDGET): number =>
+	copies <= 1 ? budget : Math.max(1, Math.floor(budget / copies));
+
+/**
+ * Whether this state says anything about this part that changes the box.
+ *
+ * The strongest lever in the whole budget, and it is the shared-variable
+ * economy again rather than a new idea: what a state does not touch, it shares.
+ * A four-state machine whose hover delta is a fill mints **no** tables at all,
+ * and a machine whose `pressed` state moves a badge two pixels down mints none
+ * either — geometry is not typography, and a copy whose words and font are the
+ * instance's has the instance's box by construction. Only a delta that reaches
+ * one of {@link MEASURED_PROPS} is worth a row.
+ *
+ * A hidden copy is worth none: a state that takes a part out of the picture is a
+ * state with no box to be wrong about, and measuring it would be measuring
+ * something nobody can see in a font nobody sees it in.
+ */
+function stateChangesType(state: MachineState, part: string): boolean {
+	const delta = state.parts[part];
+	if (!delta || delta.hidden === true) return false;
+	return MEASURED_PROPS.some((prop) => (delta.props?.[prop]?.length ?? 0) > 0);
+}
+
+/**
+ * Every state copy in the document whose box is not its instance's, with the
+ * rows the host should measure for it.
+ *
+ * **Why this exists at all.** Text is measured in TypeScript, before the solve,
+ * from the document — that is what keeps the compiler pure and testable in Node,
+ * and it is stated at the top of this file. The measurement table is keyed by
+ * *picks*: `lask/3`, `lrow/4` and an `lrowif/4` per axis, where a row holds in
+ * the universes that picked a given alternative. **A state is not a pick** — that
+ * is the one invariant the whole machine feature is built to keep — so a state
+ * cannot ride that mechanism, cannot be an axis, and must not become one. What it
+ * can be is what it already is everywhere else in the feature: its own term, with
+ * its own table, keyed by the picks that really are picks.
+ *
+ * So a copy's axes are the same three sources any node's are, read through the
+ * variables the *program* actually branches on:
+ *
+ *   - a property the state's delta answers is the delta's own variable,
+ *     `sprop(I,S,N,P)`, and branches only where the designer wrote alternatives
+ *     inside the delta — which is a design decision like any other;
+ *   - a property the state says nothing about is the **instance's** one shared
+ *     variable, `prop(inst(I,N),P)`, exactly as the program's inherit rule reads
+ *     it. This is the invariant paying for itself in measurements: a headline
+ *     with three wordings under a four-state machine is three boxes per copy, not
+ *     3⁴, because the copies read one variable rather than four;
+ *   - a property the part's **style** decides is `sty(S)`, which is one variable
+ *     for the whole document and is therefore not re-keyed per copy at all.
+ *
+ * Per instance, and not per (machine, state, part), because the values are the
+ * instance's: two uses of one button hover to whatever their own held picks say,
+ * exactly as they rest at whatever their own held picks say. Bounded the same way
+ * the grounding is — only {@link materializedParts}, only what
+ * {@link stateChangesType} says is worth a row — so the usual button contributes
+ * nothing and a machine that restyles a label contributes one table per state
+ * that restyles it.
+ *
+ * **What this does not do**, so that nobody reads a promise into it. It measures
+ * *leaves*: a part that hugs its own content. It does not lay a copy out and it
+ * does not compute a container copy's natural size, because an instance's copy of
+ * a laid-out definition does not re-solve its layout in the first place — there
+ * is no `lask/3` for `inst(I,N)` today, so there is nothing for a per-state
+ * container arithmetic to be the second half of. A state that changes the wording
+ * of a hugging text node still does not resize the frame around it, and that
+ * remains a named exclusion rather than a silence.
+ *
+ * **And nothing calls it yet.** This is the analysis half of a pass whose other
+ * half — a host that runs a canvas over these rows, and a compiler that turns the
+ * answers into `lask/3` for a `stt(I,S,N)` term — is not written, so no exported
+ * file and no canvas is any different for its existence. It is recorded here
+ * rather than left for a reader to discover, because a function this size that is
+ * exported from the package index reads as shipped behaviour and is not: the
+ * spec's §3.6 excludes per-state measurement outright, both the exporter and the
+ * Machines panel say so to the designer in as many words, and this exists as the
+ * proof that the exclusion is a wiring job rather than a consequence of the
+ * encoding — the invariant survives it, which is the part that was worth settling
+ * before anyone builds the rest.
+ */
+export function stateMeasures(
+	scene: Scene,
+	budget = MEASURE_BUDGET,
+): StateMeasure[] {
+	const out: StateMeasure[] = [];
+	// The context the rows resolve in: the tokens, and every node property by
+	// variable key so a delta written as a derivation can read one. The same
+	// context the host builds for the document's own nodes, because a copy that
+	// resolved its values differently would be measured for a design that is not
+	// in the answer set.
+	const base: ResolveContext = {
+		tokens: scene.tokens,
+		picks: {},
+		props: propValues(scene.nodes),
+	};
+	/**
+	 * One analysis per machine rather than one per instance — the parts and the
+	 * states that touch them are facts about the *definition*, and the instances
+	 * multiply them for nothing. The same split the program makes, where `mpart/2`
+	 * is emitted once per machine and `mcopy/3` derives the instances from it.
+	 */
+	const cache = new Map<string, Array<{ node: SceneNode; states: MachineState[] }>>();
+
+	for (const instance of instanceNodes(scene)) {
+		const machine = machineForNode(scene, instance);
+		if (!machine) continue;
+		let plan = cache.get(machine.id);
+		if (plan === undefined) {
+			const def = componentDef(scene, machine.root);
+			const materialised = materializedParts(scene, machine);
+			plan = (def?.parts ?? [])
+				.filter((part) => materialised.has(part.id) && autoSizes(part))
+				.map((node) => ({
+					node,
+					states: machine.states.filter((state) => stateChangesType(state, node.id)),
+				}))
+				.filter((entry) => entry.states.length > 0);
+			cache.set(machine.id, plan);
+		}
+		for (const { node, states } of plan) {
+			const share = stateBudget(states.length, budget);
+			for (const state of states) {
+				const override = (prop: PropName): Override | undefined => {
+					const value = state.parts[node.id]?.props?.[prop];
+					return value && value.length > 0
+						? {
+								value,
+								variable: statePropVar(instance.id, state.id, node.id, prop),
+							}
+						: undefined;
+				};
+				const { axes, dropped } = capAxes(
+					typeAxes(
+						scene,
+						node,
+						(prop) => instanceVariable(instance.id, node.id, prop),
+						override,
+					),
+					share,
+				);
+				const rows: TextRow[] = [];
+				for (let row = 0; row < rowCount(axes); row++) {
+					const picks = rowPicks(axes, row);
+					const at = { ...base, picks };
+					/**
+					 * The delta first, then the part as the document dresses it — its
+					 * own value or its style's, at this row's variant, through
+					 * `propValueOf` and so by the same precedence the program applies.
+					 *
+					 * A delta that resolves to nothing — a dangling token, a cycle —
+					 * falls through to the base rather than to the empty string,
+					 * because that is what the program does: `msprop/4` is derived from
+					 * `resolved(sprop(...),_)`, so an override nothing can resolve is an
+					 * override the copy never takes. The base is then read at whatever
+					 * this row says, which for a property the delta answered is its
+					 * first alternative — the same convention {@link rowIndex} reads a
+					 * dropped axis at, and a dangling reference is a document being
+					 * repaired rather than a design being described.
+					 */
+					const read = (prop: PropName): string | undefined => {
+						const said = override(prop);
+						if (said) {
+							const resolved = resolveValue(at, said.value, said.variable);
+							if (resolved !== undefined) return resolved;
+						}
+						return resolveValue(
+							at,
+							propValueOf(scene, node, prop, picks),
+							instanceVariable(instance.id, node.id, prop),
+						);
+					};
+					rows.push({
+						text: read("text") ?? "",
+						family: read("fontFamily"),
+						size: read("size"),
+						weight: read("weight"),
+						lineHeight: read("lineHeight"),
+					});
+				}
+				out.push({
+					id: statePart(instance.id, state.id, node.id),
+					instance: instance.id,
+					state: state.id,
+					part: node.id,
+					axes,
+					dropped,
+					rows,
+				});
+			}
+		}
+	}
+	return out;
 }
 
 /* ------------------------------------------------------------------ */

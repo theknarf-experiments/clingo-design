@@ -45,6 +45,8 @@ import {
 	guideVar,
 	layoutVar,
 	lit,
+	motionVar,
+	msOf,
 	ref,
 	resolveValue,
 	single,
@@ -1514,6 +1516,30 @@ export interface SceneNode {
 	 * the lists its instances index into — see `collapseToPicks`.
 	 */
 	holds?: Readonly<Record<string, number>>;
+	/**
+	 * On an `instance` kind: which state of its definition's machine it is
+	 * drawn in on the canvas, and which state it starts in when exported.
+	 *
+	 * **Structurally the twin of {@link holds}**, and the resemblance is exact
+	 * rather than decorative: both are a decision the document remembers about
+	 * one use of a shared definition, both name something the definition owns,
+	 * and both leave the thing they name unchanged for every other use. The one
+	 * difference is which way the decision cuts — a hold narrows the *design
+	 * space*, a state selects one of the *behaviours*, and those are orthogonal.
+	 * An instance may hold a variant and be drawn in a state, and the pair is a
+	 * cell of a matrix rather than a point in a product of universes.
+	 *
+	 * Absent, or naming a state the machine no longer has, is the machine's
+	 * initial state. Nothing is corrected on the way in: a stored document is
+	 * read, not repaired, and a machine edited down leaves its instances legal.
+	 *
+	 * Read on an `instance` node and nowhere else. A component *definition* on
+	 * the canvas is always its rest state, and that is deliberate: a definition
+	 * part's frame is a *fact* the compiler emits, a fact cannot be un-said by a
+	 * rule, and every instance of the definition inherits it — so drawing the
+	 * definition in another state would move the component itself.
+	 */
+	state?: string;
 }
 
 /** True when this node's children are placed by the solver. */
@@ -2541,6 +2567,418 @@ export function propValueOf(
 	return term ? [term] : undefined;
 }
 
+/* ------------------------------------------------------------------ */
+/* State machines                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What makes a machine move.
+ *
+ * Deliberately the *input* rather than a name of the designer's own: a trigger
+ * has to mean something to a browser at the far end, or the export is a
+ * picture with a data attribute nobody sets. Half of these collapse to a CSS
+ * pseudo-class and cost the export no script at all; the rest drive
+ * `data-state` from a generated runtime. Which is which is the `css` column,
+ * read off this table rather than decided at the emitter — see `export.ts`.
+ */
+export type Trigger =
+	| "pointerenter"
+	| "pointerleave"
+	| "pointerdown"
+	| "pointerup"
+	| "focus"
+	| "blur"
+	| "click"
+	| "load";
+
+export interface TriggerSpec {
+	label: string;
+	/** The DOM event a runtime listens for, and the one the canvas fires. */
+	event: string;
+	/**
+	 * The pseudo-class a *pair* of transitions collapses to, so that the most
+	 * common machine anybody builds — rest and hover — leaves as a stylesheet
+	 * with no behaviour in it. Null where CSS has no name for the condition.
+	 */
+	css: "hover" | "active" | "focus-visible" | null;
+	/** The trigger that undoes it, where the pair is what CSS understands. */
+	pair?: Trigger;
+}
+
+export const TRIGGERS: Record<Trigger, TriggerSpec> = {
+	pointerenter: {
+		label: "Pointer enters",
+		event: "pointerenter",
+		css: "hover",
+		pair: "pointerleave",
+	},
+	pointerleave: {
+		label: "Pointer leaves",
+		event: "pointerleave",
+		css: "hover",
+		pair: "pointerenter",
+	},
+	pointerdown: {
+		label: "Pressed",
+		event: "pointerdown",
+		css: "active",
+		pair: "pointerup",
+	},
+	pointerup: {
+		label: "Released",
+		event: "pointerup",
+		css: "active",
+		pair: "pointerdown",
+	},
+	// `focusin`/`focusout` rather than `focus`/`blur`: the DOM pair that
+	// bubbles, which is what a listener on the instance's own element needs when
+	// the thing that took focus is a descendant of it.
+	focus: {
+		label: "Focused",
+		event: "focusin",
+		css: "focus-visible",
+		pair: "blur",
+	},
+	blur: {
+		label: "Blurred",
+		event: "focusout",
+		css: "focus-visible",
+		pair: "focus",
+	},
+	click: { label: "Clicked", event: "click", css: null },
+	// No event: a load trigger fires once, when the runtime starts. It is how a
+	// machine says "settle into this state" rather than "wait to be poked".
+	load: { label: "On load", event: "", css: null },
+};
+
+export const TRIGGER_NAMES = Object.keys(TRIGGERS) as Trigger[];
+
+/**
+ * How a transition is paced.
+ *
+ * The keys are ASP constants and reach the program as themselves, the way
+ * `spaceBetween` does — the words a human reads are the `label`s.
+ */
+export type Easing = "linear" | "ease" | "easeIn" | "easeOut" | "easeInOut";
+
+export const EASINGS: Record<Easing, { label: string; css: string }> = {
+	linear: { label: "Linear", css: "linear" },
+	ease: { label: "Ease", css: "ease" },
+	easeIn: { label: "Ease in", css: "ease-in" },
+	easeOut: { label: "Ease out", css: "ease-out" },
+	easeInOut: { label: "Ease in-out", css: "ease-in-out" },
+};
+
+export const EASING_NAMES = Object.keys(EASINGS) as Easing[];
+
+/**
+ * What a transition eases by default.
+ *
+ * `easeOut` rather than `ease`, because a state machine's transitions are
+ * responses to a person: the interesting half of the curve is the beginning,
+ * and a response that starts slowly reads as lag.
+ */
+export const DEFAULT_EASING: Easing = "easeOut";
+
+/** One of the three numbers that pace a transition. */
+export type MotionProp = "duration" | "delay" | "stagger";
+
+export interface MotionPropSpec {
+	label: string;
+	type: ValueType;
+	fallback: string;
+	/**
+	 * Whether a negative value means anything.
+	 *
+	 * Only a delay: a negative one starts the transition partway through, which
+	 * is a real thing to ask for. A negative duration is not a fast transition
+	 * and a negative stagger is not a reversed one — both are typos, and both
+	 * are clamped to zero where they are read, exactly as a negative gap is.
+	 */
+	signed: boolean;
+}
+
+/**
+ * Every input to the motion system, in one place — the twin of
+ * {@link LAYOUT_PROPS} and {@link GUIDE_PROPS}, and it earns the shape for the
+ * same reason both of those do: a bundle of settings that never paints, that
+ * the program reads, and that may each hold alternatives or name a token.
+ *
+ * A `duration` token with two alternatives is a motion scale held in one
+ * document — brisk and considered — and because the settings are values rather
+ * than numbers, that really is two designs rather than two documents. It is the
+ * grid argument, applied to time.
+ */
+export const MOTION_PROPS: Record<MotionProp, MotionPropSpec> = {
+	duration: {
+		label: "Duration",
+		type: "duration",
+		fallback: "200ms",
+		signed: false,
+	},
+	delay: { label: "Delay", type: "duration", fallback: "0ms", signed: true },
+	/**
+	 * How much later each subsequent part starts, in `order/2` sequence.
+	 *
+	 * One number rather than a per-part offset, because a stagger is a *rhythm*
+	 * and a table of offsets is a table nobody can read a rhythm off. Which
+	 * parts it applies to is whichever ones the state actually changes.
+	 */
+	stagger: {
+		label: "Stagger",
+		type: "duration",
+		fallback: "0ms",
+		signed: false,
+	},
+};
+
+export const MOTION_PROP_NAMES = Object.keys(MOTION_PROPS) as MotionProp[];
+
+/**
+ * What one state says about one definition part — a **delta**, not a node.
+ *
+ * This is the decision the whole feature turns on. A state could have been a
+ * whole second copy of the subtree, and every design tool that has states does
+ * it that way; the price is that editing the component means editing it N
+ * times, and that "what does hover actually change?" is a diff nobody can see.
+ * A delta is the answer to that question written down, which is also the thing
+ * a designer means when they say the word.
+ *
+ * Every field is absent-is-inherit. A property the state says nothing about is
+ * the instance's own, shared with every other state — which is not merely
+ * economical, it is the invariant: a fill with two alternatives that four
+ * states each re-minted would be sixteen designs where the document holds two.
+ *
+ * **A delta decides strictly more than a {@link StyleVariant} does**, and the
+ * difference is not an inconsistency to tidy up later. A variant's `parts` are
+ * filtered to {@link STYLE_PROPS} — no `text`, no `opacity`, no geometry and no
+ * presence — because a style is a *treatment*: a claim that these nodes look
+ * alike, which several unrelated nodes wear at once, and a treatment that moved
+ * its wearers or made them say the same words would be one no two nodes could
+ * share. A state is the opposite kind of claim. It is one machine's account of
+ * one definition, in one of the situations that definition is in, and "the
+ * panel is out of the picture when the menu is closed" and "the button is two
+ * pixels lower while it is held down" are exactly what a person means by a
+ * state. So `props` spans all of {@link PROPS}, `frame` spans the four
+ * dimensions, and `hidden` is here — while adding, removing or reparenting a
+ * node is *not*, because that would make a state a second document rather than
+ * a reading of this one. Hiding is the one structural verb, and it is the one a
+ * stylesheet can say.
+ */
+export interface StatePart {
+	/**
+	 * Appearance and content, as ordinary {@link Value}s — so a state's fill may
+	 * name a token, hold alternatives, or be derived, exactly like a node's.
+	 */
+	props?: Partial<Record<PropName, Value>>;
+	/**
+	 * Geometry, in the part's *own parent-relative* coordinates — the same space
+	 * {@link SceneNode.frame} is in. So a state that moves a container moves
+	 * everything inside it for nothing, which is what makes the materialisation
+	 * analysis in `machines.ts` affordable: a copy is minted for the parts some
+	 * state touches and their *ancestors*, and never for their children.
+	 */
+	frame?: Partial<Record<Dimension, Value>>;
+	/**
+	 * Take this part out of the picture in this state.
+	 *
+	 * `true` or absent, like {@link SceneNode.component}, and deliberately with
+	 * no `false`: a definition part is drawn unless a state says otherwise, so
+	 * "shown" needs no spelling. A dropdown's panel is `hidden: true` in
+	 * `closed` and silent in `open`.
+	 */
+	hidden?: true;
+}
+
+/**
+ * True when a delta says anything at all — the question the materialisation
+ * analysis asks of every entry before it mints a copy for the part.
+ *
+ * Here rather than at the analysis because it is a fact about the shape rather
+ * than about the walk, and because "says nothing" has more spellings than it
+ * looks: an entry left behind by an edit that cleared its last property is
+ * `{ props: {} }`, and a property cleared in place is `{ props: { fill: [] } }`
+ * — an empty {@link Value}, which resolves to no literal and so decides
+ * nothing. Both are the same claim as no entry at all, and a reader that only
+ * checked for the key would materialise a part, and a `sprop` variable with no
+ * alternatives, on the strength of a leftover.
+ */
+export const stateTouches = (part: StatePart): boolean =>
+	part.hidden === true ||
+	Object.values(part.props ?? {}).some((v) => (v?.length ?? 0) > 0) ||
+	Object.values(part.frame ?? {}).some((v) => (v?.length ?? 0) > 0);
+
+/**
+ * One state of a machine: a name, and a delta per definition part.
+ *
+ * The first state of a machine is its **initial** state, and there is no
+ * `initial` flag — the order *is* the answer, the same way `order/2` is the
+ * paint order and nothing carries a `onTop` flag. Reordering the list is how
+ * the initial state changes, which is one edit rather than two that can
+ * disagree.
+ */
+export interface MachineState {
+	/**
+	 * Unique among the states of *its own machine*, and spellable as an ASP
+	 * constant — it reaches the program inside `stt(I,S,N)` and inside every
+	 * variable key a delta mints.
+	 *
+	 * Per machine rather than per document, for the reason a {@link Guide}'s id
+	 * is per surface: `hover` is what every machine in the document calls that
+	 * state, and making them collide would be making them rename each other.
+	 */
+	id: string;
+	/** What it is called. Free-form. */
+	name: string;
+	/** Definition part id -> what this state changes about it. */
+	parts: Record<string, StatePart>;
+}
+
+/**
+ * One edge: from a state, to a state, on a trigger, over some time.
+ *
+ * A transition carries no geometry and no appearance. It says *when* the
+ * machine moves and *how long the move takes*, and nothing about what the
+ * design looks like at either end — that is entirely the two states' business.
+ * Keeping the two apart is what lets the export collapse a rest/hover pair into
+ * `:hover` and a `transition:` declaration and emit no behaviour at all.
+ */
+export interface Transition {
+	/** Unique among the transitions of its own machine; an ASP constant. */
+	id: string;
+	/** A state id of the same machine. */
+	from: string;
+	/** A state id of the same machine. */
+	to: string;
+	trigger: Trigger;
+	/**
+	 * How long the move takes, as a `duration` {@link Value} — so it may name a
+	 * token and follow a motion scale. Absent takes `MOTION_PROPS.duration`'s
+	 * fallback, which is what the program's own default rule says too.
+	 */
+	duration?: Value;
+	/** How long before it starts. May be negative — see {@link MotionPropSpec.signed}. */
+	delay?: Value;
+	/** How much later each subsequent part moves, in `order/2` sequence. */
+	stagger?: Value;
+	easing?: Easing;
+	/**
+	 * Only tween these properties; everything else in the state's delta snaps.
+	 *
+	 * Absent is *everything the delta touches*, which is what a designer means
+	 * by default. Present and empty is a transition that tweens nothing, which
+	 * is a legal and occasionally wanted thing to say — "change instantly on
+	 * press, ease back on release".
+	 */
+	only?: PropName[];
+	/** Off keeps it in the document but out of the program. */
+	enabled: boolean;
+}
+
+/**
+ * A state machine, belonging to one component definition.
+ *
+ * On {@link Scene} rather than on the definition's root node, and beside the
+ * styles rather than among the nodes, for the reason styles are: a machine is a
+ * record with its own identity, its own list of states and its own lifecycle,
+ * and a `SceneNode` field would give every rectangle in the document a slot for
+ * one. It names its root instead, and a machine whose root is no longer a
+ * definition simply says nothing — the same silence a dangling
+ * {@link SceneNode.instanceOf} leaves.
+ *
+ * **This is component-local runtime behaviour and it is not the multiverse.**
+ * Every state is true at once in one answer set; nothing here is ever an
+ * alternative, and adding a state to a machine must leave the document's
+ * universe count exactly where it was.
+ */
+export interface Machine {
+	/** Unique in the document; an ASP constant. */
+	id: string;
+	name: string;
+	/** The id of the component definition's root node — see `isDefinition`. */
+	root: string;
+	/** In order. **The first is the initial state.** Never empty. */
+	states: MachineState[];
+	transitions: Transition[];
+}
+
+/** Whatever a transition stores for one motion setting, if anything. */
+export function motionValueOf(
+	transition: Transition,
+	prop: MotionProp,
+): Value | undefined {
+	return transition[prop];
+}
+
+/**
+ * What a motion setting comes to, following whatever token it names — the same
+ * walk the generated program does through `resolved/2`, and the twin of
+ * {@link guideSetting} over the twin table.
+ *
+ * Nothing for a setting the transition does not hold, or one that resolves to
+ * no literal at all; the program behaves the same way, through
+ * `not mreadsdur(M,T)` and its two siblings, and the caller falls back to the
+ * table.
+ */
+export function motionSetting(
+	machine: Machine,
+	transition: Transition,
+	prop: MotionProp,
+	context: ResolveContext = NO_CONTEXT,
+): string | undefined {
+	return resolveValue(
+		context,
+		motionValueOf(transition, prop),
+		motionVar(machine.id, transition.id, prop),
+	);
+}
+
+/**
+ * One motion setting in whole milliseconds, falling back to the table's own
+ * default — the twin of {@link guideLength}, and it clamps for the same reason
+ * that one does, minus one exception the table states.
+ *
+ * A duration and a stagger clamp at zero, because a negative duration is not a
+ * fast transition and a negative stagger is not a reversed one; both are typos,
+ * and the generated program clamps them in exactly the same place with exactly
+ * the same argument (`mdur(M,T,0) :- …, V < 0`). A **delay does not**, because a
+ * negative delay starts the move partway through, which is a real thing to ask
+ * for — {@link MotionPropSpec.signed} is where that difference is stated once
+ * and this is the only reader of it.
+ *
+ * Read with `msOf`, which is exact or nothing: a setting spelled `"1.5ms"` is
+ * not a whole millisecond, reads as no duration at all, and so takes the
+ * fallback rather than being rounded behind the designer's back. That is the
+ * same answer the program gives, and giving a different one here would put a
+ * number in the panel that no exported file agrees with.
+ */
+export function motionMs(
+	machine: Machine,
+	transition: Transition,
+	prop: MotionProp,
+	context?: ResolveContext,
+): number {
+	const resolved = motionSetting(machine, transition, prop, context);
+	const read = resolved === undefined ? undefined : msOf(resolved);
+	const ms = read ?? msOf(MOTION_PROPS[prop].fallback) ?? 0;
+	return MOTION_PROPS[prop].signed ? ms : Math.max(0, ms);
+}
+
+/**
+ * How a transition is paced, falling back to {@link DEFAULT_EASING}.
+ *
+ * A word rather than a {@link Value}, so this is a lookup rather than a
+ * resolution: an easing is a closed menu of five curves with no arithmetic in
+ * it, nothing scales it, and a `duration` token is where a document says "all
+ * my motion moves together". A stored word the table does not know falls back
+ * rather than being carried, exactly as an unknown {@link Scene.unit} does —
+ * the emitter would otherwise write a CSS timing function no browser parses.
+ */
+export const easingOf = (transition: Transition): Easing =>
+	transition.easing !== undefined && Object.hasOwn(EASINGS, transition.easing)
+		? transition.easing
+		: DEFAULT_EASING;
+
 export interface Scene {
 	/** Named values, referenced from anywhere. Like CSS custom properties. */
 	tokens: Token[];
@@ -2553,6 +2991,15 @@ export interface Scene {
 	 * variant list of one.
 	 */
 	styles: Style[];
+	/**
+	 * State machines, by the definitions they drive — see {@link Machine}.
+	 *
+	 * Beside the styles and the constraints rather than among them. A style is a
+	 * variable, a constraint is a rule, and a machine is neither: it is
+	 * behaviour, it never branches the space, and it is the first thing in this
+	 * document that is about *time*.
+	 */
+	machines: Machine[];
 	/**
 	 * Paint order: later nodes sit on top. Top-level nodes are normally
 	 * frames — the artboards — but nothing enforces that.
@@ -2626,6 +3073,11 @@ export function emptyScene(): Scene {
 		// before they have drawn anything; a treatment for text that does not
 		// exist yet is not.
 		styles: [],
+		// And no starter machines, for a stronger version of the same reason: a
+		// machine belongs to a component definition, and a new document has no
+		// components in it. One made in advance would name a root that does not
+		// exist, which is a machine that says nothing at all.
+		machines: [],
 		nodes: [
 			{
 				id: "frame1",

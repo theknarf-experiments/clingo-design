@@ -13,6 +13,7 @@ import { blank } from "./blank.ts";
 import { buttons } from "./buttons.ts";
 import { card } from "./card.ts";
 import { component } from "./component.ts";
+import { machine } from "./machine.ts";
 import { map } from "./map.ts";
 import { pair } from "./pair.ts";
 import { palette } from "./palette.ts";
@@ -48,6 +49,13 @@ export const TEMPLATES: Template[] = [
 		description:
 			"A button whose four variants are its universes, used three times — two of them decided.",
 		create: component,
+	},
+	{
+		id: "machine",
+		name: "States",
+		description:
+			"A button with rest, hover and pressed — and exactly as many designs as the same button with no machine at all.",
+		create: machine,
 	},
 	{
 		id: "buttons",

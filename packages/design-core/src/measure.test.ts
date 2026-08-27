@@ -13,7 +13,10 @@ import {
 	setStyle,
 } from "./edits.ts";
 import { explore } from "./explore.ts";
+import { instanceVariable } from "./components.ts";
+import { statePart, statePropVar } from "./machines.ts";
 import {
+	MEASURE_BUDGET,
 	type Measured,
 	type Measurements,
 	type Size,
@@ -25,6 +28,7 @@ import {
 	lineHeightEmu,
 	lineHeightPx,
 	measureAxes,
+	measuredSize,
 	naturalSize,
 	oneSize,
 	rowCount,
@@ -32,12 +36,17 @@ import {
 	rowPicks,
 	sizeFromCssPx,
 	sizingOf,
+	stateBudget,
+	stateMeasures,
 	toMeasure,
 } from "./measure.ts";
 import {
 	PROPS,
+	type Machine,
+	type MachineState,
 	type Scene,
 	type SceneNode,
+	type StatePart,
 	type Style,
 	emptyScene,
 	makeLayout,
@@ -100,6 +109,7 @@ function row(): Scene {
 	};
 }
 import {
+	type Token,
 	type Value,
 	frameVar,
 	layoutVar,
@@ -925,4 +935,404 @@ test("a laid-out child with two widths is both of them", async () => {
 		widths.push(out.universes[0].solved.r?.width ?? 0);
 	}
 	assert.deepEqual(widths, [px(100), px(200)]);
+});
+
+/* ------------------------------------------------------------------ */
+/* States: the same words, in another typography                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The other half of the bill, and the reason it could not be paid the way the
+ * first half was.
+ *
+ * A measurement table is indexed by *picks* — `lrow/4` with an `lrowif/4` per
+ * axis, where a row holds in the universes that chose a given alternative. **A
+ * state is not a pick.** All states of a machine are true at once in one answer
+ * set; that is the invariant the whole feature is built on, and it means a state
+ * cannot be an axis of anything. So a state copy takes a table of its own,
+ * keyed by its own term, indexed by the variables the program really does
+ * branch on: the delta's `sprop(I,S,N,P)` where the state has an opinion, and
+ * the instance's one shared `prop(inst(I,N),P)` where it does not.
+ *
+ * The tests below are about that table: when it exists, what indexes it, what it
+ * costs, and — first and last — that nothing about it reaches the node it is a
+ * copy of.
+ */
+
+/**
+ * A component definition holding one hugging text label, some uses of it, and
+ * optionally a machine over it.
+ *
+ * The label is a leaf on purpose. Per-state measurement is a claim about text,
+ * and a container copy is deliberately outside it: an instance's copy of a
+ * laid-out definition does not re-solve its layout in the first place, so there
+ * is no `lask(inst(I,N))` for a per-state container arithmetic to be the second
+ * half of.
+ */
+function component(
+	spec: {
+		/** What the label says about itself. */
+		label?: SceneNode["props"];
+		/** The style it wears, if any. */
+		style?: string;
+		styles?: Style[];
+		tokens?: Token[];
+		/** In order; the first is the initial state. No machine at all if absent. */
+		states?: Array<{ id: string; parts?: Record<string, StatePart> }>;
+		/** Instance node ids. One called `b1` unless said otherwise. */
+		uses?: string[];
+	} = {},
+): Scene {
+	const label: SceneNode = {
+		...makeNode("text", box(12, 14, 136, 20), { id: "label", name: "Label" }),
+		props: spec.label ?? {
+			text: single("Go"),
+			size: single("14px"),
+			weight: single("400"),
+		},
+		...(spec.style ? { style: spec.style } : {}),
+	};
+	const definition: SceneNode = {
+		...makeNode("frame", box(20, 20, 160, 48), { id: "btn", name: "Button" }),
+		children: [label],
+		component: true,
+	};
+	const machine: Machine | undefined = spec.states && {
+		id: "m1",
+		name: "Button states",
+		root: "btn",
+		states: spec.states.map(
+			(state): MachineState => ({
+				id: state.id,
+				name: state.id,
+				parts: state.parts ?? {},
+			}),
+		),
+		transitions: [],
+	};
+	const empty = emptyScene();
+	return {
+		...empty,
+		styles: spec.styles ?? [],
+		tokens: [...empty.tokens, ...(spec.tokens ?? [])],
+		machines: machine ? [machine] : [],
+		nodes: [
+			{
+				...makeNode("frame", box(0, 0, 600, 400), { id: "page", name: "Page" }),
+				children: [
+					definition,
+					...(spec.uses ?? ["b1"]).map((id, i) => ({
+						...makeNode("instance", box(300, 20 + i * 120, 160, 48), {
+							id,
+							name: id,
+						}),
+						instanceOf: "btn",
+					})),
+				],
+			},
+		],
+	};
+}
+
+test("a state that changes the type is measured as itself", () => {
+	// The claim in one line: hover is bold, so hover's box is not rest's box —
+	// and today nothing between the document and the solver would have noticed,
+	// because the measurement pass reads the document and the delta is not in it.
+	const scene = component({
+		states: [
+			{ id: "rest" },
+			{ id: "hover", parts: { label: { props: { weight: single("700") } } } },
+		],
+	});
+	const measures = stateMeasures(scene);
+	assert.deepEqual(
+		measures.map((m) => m.id),
+		[statePart("b1", "hover", "label")],
+		"one table, for the one state with an opinion about the type",
+	);
+	const [hover] = measures;
+	assert.deepEqual(hover.axes, [], "nothing branches, so it is one row");
+	assert.equal(hover.rows.length, 1);
+	assert.equal(hover.rows[0].weight, "700", "the delta's, not the document's 400");
+	assert.equal(hover.rows[0].text, "Go", "and everything else is the instance's");
+	assert.equal(hover.rows[0].size, "14px");
+	assert.deepEqual(
+		{ instance: hover.instance, state: hover.state, part: hover.part },
+		{ instance: "b1", state: "hover", part: "label" },
+		"the copy knows which three things it is a copy of",
+	);
+});
+
+test("a state that changes nothing the measurement reads mints no rows", () => {
+	// The strongest lever in the budget, and it is the shared-variable economy
+	// rather than a special case: what a state does not touch, it shares — so the
+	// copy's box *is* the instance's box and there is nothing to measure.
+	const nothing = (parts: Record<string, StatePart>): Scene =>
+		component({ states: [{ id: "rest" }, { id: "hover", parts }] });
+	assert.deepEqual(stateMeasures(nothing({})), []);
+	assert.deepEqual(
+		stateMeasures(nothing({ label: { props: { ink: single("#ff0000") } } })),
+		[],
+		"a colour is not a typeface",
+	);
+	assert.deepEqual(
+		stateMeasures(nothing({ label: { frame: { y: single("10px") } } })),
+		[],
+		"and geometry is not typography: a label that moves is the same words",
+	);
+	assert.deepEqual(
+		stateMeasures(
+			nothing({ label: { hidden: true, props: { text: single("Gone") } } }),
+		),
+		[],
+		"a hidden copy has no box to be wrong about",
+	);
+	assert.deepEqual(
+		stateMeasures(component({ states: [{ id: "rest" }, { id: "hover" }] })),
+		[],
+		"and a machine whose states are all silent costs nothing at all",
+	);
+});
+
+test("a state copy is indexed by the program's variables, never by the state", () => {
+	// Two sources, and the difference between them is the whole invariant. The
+	// wording is the *instance's* one shared variable, read alike by every state —
+	// which is what makes four states four boxes and not 3^4. The size is the
+	// delta's own, and it branches because the designer wrote two alternatives
+	// inside a state, which is a design decision like any other.
+	const scene = component({
+		label: { text: [lit("Go"), lit("Get started")], size: single("14px") },
+		states: [
+			{ id: "rest" },
+			{
+				id: "hover",
+				parts: { label: { props: { size: [lit("16px"), lit("20px")] } } },
+			},
+		],
+	});
+	const [hover, ...rest] = stateMeasures(scene);
+	assert.deepEqual(rest, [], "rest says nothing, so rest has no table");
+	assert.deepEqual(hover.axes, [
+		{ variable: instanceVariable("b1", "label", "text"), count: 2 },
+		{ variable: statePropVar("b1", "hover", "label", "size"), count: 2 },
+	]);
+	// The odometer, in MEASURED_PROPS order: the wording varies slowest.
+	assert.deepEqual(
+		hover.rows.map((row) => `${row.text}/${row.size}`),
+		["Go/16px", "Go/20px", "Get started/16px", "Get started/20px"],
+	);
+	// And the negative, which is the one that would catch a state quietly becoming
+	// an alternative. No axis is keyed by a copy — a copy has a table, it is not a
+	// place in one — and a state id appears in a key only inside a delta's own
+	// variable, where what branches is the two sizes a designer wrote and not the
+	// two states they sit in.
+	for (const measure of stateMeasures(scene)) {
+		for (const axis of measure.axes) {
+			assert.ok(!axis.variable.includes("stt("), `${axis.variable} keys a copy`);
+			if (axis.variable.includes("hover")) {
+				assert.ok(
+					axis.variable.startsWith("sprop("),
+					`${axis.variable} names a state and is not a delta`,
+				);
+			}
+		}
+	}
+});
+
+test("two uses of one button are two sets of tables", () => {
+	// Per instance, because the values are the instance's: the program re-mints a
+	// definition's property variables per use, and a delta resolves against the
+	// instance's own picks exactly as the rest state does.
+	const scene = component({
+		uses: ["b1", "b2"],
+		states: [
+			{ id: "rest" },
+			{ id: "hover", parts: { label: { props: { text: single("Now") } } } },
+		],
+	});
+	assert.deepEqual(
+		stateMeasures(scene).map((m) => m.id),
+		[statePart("b1", "hover", "label"), statePart("b2", "hover", "label")],
+	);
+});
+
+test("a delta a style would have decided drops the style as an axis", () => {
+	// The precedence, seen from the copy: a state that pins the weight down means
+	// the treatment's disagreement about the weight no longer reaches this box, so
+	// carrying `sty(head)` would be measuring the same row twice.
+	const styles: Style[] = [
+		{
+			id: "head",
+			name: "Heading",
+			variants: [
+				{ name: "Compact", parts: { weight: lit("400") } },
+				{ name: "Comfortable", parts: { weight: lit("800") } },
+			],
+		},
+	];
+	const worn = component({
+		label: { text: single("Go") },
+		style: "head",
+		styles,
+		states: [
+			{ id: "rest" },
+			{ id: "hover", parts: { label: { props: { weight: single("700") } } } },
+		],
+	});
+	const [hover] = stateMeasures(worn);
+	assert.deepEqual(hover.axes, [], "the state answered the only thing the style moved");
+	assert.equal(hover.rows[0].weight, "700");
+	// And the control: a state that answers something else leaves the treatment
+	// exactly where it was — one axis, two boxes, and the copy reads the same
+	// document-wide `sty(S)` every other reader does.
+	const elsewhere = component({
+		label: { text: single("Go") },
+		style: "head",
+		styles,
+		states: [
+			{ id: "rest" },
+			{ id: "hover", parts: { label: { props: { text: single("Now") } } } },
+		],
+	});
+	const [other] = stateMeasures(elsewhere);
+	assert.deepEqual(other.axes, [{ variable: styleVar("head"), count: 2 }]);
+	assert.deepEqual(
+		other.rows.map((row) => `${row.text}/${row.weight}`),
+		["Now/400", "Now/800"],
+	);
+});
+
+test("the copies share one budget, and the node they copy keeps its own whole", () => {
+	// The budget under states, as the two rules it is: the document's own node is
+	// untouched however many states there are, and the copies divide one budget
+	// between them. Which bounds the feature at twice a machine-less document's
+	// measurement cost, whatever anybody adds — the same shape of promise the
+	// universe count makes, in milliseconds instead of designs.
+	assert.deepEqual(
+		[1, 2, 4, 64].map((n) => stateBudget(n)),
+		[MEASURE_BUDGET, 16, 8, 1],
+		"one copy pays nothing; sixty-four still get a row each",
+	);
+
+	const step: Token = {
+		id: "step",
+		name: "step",
+		type: "length",
+		value: ["12px", "14px", "16px", "20px", "24px"].map(lit),
+	};
+	const wordings = [lit("a"), lit("bb"), lit("ccc")];
+	const label = { text: wordings, size: [ref("step")] };
+	const hover = (id: string) => ({
+		id,
+		parts: { label: { props: { text: wordings } } },
+	});
+
+	// Three wordings across a five-step scale is fifteen rows: inside the budget
+	// of thirty-two for one copy, over the eight that four copies leave each.
+	const one = component({ label, tokens: [step], states: [{ id: "rest" }, hover("h1")] });
+	const [alone] = stateMeasures(one);
+	assert.equal(rowCount(alone.axes), 15);
+	assert.deepEqual(alone.dropped, [], "one copy gets the whole budget");
+
+	const four = component({
+		label,
+		tokens: [step],
+		states: [hover("h1"), hover("h2"), hover("h3"), hover("h4")],
+	});
+	const many = stateMeasures(four);
+	assert.equal(many.length, 4);
+	for (const copy of many) {
+		assert.equal(rowCount(copy.axes), 3, "the wording survives, three rows each");
+		assert.deepEqual(
+			copy.axes.map((axis) => axis.variable),
+			[statePropVar("b1", copy.state, "label", "text")],
+		);
+		assert.deepEqual(
+			copy.dropped,
+			[tokenVar("step")],
+			"and the type scale is reported, not absorbed",
+		);
+	}
+
+	// The half that must not move: the label's own table is what it was before
+	// anybody wrote a machine. A budget that took rows from here would repaint the
+	// rest state — the picture on screen — because somebody added a hover.
+	const base = findInTree(four.nodes, "label");
+	assert.ok(base);
+	assert.deepEqual(capAxes(measureAxes(four, base)), {
+		axes: [
+			{ variable: propVar("label", "text"), count: 3 },
+			{ variable: tokenVar("step"), count: 5 },
+		],
+		dropped: [],
+	});
+});
+
+test("adding a machine changes no measurement fact about the document's own nodes", () => {
+	// The invariant, one level down from where it is usually stated, and asserted
+	// against the real compiler rather than against this file's arithmetic: a
+	// document with a four-state machine emits exactly the `lask`/`lrow`/`lrowif`
+	// the same document with no machine does. A state is a copy beside the
+	// picture, never a change to it.
+	const label = { text: [lit("a"), lit("bb"), lit("ccc")], size: single("14px") };
+	const measurements: Measurements = {
+		label: {
+			axes: [{ variable: propVar("label", "text"), count: 3 }],
+			sizes: [size(10, 20), size(40, 20), size(90, 20)],
+		},
+	};
+	const asked = (scene: Scene): string[] =>
+		compile(scene, { measurements })
+			.program.split("\n")
+			.filter((line) => /^(lask|lrow|lrowif|laskdef)\(/.test(line));
+
+	const plain = component({ label });
+	const machined = component({
+		label,
+		states: [
+			{ id: "rest" },
+			{ id: "hover", parts: { label: { props: { weight: single("700") } } } },
+			{ id: "pressed", parts: { label: { props: { text: single("…") } } } },
+			{ id: "off", parts: { label: { hidden: true } } },
+		],
+	});
+	assert.deepEqual(asked(machined), asked(plain));
+	assert.ok(asked(plain).length > 0, "and there was something there to compare");
+	// The copies are real, though: two of the four states change the type.
+	assert.deepEqual(
+		stateMeasures(machined).map((m) => m.id),
+		[statePart("b1", "hover", "label"), statePart("b1", "pressed", "label")],
+	);
+});
+
+test("a state copy's table is read back by the same arithmetic as a node's", () => {
+	// A copy is not a `node/1` and never will be, so it has no `SceneNode` to hang
+	// a table off — which is exactly why the row lookup is reachable without one.
+	// Both readers land on the same row for the same picks, and that is the only
+	// reason a copy's box and its instance's box can be compared at all.
+	const scene = component({
+		label: { text: single("Go"), size: single("14px") },
+		states: [
+			{ id: "rest" },
+			{
+				id: "hover",
+				parts: { label: { props: { text: [lit("Go"), lit("Get started")] } } },
+			},
+		],
+	});
+	const [hover] = stateMeasures(scene);
+	const measured: Measured = {
+		axes: hover.axes,
+		sizes: [size(30, 20), size(120, 20)],
+	};
+	const context = { tokens: scene.tokens, picks: {} };
+	assert.deepEqual(measuredSize(measured, context), size(30, 20));
+	assert.deepEqual(
+		measuredSize(measured, {
+			...context,
+			picks: { [statePropVar("b1", "hover", "label", "text")]: 1 },
+		}),
+		size(120, 20),
+	);
+	assert.equal(measuredSize(undefined, context), undefined, "no table, no box");
 });

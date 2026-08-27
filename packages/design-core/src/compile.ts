@@ -35,7 +35,14 @@
  * usable range narrows, because gringo's integers are 32-bit and **wrap
  * silently** — see {@link ASP_EMU_CEILING}.
  */
-import { componentDefs, instanceNodes } from "./components.ts";
+import { componentDef, componentDefs, instanceNodes, instancePart } from "./components.ts";
+import {
+	machineForRoot,
+	materializedParts,
+	shownState,
+	stateFrameVar,
+	statePropVar,
+} from "./machines.ts";
 import {
 	askedAxes,
 	naturalSize,
@@ -50,16 +57,25 @@ import {
 	CONSTRAINT_NAMES,
 	CONTAINER_PROPS,
 	DIMENSIONS,
+	type Dimension,
 	EDGES,
 	EDGE_NAMES,
 	GUIDE_PROPS,
 	GUIDE_PROP_NAMES,
 	LAYOUT_PROPS,
 	LAYOUT_PROP_NAMES,
+	type Machine,
+	MOTION_PROPS,
+	MOTION_PROP_NAMES,
+	type MotionProp,
 	NODE_KINDS,
+	PROPS,
+	PROP_NAMES,
+	type PropName,
 	STYLE_PROPS,
 	constrainsProp,
 	dimension,
+	easingOf,
 	frameDim,
 	guideLines,
 	guideValueOf,
@@ -67,6 +83,7 @@ import {
 	isLaidOut,
 	layoutValueOf,
 	levelOf,
+	motionValueOf,
 	rangesOverGroup,
 	type Scene,
 	type SceneNode,
@@ -85,6 +102,8 @@ import {
 	guideVar,
 	isLengthType,
 	layoutVar,
+	motionVar,
+	msOf,
 	propVar,
 	referencedTokens,
 	stylePartVar,
@@ -862,12 +881,21 @@ const COMPONENT_RULES = [
 	"order(inst(I,N),O) :- instance(I,R), cinner(R,N), order(N,O).",
 	"child(I,inst(I,R)) :- instance(I,R).",
 	"child(inst(I,P),inst(I,N)) :- instance(I,R), cinner(R,N), child(P,N), cpart(R,P).",
-	"frame(inst(I,N),D,V) :- instance(I,R), cinner(R,N), frame(N,D,V).",
+	"% Geometry is the one part of the copy that is stated a step short of its",
+	"% head. These two rules used to write frame(inst(I,N),D,V) directly; the",
+	"% machine section a few sections down *also* writes that head — it is the",
+	"% shown state's copy, aliased back — and a rule cannot read its own head, so",
+	"% without the rename the inherit rule and the alias would be a cycle through",
+	"% the one predicate the whole picture is made of. Nothing else changed: the",
+	"% bodies are the bodies they were, and on a document with no machine the",
+	"% single rule that reads mbase/4 puts back exactly the atoms these two used",
+	"% to state. See MACHINE_RULES.",
+	"mbase(I,N,D,V) :- instance(I,R), cinner(R,N), frame(N,D,V).",
 	"% The root copy takes the instance's size and sits at its origin, so an",
 	"% instance is resizable the way a placement should be, while what is inside",
 	"% it stays the definition's arrangement. Its x and y are left to the scene",
 	"% defaults, which is what puts them at zero.",
-	"frame(inst(I,R),S,V) :- instance(I,R), gspan(S), frame(I,S,V).",
+	"mbase(I,R,Z,V) :- instance(I,R), gspan(Z), frame(I,Z,V).",
 	"",
 	"% ---- the definition's variables, minted once per instance ----",
 	"% This is what makes an instance a *point* in the component's space rather",
@@ -895,6 +923,228 @@ const COMPONENT_RULES = [
 	"% style reached the definition and nothing else, and every instance drew the",
 	"% part unstyled — a wrong picture, not merely a missing class.",
 	"sty_wears(inst(I,N),S,P) :- instance(I,R), cpart(R,N), sty_wears(N,S,P).",
+]
+
+/**
+ * The three motion fallbacks, as facts, out of the one table that says what a
+ * motion setting is — the twin of {@link LAYOUT_OPTIONS}' `ldefnum` half.
+ *
+ * Read through `msOf`, which is the same exact-or-nothing reader a document's
+ * own duration goes through, for the reason a length fallback goes through
+ * `emuOf`: the number in the table and the number in the program have to be the
+ * same number, and a fallback the table wrote that no unit spells emits no
+ * default at all — a table entry to fix rather than a number to fudge.
+ *
+ * Emitted always, beside the rules rather than beside the document's own
+ * machine facts, because a hand-written rule may assert `mtrans/2` — a machine
+ * a rule brought into being is as legal as a node one did — and a transition
+ * with no duration at all is a transition nothing paces.
+ */
+const MOTION_DEFAULT_PREDICATES: Record<MotionProp, string> = {
+	duration: "mdefdur",
+	delay: "mdefdelay",
+	stagger: "mdefstagger",
+}
+
+const MOTION_DEFAULTS = MOTION_PROP_NAMES.flatMap((prop) => {
+	const ms = msOf(MOTION_PROPS[prop].fallback)
+	return ms === undefined ? [] : [atom(MOTION_DEFAULT_PREDICATES[prop], ms)]
+})
+
+/**
+ * State machines, as rules over the facts a machine and its instances emit.
+ *
+ * The whole feature is here, and the shape of it is decided by one sentence:
+ * **a machine state is never an `alt/2` alternative and never gets a `pick/2`.**
+ * States are not design-space choices. Every state of every instance is true at
+ * once, in one answer set, side by side — so adding a fourth state to a machine
+ * leaves the document's universe count exactly where it was, and a rule that
+ * relates two states is an ordinary rule with an unusual member.
+ *
+ * The obvious encoding was a choice rule — `1 { spick(I,S) : mstate(M,S) } 1.`
+ * — and it is rejected twice over. It makes the multiverse a sprite sheet: a
+ * button with four states and three variants becomes twelve designs, of which
+ * nobody is choosing between eight. And it makes the interesting question
+ * unaskable, because "is the label still inside the box when the button grows on
+ * hover?" relates two states, and under a choice rule the two states live in two
+ * different answer sets where nothing can relate them and simplex is free to
+ * place the same node in two places in two independent solves.
+ *
+ * So a state is a **copy**. `stt(I,S,N)` carries `frame/3` and `rendered/3` and
+ * nothing else, and it is deliberately **not a `node/1`**: `node/1` is what makes
+ * a thing drawable, and a drawable copy per state would paint every state on top
+ * of every other, grow the layer list by the state count, and teach hit-testing a
+ * case it does not need. What draws is still `inst(I,N)`, which becomes a *view*
+ * of whichever state is shown — the three alias rules below — so the canvas, the
+ * layer list, `isPartOf`, `partLabel`, `derivedNodes` and both export renderers
+ * never learn that states exist. `gsolved/1`, `lv/2`, `lsz/2`, `ge/2` and
+ * `c_node/2` never asked for `node/1`, which is exactly what lets a geometric
+ * constraint place a copy and compare two of them.
+ *
+ * Two economies do the rest of the work, and both are the invariant rather than
+ * an optimisation:
+ *
+ *   - **What a state does not touch, it shares.** A property no state of the
+ *     machine mentions is read by every copy from the instance's one
+ *     `prop(inst(I,N),P)` variable. Minting a copy of a two-alternative fill per
+ *     state would make four states 2⁴ = 16 designs where the document holds two.
+ *     Only what a delta actually says gets a variable, and such a variable
+ *     branches only where the designer wrote alternatives *inside* the delta —
+ *     which is a design decision like any other and branches like any other.
+ *   - **Copies cost grounding, so they are rationed.** `mpart/2` is the
+ *     materialisation analysis' answer, computed once per machine over the
+ *     definition and multiplied across the instances here by `mcopy/3` rather
+ *     than emitted per use. See `materializedParts`.
+ *
+ * Emitted **always**, like the geometry, component, style and guide rules and
+ * for the same reason: `machine/1`, `mstate/2`, `mpart/2` and `instance/2` are
+ * all things a hand-written rule may assert, and a contract that quietly does
+ * nothing on some documents is not one. With no facts, none of it grounds.
+ *
+ * Placed after the component rules — which is where `instance/2`, `cpart/2` and
+ * `cinner/2` are said, and where two lines were renamed to `mbase/4` so that the
+ * alias below is not also its own body — and before the scene defaults, so that a
+ * copy's own defaults are stated after the frames they guard.
+ */
+const MACHINE_RULES = [
+	"#defined machine/1.",
+	"#defined machine_of/2.",
+	"#defined mstate/2.",
+	"#defined mindex/3.",
+	"#defined mpart/2.",
+	"#defined mhide/3.",
+	"#defined mtrans/2.",
+	"#defined mfrom/3.",
+	"#defined mto/3.",
+	"#defined mtrigger/3.",
+	"#defined measing/3.",
+	"#defined monly/3.",
+	"#defined mdefdur/1.",
+	"#defined mdefdelay/1.",
+	"#defined mdefstagger/1.",
+	"#defined shown/2.",
+	"#defined mshadow/2.",
+	"#defined mfshadow/3.",
+	"#defined instance/2.",
+	"#defined cpart/2.",
+	"#defined cinner/2.",
+	"#defined millis/2.",
+	"#defined numeral/2.",
+	"",
+	"% ---- which instances a machine drives ----",
+	"minstance(I,M) :- instance(I,R), machine_of(M,R).",
+	"minitial(M,S) :- mindex(M,S,1).",
+	"",
+	"% Every instance of a driven definition is in *some* state, and never in two.",
+	"% The default is written the way the scene defaults are — the guard excludes",
+	"% the value the default supplies — so that supplying the default is not itself",
+	"% the reason the default no longer applies, which is the pair with no stable",
+	"% model. The compiler emits shown/2 as a fact for every instance the document",
+	"% holds; this rule is for the ones a rule of yours brought into being.",
+	"mstated(I) :- minstance(I,M), shown(I,S), not minitial(M,S).",
+	"shown(I,S) :- minstance(I,M), minitial(M,S), not mstated(I).",
+	"",
+	"% ---- which parts get a copy ----",
+	"% Derived rather than emitted per instance: the analysis decides the parts",
+	"% once per machine, and the instances multiply it here for nothing.",
+	"mcopy(I,S,N) :- minstance(I,M), mstate(M,S), mpart(M,N).",
+	"",
+	"% ---- what a copy starts from ----",
+	"% What the instance's part is where no state has an opinion about it. The",
+	"% guard is per *dimension*, not per part: a state that moves a badge leaves",
+	"% the badge's width exactly where the definition put it, and this is the rule",
+	"% that says so.",
+	"frame(inst(I,N),D,V) :- mbase(I,N,D,V), not mfshadow(I,N,D).",
+	"",
+	"% ---- each state's own copy ----",
+	"% A dimension the state says nothing about is the instance's. Every state of",
+	"% every instance is in one answer set, so a rule may compare two of them and",
+	"% simplex places both — which is the whole reason this is a copy and not a",
+	"% second solve.",
+	"frame(stt(I,S,N),D,V) :- mcopy(I,S,N), mbase(I,N,D,V), not msfval(I,S,N,D).",
+	"frame(stt(I,S,N),D,V) :- mcopy(I,S,N), resolved(sfval(I,S,N,D),L), numeral(L,V).",
+	"% ...and it only counts where it reads as a length, so a delta pointed at a",
+	"% dangling token or at \"50%\" falls back to the base rather than leaving the",
+	"% copy with no geometry at all. Same reading frame/3 itself gets.",
+	"msfval(I,S,N,D) :- resolved(sfval(I,S,N,D),L), numeral(L,_).",
+	"",
+	"% A state copy is not a node/1, so the scene defaults do not reach it. Its",
+	"% own, in the same shape and for the same reason: written so it cannot unsay",
+	"% itself.",
+	"mframed(I,S,N,D) :- frame(stt(I,S,N),D,V), V != 0.",
+	"frame(stt(I,S,N),A,0) :- mcopy(I,S,N), gaxis(A), not mframed(I,S,N,A).",
+	"frame(stt(I,S,N),Z,0) :- mcopy(I,S,N), gspan(Z), not mframed(I,S,N,Z).",
+	"",
+	"% Appearance, the same way — and this is where the invariant lives. A property",
+	"% no state touches is read from the *instance's* one variable, shared by every",
+	"% state, so a fill with two alternatives is two designs whether the machine has",
+	"% two states or twenty. Minting a copy of it per state would be 2^N.",
+	"rendered(stt(I,S,N),P,L) :- mcopy(I,S,N), resolved(prop(inst(I,N),P),L),",
+	"                            not msprop(I,S,N,P).",
+	"rendered(stt(I,S,N),P,L) :- mcopy(I,S,N), resolved(sprop(I,S,N,P),L).",
+	"msprop(I,S,N,P) :- resolved(sprop(I,S,N,P),_).",
+	"",
+	"mhidden(I,S,N) :- minstance(I,M), mhide(M,S,N), mcopy(I,S,N).",
+	"",
+	"% ---- the shown state is what the instance *is* ----",
+	"% This is the join that keeps everything downstream working unchanged. frame/3",
+	"% and rendered/3 stay untimed and stay about inst(I,N), so the canvas, hit",
+	"% testing, isPartOf, partLabel, the layer list and both export targets never",
+	"% learn that states exist.",
+	"frame(inst(I,N),D,V) :- frame(stt(I,S,N),D,V), shown(I,S).",
+	"rendered(inst(I,N),P,L) :- rendered(stt(I,S,N),P,L), shown(I,S).",
+	"hidden(inst(I,N)) :- mhidden(I,S,N), shown(I,S).",
+	"",
+	"% ---- a copy is parented where its part is ----",
+	"% Only so that a geometric constraint naming a state copy gets a world chain:",
+	"% gworld/2 climbs child/2, and a copy with no parent would be treated as a root",
+	"% and placed in the instance's own coordinates rather than on the canvas. The",
+	"% copies hang off the *instance* tree, never off each other, so no node ever",
+	"% gains a second parent and readModel — which builds byId from node/1 alone —",
+	"% never sees one.",
+	"child(inst(I,P),stt(I,S,N)) :- mcopy(I,S,N), instance(I,R), cinner(R,N),",
+	"                               child(P,N), cpart(R,P).",
+	"child(I,stt(I,S,R)) :- mcopy(I,S,R), instance(I,R).",
+	"",
+	"% ---- how long a move takes, per universe ----",
+	"% The same shape a layout's gap has, for the same reason: a duration is a",
+	"% value, so what the export writes is derived from the pick rather than",
+	"% written down, and a `duration` token with two alternatives is a motion scale",
+	"% the document can hold both ends of.",
+	"mdur(M,T,V) :- resolved(mval(M,T,duration),L), millis(L,V), V >= 0.",
+	"% A negative duration is not a fast transition, it is a typo — exactly as a",
+	"% negative gap is not a tight row.",
+	"mdur(M,T,0) :- resolved(mval(M,T,duration),L), millis(L,V), V < 0.",
+	"mreadsdur(M,T) :- resolved(mval(M,T,duration),L), millis(L,_).",
+	"mdur(M,T,V) :- mtrans(M,T), mdefdur(V), not mreadsdur(M,T).",
+	"% A delay may be negative: it starts the move partway through, which is a thing",
+	"% to ask for rather than a mistake. So it is the one motion setting with no",
+	"% clamp.",
+	"mdelay(M,T,V) :- resolved(mval(M,T,delay),L), millis(L,V).",
+	"mreadsdelay(M,T) :- resolved(mval(M,T,delay),L), millis(L,_).",
+	"mdelay(M,T,V) :- mtrans(M,T), mdefdelay(V), not mreadsdelay(M,T).",
+	"mstagger(M,T,V) :- resolved(mval(M,T,stagger),L), millis(L,V), V >= 0.",
+	"mstagger(M,T,0) :- resolved(mval(M,T,stagger),L), millis(L,V), V < 0.",
+	"mreadsstagger(M,T) :- resolved(mval(M,T,stagger),L), millis(L,_).",
+	"mstagger(M,T,V) :- mtrans(M,T), mdefstagger(V), not mreadsstagger(M,T).",
+	"",
+	"% ---- what is wrong with the machine ----",
+	"% Derived rather than checked here, so that a rule of yours can forbid any of",
+	"% them by name and land in a core like every other rule. The Machines panel",
+	"% offers the four canned `custom` constraints that do exactly that; there is no",
+	"% new constraint kind and no new machinery.",
+	"mreach(M,S) :- minitial(M,S).",
+	"mreach(M,S2) :- mreach(M,S1), mfrom(M,T,S1), mto(M,T,S2).",
+	"munreached(M,S) :- mstate(M,S), not mreach(M,S).",
+	"mleaves(M,S) :- mfrom(M,_,S).",
+	"mdeadend(M,S) :- mstate(M,S), not mleaves(M,S).",
+	"mnondet(M,S,G) :- mfrom(M,T1,S), mfrom(M,T2,S), T1 < T2,",
+	"                  mtrigger(M,T1,G), mtrigger(M,T2,G).",
+	"mdangling(M,T) :- mfrom(M,T,S), not mstate(M,S).",
+	"mdangling(M,T) :- mto(M,T,S), not mstate(M,S).",
+	"% Two shown states is not an instance in two states, it is two pictures on top",
+	"% of each other. Nothing the document can write does it; a rule can.",
+	"mtwoshown(I) :- shown(I,S1), shown(I,S2), S1 < S2.",
 ]
 
 /**
@@ -1254,7 +1504,10 @@ export const CONTRACT = `% Predicates you can rely on:
 %   f_value(N, D, Lit)          derived: resolved(fval(N,D)) — projected, so
 %                               two positions really are two designs
 %   rendered(N, Prop, Lit)      what it draws with — an interned literal id, or
-%                               the text itself in quotes
+%                               the text itself in quotes. Not derived from a
+%                               node's own variable where mshadow(N,Prop) holds:
+%                               a machine owns that property, and the shown
+%                               state's copy draws it
 %   hidden(N)                   assert to remove a node
 %   visible(N)                  derived: node(N), not hidden(N)
 %
@@ -1365,13 +1618,141 @@ export const CONTRACT = `% Predicates you can rely on:
 %
 % Everything under an instance is derived from those:
 %
-%   node(inst(I,N))  kind  order  child  frame        the copy of the tree
+%   node(inst(I,N))  kind  order  child  frame        the copy of the tree.
+%                               frame and rendered come from the shown state's
+%                               copy where the definition has a machine — see
+%                               State machines below
 %   alt(prop(inst(I,N),P), K)                         its own choices, over the
 %                                                     definition's alternatives
 %
 % So two instances differ exactly where the definition wrote more than one
 % alternative, and nowhere else. An *override* is not a predicate: it is
 % pick(prop(inst(I,N),P),K) assumed, which is the same thing a pin is.
+%
+% State machines. A definition may have one, and a machine is component-local
+% *behaviour*: states, and transitions between them. It is emphatically not a
+% design space. Every state of every instance is true at once, in this one
+% answer set, and nothing here is ever an alternative — so adding a fourth state
+% to a machine leaves the number of universes exactly where it was. Variants and
+% states are a matrix, not a cross product.
+%
+%   machine(M)  machine_of(M, R)   M drives the definition rooted at R
+%   mstate(M, S)                   S is a state of M. Ids are unique per
+%                                  machine, not per document: \`hover\` is what
+%                                  every machine calls that state
+%   mindex(M, S, K)                S is M's Kth state, 1-based. There is no
+%                                  \`initial\` flag — the order is the answer,
+%                                  the way order/2 is the paint order
+%   minitial(M, S)                 derived: mindex(M,S,1)
+%   mpart(M, N)                    definition part N gets a copy per state.
+%                                  Only the parts some state touches, plus
+%                                  their ancestors: a frame is parent-relative,
+%                                  so a state that moves a container moves
+%                                  everything inside it for nothing
+%   mhide(M, S, N)                 state S takes part N out of the picture
+%   shown(I, S)                    which state instance I is drawn in. A fact,
+%                                  never a choice: it decides rendered/3, which
+%                                  is projected, so a choice over it would
+%                                  multiply the universes by the state count
+%
+% The copies, and the view the rest of the program sees:
+%
+%   stt(I, S, N)                   instance I's copy of part N in state S.
+%                                  **Never a node/1** — it carries frame/3 and
+%                                  rendered/3 and nothing else, so the canvas,
+%                                  the layer list and both exports never see
+%                                  one. gsolved/1, lv/2, lsz/2, ge/2 and
+%                                  c_node/2 do not need node/1, which is what
+%                                  lets a rule place one and compare two
+%   mcopy(I, S, N)                 derived: that copy exists
+%   mbase(I, N, D, V)              derived: what I's copy of N is before any
+%                                  state has an opinion
+%   frame(inst(I,N),D,V) :- frame(stt(I,S,N),D,V), shown(I,S).
+%   rendered(inst(I,N),P,L) :- rendered(stt(I,S,N),P,L), shown(I,S).
+%   hidden(inst(I,N)) :- mhidden(I,S,N), shown(I,S).
+%                                  inst(I,N) is a *view* of the shown state, so
+%                                  frame/3 and rendered/3 stay untimed and
+%                                  everything downstream is unchanged
+%
+% The alias has a second half that is not written here and cannot be. Where a
+% geometric constraint places a copy, the answer arrives as a theory atom —
+% __lpx(lv(stt(I,S,N),A),"V") — and a theory atom is not something a rule can
+% read and re-state under another term, so the frame/3 alias above carries the
+% stated geometry across and nothing carries the solved geometry. readModel does
+% it instead, in solvedView: an instance part with no solve of its own is drawn
+% at the shown copy's solved offset. So a rule may place the state that is on
+% show and the picture moves with it, which is what "a rule can place two states"
+% has to mean. Universe.solved is left exactly as the solver answered it, because
+% its readers — dragging, hit testing, the guide overlay — are all about document
+% nodes, and an instance part is not one.
+%
+% What a state does not touch, it shares. A property no state of the machine
+% mentions is read from prop(inst(I,N),P) — the instance's one variable — by
+% every state copy at once. That is the invariant, spelled as a rule: minting a
+% copy of a two-alternative fill per state would make four states sixteen
+% designs where the document holds two.
+%
+%   sprop(I, S, N, P)              the variable one state's delta mints for a
+%                                  property; a value like any other, so it may
+%                                  name a token or hold alternatives, and where
+%                                  it holds two that really is two designs
+%   sfval(I, S, N, D)              the same for one of the four dimensions
+%   mshadow(inst(I,N), P)          some state owns this property, so the
+%                                  instance does not draw it from its own
+%                                  variable — the shown copy does
+%   mfshadow(I, N, D)              the same for a dimension
+%
+% Time is the fourth quantity, beside length, count and ratio:
+%
+%   millis(Lit, Ms)                the DURATION a literal reads as, in whole
+%                                  milliseconds: "200ms" is 200 and "0.2s" is
+%                                  200 too. Exact or absent — "1.5ms" is not a
+%                                  whole millisecond, so it emits nothing, and
+%                                  a bare number is refused except for 0, which
+%                                  reads the same under either unit
+%   mval(M, T, duration|delay|stagger)   the variable a motion setting is, so a
+%                                  \`duration\` token with two alternatives is a
+%                                  motion scale the document holds both ends of
+%   mdur(M, T, Ms)                 derived: millis(resolved(mval(M,T,duration)))
+%   mdelay(M, T, Ms)  mstagger(M, T, Ms)   the same. Duration and stagger clamp
+%                                  at zero; a delay does not, because a negative
+%                                  one starts the move partway through
+%
+% Transitions, and what is wrong with them. All four checks are *derived*, not
+% enforced, so a rule of yours forbids the ones you care about by name — and
+% then it has an enable switch, a place in the unsat core, a strength you can
+% soften to a preference, and \`why\`:
+%
+%   mtrans(M, T)   mfrom(M, T, S)   mto(M, T, S)
+%   mtrigger(M, T, ...)            one of the trigger words below
+%   measing(M, T, ...)             linear|ease|easeIn|easeOut|easeInOut
+%   monly(M, T, Prop)              tween only these; no monly at all is
+%                                  everything the state changes
+%   mreach(M, S)                   derived: reachable from the initial state
+%   munreached(M, S)               derived: and the states that are not
+%   mdeadend(M, S)                 derived: nothing leaves S
+%   mnondet(M, S, G)               derived: two transitions leave S on trigger G
+%   mdangling(M, T)                derived: T names a state M has not got
+%   mtwoshown(I)                   derived: two shown/2 for one instance, which
+%                                  is two pictures on top of each other rather
+%                                  than an instance in two states
+%
+%   viol(machine_deterministic) :- mnondet(_,_,_).
+%
+% A rule that relates two states is an ordinary rule with an unusual member. A
+% state copy is a term c_node/2 takes exactly where it takes a node id, so "the
+% label does not jump when you hover" is an align, with a name and a switch:
+%
+%   c_node(no_jump, stt(b1,rest,label)).
+%   c_node(no_jump, stt(b1,hover,label)).
+%   c_edge(no_jump, centerY).
+%
+% A machine changes appearance, geometry and presence. It does not change
+% structure: no node appears, moves in the tree or changes kind, and hiding is
+% the one structural verb, because it is the one a stylesheet can say. A
+% definition on the canvas is always its rest state — a definition part's frame
+% is a fact, a fact cannot be un-said by a rule, and every instance inherits it,
+% so drawing the definition in another state would move the component itself.
 %
 % Automatic layout. The settings are values, so the predicates the equations
 % read are derived per universe rather than stated:
@@ -1635,6 +2016,151 @@ function emitAsked(
 	say("laskdef", naturalSize(node, measurements, context));
 }
 
+/**
+ * One machine, reduced to the three things the program needs to know about it.
+ *
+ * Read once per compile and handed to everything that asks, because three
+ * callers ask and they must not be able to disagree: {@link compile} emits the
+ * facts and mints the variables, {@link variableCounts} tells the studio which
+ * rows exist, and a pin surviving an edit depends on the two answering alike.
+ * The alternative — each doing its own walk over `scene.machines` — is how a
+ * delta row ends up pinnable in the panel and absent from the program.
+ *
+ * Nothing here is per instance. The parts are a fact about the *definition*, and
+ * the instances multiply them in ASP through `mcopy/3`; the shadows are per part
+ * for the same reason and are stamped with an instance only where they are
+ * written down.
+ */
+interface MachineFacts {
+	machine: Machine;
+	/**
+	 * The materialised parts, in the definition's own document order.
+	 *
+	 * Ordered rather than a set because this decides the order of the facts in
+	 * the generated program, and a program a person reads in the power panel
+	 * should list a component's parts the way the layer list does.
+	 */
+	parts: string[];
+	/** Part id -> the properties *some* state of the machine overrides on it. */
+	shadow: Map<string, PropName[]>;
+	/** Part id -> the dimensions some state overrides. */
+	fshadow: Map<string, Dimension[]>;
+}
+
+/**
+ * What every machine in the document comes to, materialisation and all.
+ *
+ * A machine whose root is no longer a definition survives this with no parts at
+ * all rather than being dropped: it is still a record the document holds, and it
+ * still emits `machine/1` and its states, so the panel showing it and the rule
+ * naming one of its states both keep working. What it does not emit is a single
+ * copy — `materializedParts` returns the empty set, `mpart/2` is never stated,
+ * and `mcopy/3` grounds nothing. The same silence a dangling `instanceOf` leaves.
+ */
+function machineFacts(scene: Scene): MachineFacts[] {
+	return (scene.machines ?? []).map((machine) => {
+		const materialised = materializedParts(scene, machine);
+		const def = componentDef(scene, machine.root);
+		const parts = (def?.parts ?? [])
+			.filter((part) => materialised.has(part.id))
+			.map((part) => part.id);
+		const shadow = new Map<string, PropName[]>();
+		const fshadow = new Map<string, Dimension[]>();
+		for (const part of parts) {
+			// Read out of the tables rather than off the delta's own keys, so the
+			// facts come out in one fixed order however the document was edited, and
+			// so a key no table holds — a property a rename left behind — never
+			// reaches the program as a term. `Object.keys` on a `Partial<Record>` is
+			// the shape that lets that happen.
+			const props = PROP_NAMES.filter((prop) =>
+				machine.states.some(
+					(state) => (state.parts[part]?.props?.[prop]?.length ?? 0) > 0,
+				),
+			);
+			const dims = DIMENSIONS.filter((dim) =>
+				machine.states.some(
+					(state) => (state.parts[part]?.frame?.[dim]?.length ?? 0) > 0,
+				),
+			);
+			if (props.length > 0) shadow.set(part, props);
+			if (dims.length > 0) fshadow.set(part, dims);
+		}
+		return { machine, parts, shadow, fshadow };
+	});
+}
+
+/**
+ * Every value a machine puts into the program as a variable, with the key it
+ * gets — and **never a state**.
+ *
+ * That last word is the whole of what this function is careful about. A state is
+ * not a design-space choice: all of them are true at once in one answer set, so
+ * there is no variable anywhere whose alternatives are states and no `pick/2`
+ * that says which one an instance is in. What a machine *does* name variables
+ * for is the two places a designer wrote a {@link Value} down — the fields
+ * inside one state's delta, and the three numbers that pace a transition — and
+ * those branch exactly where any other value branches, which is a design
+ * decision like any other. `hover fill: [accent, danger]` is two designs; four
+ * states are not sixteen.
+ *
+ * The delta variables are per *instance*, because the override is: two uses of
+ * one button may hover to two different fills, exactly as they may rest at two.
+ * The motion variables are per machine, because a transition belongs to the
+ * machine and every instance moves by the same clock.
+ *
+ * Disabled transitions are skipped, the same reading the compiler already gives
+ * a switched-off constraint: out of the program is out of the program, and a
+ * duration nothing reads is a duration nothing reads.
+ */
+function machineValues(
+	scene: Scene,
+	facts: readonly MachineFacts[],
+	visit: (variable: string, value: Value) => void,
+): void {
+	for (const { machine } of facts) {
+		for (const transition of machine.transitions) {
+			if (!transition.enabled) continue;
+			for (const prop of MOTION_PROP_NAMES) {
+				const value = motionValueOf(transition, prop);
+				if (value && value.length > 0) {
+					visit(motionVar(machine.id, transition.id, prop), value);
+				}
+			}
+		}
+	}
+	const byId = new Map(facts.map((entry) => [entry.machine.id, entry]));
+	for (const node of instanceNodes(scene)) {
+		// Which machine drives an instance is `machineForRoot`'s answer and nobody
+		// else's. A document holding two machines on one root is one
+		// `normalizeScene` does not produce — it dedupes ids, not roots — and the
+		// one thing worth insisting on is that every reader in the tool picks the
+		// same one of them rather than each picking its own. `machine_of/2` is
+		// emitted under the same test, so the shadowed machine mints no copies for
+		// these variables to be about either.
+		const machine = machineForRoot(scene, node.instanceOf);
+		const entry = machine === undefined ? undefined : byId.get(machine.id);
+		if (!entry) continue;
+		for (const state of entry.machine.states) {
+			for (const part of entry.parts) {
+				const delta = state.parts[part];
+				if (delta === undefined) continue;
+				for (const prop of PROP_NAMES) {
+					const value = delta.props?.[prop];
+					if (value && value.length > 0) {
+						visit(statePropVar(node.id, state.id, part, prop), value);
+					}
+				}
+				for (const dim of DIMENSIONS) {
+					const value = delta.frame?.[dim];
+					if (value && value.length > 0) {
+						visit(stateFrameVar(node.id, state.id, part, dim), value);
+					}
+				}
+			}
+		}
+	}
+}
+
 export function compile(
 	scene: Scene,
 	options: CompileOptions = {},
@@ -1884,6 +2410,131 @@ export function compile(
 		componentLines.push(atom("instance", node.id, node.instanceOf));
 	}
 
+	/**
+	 * State machines: what the document holds, as facts.
+	 *
+	 * Facts only, like a component and a grid, so that a document with a machine
+	 * in it is the same *program* as one without — with more data. Everything that
+	 * makes a machine mean anything is in {@link MACHINE_RULES}, which is emitted
+	 * whether or not a line below is.
+	 *
+	 * Ids reach the program as themselves, which is what makes `mstate(m1,hover)`
+	 * readable in a hand-written rule and what makes `stt(b1,hover,label)` a term a
+	 * designer can type into the Rules panel. They are not re-checked here:
+	 * `normalizeScene` drops a machine, a state or a transition whose id is not a
+	 * bare ASP constant, on exactly the argument that would apply here — a term the
+	 * program cannot hold takes the whole document down rather than making one
+	 * picture wrong — and this file trusts the reader about an id in the same way
+	 * it already trusts it about a node id, a token id and a constraint id.
+	 *
+	 * Two halves, and the split is the materialisation analysis: what is per
+	 * *machine* is stated once (the states, the parts, the transitions), and what
+	 * is per *instance* is stated per instance (which state it is drawn in, and
+	 * which of its own variables a state has taken over). The copies themselves are
+	 * in neither half — `mcopy/3` derives them, so twenty uses of a four-state
+	 * button cost twenty `shown/2` facts here rather than eighty of anything.
+	 */
+	const machineLines: string[] = [];
+	const machines = machineFacts(scene);
+	for (const { machine, parts } of machines) {
+		machineLines.push(atom("machine", machine.id));
+		// Which machine drives a root is `machineForRoot`'s answer and nobody
+		// else's, and this is the one line that has to agree with it. A document
+		// holding two machines on one root is one `normalizeScene` does not produce
+		// — it dedupes ids, not roots — but an import or a merge of two documents
+		// reaches it, and `machine_of/2` is where it would do damage rather than be
+		// merely untidy. Both machines' `minstance/2` would derive, so both would
+		// mint a full set of copies while only one of them ever gets a `shown/2`, a
+		// `mshadow/2` or an alias — grounding for a machine nothing draws. Worse,
+		// the default rule would then say `shown(I,S)` for *each* machine's initial
+		// state on any instance a rule brought into being, which is `mtwoshown/1`:
+		// two pictures on top of each other, produced by the compiler rather than by
+		// anything the designer wrote.
+		//
+		// So the shadowed machine says everything about itself and nothing about the
+		// definition. `machine/1`, its states, its transitions and all four health
+		// predicates still ground, so the panel showing it and a rule naming one of
+		// its states both keep working, and `mpart/2` is still stated because it is
+		// a claim about the definition's parts that is true either way — a
+		// hand-written `machine_of/2` is a legal thing to assert, and it should get
+		// copies when it does.
+		if (machineForRoot(scene, machine.root)?.id === machine.id) {
+			machineLines.push(atom("machine_of", machine.id, machine.root));
+		}
+		machine.states.forEach((state, index) => {
+			machineLines.push(atom("mstate", machine.id, state.id));
+			// 1-based and in document order, because the order *is* which state is
+			// initial: `minitial(M,S) :- mindex(M,S,1)`. There is no `initial` flag to
+			// disagree with the list, the same way nothing carries an `onTop` flag
+			// beside `order/2`.
+			machineLines.push(atom("mindex", machine.id, state.id, index + 1));
+		});
+		for (const part of parts) machineLines.push(atom("mpart", machine.id, part));
+		for (const state of machine.states) {
+			for (const part of parts) {
+				if (state.parts[part]?.hidden === true) {
+					machineLines.push(atom("mhide", machine.id, state.id, part));
+				}
+			}
+		}
+		for (const transition of machine.transitions) {
+			// A switched-off transition stays in the document and stays out of the
+			// program, exactly as a switched-off constraint does — which is why
+			// turning one off can make a state unreachable, and why `munreached/2`
+			// then says so. That is what a person means by switching it off.
+			if (!transition.enabled) continue;
+			machineLines.push(atom("mtrans", machine.id, transition.id));
+			// The ends are stated whether or not the machine still has those states:
+			// `mdangling/2` exists to report exactly that, and a compiler that quietly
+			// dropped the edge would repair the document into silence.
+			machineLines.push(atom("mfrom", machine.id, transition.id, transition.from));
+			machineLines.push(atom("mto", machine.id, transition.id, transition.to));
+			machineLines.push(atom("mtrigger", machine.id, transition.id, transition.trigger));
+			// Through `easingOf`, so the program is told the curve the editor would
+			// draw and the exporter would write, rather than a stored word that may be
+			// from an older vocabulary. An easing decides the shape of a move and
+			// never whether it happens, so falling back is the whole of the repair.
+			machineLines.push(atom("measing", machine.id, transition.id, easingOf(transition)));
+			for (const prop of transition.only ?? []) {
+				if (prop in PROPS) machineLines.push(atom("monly", machine.id, transition.id, prop));
+			}
+		}
+	}
+	const byMachineId = new Map(machines.map((entry) => [entry.machine.id, entry]));
+	for (const node of instanceNodes(scene)) {
+		if (node.instanceOf === undefined) continue;
+		if (!definitions.has(node.instanceOf)) continue;
+		const machine = machineForRoot(scene, node.instanceOf);
+		const entry = machine === undefined ? undefined : byMachineId.get(machine.id);
+		if (!entry || entry.machine.states.length === 0) continue;
+		// A fact, never a choice. Which state an instance is drawn in decides
+		// `rendered/3`, which is projected — so a choice rule over it would multiply
+		// the document's universes by the state count, and the multiverse would stop
+		// being a design space and become a sprite sheet. Changing it is an edit;
+		// *watching* a transition play costs no solve at all, because every state's
+		// values are already in this one answer set.
+		machineLines.push(atom("shown", node.id, shownState(entry.machine, node)));
+		// And which of the instance's own variables a state has taken over. Per
+		// property and per dimension rather than per part, because that is the
+		// precision the rules need: a state that moves a badge leaves the badge's
+		// width and its fill exactly where the definition put them, and these two
+		// facts are the only thing that says so.
+		for (const [part, props] of entry.shadow) {
+			for (const prop of props) {
+				machineLines.push(atom("mshadow", instancePart(node.id, part), prop));
+			}
+		}
+		for (const [part, dims] of entry.fshadow) {
+			for (const dim of dims) machineLines.push(atom("mfshadow", node.id, part, dim));
+		}
+	}
+	// The delta fields and the motion settings, as ordinary variables — the one
+	// place a machine may legitimately branch the space, and only where a designer
+	// wrote alternatives inside one. See `machineValues`, which is also what
+	// `variableCounts` reads, so the studio and the program cannot disagree about
+	// which rows exist.
+	machineValues(scene, machines, emitValue);
+
 	// Constraints are facts; the rules that interpret them are generic, so a
 	// document never changes the *shape* of the program, only its data.
 	const constraintLines: string[] = [];
@@ -1974,7 +2625,7 @@ export function compile(
 	 * uses, because which literal a dimension resolves to is the solver's answer,
 	 * not something known here.
 	 *
-	 * Three bridges, because there are three quantities and a literal has no
+	 * Four bridges, because there are four quantities and a literal has no
 	 * type. The reader is chosen by what the value *is* rather than by who is
 	 * asking, exactly as it is on the TypeScript side:
 	 *
@@ -1987,14 +2638,21 @@ export function compile(
 	 *                   EMU `numeral/2` would hand it 114300 columns for "12".
 	 *   word(Lit,W)     a constant: a layout is described in `row` and `hug`,
 	 *                   and a rule can only read one of those as a term.
+	 *   millis(Lit,Ms)  a duration, in whole milliseconds. `msOf`, exact or
+	 *                   nothing for `emuOf`'s reason — a fact has to be an
+	 *                   integer, and "1.5ms" is not a whole millisecond.
 	 *
-	 * All three are emitted for every literal that admits them, and a literal
+	 * All four are emitted for every literal that admits them, and a literal
 	 * happily carries two — `"12"` is both 114300 EMU and a tally of 12, because
 	 * a literal is interned by its text and the rule that reads it is what says
-	 * which it meant. Filtering by the value type was rejected: the literal table
-	 * is shared, so a text that arrived as a count in one place and a length in
-	 * another has no single answer. A weight of `"400"` emitting a numeral of
-	 * 3810000 is noise no rule reads.
+	 * which it meant. The two time cases are the sharpest illustration and worth
+	 * spelling out: `"200"` carries a `tally` and no `millis`, because a bare
+	 * number is ambiguous between two units a factor of a thousand apart; while
+	 * `"200ms"` carries a `millis` and neither of the others, because it is not a
+	 * length, not a count and not a constant. Filtering by the value type was
+	 * rejected: the literal table is shared, so a text that arrived as a count in
+	 * one place and a length in another has no single answer. A weight of `"400"`
+	 * emitting a numeral of 3810000 is noise no rule reads.
 	 */
 	const numeralLines: string[] = [];
 	for (const text of literals.texts()) {
@@ -2009,6 +2667,10 @@ export function compile(
 		const word = wordOf(text);
 		if (word !== undefined) {
 			numeralLines.push(atom("word", literals.id(text), word));
+		}
+		const ms = msOf(text);
+		if (ms !== undefined) {
+			numeralLines.push(atom("millis", literals.id(text), ms));
 		}
 	}
 
@@ -2027,6 +2689,7 @@ export function compile(
 			"#defined numeral/2.",
 			"#defined tally/2.",
 			"#defined word/2.",
+			"#defined millis/2.",
 			...numeralLines,
 		]),
 		section("choices", [
@@ -2049,7 +2712,19 @@ export function compile(
 			"resolved(V,L) :- pick(V,I), alt_derived(V,I,Via,S), resolved(S,Src),",
 			"                 derived_of(Via,Src,L).",
 			"% What a node actually draws with — the only thing an onlooker sees.",
-			"rendered(N,P,L) :- resolved(prop(N,P),L).",
+			"%",
+			"% A property some state of a machine owns is not drawn from the instance's",
+			"% own variable: the shown state's copy draws it, and the alias writes it",
+			"% back here. Without this guard both would, and rendered/3 is a relation —",
+			"% two literals for one property is not two designs, it is one arbitrary",
+			"% answer, silently. The guard is per *property*, not per node, which is",
+			"% what keeps it to the one thing it is for: a property no state touches",
+			"% still draws from here, the state copies inherit exactly that literal, and",
+			"% the alias derives the same atom again, which costs nothing because it",
+			"% *is* the same atom. On a document with no machine nothing heads",
+			"% mshadow/2 and the literal grounds away.",
+			"#defined mshadow/2.",
+			"rendered(N,P,L) :- resolved(prop(N,P),L), not mshadow(N,P).",
 		]),
 		section("styles", [...styleLines, ...wearLines]),
 		// Always emitted, like the geometry and component rules: a hand-written
@@ -2085,6 +2760,20 @@ export function compile(
 		//
 		// After the geometry rules, which is where `gspan` is said.
 		section("component rules", COMPONENT_RULES),
+		section("machines", machineLines),
+		// Always emitted, like the component rules and for the same reason:
+		// `machine/1`, `mstate/2`, `mpart/2` and `instance/2` are all things a
+		// hand-written rule may assert, and a contract that quietly does nothing on
+		// some documents is not one. With no facts, none of it grounds — which is
+		// also what keeps the program for a machine-less document what it always
+		// was, since the one rule of this section that fires there is the renamed
+		// `mbase/4` reader, and it puts back exactly the atoms the two component
+		// lines used to state.
+		//
+		// After the component rules, which is where `instance/2`, `cpart/2`,
+		// `cinner/2` and `mbase/4` are said, and before the scene defaults, so a
+		// copy's own defaults are stated after the frames they guard.
+		section("machine rules", [...MOTION_DEFAULTS, ...MACHINE_RULES]),
 		// After the component rules, so a node an instance derived defaults the
 		// same way a node a hand-written rule derived does.
 		section("scene defaults", SCENE_DEFAULT_RULES),
@@ -2293,6 +2982,36 @@ export function compile(
 			"% names a token with two lengths, which is a guide that moves.",
 			"#defined g_value/3.",
 			"#project g_value/3.",
+			"% ---- state machines ----",
+			"% A state copy's frame/3 and rendered/3 reach the answer set through the",
+			"% two generic #shows above, which is where ModelScene.states reads them",
+			"% from — that is the whole cost of the feature in atoms, one frame set and",
+			"% one rendered set per state per materialised part, bounded by the",
+			"% materialisation analysis and by nothing else. What is left here is what",
+			"% no other predicate carries.",
+			"#show shown(I,S) : shown(I,S), scenery.",
+			"#show mhidden(I,S,N) : mhidden(I,S,N), scenery.",
+			"#show mdur(M,T,V) : mdur(M,T,V), scenery.",
+			"#show mdelay(M,T,V) : mdelay(M,T,V), scenery.",
+			"#show mstagger(M,T,V) : mstagger(M,T,V), scenery.",
+			"% What is wrong with a machine, read back so a panel can say it without",
+			"% asking a second question. Derived rather than forbidden, so a rule of",
+			"% yours is what turns any of them into a violation with a name.",
+			"#show munreached(M,S) : munreached(M,S), scenery.",
+			"#show mdeadend(M,S) : mdeadend(M,S), scenery.",
+			"#show mnondet(M,S,G) : mnondet(M,S,G), scenery.",
+			"#show mdangling(M,T) : mdangling(M,T), scenery.",
+			"#show mtwoshown(I) : mtwoshown(I), scenery.",
+			"% Motion is a design decision like a gap: a `duration` token with two",
+			"% alternatives really is two designs — the brisk one and the considered",
+			"% one — and without this they differ in nothing that is projected and",
+			"% collapse into one universe with an arbitrary pick. Same argument as",
+			"% l_value/3, one axis over. Nothing here projects on a *state*: every",
+			"% state is true at once, so there is nothing about one for two answer sets",
+			"% to disagree over.",
+			"#project mdur/3.",
+			"#project mdelay/3.",
+			"#project mstagger/3.",
 		]),
 	]
 		.filter(Boolean)
@@ -2376,6 +3095,19 @@ export function variableCounts(scene: Scene): Record<string, number> {
 			out[constraintVar(c.id)] = value.length;
 		}
 	}
+	// What the machines name, and **nothing for a state**. A state is not a
+	// variable: every state of every instance is true at once in one answer set,
+	// so there is no key here whose alternatives are states, no `pick/2` that says
+	// which state an instance is in, and no row in any panel that offers to choose
+	// one. What a machine does name variables for is the two places a designer
+	// wrote a value down — a field inside one state's delta, and the three numbers
+	// that pace a transition — and both are rows like any other row: they vary,
+	// they grey, they pin, they take a token. See `machineValues`, which is the
+	// same walk the compiler mints from, so a pin the studio keeps is a pick the
+	// program has.
+	machineValues(scene, machineFacts(scene), (variable, value) => {
+		if (value.length > 0) out[variable] = value.length;
+	});
 	return out;
 }
 
@@ -2456,6 +3188,32 @@ export function unreadVariables(scene: Scene): Set<string> {
 	// read *through it* — the same reading the compiler applies by not emitting it.
 	for (const c of scene.constraints ?? []) {
 		if (c.enabled) read.push(c.value);
+	}
+	// A machine reads values in two places, and both of them can name a token: a
+	// state's delta, and a transition's three motion settings. A `duration` token
+	// pointed at by every transition in the document *is* the motion scale, and
+	// leaving it out here would report it unread and grey its alternatives on the
+	// strength of a projection artefact — precisely the failure this function
+	// exists to avoid.
+	//
+	// Read more generously than the compiler emits, on purpose. `machineValues`
+	// knows which parts materialise and which machines drive an instance; this
+	// does not ask, because over-reporting readership is the safe direction and
+	// under-reporting it is the one that hides a real ban. A delta on a part that
+	// has stopped materialising is a delta a person still wrote, and clearing an
+	// unrelated constraint would bring it back. A disabled transition is the one
+	// exception, and it is the constraint judgement above word for word: out of
+	// the program is out of the program.
+	for (const machine of scene.machines ?? []) {
+		for (const state of machine.states) {
+			for (const delta of Object.values(state.parts)) {
+				read.push(...Object.values(delta.props ?? {}), ...Object.values(delta.frame ?? {}));
+			}
+		}
+		for (const transition of machine.transitions) {
+			if (!transition.enabled) continue;
+			read.push(...MOTION_PROP_NAMES.map((prop) => motionValueOf(transition, prop)));
+		}
 	}
 	for (const style of scene.styles ?? []) {
 		if (!worn.has(style.id) && !named(style.id)) {

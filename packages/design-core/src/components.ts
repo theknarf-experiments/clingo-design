@@ -49,7 +49,7 @@ import {
 	type Scene,
 	type SceneNode,
 } from "./scene.ts";
-import { flatten, nodeNames, propValues } from "./tree.ts";
+import { findInTree, flatten, nodeNames, propValues } from "./tree.ts";
 import {
 	type Picks,
 	type ResolveContext,
@@ -381,6 +381,40 @@ export function partLabel(scene: Scene, id: string): string | undefined {
 	const part = names[parsed.node] ?? parsed.node;
 	const instance = names[parsed.instance] ?? parsed.instance;
 	return `${part} — ${instance}`;
+}
+
+/**
+ * True when the document still holds what an `inst(I,N)` term names — the
+ * question `pruneConstraints` has to ask of a member that is an instance part.
+ *
+ * The third member of the family `holdsDatum` and `holdsStateCopy` are in, and
+ * it was the first of the three to be needed and the last to be written. An
+ * instance's copy of a definition part is not a document node — `alive` is built
+ * from `flatten(scene.nodes)` and `inst(i1,label)` is nowhere in that tree — so
+ * a rule naming one used to be stripped of that member, and then deleted for
+ * falling below `minNodes`, the next time anybody deleted an unrelated
+ * rectangle. It went unnoticed only because nothing offered such a member: the
+ * canvas selects instances, not their parts.
+ *
+ * State machines are what made it reachable. `materializedParts` reduces
+ * `inst(i1,label)` to a definition part on purpose — the three spellings of "hand
+ * this part to simplex" are the part, the instance's copy and one state's copy —
+ * so a rule that pins an instance part is now an ordinary thing to write beside
+ * a cross-state rule, and one of them surviving a delete while the other did not
+ * would be a difference with no explanation.
+ *
+ * Blunt in the same way its two siblings are: held when the instance exists and
+ * its definition still has a part by that name, which is a question about the
+ * *document* rather than about any answer set. Whether the instance currently
+ * draws that part is the program's business and changes with a rule.
+ */
+export function holdsInstancePart(scene: Scene, term: string): boolean {
+	const parsed = parseInstancePart(term);
+	if (!parsed) return false;
+	const instance = findInTree(scene.nodes, parsed.instance);
+	if (!instance || !isInstance(instance)) return false;
+	const def = definitionOf(scene, instance);
+	return def !== undefined && def.parts.some((part) => part.id === parsed.node);
 }
 
 /** What a property row on a definition part is called, for the override list. */

@@ -252,6 +252,7 @@ export function map(): Scene {
 	return {
 		tokens: starterTokens(),
 		styles: [],
+		machines: [],
 		nodes: [
 			frame(
 				"page",

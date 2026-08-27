@@ -20,20 +20,27 @@ import { makeNode } from "./edits.ts";
 import { explore } from "./explore.ts";
 import {
 	EXPORT_TARGET_NAMES,
+	type ExportOptions,
 	collapseSpace,
+	exportMachines,
 	exportSpace,
 	exportUniverse,
 } from "./export.ts";
+import { machineTable, stepMachine } from "./machines.ts";
+import { evalRuntime } from "./runtime.ts";
 import { DOCUMENT_BASE, PAINT, cssName, paintOf } from "./paint.ts";
 import {
 	KINDS,
+	type Machine,
 	PROPS,
 	PROP_NAMES,
 	type PropName,
 	RULES_HEADER,
 	type Scene,
 	type SceneNode,
+	type StatePart,
 	type Style,
+	type Transition,
 	makeGuides,
 	makeLayout,
 	starterTokens,
@@ -45,7 +52,7 @@ import { pair } from "./templates/pair.ts";
 import { places } from "./templates/places.ts";
 import { rail } from "./templates/rail.ts";
 import { typography } from "./templates/typography.ts";
-import { frame, rect, text, wearing, withToken } from "./templates/shared.ts";
+import { at, frame, rect, text, wearing, withToken } from "./templates/shared.ts";
 import { findInTree } from "./tree.ts";
 import {
 	EMU_PER_PX,
@@ -61,6 +68,7 @@ import { type Value, isLengthType, lit, ref, single } from "./values.ts";
 function flow(): Scene {
 	return {
 		styles: [],
+		machines: [],
 		tokens: starterTokens(),
 		nodes: [
 			frame("page", "Page", [0, 0, 520, 360], { fill: [ref("muted")] }, [
@@ -94,6 +102,7 @@ function parametric(): Scene {
 	);
 	return {
 		styles: [],
+		machines: [],
 		tokens,
 		nodes: [
 			frame("page", "Page", [0, 0, 400, 240], { fill: [ref("muted")] }, [
@@ -217,6 +226,7 @@ test("every kind the studio can draw reaches both targets", async () => {
 	// other test in this file.
 	const scene: Scene = {
 		styles: [],
+		machines: [],
 		tokens: starterTokens(),
 		nodes: [
 			frame("page", "Page", [0, 0, 400, 300], { fill: [ref("surface")] }, [
@@ -306,6 +316,7 @@ function ruledPage(held: boolean): Scene {
 	]);
 	return {
 		styles: [],
+		machines: [],
 		tokens: starterTokens(),
 		nodes: [
 			held
@@ -554,6 +565,7 @@ function dressed(
 			];
 	return {
 		styles: [style],
+		machines: [],
 		tokens: starterTokens(),
 		nodes: [
 			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, worn),
@@ -561,6 +573,22 @@ function dressed(
 		constraints: [],
 		rules: RULES_HEADER,
 	};
+}
+
+/**
+ * The generated class one node came out under — `n5`, without the dot.
+ *
+ * Read out of the markup rather than counted, because the numbering is a
+ * pre-order over the model and a test that hard-coded `.n5` would break the day
+ * somebody added a node to a fixture, in a way that says nothing about what went
+ * wrong. Asking the file which class `data-node="inst(b1,label)"` carries is the
+ * same question the exporter answered, asked back.
+ */
+function className(text: string, nodeId: string): string {
+	const escaped = nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/"/g, "&quot;");
+	const found = new RegExp(`class="([^" ]+)[^"]*" data-node="${escaped}"`).exec(text);
+	assert.ok(found, `no element for ${nodeId}`);
+	return found[1];
 }
 
 /** The body of one CSS rule in the export, or undefined where it has none. */
@@ -636,6 +664,7 @@ test("a class carries only what every wearer draws", async () => {
 	};
 	const scene: Scene = {
 		styles: [style],
+		machines: [],
 		tokens: starterTokens(),
 		nodes: [
 			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, [
@@ -844,6 +873,7 @@ test("a surface clips, in both targets", async () => {
 	// The child hangs over the frame's right edge, which the canvas clips.
 	const scene: Scene = {
 		styles: [],
+		machines: [],
 		tokens: starterTokens(),
 		nodes: [
 			frame("page", "Page", [0, 0, 200, 100], { fill: [ref("surface")] }, [
@@ -887,6 +917,7 @@ test("a document declares every property it would otherwise inherit", async () =
 	// And the other half: what it declares is what an exported file carries.
 	const scene: Scene = {
 		styles: [],
+		machines: [],
 		tokens: starterTokens(),
 		nodes: [frame("page", "Page", [0, 0, 200, 100], {}, [])],
 		constraints: [],
@@ -948,6 +979,7 @@ function inPixels(): Scene {
 	]);
 	return {
 		styles: [],
+		machines: [],
 		tokens: [
 			...starterTokens(),
 			{ id: "gutter", name: "gutter", type: "length", value: single("24px") },
@@ -1126,4 +1158,563 @@ test("a length no CSS unit spells reaches the canvas as pixels too", async () =>
 	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
 	const html = exportUniverse(scene, universe, { target: "html" }).text;
 	assert.ok(block(html, ".n1")?.includes("border-radius: 12.5001px;"));
+});
+
+/* ------------------------------------------------------------------ */
+/* State machines, as selectors                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The way out for behaviour, and the claim it is held to.
+ *
+ * Everything below runs through the real solver for the reason the rest of this
+ * file does, plus one that is particular to states: a state copy's `frame/3` and
+ * `rendered/3` are things the *program* derives — through the shared-variable
+ * inherit rule, the `mshadow` guard and the alias — and a hand-written model of
+ * them would be a test of what this file believes the encoding does rather than
+ * of what it does. The whole point of `stt(I,S,N)` being in the same answer set
+ * as the picture is that the exporter can read the two side by side, so that is
+ * how they are read here.
+ *
+ * The load-bearing assertion is the first one: **a hover pair leaves as a
+ * stylesheet with no behaviour in it.** That is not a nicety. It is the reason
+ * `TRIGGERS` carries a `css` column at all, and a file that shipped a script to
+ * do what `:hover` does would be a worse artefact than the one this tool
+ * replaced.
+ */
+
+/** A transition, with the defaults that make one legal without saying anything. */
+const edge = (
+	spec: Partial<Transition> & { id: string; from: string; to: string },
+): Transition => ({ trigger: "pointerenter", enabled: true, ...spec });
+
+/**
+ * A button definition, some uses of it, and a machine over it.
+ *
+ * Three parts under the root — a hugging label, a panel and an arrow inside the
+ * panel — because the losses this file has to be honest about are per part: the
+ * arrow is the `drawnGeometry` case, the label is the wording case, and the panel
+ * is the one a state can hide. A fixture with one rectangle in it would pass
+ * every test here and prove none of them.
+ */
+function machined(spec: {
+	machines: Machine[];
+	uses?: Array<{ id: string; state?: string }>;
+	tokens?: Scene["tokens"];
+}): Scene {
+	const definition: SceneNode = {
+		...frame(
+			"btn",
+			"Button",
+			[20, 20, 160, 150],
+			{ fill: [ref("accent")], radius: single("8px") },
+			[
+				text("label", "Label", [12, 14, 136, 20], "Go", {
+					ink: single("#ffffff"),
+					size: single("14px"),
+				}),
+				frame("panel", "Panel", [0, 52, 160, 90], { fill: single("#0f172a") }, [
+					{
+						...rect("mark", "Mark", [8, 8, 60, 40], {
+							stroke: single("#ffffff"),
+							strokeWidth: single("3px"),
+						}),
+						kind: "arrow",
+						diagonal: "down",
+					},
+				]),
+			],
+		),
+		component: true,
+	};
+	return {
+		styles: [],
+		machines: spec.machines,
+		tokens: spec.tokens ?? starterTokens(),
+		constraints: [],
+		rules: RULES_HEADER,
+		nodes: [
+			frame("page", "Page", [0, 0, 600, 400], { fill: [ref("surface")] }, [
+				definition,
+				...(spec.uses ?? [{ id: "b1" }]).map((use, i) => ({
+					...makeNode(
+						"instance",
+						at([300, 20 + i * 180, 160, 150]),
+						{ id: use.id, name: use.id },
+					),
+					instanceOf: "btn",
+					...(use.state === undefined ? {} : { state: use.state }),
+				})),
+			]),
+		],
+	};
+}
+
+/** The one universe of a document, exported to HTML. */
+async function exported(scene: Scene, options: Partial<ExportOptions> = {}) {
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const universe = exploration.universes[0];
+	assert.ok(universe, "expected at least one universe");
+	return {
+		universe,
+		out: exportUniverse(scene, universe, { target: "html", title: "m", ...options }),
+	};
+}
+
+/** A machine whose hover state is the whole of what it does. */
+const hoverMachine = (delta: Record<string, StatePart>): Machine => ({
+	id: "m1",
+	name: "Button",
+	root: "btn",
+	states: [
+		{ id: "rest", name: "Rest", parts: {} },
+		{ id: "hover", name: "Hover", parts: delta },
+	],
+	transitions: [
+		edge({ id: "in", from: "rest", to: "hover", trigger: "pointerenter" }),
+		edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+	],
+});
+
+test("a hover pair is a pseudo-class and no script at all", async () => {
+	const scene = machined({
+		machines: [hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } })],
+	});
+	const { out } = await exported(scene);
+
+	// The instance's element is `.n4`; its copy of the definition root is `.n5`.
+	// Read out of the file rather than assumed, so the test says what it means
+	// even if the numbering moves.
+	const host = className(out.text, "b1");
+	const part = className(out.text, "inst(b1,btn)");
+	const state = block(out.text, `.${host}:hover .${part}`);
+	assert.ok(state, "expected a :hover rule on the instance");
+	assert.match(state, /background: #1d4ed8;/);
+
+	assert.doesNotMatch(out.text, /<script/, "a hover pair needs no behaviour");
+	assert.doesNotMatch(out.text, /data-state/, "and no attribute either");
+
+	// And the base rule is what paces it, so the move works in both directions.
+	const base = block(out.text, `.${part}`);
+	assert.ok(base);
+	assert.match(base, /transition: background 200ms ease-out 0ms;/);
+});
+
+test("a click toggle drives data-state, and the runtime comes with it", async () => {
+	const scene = machined({
+		machines: [
+			{
+				id: "m2",
+				name: "Dropdown",
+				root: "btn",
+				states: [
+					{ id: "closed", name: "Closed", parts: {} },
+					{
+						id: "open",
+						name: "Open",
+						parts: { panel: { props: { fill: single("#f8fafc") } } },
+					},
+				],
+				transitions: [
+					edge({ id: "t1", from: "closed", to: "open", trigger: "click" }),
+					edge({ id: "t2", from: "open", to: "closed", trigger: "click" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+
+	const host = className(out.text, "b1");
+	const panel = className(out.text, "inst(b1,panel)");
+	const state = block(out.text, `.${host}[data-state="open"] .${panel}`);
+	assert.ok(state, "expected a data-state rule");
+	assert.match(state, /background: #f8fafc;/);
+
+	// The script is in the file, and it is the table the studio steps.
+	assert.match(out.text, /<script>/);
+	const script = out.text.slice(out.text.indexOf("<script>") + 8, out.text.indexOf("</script>"));
+	const table = machineTable(scene);
+	assert.equal(
+		stepMachine(table, "b1", "closed", "click"),
+		"open",
+		"the fixture really is a toggle",
+	);
+	assert.ok(script.includes('"edges"'), "the emitted table is in the script");
+	// Evaluated, and asked the same question the CSS answers, so "the file and the
+	// studio behave the same" is checked on the text that actually shipped.
+	const runtime = evalRuntime(table);
+	assert.equal(runtime.step("b1", "closed", "click"), "open");
+});
+
+test("the transition names only what changes, and takes the duration it resolved to", async () => {
+	const scene = machined({
+		machines: [
+			{
+				...hoverMachine({
+					label: { props: { ink: single("#facc15"), size: single("18px") } },
+				}),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						duration: single("0.12s"),
+						easing: "easeInOut",
+					}),
+					edge({
+						id: "out",
+						from: "hover",
+						to: "rest",
+						trigger: "pointerleave",
+						duration: single("0.12s"),
+						easing: "easeInOut",
+					}),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const label = className(out.text, "inst(b1,label)");
+	const base = block(out.text, `.${label}`);
+	assert.ok(base);
+	// Both properties, in the order they changed, and seconds read as whole
+	// milliseconds — the same reading `msOf` gives and the program's `mdur/3`
+	// carries.
+	assert.match(base, /transition: color, font-size 120ms ease-in-out 0ms;/);
+	// And nothing that did not change: the button's own fill is untouched here.
+	const part = className(out.text, "inst(b1,btn)");
+	assert.doesNotMatch(block(out.text, `.${part}`) ?? "", /transition:/);
+});
+
+test("only narrows what is tweened", async () => {
+	const scene = machined({
+		machines: [
+			{
+				...hoverMachine({
+					label: { props: { ink: single("#facc15"), size: single("18px") } },
+				}),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						only: ["ink"],
+					}),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const base = block(out.text, `.${className(out.text, "inst(b1,label)")}`);
+	assert.ok(base);
+	assert.match(base, /transition: color 200ms ease-out 0ms;/);
+	assert.doesNotMatch(base, /font-size 200ms/, "the size was told to snap");
+	// The size still changes; it simply changes at once.
+	const state = block(
+		out.text,
+		`.${className(out.text, "b1")}:hover .${className(out.text, "inst(b1,label)")}`,
+	);
+	assert.match(state ?? "", /font-size: 18px;/);
+});
+
+test("a stagger arrives as increasing delays, in paint order", async () => {
+	const scene = machined({
+		machines: [
+			{
+				...hoverMachine({
+					btn: { props: { fill: single("#1d4ed8") } },
+					label: { props: { ink: single("#facc15") } },
+					panel: { props: { fill: single("#f8fafc") } },
+				}),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						delay: single("40ms"),
+						stagger: single("60ms"),
+					}),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const delays = ["inst(b1,btn)", "inst(b1,label)", "inst(b1,panel)"].map((id) => {
+		const body = block(out.text, `.${className(out.text, id)}`) ?? "";
+		return /transition: [^;]* (\d+)ms;/.exec(body)?.[1];
+	});
+	// The root first, then its children in paint order: the delay is the rhythm
+	// `order/2` states, not the order a map happened to be built in.
+	assert.deepEqual(delays, ["40", "100", "160"]);
+});
+
+test("a state that moves a node translates it, so the move runs on the compositor", async () => {
+	const scene = machined({
+		machines: [hoverMachine({ label: { frame: { y: single("6px") } } })],
+	});
+	const { out } = await exported(scene);
+	const state = block(
+		out.text,
+		`.${className(out.text, "b1")}:hover .${className(out.text, "inst(b1,label)")}`,
+	);
+	assert.ok(state, "expected the label to move on hover");
+	// The label sits at y = 14px at rest, so the state is eight pixels up — a
+	// translation, and not a second absolute `top` for the browser to lay out.
+	assert.match(state, /transform: translate\(0px, -8px\);/);
+	assert.doesNotMatch(state, /top:/);
+	// And the base rule paces the transform rather than a coordinate.
+	const base = block(out.text, `.${className(out.text, "inst(b1,label)")}`);
+	assert.match(base ?? "", /transition: transform 200ms/);
+});
+
+test("a state that hides a part says display:none, and says what that costs", async () => {
+	// Drawn in `open`, so the panel is in the markup and `closed` can take it
+	// away. The other way round there is no element for a selector to reach: a
+	// class can restyle markup and cannot write it, which the losses also say.
+	const scene = machined({
+		machines: [
+			{
+				id: "m3",
+				name: "Dropdown",
+				root: "btn",
+				states: [
+					{ id: "closed", name: "Closed", parts: { panel: { hidden: true } } },
+					{ id: "open", name: "Open", parts: {} },
+				],
+				transitions: [
+					edge({ id: "t1", from: "closed", to: "open", trigger: "click" }),
+					edge({ id: "t2", from: "open", to: "closed", trigger: "click" }),
+				],
+			},
+		],
+		uses: [{ id: "b1", state: "open" }],
+	});
+	const { out } = await exported(scene);
+	const state = block(
+		out.text,
+		`.${className(out.text, "b1")}[data-state="closed"] .${className(out.text, "inst(b1,panel)")}`,
+	);
+	assert.equal(state?.trim(), "display: none;");
+	assert.ok(
+		out.lost.some((line) => /takes .* out of the picture/.test(line)),
+		"the structural change is named",
+	);
+	assert.ok(
+		out.lost.some((line) => /data-state rule rather than a pseudo-class/.test(line)),
+		"and so is the base this file had to be",
+	);
+	// `display` is never in a transition: there is nothing between shown and not
+	// shown to interpolate, so naming it would be a declaration a browser ignores.
+	assert.doesNotMatch(out.text, /transition:[^;]*display/);
+});
+
+test("a dropdown drawn closed exports inert, and the loss says how to fix it", async () => {
+	// The same machine as above, drawn in its *initial* state — which is what a
+	// person gets by doing nothing — and it is the spec's own headline example.
+	// The panel is hidden in `closed`, so it is not in the markup; `open` therefore
+	// finds nothing to restyle and the whole machine leaves as a picture with no
+	// behaviour in it. The file is honest either way, but "your dropdown does not
+	// open" deserves more than a statement of fact, because the fix is one click
+	// and is exactly the one the test above takes.
+	const scene = machined({
+		machines: [
+			{
+				id: "m3",
+				name: "Dropdown",
+				root: "btn",
+				states: [
+					{ id: "closed", name: "Closed", parts: { panel: { hidden: true } } },
+					{ id: "open", name: "Open", parts: {} },
+				],
+				transitions: [
+					edge({ id: "t1", from: "closed", to: "open", trigger: "click" }),
+					edge({ id: "t2", from: "open", to: "closed", trigger: "click" }),
+				],
+			},
+		],
+		uses: [{ id: "b1" }],
+	});
+	const { out } = await exported(scene);
+	assert.doesNotMatch(out.text, /<script/, "nothing to switch, so no runtime");
+	assert.doesNotMatch(out.text, /data-state/);
+	const line = out.lost.find((l) => /which this design is not drawing/.test(l));
+	assert.ok(line, "the missing part is named");
+	assert.match(line, /Closed — the state this use is drawn in — takes it out/);
+	assert.match(line, /Draw this use in a state that shows “panel”/);
+});
+
+test("a state that moves a drawn-geometry node is named as a loss, not emitted", async () => {
+	const scene = machined({
+		machines: [hoverMachine({ mark: { frame: { x: single("30px") } } })],
+	});
+	const { out } = await exported(scene);
+	assert.ok(
+		out.lost.some((line) => /draw their own geometry inside their box/.test(line)),
+		"an arrow a state moves is named",
+	);
+	// And the class it could not move is not in the file pretending otherwise.
+	assert.doesNotMatch(out.text, /:hover .* \{\n\ttransform/);
+	const state = block(
+		out.text,
+		`.${className(out.text, "b1")}:hover .${className(out.text, "inst(b1,mark)")}`,
+	);
+	assert.equal(state, undefined, "no broken class for a shape that cannot move");
+});
+
+test("a document with no machine exports exactly what it did before", async () => {
+	// Byte identity against the same document with a machine that says nothing:
+	// an empty state materialises no part, so the program derives no copy and the
+	// file has nowhere to put one. This is the assertion that the feature costs a
+	// machine-less document nothing at all.
+	const bare = machined({ machines: [] });
+	const inert = machined({
+		machines: [
+			{
+				id: "m4",
+				name: "Quiet",
+				root: "btn",
+				states: [
+					{ id: "rest", name: "Rest", parts: {} },
+					{ id: "other", name: "Other", parts: {} },
+				],
+				transitions: [edge({ id: "t1", from: "rest", to: "other" })],
+			},
+		],
+	});
+	for (const target of EXPORT_TARGET_NAMES) {
+		const [a, b] = await Promise.all(
+			[bare, inert].map(async (scene) => {
+				const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+				return exportUniverse(scene, universe, { target, title: "m" }).text;
+			}),
+		);
+		assert.equal(a, b, `${target}: a machine that says nothing changed the file`);
+	}
+	const { out } = await exported(bare);
+	assert.doesNotMatch(out.text, /<script/);
+	assert.doesNotMatch(out.text, /transition:/);
+	assert.doesNotMatch(out.text, /data-state/);
+});
+
+test("the SVG target says it carries no behaviour, and carries the drawn state", async () => {
+	const scene = machined({
+		machines: [hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } })],
+	});
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const out = exportUniverse(scene, exploration.universes[0], {
+		target: "svg",
+		title: "m",
+	});
+	assert.ok(
+		out.lost.some((line) => /^Behaviour\. An SVG has no states/.test(line)),
+		"the format's own loss is unconditional",
+	);
+	// The rest colour, and nothing of the hover one anywhere in the file.
+	assert.doesNotMatch(out.text, /#1d4ed8/);
+	assert.doesNotMatch(out.text, /<script/);
+});
+
+test("a theme and a machine compose, and neither eats the other", async () => {
+	// One colour token with two values is a theme; a hover pair is a state. They
+	// are separate mechanisms on purpose — see the note above `StateLayer` — and
+	// the proof is that both survive in one file.
+	const scene = machined({
+		machines: [hoverMachine({ label: { props: { ink: single("#facc15") } } })],
+		tokens: withToken(starterTokens(), "accent", [lit("#eff6ff"), lit("#1e3a8a")]),
+	});
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	assert.equal(exploration.universes.length, 2, "two colours, and the machine adds none");
+	const out = exportSpace(scene, exploration.universes, { target: "html", title: "m" });
+	assert.match(out.text, /@media \(prefers-color-scheme: dark\)/, "the theme survived");
+	assert.match(out.text, /:hover \./, "and so did the state");
+	// The transition on the base rule must not be unsaid inside the media query:
+	// a `diff` that saw it there would emit `transition: unset` and the dark
+	// design would stop moving.
+	assert.doesNotMatch(out.text, /transition: unset/);
+});
+
+test("exportMachines reads the states without building a file", async () => {
+	const scene = machined({
+		machines: [hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } })],
+	});
+	const { universe } = await exported(scene);
+	const machines = exportMachines(scene, {
+		universe,
+		media: null,
+		under: null,
+		label: "The design",
+	});
+	assert.equal(machines.layers.length, 1);
+	const [layer] = machines.layers;
+	assert.equal(layer.on, ":hover");
+	assert.equal(layer.instance, "b1");
+	assert.equal(layer.state, "hover");
+	assert.deepEqual([...layer.changed.keys()], ["inst(b1,btn)"]);
+	assert.equal(machines.runtime, null, "a pseudo-class needs no script");
+});
+
+test("press and focus have their own pseudo-classes, read off the trigger table", async () => {
+	// Not three copies of the hover test: the point is that nothing in `export.ts`
+	// names a trigger. `TRIGGERS[g].css` and `.pair` decide, so a machine built on
+	// pointerdown/pointerup collapses for exactly the same reason hover does, and
+	// a sixth trigger with a pseudo-class would need no change here at all.
+	for (const [into, back, expected] of [
+		["pointerdown", "pointerup", ":active"],
+		["focus", "blur", ":focus-visible"],
+	] as const) {
+		const scene = machined({
+			machines: [
+				{
+					...hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } }),
+					transitions: [
+						edge({ id: "in", from: "rest", to: "hover", trigger: into }),
+						edge({ id: "out", from: "hover", to: "rest", trigger: back }),
+					],
+				},
+			],
+		});
+		const { out } = await exported(scene);
+		const state = block(
+			out.text,
+			`.${className(out.text, "b1")}${expected} .${className(out.text, "inst(b1,btn)")}`,
+		);
+		assert.ok(state, `expected ${expected} for ${into}/${back}`);
+		assert.match(state, /background: #1d4ed8;/);
+		assert.doesNotMatch(out.text, /<script/, `${expected} needs no behaviour`);
+	}
+});
+
+test("a pair CSS has no name for, or a state with a way out CSS cannot see, keeps the script", async () => {
+	// Each half of §8.1's test, on its own minimal machine. The first enters on a
+	// pseudo-class trigger and leaves on one CSS cannot express; the second is a
+	// clean hover pair with one extra edge out. Both are behaviour a `:hover` rule
+	// would silently drop, so both keep the attribute and the runtime.
+	for (const extra of [
+		[
+			edge({ id: "in", from: "rest", to: "hover", trigger: "pointerenter" }),
+			edge({ id: "out", from: "hover", to: "rest", trigger: "click" }),
+		],
+		[
+			edge({ id: "in", from: "rest", to: "hover", trigger: "pointerenter" }),
+			edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+			edge({ id: "away", from: "hover", to: "rest", trigger: "blur" }),
+		],
+	]) {
+		const scene = machined({
+			machines: [
+				{
+					...hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } }),
+					transitions: extra,
+				},
+			],
+		});
+		const { out } = await exported(scene);
+		assert.match(out.text, /\[data-state="hover"\]/);
+		assert.match(out.text, /<script>/);
+	}
 });

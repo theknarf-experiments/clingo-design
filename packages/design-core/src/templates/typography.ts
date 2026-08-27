@@ -92,6 +92,7 @@ export function typography(): Scene {
 	return {
 		tokens: starterTokens(),
 		styles: [prose],
+		machines: [],
 		nodes: [
 			{
 				...frame(

@@ -31,10 +31,11 @@ import {
 	setTokenValue,
 	updateConstraint,
 } from "./edits.ts";
-import type { Scene } from "./scene.ts";
+import type { Machine, Scene, SceneNode } from "./scene.ts";
+import { dimension } from "./scene.ts";
 import { findTemplate } from "./templates/index.ts";
 import { EMU_PER_PX } from "./units.ts";
-import { lit } from "./values.ts";
+import { lit, single } from "./values.ts";
 
 /** A frame is EMU; the one case that drags something says the drag in pixels. */
 const px = (n: number): number => n * EMU_PER_PX;
@@ -153,6 +154,122 @@ test("structural edits re-ground, in both directions", async () => {
 		await reuses(base, setTokenValue(base, "accent", [lit("#000000")])),
 		false,
 	);
+});
+
+/**
+ * A one-part definition with a two-state machine and one use of it.
+ *
+ * Built by hand rather than taken from a template because no template has a
+ * machine, and the point of the test below is a claim about which *edits* to one
+ * cost a grounding — which needs two documents that differ in exactly one field.
+ */
+function machined(state?: string): Scene {
+	const machine: Machine = {
+		id: "m1",
+		name: "States",
+		root: "btn",
+		states: [
+			{ id: "rest", name: "Rest", parts: { label: { frame: { y: dimension(px(14)) } } } },
+			{ id: "hover", name: "Hover", parts: { label: { frame: { y: dimension(px(4)) } } } },
+		],
+		transitions: [
+			{ id: "over", from: "rest", to: "hover", trigger: "pointerenter", enabled: true },
+		],
+	};
+	const label: SceneNode = {
+		...makeNode("text", { x: px(12), y: px(14), width: px(100), height: px(20) }, {
+			id: "label",
+		}),
+		props: { text: single("Go") },
+	};
+	const definition: SceneNode = {
+		...makeNode("frame", { x: px(20), y: px(20), width: px(160), height: px(48) }, {
+			id: "btn",
+		}),
+		props: { fill: [lit("#3b82f6"), lit("#0f172a")] },
+		children: [label],
+		component: true,
+	};
+	return {
+		styles: [],
+		machines: [machine],
+		tokens: [],
+		constraints: [],
+		rules: "",
+		nodes: [
+			{
+				...makeNode("frame", { x: 0, y: 0, width: px(600), height: px(400) }, { id: "page" }),
+				children: [
+					definition,
+					{
+						...makeNode("instance", { x: px(300), y: px(20), width: px(160), height: px(48) }, {
+							id: "b1",
+						}),
+						instanceOf: "btn",
+						...(state ? { state } : {}),
+					},
+				],
+			},
+		],
+	};
+}
+
+test("drawing an instance in another state re-grounds, which is why playing one does not touch the document", async () => {
+	// `shown/2` is a fact, never a choice — it decides rendered/3, which is
+	// projected, so a choice rule over it would multiply the universes by the
+	// state count. The price of that decision is recorded here: changing which
+	// state the *document* draws an instance in is an edit like any other, and
+	// `shown(b1,hover)` is an atom the old grounding does not contain.
+	const rest = machined();
+	const hover = machined("hover");
+	assert.deepEqual(addedLines(rest, hover), ["shown(b1,hover)."]);
+	assert.equal(await reuses(rest, hover), false);
+
+	// Which is exactly why the state strip *plays* a state instead of writing one.
+	// Every state's frame/3 and rendered/3 are already in the one answer set, so
+	// showing the hover state on the canvas is a different entry read out of a
+	// model the studio already has — no edit, no grounding, no solve.
+	const explorer = new Explorer(directSolver);
+	try {
+		const found = await explorer.explore(rest);
+		const atoms = found.universes[0];
+		assert.ok(atoms.model.byId["inst(b1,label)"], "the shown state is drawn");
+		assert.equal((await explorer.explore(rest)).reusedGrounding, true);
+	} finally {
+		await explorer.close();
+	}
+});
+
+test("a machine's own edits re-ground, and none of them is a design", async () => {
+	// The other half, and the one worth being explicit about: every one of these
+	// is a new term and so re-grounds, and not one of them changes how many
+	// designs the document holds. States are not a design space.
+	const base = machined();
+	const four: Scene = {
+		...base,
+		machines: [
+			{
+				...base.machines[0],
+				states: [
+					...base.machines[0].states,
+					{ id: "pressed", name: "Pressed", parts: { label: { frame: { y: dimension(px(18)) } } } },
+					{ id: "busy", name: "Busy", parts: { label: { frame: { y: dimension(px(24)) } } } },
+				],
+			},
+		],
+	};
+	assert.equal(await reuses(base, four), false);
+	assert.ok(addedLines(base, four).includes("mstate(m1,pressed)."));
+	assert.ok(addedLines(base, four).includes("mindex(m1,busy,4)."));
+
+	const explorer = new Explorer(directSolver);
+	try {
+		const before = await explorer.explore(base);
+		const after = await explorer.explore(four);
+		assert.equal(after.count, before.count, "two more states, not four times the designs");
+	} finally {
+		await explorer.close();
+	}
 });
 
 test("switching a rule off re-grounds today, and is the one edit that need not", async () => {

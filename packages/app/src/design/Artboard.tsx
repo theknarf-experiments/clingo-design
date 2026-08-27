@@ -2,6 +2,7 @@ import { type CSSProperties, type ReactNode, memo, useMemo } from "react";
 import {
 	type Frame,
 	type ModelNode,
+	type ModelState,
 	type NodeKind,
 	type Scene,
 	type SceneNode,
@@ -12,9 +13,11 @@ import {
 	flatten,
 	frameOf,
 	paintOf,
+	parseInstancePart,
 	pathData,
 	propVar,
 	scalePoints,
+	statePart,
 } from "@clingo-design/design-core";
 
 import styles from "./Artboard.module.css";
@@ -146,6 +149,12 @@ export interface ArtboardProps {
 	preview?: ReadonlyMap<string, Frame>;
 	/** Variable keys the solver reports as unsettled, for the in-place marks. */
 	varying?: ReadonlySet<string>;
+	/**
+	 * Instance node id -> a state to draw instead of the one the answer set
+	 * shows. Read out of `universe.model.states`, so it costs no solve — the
+	 * copies are already in the answer set beside the picture.
+	 */
+	playing?: Readonly<Record<string, string>>;
 	className?: string;
 	style?: CSSProperties;
 }
@@ -181,6 +190,23 @@ export interface ArtboardProps {
  * cannot be talked out of it; so the crossing is one call in {@link render} and
  * one inside {@link Plot}, and nothing else in the file converts.
  *
+ * One thing it draws that is *not* in `universe.model.roots`: a state machine's
+ * other states. `playing` names, per instance, a state to draw instead of the
+ * one the answer set shows, and the values come out of `universe.model.states`
+ * — the same answer set, read one key over. So playing a machine on the canvas
+ * costs no solve at all, and the renderer learns exactly one thing about states:
+ * where to look up a part's other self. It learns nothing about triggers, edges
+ * or time, all of which are the editor's business above it.
+ *
+ * How fast a played change moves is *also* not here. The transition is declared
+ * in this component's stylesheet against three custom properties, and whoever
+ * is running the machine sets them on an ancestor — see `Editor.tsx`. That way
+ * the artboard states that it animates and the editor states how, which is the
+ * same division CSS itself makes and the same one the export makes between a
+ * rule and the `transition:` on it. With the properties unset the duration is
+ * zero, so nothing on a canvas nobody is previewing ever animates: a drag must
+ * never lag behind the pointer.
+ *
  * Memoised because the editor above it re-renders on every pointermove, and
  * most gestures (marquee, draw) do not touch the document at all.
  */
@@ -189,6 +215,7 @@ export const Artboard = memo(function Artboard({
 	universe,
 	preview,
 	varying,
+	playing,
 	className,
 	style,
 }: ArtboardProps) {
@@ -203,7 +230,66 @@ export const Artboard = memo(function Artboard({
 		return byId;
 	}, [scene.nodes, scene.tokens, universe.pick]);
 
+	/**
+	 * The state copy to draw a node from, where the canvas is playing one.
+	 *
+	 * This is the whole of playback on the canvas, and it is three lookups
+	 * because the answer set did the work. A node of the picture that belongs to
+	 * an instance is `inst(I,N)`; the state copies of that same part are
+	 * `stt(I,S,N)`, sitting in `model.states` beside the picture rather than in
+	 * it — deliberately not `node/1`, so they never reach `roots`, `byId`, the
+	 * layer list or hit testing. So "draw this instance in `hover`" is: read the
+	 * term back, look the copy up, and use its frame and its rendered text in
+	 * place of the ones the shown state left here.
+	 *
+	 * **Nothing solves.** Every state is true at once in the one answer set, so
+	 * the copy being asked for is already in hand. That is what makes hovering a
+	 * button on the canvas cost a lookup rather than a grounding, and it is the
+	 * reason `shown/2` is a fact rather than a choice — see the machine section
+	 * of the generated program.
+	 *
+	 * A part with **no copy** falls back to the node's own values, and that is
+	 * correct rather than a hole: the materialisation analysis only mints copies
+	 * for the parts some state touches plus their ancestors, so a part no state
+	 * has an opinion about has nothing to say and the picture already draws what
+	 * it would have said. Treating a missing copy as an error would make the
+	 * analysis — the thing that keeps grounding affordable — into a bug.
+	 *
+	 * Rebuilt only when the played states or the answer set change, because this
+	 * is called once per node per render and the editor re-renders on every
+	 * pointermove.
+	 */
+	const playedOf = useMemo(() => {
+		const states = universe.model.states;
+		if (!playing || Object.keys(playing).length === 0) {
+			return (_id: string): ModelState | undefined => undefined;
+		}
+		return (id: string): ModelState | undefined => {
+			const part = parseInstancePart(id);
+			if (!part) return undefined;
+			const state = playing[part.instance];
+			if (state === undefined) return undefined;
+			return states[statePart(part.instance, state, part.node)];
+		};
+	}, [playing, universe.model.states]);
+
 	function render(node: ModelNode) {
+		/**
+		 * A state that hides a part takes its subtree with it, exactly as
+		 * `readModel`'s own `drawn` filter does for the shown state — closing the
+		 * hiding downward is the reader's job in its own medium, which for a DOM
+		 * is not descending, and for the exported stylesheet is `display: none`
+		 * and CSS nesting.
+		 *
+		 * The converse does not hold and cannot: a part the *shown* state hides is
+		 * not in the model at all, so playing a state that shows it again has
+		 * nothing to draw. That is a real limitation of drawing the picture the
+		 * answer set describes, it bites the same way in the export, and the way
+		 * round it is to draw the instance in the state that shows the most —
+		 * which is what `SceneNode.state` is for.
+		 */
+		const played = playedOf(node.id);
+		if (played?.hidden) return null;
 		// The solver has not seen an uncommitted drag, so the one thing that
 		// still overrides the answer set is the frame the pointer is holding.
 		//
@@ -215,7 +301,27 @@ export const Artboard = memo(function Artboard({
 		// carries, and the two are both `number` with a factor of 9525 between
 		// them, so a frame that reached the DOM unconverted would draw a business
 		// card nine miles wide.
-		const frame = canvasRect(preview?.get(node.id) ?? node.frame);
+		//
+		// A drag beats a played state, and the order is not arbitrary: a pointer
+		// holding a frame is the most recent thing anybody said, and the two never
+		// happen together anyway — the editor takes the canvas out of edit mode
+		// before it will play anything.
+		const frame = canvasRect(preview?.get(node.id) ?? played?.frame ?? node.frame);
+		/**
+		 * The node as this state has it: same id, same kind, same children, other
+		 * paint.
+		 *
+		 * A fresh object rather than a mutation, because `node` is the answer
+		 * set's own account of the picture and is shared with the layer list, the
+		 * inspector and the exporter. Only the two fields a state may change are
+		 * replaced — geometry and rendered text — which is the same list `StatePart`
+		 * offers, and it is a list rather than a spread because a state that could
+		 * change a node's *kind* or its children would be a second document per
+		 * state, which is the design this feature exists not to be.
+		 */
+		const drawn: ModelNode = played
+			? { ...node, frame: played.frame, rendered: played.rendered }
+			: node;
 		const unsettled =
 			varying !== undefined &&
 			Object.keys(node.rendered).some((prop) =>
@@ -231,7 +337,7 @@ export const Artboard = memo(function Artboard({
 			boxSizing: "border-box",
 			// The ground, the kind's own box and every property it paints, from
 			// the one table the exporter reads too.
-			...(paintOf(node) as CSSProperties),
+			...(paintOf(drawn) as CSSProperties),
 		};
 
 		return (
@@ -239,12 +345,16 @@ export const Artboard = memo(function Artboard({
 				key={node.id}
 				data-node={node.id}
 				data-kind={node.kind}
+				// The same attribute the exported file switches on, carrying the same
+				// state id — so what a screenshot of the canvas shows and what the
+				// stylesheet selects are visibly the same claim.
+				data-state={played?.state}
 				data-varies={unsettled ? "" : undefined}
 				className={unsettled ? `${styles.node} ${styles.varies}` : styles.node}
 				style={box}
 				title={unsettled ? "This property has more than one value" : undefined}
 			>
-				{CONTENT[node.kind]?.(node, frame, docNodes.get(node.id))}
+				{CONTENT[node.kind]?.(drawn, frame, docNodes.get(node.id))}
 				{node.children.map(render)}
 			</div>
 		);

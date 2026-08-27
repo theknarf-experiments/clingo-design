@@ -34,6 +34,7 @@ export function rail(): Scene {
 	return {
 		tokens,
 		styles: [],
+		machines: [],
 		// Drawn at the first spacing, so the document reads the same as the
 		// universe it opens on. The solver owns these coordinates either way.
 		nodes: [

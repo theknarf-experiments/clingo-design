@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+	MAX_MS,
 	MAX_TALLY,
 	VALUE_TYPES,
 	VALUE_TYPE_NAMES,
@@ -10,8 +11,12 @@ import {
 	guideAtVar,
 	guideVar,
 	isLengthType,
+	isTimeType,
 	layoutVar,
 	lit,
+	motionVar,
+	msOf,
+	nearestMs,
 	numeralOf,
 	parseVariable,
 	propVar,
@@ -179,15 +184,182 @@ test("the quantity column says which reader a type belongs to", () => {
 	assert.equal(isLengthType("number"), false, "a line height is a ratio");
 	assert.equal(isLengthType("count"), false);
 	assert.equal(isLengthType("color"), false);
+	assert.equal(isLengthType("duration"), false, "200ms is not 200 EMU");
+	assert.equal(isTimeType("duration"), true);
+	assert.equal(isTimeType("count"), false, "a count of milliseconds is not one");
+	assert.equal(isTimeType("length"), false);
 	assert.equal(VALUE_TYPES.count.fallback, "1");
-	// A quantity is one of the three readers, and a closed menu never has one:
+	assert.equal(VALUE_TYPES.duration.fallback, "200ms");
+	// A quantity is one of the four readers, and a closed menu never has one:
 	// the options are words, and words are read by wordOf.
 	for (const type of VALUE_TYPE_NAMES) {
 		const { quantity, options } = VALUE_TYPES[type];
 		if (quantity === undefined) continue;
-		assert.ok(["length", "ratio", "count"].includes(quantity), type);
+		assert.ok(["length", "ratio", "count", "time"].includes(quantity), type);
 		assert.equal(options, undefined, `${type} is a quantity, not a menu`);
 	}
+	// Every fallback has to be readable by its own quantity's reader, or an empty
+	// assignment of that type says nothing to the program that reads it.
+	for (const type of VALUE_TYPE_NAMES) {
+		if (!isTimeType(type)) continue;
+		assert.equal(
+			typeof msOf(VALUE_TYPES[type].fallback),
+			"number",
+			`${type}'s fallback must read as a duration`,
+		);
+	}
+});
+
+test("msOf reads a duration exactly, in whole milliseconds", () => {
+	assert.equal(msOf("200ms"), 200);
+	assert.equal(msOf("0.2s"), 200);
+	assert.equal(msOf("1s"), 1000);
+	assert.equal(msOf("0"), 0, "zero needs no unit: both readings agree");
+	assert.equal(msOf("0ms"), 0);
+	assert.equal(msOf("0s"), 0);
+	assert.equal(msOf("0.001s"), 1, "a millisecond spelled in seconds");
+	assert.equal(msOf(" 200 ms "), 200, "a person types the space and means it");
+	assert.equal(msOf("200MS"), 200, "CSS units are case-insensitive");
+	assert.equal(msOf("0.2S"), 200);
+	// The one case a float multiply gets wrong: 1.005 * 1000 is
+	// 1004.9999999999999 in binary, so evaluating before asking whether it is a
+	// whole millisecond would refuse a duration that is exact.
+	assert.equal(msOf("1.005s"), 1005);
+	assert.equal(msOf("2.675s"), 2675);
+});
+
+test("msOf refuses a unitless number that is not zero", () => {
+	// 200 is ambiguous between two units a thousand apart, and guessing would
+	// make a design that animates for three minutes look like a browser bug.
+	assert.equal(msOf("200"), undefined);
+	assert.equal(msOf("1.5"), undefined);
+	assert.equal(msOf("-4"), undefined);
+	// And a suffix that is not one of the two CSS time units is not a unit this
+	// module has not heard of; it is a typo.
+	assert.equal(msOf("200px"), undefined);
+	assert.equal(msOf("200sec"), undefined);
+	assert.equal(msOf("200m"), undefined, "minutes are not a CSS time unit");
+	assert.equal(msOf("200 m s"), undefined);
+});
+
+test("msOf is exact or nothing, exactly as emuOf is", () => {
+	assert.equal(msOf("1.5ms"), undefined, "half a millisecond is not a duration");
+	assert.equal(msOf("0.25ms"), undefined);
+	assert.equal(msOf("0.0001s"), undefined, "a tenth of a millisecond");
+	assert.equal(msOf("0.0005s"), undefined);
+	// Not rounded down to nothing, not rounded up to one: nothing at all, which
+	// is what the callers already handle.
+	assert.notEqual(msOf("1.5ms"), 1);
+	assert.notEqual(msOf("1.5ms"), 2);
+});
+
+test("msOf reads a negative duration, because a delay may be one", () => {
+	// The clamp lives at the reading — duration and stagger clamp at zero, delay
+	// does not — so one reader serves all three.
+	assert.equal(msOf("-150ms"), -150);
+	assert.equal(msOf("-0.2s"), -200);
+	assert.equal(msOf("-0"), 0);
+	assert.equal(msOf("-0.0ms"), 0, "negative zero is zero, not -0");
+	assert.ok(Object.is(msOf("-0ms"), 0));
+	assert.equal(msOf("+200ms"), undefined, "nothing writes a leading plus");
+});
+
+test("garbage reads as no duration rather than as its leading digits", () => {
+	for (const text of [
+		"",
+		"   ",
+		"abc",
+		"#3b82f6",
+		"calc(1s + 2s)",
+		"1e3ms",
+		".5s",
+		"1..5s",
+		"200ms 300ms",
+		"NaN",
+		"Infinity",
+		"1,5s",
+		"--fast",
+	]) {
+		assert.equal(msOf(text), undefined, `msOf(${JSON.stringify(text)})`);
+		assert.equal(nearestMs(text), undefined, `nearestMs(${JSON.stringify(text)})`);
+	}
+});
+
+test("a duration past the ceiling reads as nothing", () => {
+	assert.equal(msOf(`${MAX_MS}ms`), MAX_MS);
+	assert.equal(msOf(`${MAX_MS + 1}ms`), undefined);
+	assert.equal(msOf(`-${MAX_MS}ms`), -MAX_MS);
+	assert.equal(msOf(`-${MAX_MS + 1}ms`), undefined);
+	// A mistyped `200000s` is a typo, not a transition. gringo's integers are
+	// 32-bit and a stagger is multiplied by a sibling index.
+	assert.equal(msOf("200000s"), undefined);
+	assert.equal(msOf("600s"), MAX_MS, "ten minutes exactly is still legal");
+	assert.equal(nearestMs("600001ms"), undefined);
+});
+
+test("nearestMs rounds, and is the only reader allowed to", () => {
+	// The field a person is typing into: msOf would go blank at "1.5", and the
+	// row would blank with it.
+	assert.equal(nearestMs("1.5ms"), 2);
+	assert.equal(nearestMs("1.4ms"), 1);
+	assert.equal(nearestMs("0.0004s"), 0);
+	assert.equal(nearestMs("0.0006s"), 1);
+	assert.equal(nearestMs("200ms"), 200, "an exact one is left alone");
+	assert.equal(nearestMs("0.2s"), 200);
+	assert.equal(nearestMs("0"), 0);
+	// Ties go away from zero, the convention nearestEmu, snapToUnit and wholeEmu
+	// all use — and it keeps a negative half from coming back as a negative zero.
+	assert.equal(nearestMs("-1.5ms"), -2);
+	assert.equal(nearestMs("-0.5ms"), -1);
+	assert.ok(Object.is(nearestMs("-0.4ms"), 0), "and never -0");
+	// It rounds; it does not invent a unit. Unitless is still refused, because
+	// the ambiguity a rounding cannot resolve is which unit was meant.
+	assert.equal(nearestMs("200"), undefined);
+	assert.equal(nearestMs("1.5"), undefined);
+});
+
+test("a duration round-trips through a token, alternatives and all", () => {
+	// The point of the type: a `duration` token holding two alternatives is a
+	// motion scale, and the brisk design and the considered one are two
+	// universes of the same document rather than two documents.
+	const motion: Token[] = [
+		{
+			id: "pace",
+			name: "pace",
+			type: "duration",
+			value: [lit("120ms"), lit("0.24s")],
+		},
+		{ id: "quick", name: "quick", type: "duration", value: [ref("pace")] },
+	];
+	const brisk = { tokens: motion, picks: {} };
+	const considered = { tokens: motion, picks: { [tokenVar("pace")]: 1 } };
+
+	assert.equal(resolveToken(brisk, "pace"), "120ms");
+	assert.equal(msOf(resolveToken(brisk, "pace") ?? ""), 120);
+	// Stored as typed — "0.24s" is not normalised to "240ms" on the way through —
+	// and read as the same integer either way.
+	assert.equal(resolveToken(considered, "pace"), "0.24s");
+	assert.equal(msOf(resolveToken(considered, "pace") ?? ""), 240);
+	assert.equal(msOf(resolveToken(considered, "quick") ?? ""), 240, "one hop");
+
+	// A transition pointed at a dangling token has no duration rather than a
+	// wrong one, which is what lets the program fall back to its default.
+	const dangling = resolveValue(brisk, [ref("gone")], motionVar("m1", "t1", "duration"));
+	assert.equal(dangling, undefined);
+});
+
+test("a motion setting is a variable, and deliberately does not read back", () => {
+	assert.equal(motionVar("m1", "press", "duration"), "mval(m1,press,duration)");
+	assert.equal(motionVar("m1", "press", "delay"), "mval(m1,press,delay)");
+	// Machine-scoped, because `press` is what every machine calls that
+	// transition: two machines' durations must not be one variable.
+	assert.notEqual(
+		motionVar("m1", "press", "duration"),
+		motionVar("m2", "press", "duration"),
+	);
+	// Absent from parseVariable on purpose — see the note there. The generic
+	// readers could not act on it, and the panel that mints it already knows.
+	assert.equal(parseVariable(motionVar("m1", "press", "duration")), null);
 });
 
 test("a layout setting is a variable like any other", () => {

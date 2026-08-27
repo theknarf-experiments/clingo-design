@@ -61,6 +61,7 @@ import {
 	type RuledLine,
 	type Scene,
 	type SnapGuide,
+	type Trigger,
 	type Universe,
 	addNodeTo,
 	annotate,
@@ -73,6 +74,7 @@ import {
 	frameAncestorOf,
 	frameAt,
 	frameDim,
+	frameContains,
 	frameFromPoints,
 	frameOf,
 	framesIntersect,
@@ -261,6 +263,52 @@ export interface EditorProps {
 	 * these off my screen" was asking to stop.
 	 */
 	showGuides?: boolean;
+	/**
+	 * Whether the surface is running the document's machines instead of editing
+	 * it.
+	 *
+	 * **An explicit mode, and it has to be one.** The triggers a machine listens
+	 * for are `pointerenter`, `pointerdown` and `click` — which are, to the
+	 * letter, the events a drag is made of. A canvas that fired them while
+	 * somebody was moving a button would hover it on the way past, press it on
+	 * the way down and click it on the way up, and the designer would never once
+	 * have asked to see the machine run. The alternatives are worse: firing only
+	 * on some modifier hides the feature, and firing only when nothing is
+	 * selected makes the same gesture mean two things depending on state nobody
+	 * is looking at. So it is a toggle, it is off by default, and while it is on
+	 * there is nothing to edit — see the stylesheet, which takes the whole
+	 * editing overlay off the screen rather than leaving handles somebody can
+	 * pull on a design that is mid-transition.
+	 */
+	previewing?: boolean;
+	/**
+	 * Instance node id -> the state to draw it in, handed straight to the
+	 * artboard. Editor state; the document knows nothing about it.
+	 */
+	playing?: Readonly<Record<string, string>>;
+	/**
+	 * A real pointer event at a real instance, in the machine's own vocabulary.
+	 *
+	 * The editor says *what happened where* and nothing else: which state that
+	 * takes the instance to is `stepMachine`'s answer, one level up, and it is
+	 * the same answer the exported file's runtime gives because it is the same
+	 * lookup over the same table. Keeping the decision out of here is what stops
+	 * the studio and the file being two implementations of one machine.
+	 */
+	onTrigger?: (instance: string, trigger: Trigger) => void;
+	/**
+	 * How the transition that just fired is paced, in the universe on screen.
+	 *
+	 * Written onto the content wrapper as custom properties, where the artboard's
+	 * own stylesheet reads them — see `Artboard.module.css`. It arrives from
+	 * above rather than being worked out here because the numbers are a *value*:
+	 * a duration may name a token, so which milliseconds a transition runs for is
+	 * something this universe decided and only the model can answer.
+	 *
+	 * Absent is no animation, which is the state of every canvas that is not
+	 * previewing.
+	 */
+	motion?: { duration: number; delay: number; easing: string };
 	/** Right-click, in client coordinates. */
 	onContextMenu?: (at: { x: number; y: number }) => void;
 }
@@ -274,6 +322,19 @@ export interface EditorProps {
  * conversion at one boundary is what stops coordinate bugs leaking into the
  * drag maths — and it is the same bargain the file header strikes for the other
  * conversion, the one between the design's units and the screen's.
+ *
+ * It has a second mode, and it is the opposite of everything above. Under
+ * {@link EditorProps.previewing} the surface stops being an editor and becomes
+ * the design *running*: a pointer over an instance is a `pointerenter`, a press
+ * is a `pointerdown`, and each of them is handed up as a trigger rather than
+ * turned into a gesture. Nothing here decides what a trigger does — that is one
+ * lookup in the same table the exported file ships, so the studio cannot follow
+ * an edge a browser would not — and nothing here writes to the document, so
+ * watching a machine run costs no edit, no undo entry and no solve at all.
+ *
+ * The two modes are a toggle rather than a heuristic because the events they
+ * are built from are the same events. Every argument for guessing between them
+ * ends with a drag that hovers the thing it is dragging.
  */
 export function Editor({
 	scene,
@@ -289,6 +350,10 @@ export function Editor({
 	freedom = {},
 	derived = [],
 	showGuides = true,
+	previewing = false,
+	playing,
+	onTrigger,
+	motion,
 	onContextMenu,
 }: EditorProps) {
 	const surface = useRef<HTMLDivElement>(null);
@@ -554,6 +619,128 @@ export function Editor({
 			: null;
 		onSceneChange((prev) => addNodeTo(prev, host, node, universe.pick));
 		onSelectionChange([node.id]);
+	}
+
+	/* ---------------------------------------------------------------- */
+	/* Preview: the same surface, running the document instead of editing it */
+	/* ---------------------------------------------------------------- */
+
+	/**
+	 * Which instance the pointer is over, and which one it went down on.
+	 *
+	 * Refs rather than state because neither is drawn: they exist so that a
+	 * `pointerleave` can be sent to the instance the pointer has *just left*,
+	 * which is a fact about the previous event and not about the current render.
+	 * Re-rendering the whole canvas on every pixel of a hover — while a
+	 * transition is mid-flight — is also exactly the thing that would make the
+	 * preview stutter, and the stutter would be blamed on the design.
+	 */
+	const hovering = useRef<string | null>(null);
+	const pressed = useRef<string | null>(null);
+
+	/**
+	 * Leaving preview forgets where the pointer was.
+	 *
+	 * Without this the next preview would open holding a `pointerenter` it never
+	 * sent, and the first move would fire a `pointerleave` at an instance the
+	 * pointer is nowhere near — an edge taken for a reason no one could see.
+	 */
+	useEffect(() => {
+		if (previewing) return;
+		hovering.current = null;
+		pressed.current = null;
+	}, [previewing]);
+
+	/**
+	 * The topmost instance under a canvas point, or null.
+	 *
+	 * Deliberately *not* `hitTestTree`: that answers "what did the pointer hit",
+	 * and what a running machine needs to know is "which instance is the pointer
+	 * in", which is a different question wherever something is drawn over one. A
+	 * label lying across a button is the ordinary case — a designer annotating a
+	 * component — and a hover that stopped working because of it would read as
+	 * the machine being broken rather than as the annotation being in the way.
+	 *
+	 * Paint order still settles overlapping *instances*, backwards through the
+	 * placement list, which is the same arbiter `derivedAt` and `hitTestTree`
+	 * use: what is drawn last is what the pointer gets.
+	 *
+	 * An instance that no machine drives is answered like any other, and the step
+	 * above turns it into nothing — one lookup deciding what is driven, rather
+	 * than two that can disagree about it.
+	 */
+	function instanceUnder(point: Point): string | null {
+		const placed = placedNodes(scene.nodes, universe.solved, context);
+		for (let i = placed.length - 1; i >= 0; i--) {
+			const at = placed[i];
+			if (at.node.kind !== "instance") continue;
+			if (frameContains(at.world, point)) return at.node.id;
+		}
+		return null;
+	}
+
+	/**
+	 * The pointer crossing from one instance to another, as the two events a
+	 * machine is written against.
+	 *
+	 * A crossing is a leave *and* an enter, in that order, because that is what a
+	 * browser does and what a machine's author will have assumed: the rest→hover
+	 * pair on the button being left has to run before the one on the button being
+	 * entered, or two buttons are hovered at once for a frame.
+	 */
+	function onPreviewMove(event: React.PointerEvent) {
+		const now = instanceUnder(toDocument(event));
+		if (now === hovering.current) return;
+		if (hovering.current !== null) onTrigger?.(hovering.current, "pointerleave");
+		hovering.current = now;
+		if (now !== null) onTrigger?.(now, "pointerenter");
+	}
+
+	/**
+	 * A press on an instance is the machine's; a press on empty canvas is still
+	 * the canvas's, so the camera keeps working while the document is running.
+	 * That is the one thing preview does not take away, and it is the difference
+	 * between watching a design and being trapped in it.
+	 */
+	function onPreviewDown(event: React.PointerEvent) {
+		if (event.button !== 0) return;
+		const id = instanceUnder(toDocument(event));
+		pressed.current = id;
+		if (id === null) return;
+		event.stopPropagation();
+		onTrigger?.(id, "pointerdown");
+	}
+
+	/**
+	 * Release, and then a click if the release landed where the press did.
+	 *
+	 * Synthesised rather than taken from the DOM's own `click`, because the DOM
+	 * would fire it at whatever element is under the pointer and the editor's
+	 * overlay is what is under the pointer. Two events for one release is also
+	 * what a browser does with a real button, and a machine written against
+	 * `click` and one written against `pointerup` must both work — which they do
+	 * only if both are sent, in this order.
+	 *
+	 * `focus` and `blur` are not sent from here at all. The canvas has no focus
+	 * to give: an instance is a div in an artboard rather than a control, nothing
+	 * is tabbable, and firing a focus trigger off a click would make the studio
+	 * disagree with the exported file about the one thing the two are supposed to
+	 * agree on. A focus state is authored and exported and read in the panel; it
+	 * is played from the state strip rather than pointed at.
+	 */
+	function onPreviewUp(event: React.PointerEvent) {
+		const was = pressed.current;
+		pressed.current = null;
+		if (was === null) return;
+		onTrigger?.(was, "pointerup");
+		if (instanceUnder(toDocument(event)) === was) onTrigger?.(was, "click");
+	}
+
+	/** The pointer leaving the surface leaves whatever it was over. */
+	function onPreviewLeave() {
+		if (hovering.current !== null) onTrigger?.(hovering.current, "pointerleave");
+		hovering.current = null;
+		pressed.current = null;
 	}
 
 	function onPointerDown(event: React.PointerEvent) {
@@ -1182,24 +1369,62 @@ export function Editor({
 			className={styles.surface}
 			data-role="editor"
 			data-tool={tool}
-			onPointerDown={onPointerDown}
+			// The stylesheet reads this and takes the whole editing overlay off
+			// the screen — outlines, handles, guides, vertices, annotations. One
+			// attribute rather than a condition around each of them, because
+			// "while the document is running there is nothing to edit" is one
+			// statement and deserves to be written once.
+			data-previewing={previewing ? "" : undefined}
+			onPointerDown={previewing ? onPreviewDown : onPointerDown}
 			// Only while the pen is mid-path: every other tool tracks the
-			// pointer from the window, and only once a button is down.
-			onPointerMove={pen ? (e) => setCurrent(toDocument(e)) : undefined}
-			onDoubleClick={onDoubleClick}
-			onContextMenu={onContext}
+			// pointer from the window, and only once a button is down. Preview is
+			// the exception — a hover is a trigger, so it has to be watched
+			// whether or not anything is held down.
+			onPointerMove={
+				previewing
+					? onPreviewMove
+					: pen
+						? (e) => setCurrent(toDocument(e))
+						: undefined
+			}
+			onPointerUp={previewing ? onPreviewUp : undefined}
+			onPointerLeave={previewing ? onPreviewLeave : undefined}
+			onDoubleClick={previewing ? undefined : onDoubleClick}
+			onContextMenu={previewing ? undefined : onContext}
 		>
 			{/* The whole overlay is drawn in canvas pixels inside here, which is
 			    why this offset crosses: `origin` is a point in the design. */}
 			<div
 				className={styles.content}
-				style={{ left: -canvasPx(origin.x), top: -canvasPx(origin.y) }}
+				style={
+					{
+						left: -canvasPx(origin.x),
+						top: -canvasPx(origin.y),
+						// Custom properties rather than a prop on the artboard, so that
+						// the component that knows *what* moves declares the transition
+						// and the component that knows *how fast* sets the numbers.
+						// They inherit, so this one declaration paces every node under
+						// it; unset — which is every canvas nobody is previewing — the
+						// artboard's own fallback is zero milliseconds and nothing
+						// animates at all. The cast is React's type for `style` not
+						// admitting custom properties, which is a gap in the typings
+						// rather than a claim about CSS.
+						...(motion
+							? {
+									"--dc-play-duration": `${motion.duration}ms`,
+									"--dc-play-delay": `${motion.delay}ms`,
+									"--dc-play-easing": motion.easing,
+								}
+							: {}),
+					} as React.CSSProperties
+				}
 			>
 			<Artboard
 				scene={scene}
 				universe={universe}
 				preview={renderPreview}
 				varying={varying}
+				playing={playing}
 			/>
 
 			{topFrames.map((node) => {

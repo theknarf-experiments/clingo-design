@@ -33,6 +33,7 @@ import {
 	type AutoLayout,
 	CHILD_PROPS,
 	CONTAINER_PROPS,
+	EASINGS,
 	FRAME_DIMS,
 	GUIDE_PROPS,
 	GUIDE_PROP_NAMES,
@@ -41,20 +42,32 @@ import {
 	CONSTRAINT_KINDS,
 	DIMENSIONS,
 	EDGES,
+	MOTION_PROPS,
+	MOTION_PROP_NAMES,
+	PROP_NAMES,
+	TRIGGERS,
 	type Constraint,
 	DEFAULT_FRAME,
 	type Dimension,
+	type Easing,
 	type FrameValue,
 	KINDS,
+	type Machine,
+	type MachineState,
+	type MotionProp,
 	PROPS,
+	type PropName,
 	RULES_HEADER,
 	STRENGTHS,
 	STYLE_PROPS,
 	type Scene,
 	type SceneNode,
+	type StatePart,
 	type Style,
 	type SurfaceGuides,
 	type StyleVariant,
+	type Transition,
+	type Trigger,
 	dimension,
 	emptyScene,
 	makeFrame,
@@ -300,6 +313,15 @@ export function normalizeScene(input: unknown): Scene {
 		styles: Array.isArray(input.styles)
 			? input.styles.filter(isStyle).map(normalizeStyle)
 			: [],
+		// Documents written before machines existed have none, which is what
+		// every document written before them *was*. Filtered rather than
+		// rejected wholesale, like the styles and for the same reason: one
+		// unreadable machine is one machine to drop, and the definition it drove
+		// goes back to being a component with no behaviour, which is what every
+		// other component in the document already is.
+		machines: Array.isArray(input.machines)
+			? normalizeMachines(input.machines)
+			: [],
 		// Nodes from a document written before absolute geometry existed have
 		// no frame, and would render at 0x0. Dropping them is better than
 		// showing an invisible layer list.
@@ -475,6 +497,299 @@ function isTerm(value: unknown): boolean {
 	if (value.kind === "literal") return typeof value.value === "string";
 	if (value.kind === "token") return typeof value.token === "string";
 	return value.kind === "derived" && typeof value.from === "string";
+}
+
+/* ------------------------------------------------------------------ */
+/* Reading a machine                                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A machine is the first thing in the document whose *identifiers* reach the
+ * generated program as terms of their own — `machine(m1)`, `mstate(m1,hover)`,
+ * `mval(m1,press,duration)`, `stt(i1,hover,label)` — so the reader below is
+ * stricter than the ones above it in exactly one respect and looser in every
+ * other. The one rule worth stating before the code, because it decides every
+ * question in it:
+ *
+ *   **Drop what could not be what it says it is. Keep what is merely wrong.**
+ *
+ * An id that is not spellable as an ASP constant is the first kind. It is not a
+ * machine with a bad name, it is a term the program cannot hold; carrying it
+ * would put `machine(My Machine)` in the text and take the whole document down
+ * with a syntax error, which is a document nobody can open rather than a
+ * machine nobody can use. Same for a duplicate id: two machines answering to one
+ * name are one machine as far as the solver is concerned, and which of them it
+ * turns out to be is decided by whichever fact grounds last. This is the
+ * judgement {@link normalizeLines} already makes about a guide, for the same two
+ * reasons, and the precedent is what makes it a rule rather than a preference.
+ *
+ * A transition pointing at a state the machine has not got is the second kind,
+ * and it is deliberately kept. `mdangling(M,T)` exists to report exactly that,
+ * the Machines panel offers a one-click rule that forbids it by name, and a
+ * reader that quietly deleted the edge would repair the document into silence:
+ * the designer would open a machine that had lost a transition and be told
+ * nothing about why. The document is read, not corrected — the same sentence
+ * that keeps a `guides` record on a rectangle and a dangling `instanceOf` on an
+ * instance.
+ *
+ * A machine with no states at all is the one shape that has to go, and for the
+ * reason a {@link Style} with no variants does. `initialState` is `states[0]`,
+ * `mindex(M,S,1)` never grounds, `minitial/2` is empty, and so `shown/2` has
+ * nothing to default to — every instance of the definition would be drawn in no
+ * state whatsoever, which is not a degenerate machine but an absent one wearing
+ * a machine's name.
+ */
+
+/**
+ * Every machine the document still holds, in order.
+ *
+ * A machine's id is unique **in the document** — unlike a state id, which is
+ * unique within its machine — because it is the first argument of every
+ * machine-scoped predicate there is, and it is what makes `hover` a state of one
+ * machine rather than a state of all of them.
+ *
+ * The `root` is not checked against the document's nodes. A machine whose root
+ * has been deleted, or was never there, says nothing at all: `machine_of(M,R)`
+ * joins against `instance(I,R)` and finds nobody, so no copy is minted and no
+ * state is drawn. That is precisely the silence a dangling
+ * {@link SceneNode.instanceOf} already leaves, and it is worth keeping for the
+ * same reason — a definition released and re-made, or a machine copied between
+ * documents ahead of the component it drives, comes back to life rather than
+ * having to be rebuilt from memory.
+ */
+function normalizeMachines(list: readonly unknown[]): Machine[] {
+	const out: Machine[] = [];
+	const taken = new Set<string>();
+	for (const raw of list) {
+		if (!isRecord(raw)) continue;
+		const id = raw.id;
+		if (typeof id !== "string" || wordOf(id) !== id || taken.has(id)) continue;
+		if (typeof raw.root !== "string" || !raw.root) continue;
+		const states = normalizeStates(raw.states);
+		// The one shape that cannot be normalised into anything — see above.
+		if (states.length === 0) continue;
+		taken.add(id);
+		out.push({
+			id,
+			// A name is what a person reads and nothing else reads it, so a
+			// missing one is not a reason to lose the machine. The id is the
+			// honest fallback: it is what every other surface would have to
+			// print anyway.
+			name: typeof raw.name === "string" ? raw.name : id,
+			root: raw.root,
+			states,
+			transitions: normalizeTransitions(raw.transitions),
+		});
+	}
+	return out;
+}
+
+/**
+ * The states of one machine, in document order — **and the order is the
+ * answer**, because the first state is the initial one and there is no flag
+ * that says so.
+ *
+ * Which is why a duplicate id drops the *second* and keeps the first: dropping
+ * the first instead could change which state a machine starts in, and a reader
+ * that could re-point a machine's initial state is a reader that changes what
+ * every instance of the definition draws. Keeping the earlier one is also what
+ * {@link normalizeLines} does with a repeated guide name, and one rule for
+ * "first wins" is worth more than a per-case argument.
+ */
+function normalizeStates(value: unknown): MachineState[] {
+	if (!Array.isArray(value)) return [];
+	const out: MachineState[] = [];
+	const taken = new Set<string>();
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		const id = raw.id;
+		// Unique within the machine, and an ASP constant: it reaches the program
+		// inside `stt(I,S,N)` and inside every variable key a delta mints, so a
+		// state called `Pressed Down` is a term nothing can hold.
+		if (typeof id !== "string" || wordOf(id) !== id || taken.has(id)) continue;
+		taken.add(id);
+		out.push({
+			id,
+			name: typeof raw.name === "string" ? raw.name : id,
+			parts: normalizeStateParts(raw.parts),
+		});
+	}
+	return out;
+}
+
+/**
+ * One state's deltas, keyed by definition part id.
+ *
+ * A key naming a part the definition has not got is **kept**. It is the third
+ * dangling reference in this file and it behaves like the other two: the
+ * materialisation analysis asks `parts.has(nodeId)` and skips it, so it emits
+ * nothing and costs nothing. What keeping it buys is the case that actually
+ * happens — a part deleted from a definition and drawn again, or a definition
+ * edited in one branch and a machine in another — where the delta is waiting
+ * rather than gone.
+ *
+ * An entry that survives with nothing usable in it is kept too, and this is the
+ * one place that is worth spelling out, because `clearStatePart` deliberately
+ * removes such an entry and this reader deliberately does not. The difference is
+ * who is speaking. An edit is a person saying "this state changes nothing here",
+ * and it should leave one spelling of that behind rather than two. A reader is
+ * not being asked anything; it is being handed a file. `stateTouches` already
+ * reads an empty delta and an absent one as the same claim, so nothing
+ * downstream can tell them apart, and tidying it would be a rewrite of somebody
+ * else's document bought with nothing at all.
+ */
+function normalizeStateParts(value: unknown): Record<string, StatePart> {
+	if (!isRecord(value)) return {};
+	const out: Record<string, StatePart> = {};
+	for (const [nodeId, raw] of Object.entries(value)) {
+		if (!isRecord(raw)) continue;
+		out[nodeId] = normalizeStatePart(raw);
+	}
+	return out;
+}
+
+/**
+ * One delta: what this state changes about one part.
+ *
+ * The three fields are filtered against the three tables that say what they can
+ * be — {@link PROP_NAMES}, {@link DIMENSIONS}, and `true`. A delta spans *all*
+ * of `PROPS` rather than {@link STYLE_PROPS}, which is the one place this reader
+ * is looser than {@link normalizeStyle}, and the reason is on
+ * {@link StatePart}: a style is a treatment several unrelated nodes wear, while
+ * a state is one machine's account of one definition, and "the label says
+ * Saving…" is exactly what a state is for and exactly what a style must not be.
+ *
+ * The lengths among the properties get the lattice pass, because a delta is one
+ * more place a document can hold `"20.5px"` and one more place that would
+ * otherwise read as no length at all — same sweep, new home. Durations do not
+ * appear here at all; they are on the transition, and time has no lattice to
+ * snap to.
+ */
+function normalizeStatePart(raw: Record<string, unknown>): StatePart {
+	const part: StatePart = {};
+	if (isRecord(raw.props)) {
+		const props: NonNullable<StatePart["props"]> = {};
+		for (const prop of PROP_NAMES) {
+			const value = raw.props[prop];
+			if (Array.isArray(value)) {
+				props[prop] = snapValue(value as Value, PROPS[prop].type);
+			}
+		}
+		part.props = props;
+	}
+	if (isRecord(raw.frame)) {
+		const frame: NonNullable<StatePart["frame"]> = {};
+		for (const dim of DIMENSIONS) {
+			const value = raw.frame[dim];
+			// A dimension a state does not mention is the instance's own — the
+			// guard in the program is per dimension — so unlike a node's frame
+			// there is nothing to default here and a missing one is the point.
+			if (Array.isArray(value)) {
+				frame[dim] = snapValue(value as Value, FRAME_DIMS[dim].type);
+			}
+		}
+		part.frame = frame;
+	}
+	// `true` or absent, with no `false`, exactly as {@link SceneNode.component}
+	// is: a part is drawn unless a state says otherwise, so "shown" needs no
+	// spelling and a stored `false` is the same statement as silence.
+	if (raw.hidden === true) part.hidden = true;
+	return part;
+}
+
+/**
+ * The edges of one machine.
+ *
+ * Three things get a transition dropped, and every one of them is a transition
+ * that could not reach the program as the thing it claims to be:
+ *
+ *   - an id that is not an ASP constant, or one already taken in this machine —
+ *     it names `mtrans(M,T)` and the three `mval(M,T,…)` variable keys, so a
+ *     repeat is two edges the solver reads as one and a paced pair whose
+ *     durations overwrite each other;
+ *   - a `from` or `to` that is not an ASP constant. A state id always is one,
+ *     so this is not an edge pointing at a missing state — that is kept, see
+ *     below — it is an edge pointing at something no state could ever be
+ *     called, and `mfrom(m1,t1,Not A State)` is a syntax error rather than a
+ *     dangling reference;
+ *   - a trigger the table has not got. This is {@link isConstraint}'s judgement
+ *     about a bogus edge or strength, word for word: it would compile into a
+ *     fact no rule matches and no browser fires, so the transition would sit in
+ *     the panel looking wired and never move the machine once.
+ *
+ * A `from` or `to` naming a state this machine does not have is **kept**, and
+ * that is the whole point of `mdangling/2`. It is the one broken thing a
+ * document can hold that the program is built to *report*, the Machines panel
+ * offers a canned rule that forbids it by name, and a reader that deleted the
+ * edge would take away both the symptom and any way of finding out.
+ */
+function normalizeTransitions(value: unknown): Transition[] {
+	if (!Array.isArray(value)) return [];
+	const out: Transition[] = [];
+	const taken = new Set<string>();
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		const { id, from, to, trigger } = raw;
+		if (typeof id !== "string" || wordOf(id) !== id || taken.has(id)) continue;
+		if (typeof from !== "string" || wordOf(from) !== from) continue;
+		if (typeof to !== "string" || wordOf(to) !== to) continue;
+		if (typeof trigger !== "string" || !Object.hasOwn(TRIGGERS, trigger)) {
+			continue;
+		}
+		taken.add(id);
+		// A motion setting stored before it was a value — or as a bare number, or
+		// as a word — comes back as a single-alternative value, through the same
+		// {@link settingValue} every layout and grid setting goes through. What it
+		// does *not* get is the lattice pass: `snapValue` asks the type table
+		// whether this quantity holds lengths, `duration` says no, and time has no
+		// lattice to be off in the first place. A stored `200` therefore stays
+		// `"200"`, which `msOf` refuses as ambiguous by a factor of a thousand and
+		// the transition falls to `mdefdur` — the same answer the program gives,
+		// and a great deal better than guessing which unit somebody meant.
+		const motion: Partial<Record<MotionProp, Value>> = {};
+		for (const prop of MOTION_PROP_NAMES) {
+			const setting = settingValue(raw[prop], MOTION_PROPS[prop].type);
+			if (setting) motion[prop] = setting;
+		}
+		const easing = raw.easing;
+		const only = raw.only;
+		out.push({
+			id,
+			from,
+			to,
+			trigger: trigger as Trigger,
+			...motion,
+			// An easing the table has not got falls back rather than losing the
+			// transition, which is the judgement {@link Scene.unit} gets and not
+			// the one a bogus trigger gets. The difference is what the field
+			// decides: a trigger is *whether* the machine ever moves, while an
+			// easing is only the shape of the curve, and `easingOf` already has a
+			// default with an argument behind it.
+			...(typeof easing === "string" && Object.hasOwn(EASINGS, easing)
+				? { easing: easing as Easing }
+				: {}),
+			// Absent and empty mean different things — everything the delta
+			// touches, against nothing at all — so an `only` that is not a list is
+			// dropped to absent while a list that filters down to nothing stays
+			// empty. Filtered against `PROPS` because it reaches the program as
+			// `monly(M,T,P)` and a property name nothing knows is a filter that
+			// silently excludes everything.
+			...(Array.isArray(only)
+				? {
+						only: only.filter(
+							(p): p is PropName =>
+								typeof p === "string" && Object.hasOwn(PROPS, p),
+						),
+					}
+				: {}),
+			// Anything but a stored `false` is on. A transition written before the
+			// switch existed is a transition somebody wanted, and defaulting the
+			// other way would open a document with a machine that had quietly
+			// stopped moving.
+			enabled: raw.enabled !== false,
+		});
+	}
+	return out;
 }
 
 /** A node is usable only if it carries a frame with all four dimensions. */
@@ -739,6 +1054,21 @@ function pruneNodes(list: readonly unknown[], legacy: boolean): SceneNode[] {
 		// question everywhere downstream.
 		if (fixed.style !== undefined && typeof fixed.style !== "string") {
 			const { style: _dropped, ...rest } = fixed;
+			fixed = rest as SceneNode;
+		}
+		// And a drawn state is a state id and nothing else — the same
+		// string-or-nothing question, asked of the field that is structurally
+		// the twin of `holds`.
+		//
+		// What is *not* checked here is whether the machine still has that
+		// state, and the reason is that `shownState` already falls back to the
+		// initial one. A machine edited down leaves its instances legal, and a
+		// reader that rewrote them would spend a real edit — one that shows up in
+		// the file a collaborator pulls — on a question that answers itself every
+		// time it is asked. It is the dangling `instanceOf` argument, one field
+		// over, and the field's own doc-comment promises it in as many words.
+		if (fixed.state !== undefined && typeof fixed.state !== "string") {
+			const { state: _dropped, ...rest } = fixed;
 			fixed = rest as SceneNode;
 		}
 		out.push(

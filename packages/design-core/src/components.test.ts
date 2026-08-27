@@ -78,6 +78,7 @@ function buttons(uses: Array<{ id: string; holds?: Record<string, number> }>): S
 	};
 	return {
 		styles: [],
+		machines: [],
 		tokens: [],
 		constraints: [],
 		rules: "",

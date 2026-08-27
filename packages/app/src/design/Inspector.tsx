@@ -28,7 +28,9 @@ import {
 	type Scene,
 	type SceneNode,
 	type Term,
+	type Token,
 	type Value,
+	type ValueType,
 	type Freedom,
 	defaultValue,
 	findInTree,
@@ -88,9 +90,31 @@ import {
 	variantLabel,
 	wearStyle,
 	wornProps,
+	type Machine,
+	type MachineState,
+	type StatePart,
+	activeTerm,
+	clearStatePart,
+	componentDef,
+	componentDefs,
+	findState,
+	instanceNodes,
+	isInstance,
+	isLengthType,
+	machineForNode,
+	machineForRoot,
+	machineHealth,
+	setNodeState,
+	setStateFrame,
+	setStateHidden,
+	setStateProp,
+	shownState,
+	stateName,
+	stateTouches,
 } from "@clingo-design/design-core";
 
 import { NOTHING } from "./Styles";
+import { StateStrip } from "./StateStrip";
 import { LengthInput, ValueEditor, type WhyRow } from "./ValueEditor";
 import { cx } from "./cx";
 import {
@@ -98,7 +122,7 @@ import {
 	TRACK_FIELDS,
 	guideFieldLabel,
 } from "./guideFields";
-import { documentUnit, shownEmu } from "./lengths";
+import { documentUnit, shownEmu, shownLength } from "./lengths";
 import styles from "./Inspector.module.css";
 
 export interface InspectorProps {
@@ -148,6 +172,19 @@ export interface InspectorProps {
 	 * for in the layer tree.
 	 */
 	onSelectionChange?: (ids: string[]) => void;
+	/**
+	 * Instance node id -> the state the canvas is drawing.
+	 *
+	 * Editor state, not document state, and the difference is the whole reason it
+	 * is a prop rather than a field: `SceneNode.state` is a *fact the compiler
+	 * emits* and changing it re-grounds, while playing a state is a read of atoms
+	 * the answer set already holds — every state of every instance is in it at
+	 * once. So watching a transition costs no solve, and the panel keeps the two
+	 * questions in two different places: this one is temporary, the row below it
+	 * is an edit.
+	 */
+	playing?: Readonly<Record<string, string>>;
+	onPlay?: (instance: string, state: string | null) => void;
 }
 
 const SIZINGS: Sizing[] = ["hug", "fixed"];
@@ -798,6 +835,680 @@ function ComponentSection({
 }
 
 /**
+ * The machine a *definition part* is authored against, with the definition it
+ * belongs to.
+ *
+ * `machineForNode` deliberately refuses this question — see its comment: it
+ * answers for an instance and for a definition root and stops there, because a
+ * lookup that walked ancestors would make a click on a label inside a component
+ * silently switch which machine a panel was showing. That argument is about the
+ * *lookup* being blunt, not about the question being illegitimate, and here the
+ * question is exactly the one being asked: this panel's subject is a part, the
+ * delta a state holds is keyed by that part's id, and the only machine that can
+ * hold such a key is the one driving a definition the part is inside.
+ *
+ * Innermost first, and the first one with a machine wins. A definition nested
+ * inside another is the case that decides the order: an Icon inside a Button
+ * is a part of the Button as well as a definition of its own, so selecting the
+ * icon's root while the Button has a machine and the Icon has none must offer
+ * the Button's states — the Button's hover is entitled to move it — rather than
+ * saying there is nothing here. Where both have machines the inner one wins,
+ * because that is the definition the selection is most immediately part of.
+ */
+function machineForPart(
+	scene: Scene,
+	node: SceneNode,
+): { machine: Machine; def: ComponentDef } | undefined {
+	const holding = componentDefs(scene).filter((d) =>
+		d.parts.some((p) => p.id === node.id),
+	);
+	for (let at = holding.length - 1; at >= 0; at--) {
+		const machine = machineForRoot(scene, holding[at].root.id);
+		if (machine) return { machine, def: holding[at] };
+	}
+	return undefined;
+}
+
+/**
+ * What a value says, in one line, for the row that is showing what a state is
+ * overriding.
+ *
+ * Alternatives are joined with "or" rather than a comma because that is what a
+ * list of them means — this value is a decision the solver makes, and reading
+ * it out as "24px or 32px" says so where "24px, 32px" reads as two things at
+ * once. A length is read out in the document's unit like every other length in
+ * this panel; anything else is its term's own label, so a token appears by name
+ * rather than as whatever it currently resolves to. The name is the point: what
+ * the base *says* is what a delta is being compared against, and a state that
+ * overrides `accent` with `#ff0000` should read as leaving `accent` behind.
+ */
+function valueLine(
+	scene: Scene,
+	names: Readonly<Record<string, string>>,
+	value: Value,
+	type: ValueType,
+	unit: Unit,
+): string {
+	if (value.length === 0) return "nothing";
+	return value
+		.map((term) =>
+			term.kind === "literal" && isLengthType(type)
+				? shownLength(term.value, unit)
+				: termLabel(scene.tokens, term, names),
+		)
+		.join(" or ");
+}
+
+/**
+ * Which state this instance is drawn in — which is also which state it starts
+ * in when the document is exported.
+ *
+ * One decision rather than two, and that is worth defending because a tool
+ * could easily have had a "preview state" separate from an "initial state". It
+ * would then have two answers to "what does this button look like", and the
+ * canvas would be showing a design the file does not ship. `SceneNode.state` is
+ * the twin of `SceneNode.holds` — a decision the document remembers about one
+ * use of a shared definition — and this row is the twin of the override rows
+ * above it.
+ *
+ * Playing a state is the *other* thing, and the strip is where it lives: it
+ * changes no document, costs no solve, and is forgotten when the panel closes,
+ * because every state's copy is already in the one answer set beside the
+ * picture. A row that conflated the two would make watching a hover an edit.
+ *
+ * `picks` is in the props because a caller that has them should hand them over
+ * and because the spec puts it there — but nothing here reads it, and the
+ * absence is the invariant showing through: a state is never an `alt/2`
+ * alternative and never gets a `pick/2`, so there is no pick that says which
+ * state anything is in.
+ */
+function StateSection({
+	scene,
+	node,
+	machine,
+	playing,
+	onSceneChange,
+	onPlay,
+	onSelect,
+}: {
+	scene: Scene;
+	node: SceneNode;
+	/** The machine driving this node — `machineForNode`, never undefined here. */
+	machine: Machine;
+	picks: Picks;
+	/** The state the canvas is playing for *this* node. */
+	playing?: string;
+	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
+	onPlay?: (instance: string, state: string | null) => void;
+	onSelect?: (ids: string[]) => void;
+}) {
+	const first = machine.states[0];
+	if (!first) {
+		return (
+			<div data-role="state-section">
+				<h3>States</h3>
+				<p className={styles.note} data-role="no-states">
+					“{machine.name}” has no states left. Add one in the States panel and
+					this instance has somewhere to be.
+				</p>
+			</div>
+		);
+	}
+	/**
+	 * States nothing can ever reach, greyed rather than hidden — the same
+	 * treatment an alternative no design uses gets two sections up, and for the
+	 * same reason: it is still in the document and still a thing to repair.
+	 */
+	const unreached = new Set(machineHealth(machine).unreachable);
+	const reachable = new Set(
+		machine.states.map((s) => s.id).filter((id) => !unreached.has(id)),
+	);
+	/** What the document says, as opposed to what it falls back to. */
+	const stored = findState(machine, node.state)?.id;
+	/**
+	 * Whether the machine's root is still a component definition.
+	 *
+	 * `machineForRoot` is blunt on purpose — see its comment: it answers what the
+	 * machine *names*, so that a machine whose definition was released is still a
+	 * record a panel can show and repair. The program is not blunt about it at
+	 * all: `machine_of(M,R)` joins `instance(I,R)` and finds nobody, so nothing
+	 * about the machine reaches the answer set. That gap between a document that
+	 * holds a machine and a design that has none is exactly the kind of silence
+	 * this panel says out loud everywhere else — an instance of a definition that
+	 * stopped being one, a node wearing a style the document no longer holds —
+	 * and it costs one lookup to say it here too.
+	 */
+	const alive = componentDef(scene, machine.root) !== undefined;
+
+	return (
+		<div data-role="state-section">
+			<h3>States</h3>
+			<p className={styles.note} data-role="machine-of">
+				Behaving as <strong>{machine.name}</strong>, which belongs to the
+				definition rather than to this use of it. Every state is true at once in
+				the answer set, so playing one costs no solve — what the document
+				remembers is only which one is drawn.
+			</p>
+			{alive ? null : (
+				<p className={styles.note} data-role="orphan-machine">
+					Its root is no longer a component definition, so nothing it says
+					reaches the design. The states are still here; mark that subtree as a
+					component again and they come back.
+				</p>
+			)}
+
+			{/* Read-only: the strip shows and plays, and editing a machine happens in
+			    one place. A second editor here would be a second place to rename a
+			    state and a second place to get it wrong. */}
+			<StateStrip
+				machine={machine}
+				shown={shownState(machine, node)}
+				playing={playing}
+				reachable={reachable}
+				onPlay={(state) => onPlay?.(node.id, state)}
+				onShow={(state) =>
+					onSceneChange((prev) => setNodeState(prev, node.id, state))
+				}
+			/>
+
+			<label
+				className={cx(styles.field, styles.wide)}
+				title="Which state this instance is drawn in on the canvas, and which state it starts in when the document is exported. One answer, because a canvas showing a design the file does not ship would be a canvas nobody could trust."
+			>
+				<span className={styles.fieldLabel}>drawn in</span>
+				<select
+					className={styles.number}
+					data-role="show-state"
+					value={stored ?? ""}
+					onChange={(e) =>
+						onSceneChange((prev) =>
+							setNodeState(prev, node.id, e.target.value || null),
+						)
+					}
+				>
+					{/* Two ways to be in the initial state, and they are different
+					    statements. Saying nothing follows the machine: reorder its
+					    states and this instance follows them. Naming the state pins
+					    this instance to it whatever the machine does later. */}
+					<option value="">Follow the machine — {stateName(machine, first.id)}</option>
+					{machine.states.map((state) => (
+						<option key={state.id} value={state.id}>
+							{state.name}
+							{unreached.has(state.id) ? " (unreachable)" : ""}
+						</option>
+					))}
+				</select>
+			</label>
+
+			<p className={styles.note}>
+				{/* There is no prop that switches panels — the tabs are Studio's — so
+				    the nearest honest thing is to select the definition, which is
+				    where the machine's own rows are, and to name the panel that
+				    edits it. */}
+				<button
+					type="button"
+					className={styles.jump}
+					data-role="goto-machine"
+					title="Select the definition this machine belongs to; the States panel is where its states and transitions are edited"
+					onClick={() => onSelect?.([machine.root])}
+				>
+					Edit {machine.name}
+				</button>{" "}
+				in the States panel: adding a state, or changing what one does, changes
+				every instance at once.
+			</p>
+		</div>
+	);
+}
+
+/**
+ * The authoring surface for a state's delta — the second half of this feature's
+ * whole editing story, and the half where a designer can most easily be lied
+ * to.
+ *
+ * The danger is precise and worth naming: every row below *looks* like the rows
+ * further down the panel, and the rows further down write the definition. Type a
+ * colour in the wrong block and you have not changed what the button looks like
+ * on hover, you have changed what the button looks like — in every state, in
+ * every instance, forever, with an undo stack as the only clue. So the block
+ * commits to three things that cost screen space and are worth it:
+ *
+ *   - **nothing is authored by default.** The strip opens on *Base*, which is
+ *     not a state; while it is selected this block shows no editable rows at
+ *     all, and the panel is the panel it has always been. A designer has to
+ *     press a state's name before a single delta row exists.
+ *   - **the banner says which state, in words, above the rows.** Not a border,
+ *     not a tint — those are the *second* signal, and a person scrolling past a
+ *     tint reads it as decoration.
+ *   - **every row says what the definition decided beside what the state does**,
+ *     the way the style rows say "from Heading". A delta is meaningless on its
+ *     own; it is a difference, and a difference shown without the thing it
+ *     differs from is a number.
+ *
+ * What the block writes is `MachineState.parts[node.id]`, keyed by the
+ * *definition* part — so it is authored once and every instance gets it, which
+ * is the same bargain the definition itself strikes. The variables it mints are
+ * per instance (`sprop(I,S,N,P)`), and so the solver questions a row could ask —
+ * which alternative is live, which are ruled out, pin one — have as many answers
+ * as there are instances and no single answer here. Rather than pick an instance
+ * and quietly show its answer as if it were the definition's, these rows leave
+ * those halves off entirely; the States panel is where a delta's variable is
+ * greyed, pinned and asked about, because that panel is looking at one instance
+ * at a time.
+ *
+ * Which is also the answer to "why does the States panel edit deltas too". The
+ * two are the same edit approached from its two ends: that panel holds a machine
+ * and walks its parts — one state, every part, with the solver's answers beside
+ * each row — and this one holds a part and walks the machine's states, which is
+ * the end a designer is at when they have just clicked a label on the canvas and
+ * want to know what hover does to *it*. They write through the same edits with
+ * the same coalescing keys, so a value dragged in one and typed in the other
+ * lands in the undo stack as one change either way.
+ */
+function StateDeltaSection({
+	scene,
+	node,
+	machine,
+	def,
+	state,
+	picks,
+	unit,
+	playing,
+	onEdit,
+	onPlay,
+	onSceneChange,
+}: {
+	scene: Scene;
+	/** The definition part being authored — the subject of the whole panel. */
+	node: SceneNode;
+	machine: Machine;
+	def: ComponentDef;
+	/** The state being authored, or undefined for the definition's own values. */
+	state: MachineState | undefined;
+	picks: Picks;
+	unit: Unit;
+	/** What the canvas is drawing each instance in — see `InspectorProps`. */
+	playing?: Readonly<Record<string, string>>;
+	/** Choose a state to author, or null to go back to the definition. */
+	onEdit: (state: string | null) => void;
+	onPlay?: (instance: string, state: string | null) => void;
+	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
+}) {
+	const names = nodeNames(scene.nodes);
+	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
+	const box = frameOf(node, context);
+	const delta: StatePart = (state && state.parts[node.id]) || {};
+	/** The initial state is what the definition on the canvas already is. */
+	const initial = machine.states[0]?.id;
+	/**
+	 * What the block is currently about, for the sentences. The rows are only
+	 * ever rendered with a state open, so this is the state's name wherever a row
+	 * reads it; `def.name` is what it falls back to, which no row ever sees and
+	 * which is still the true answer for the Base chip's own title.
+	 */
+	const showing = state?.name ?? def.name;
+	/**
+	 * Where this state can actually be watched.
+	 *
+	 * The definition on the canvas is always its initial state and that is not an
+	 * oversight — §3.6: a definition part's frame is a *fact* the compiler emits,
+	 * every instance inherits it, so drawing the definition in a non-initial state
+	 * would move the component itself. The consequence for this panel is the thing
+	 * a designer would otherwise spend ten minutes on: choosing Hover here changes
+	 * nothing on the canvas, ever. So the block says so, and hands over the one
+	 * gesture that does show it — playing the state on the uses, which touches no
+	 * document and costs no solve because every state's copy is already in the
+	 * answer set beside the picture.
+	 */
+	const uses = instanceNodes(scene).filter((n) => n.instanceOf === def.root.id);
+	const watching =
+		state !== undefined &&
+		uses.length > 0 &&
+		uses.every((n) => playing?.[n.id] === state.id);
+
+	/**
+	 * What a new delta starts at: the *one* value the definition is showing,
+	 * never the whole list.
+	 *
+	 * This is the invariant, enforced at the one gesture that could break it by
+	 * accident. Seeding a delta with a base that holds two alternatives would
+	 * mint a `sprop` variable with two alternatives, and four states doing that
+	 * to one binary choice is sixteen designs where the designer wrote one. Two
+	 * alternatives *inside* a state is a legitimate design decision — "hover is
+	 * accent or danger" is a question worth asking the solver — but it is one a
+	 * person types on purpose with "+ Add value", not one that arrives free with
+	 * a button called Change.
+	 */
+	function seed(value: Value, variable: string, fallback: string): Value {
+		const term = activeTerm(value, variable, picks);
+		return [term ? { ...term } : lit(fallback)];
+	}
+
+	/**
+	 * One row of the block: what the state says here, or an offer to make it say
+	 * something, with what the definition decided in both cases.
+	 */
+	function deltaRow({
+		key,
+		label,
+		type,
+		base,
+		override,
+		tokens,
+		fallback,
+		variable,
+		onWrite,
+	}: {
+		key: string;
+		label: string;
+		type: ValueType;
+		/** What the definition holds — every state that says nothing gets this. */
+		base: Value;
+		/** What this state holds instead, where it holds anything. */
+		override: Value | undefined;
+		tokens: readonly Token[];
+		fallback: string;
+		/** Only for previewing a term; a delta's real variable is per instance. */
+		variable: string;
+		/**
+		 * Write the delta, or clear it with `undefined`. It carries its own
+		 * `onSceneChange` because a property and a dimension are two different
+		 * keys and two different edits, and the row is the same row either way.
+		 */
+		onWrite: (next: Value | undefined) => void;
+	}) {
+		const baseLine = valueLine(scene, names, base, type, unit);
+		if (override && override.length > 0) {
+			return (
+				// The same three roles the States panel's own delta rows carry, and
+				// the same spelling of each: two panels editing one thing should be
+				// addressable by one query, not by two that have to be kept in step.
+				<div
+					key={key}
+					className={styles.delta}
+					data-role="state-delta"
+					data-state={state?.id}
+					data-part={node.id}
+					data-field={key}
+				>
+					<ValueEditor
+						testId={`delta-${key}`}
+						label={label}
+						type={type}
+						value={override}
+						tokens={tokens}
+						unit={unit}
+						fallback={fallback}
+						names={names}
+						preview={(term: Term) => resolveValue(context, [term], variable)}
+						onChange={(next) => onWrite(next)}
+					/>
+					<div className={styles.styledFoot}>
+						<span className={styles.styledBy}>
+							{def.name} says {baseLine}
+						</span>
+						<button
+							type="button"
+							className={styles.follow}
+							data-role="clear-delta"
+							data-field={key}
+							title={`Stop overriding this in ${showing}. It goes back to whatever ${def.name} decides, shared with every other state.`}
+							onClick={() => onWrite(undefined)}
+						>
+							Follow {def.name}
+						</button>
+					</div>
+				</div>
+			);
+		}
+		return (
+			<div
+				key={key}
+				className={styles.baseRow}
+				data-role="state-base"
+				data-part={node.id}
+				data-field={key}
+			>
+				<span className={styles.fieldLabel}>{label}</span>
+				<span className={styles.baseValue} title={`${def.name} decides this, and every state that says nothing about it draws it`}>
+					{baseLine}
+				</span>
+				<button
+					type="button"
+					className={styles.change}
+					data-role="add-delta"
+					data-field={key}
+					title={`Give ${showing} its own ${label.toLowerCase()}, starting at what ${def.name} is showing`}
+					onClick={() => onWrite(seed(base, variable, fallback))}
+				>
+					Change in {showing}
+				</button>
+			</div>
+		);
+	}
+
+	return (
+		<div data-role="state-delta-section">
+			{/* Not "States": a node can be an instance *and* a part of an outer
+			    definition, and then both blocks are on screen at once. Two headings
+			    reading "States" a hand's width apart, one about which state this node
+			    is in and one about what a state changes, is the confusion this block
+			    is built to prevent, arriving in the one place nobody would look for
+			    it. */}
+			<h3>What a state changes</h3>
+			<p className={styles.note} data-role="delta-of">
+				<strong>{def.name}</strong> behaves as <strong>{machine.name}</strong>.
+				Pick a state to author what it changes about this part; everything a
+				state says nothing about is {def.name}’s own, shared by every state at
+				once.
+			</p>
+
+			{/* The chooser, and the *Base* chip is the load-bearing half of it: it is
+			    the way out, it is what the block opens on, and it is what makes "am I
+			    editing the button or the button's hover" a question with a visible
+			    answer rather than a thing to remember. */}
+			<div className={styles.stateBar} data-role="author-states">
+				<button
+					type="button"
+					className={cx(styles.state, state === undefined && styles.stateBase)}
+					data-role="author-state"
+					data-base=""
+					data-on={state === undefined ? "" : undefined}
+					aria-pressed={state === undefined}
+					title={`Edit ${def.name} itself — what every state that says nothing draws`}
+					onClick={() => onEdit(null)}
+				>
+					Base
+				</button>
+				{machine.states.map((s) => (
+					<button
+						key={s.id}
+						type="button"
+						className={cx(styles.state, s.id === state?.id && styles.stateOn)}
+						data-role="author-state"
+						data-state={s.id}
+						data-on={s.id === state?.id ? "" : undefined}
+						data-touched={stateTouches(s.parts[node.id] ?? {}) ? "" : undefined}
+						aria-pressed={s.id === state?.id}
+						title={`Edit what ${s.name} changes about ${node.name}`}
+						onClick={() => onEdit(s.id)}
+					>
+						{s.name}
+						{stateTouches(s.parts[node.id] ?? {}) ? (
+							<span className={styles.touched} aria-hidden="true">
+								•
+							</span>
+						) : null}
+					</button>
+				))}
+			</div>
+
+			{state === undefined ? (
+				<p className={styles.note} data-role="editing-base">
+					Editing <strong>{def.name}</strong> itself. The rows below this block
+					are the definition’s own values — change one and every state that says
+					nothing about it changes with it.
+				</p>
+			) : (
+				<>
+					<p className={styles.authoring} data-role="editing-state">
+						Editing <strong>{state.name}</strong> of {def.name} · {node.name}.
+						Every row in this block writes what {state.name} changes; the rows
+						below it are still {def.name}’s own.
+					</p>
+
+					{/* And immediately: the canvas has not moved, and it is not going to.
+					    A definition is drawn in its initial state whatever is open here
+					    — §3.6, and the reason is that a definition part's frame is a fact
+					    every instance inherits — so the panel says it in the same breath
+					    and offers the gesture that does show the state. */}
+					{uses.length === 0 ? (
+						<p className={styles.note} data-role="no-uses">
+							Nothing on the canvas changes: {def.name} itself is always drawn
+							in {stateName(machine, initial ?? "")}, and there is no instance of
+							it to watch this state on. Place one and this becomes visible.
+						</p>
+					) : (
+						<p className={styles.note} data-role="watch-note">
+							{def.name} itself is always drawn in{" "}
+							{stateName(machine, initial ?? "")}, so nothing on the canvas moves
+							while this is open.{" "}
+							<button
+								type="button"
+								className={styles.jump}
+								data-role="play-state"
+								aria-pressed={watching}
+								title={
+									watching
+										? "Put the canvas back to the state each use is drawn in"
+										: "Draw every use of this definition in this state. It changes no document and costs no solve — every state's copy is already in the answer set."
+								}
+								onClick={() => {
+									for (const use of uses) {
+										onPlay?.(use.id, watching ? null : state.id);
+									}
+								}}
+							>
+								{watching
+									? "Stop watching"
+									: `Watch it on ${uses.length} use${uses.length === 1 ? "" : "s"}`}
+							</button>
+						</p>
+					)}
+
+					{state.id === initial ? (
+						<p className={styles.note} data-role="initial-warning">
+							{state.name} is the initial state, which is what {def.name}
+							already is on the canvas. A delta here changes only {state.name}
+							— the other states keep reading {def.name}’s own value — so what
+							is almost always meant is editing {def.name} below.
+						</p>
+					) : null}
+
+					{/* Presence first, because it is the one thing a delta says that no
+					    row below can express, and because it decides whether the rest of
+					    the block is even drawn on screen in this state. */}
+					<label className={styles.check}>
+						<input
+							type="checkbox"
+							data-role="state-hidden"
+							checked={delta.hidden === true}
+							onChange={(e) =>
+								onSceneChange((prev) =>
+									setStateHidden(prev, machine.id, state.id, node.id, e.target.checked),
+								)
+							}
+						/>
+						<span>Out of the picture in {state.name}</span>
+					</label>
+					{delta.hidden ? (
+						<p className={styles.note} data-role="hidden-note">
+							{node.name} and everything inside it is not drawn in {state.name}.
+							The rows below still say what it would look like if it were.
+						</p>
+					) : null}
+
+					{/* A part the container above places is placed by it in every state:
+					    a state copy has no layout of its own — §3.6 — so a delta on a
+					    managed coordinate is a value the layout then decides over. Said
+					    here rather than by disabling the row, because the row is not
+					    wrong for `width` and because the position half of the same claim
+					    is already made twenty rows down about the definition. */}
+					{managedNodes(scene.nodes).has(node.id) ? (
+						<p className={styles.note} data-role="delta-managed">
+							Placed by the layout above, in this state as in every other — a
+							state has no layout of its own to differ with.
+						</p>
+					) : null}
+
+					<div className={styles.props} data-role="delta-frame">
+						{DIMENSIONS.map((dim) =>
+							deltaRow({
+								key: dim,
+								label: FRAME_DIMS[dim].label,
+								type: FRAME_DIMS[dim].type,
+								base: node.frame[dim],
+								override: delta.frame?.[dim],
+								tokens: tokensOfType(scene, FRAME_DIMS[dim].type),
+								// A third alternative starts where the part is now, spelled
+								// in the document's unit — a fallback has no literal of its
+								// own to inherit a spelling from.
+								fallback: formatLength(box[dim], unit),
+								variable: frameVar(node.id, dim),
+								onWrite: (next) =>
+									onSceneChange(
+										(prev) =>
+											setStateFrame(prev, machine.id, state.id, node.id, dim, next),
+										`delta-${machine.id}-${state.id}-${node.id}-${dim}`,
+									),
+							}),
+						)}
+					</div>
+
+					<div className={styles.props} data-role="delta-props">
+						{KINDS[node.kind].props.map((prop) =>
+							deltaRow({
+								key: prop,
+								label: PROPS[prop].label,
+								type: PROPS[prop].type,
+								base: node.props[prop] ?? defaultValue(prop),
+								override: delta.props?.[prop],
+								tokens: tokensFor(scene, prop),
+								fallback: PROPS[prop].fallback,
+								variable: propVar(node.id, prop),
+								onWrite: (next) =>
+									onSceneChange(
+										(prev) =>
+											setStateProp(prev, machine.id, state.id, node.id, prop, next),
+										`delta-${machine.id}-${state.id}-${node.id}-${prop}`,
+									),
+							}),
+						)}
+					</div>
+
+					{stateTouches(delta) ? (
+						<button
+							type="button"
+							className={styles.follow}
+							data-role="clear-delta"
+							data-part={node.id}
+							title={`Say that ${state.name} changes nothing about ${node.name}. One spelling of "nothing", so the delta is gone rather than left empty.`}
+							onClick={() =>
+								onSceneChange((prev) =>
+									clearStatePart(prev, machine.id, state.id, node.id),
+								)
+							}
+						>
+							{state.name} changes nothing here
+						</button>
+					) : null}
+				</>
+			)}
+		</div>
+	);
+}
+
+/**
  * Which treatment this selection wears, if any.
  *
  * One select rather than a strip, because a node wears one style: two styles
@@ -941,7 +1652,28 @@ export function Inspector({
 	everywhere,
 	variables = {},
 	onSelectionChange,
+	playing,
+	onPlay,
 }: InspectorProps) {
+	/**
+	 * Which state's delta the panel is authoring, or null for the definition
+	 * itself. Panel state and nothing else: it writes no document, it is not in
+	 * the undo stack, and it is forgotten when the app reloads.
+	 *
+	 * A state *id* rather than a machine-and-state pair, and it survives moving
+	 * the selection on purpose. "Edit hover's fill on the label, then hover's y
+	 * on the icon" is one job with two selections in it, and a chooser that reset
+	 * to Base on every click would make that job a click longer every time. A
+	 * selection whose machine has no state by that id falls back to Base — see
+	 * `authored` below — so nothing is ever authored into a state the part's
+	 * machine has not got.
+	 *
+	 * It is deliberately *not* `playing`. Which state the canvas is drawing is a
+	 * per-instance question with an answer for each instance; which state is
+	 * being authored is a question about the definition, which has no instance in
+	 * it. The two agreeing would need one of them to be lying.
+	 */
+	const [authoring, setAuthoring] = useState<string | null>(null);
 	const selected = [...selection]
 		.map((id) => findInTree(scene.nodes, id))
 		.filter((n): n is SceneNode => n !== undefined);
@@ -1038,6 +1770,28 @@ export function Inspector({
 		height: solved?.[node.id]?.height !== undefined,
 	};
 	const container = KINDS[node.kind].container && (node.children?.length ?? 0) > 0;
+	/**
+	 * The two ways a machine reaches this panel, and they are different subjects
+	 * rather than two spellings of one.
+	 *
+	 * An **instance** is *in* a state: the decision it owns is which one, and
+	 * that is a fact the compiler emits about this node. A **definition part** is
+	 * what a state is *about*: the decision authored against it is a delta, which
+	 * belongs to the definition and reaches every instance at once.
+	 *
+	 * A node can be both — an instance nested inside another definition — and
+	 * then both blocks appear, which is right: the nested button is drawn in a
+	 * state of its own machine, and the outer card's hover may still recolour it.
+	 */
+	const ownMachine = isInstance(node) ? machineForNode(scene, node) : undefined;
+	const partOf = machineForPart(scene, node);
+	/**
+	 * The state being authored, once the chooser's answer has been checked
+	 * against the machine actually in front of us. A stale id — hover carried
+	 * over to a component that has no hover — is Base, silently, because the
+	 * alternative is authoring into a state that does not exist.
+	 */
+	const authored = partOf ? findState(partOf.machine, authoring ?? undefined) : undefined;
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 	const names = nodeNames(scene.nodes);
 	/** Where the node actually is, in the universe on screen. */
@@ -1406,6 +2160,39 @@ export function Inspector({
 				onSelect={onSelectionChange}
 			/>
 
+			{/* Then what it *does*, which is the same kind of claim: an instance of a
+			    component that behaves is not fully described by which variant it is
+			    holding. Before the style section, because "which state is this drawn
+			    in" changes what every row below it means. */}
+			{ownMachine ? (
+				<StateSection
+					scene={scene}
+					node={node}
+					machine={ownMachine}
+					picks={picks}
+					playing={playing?.[node.id]}
+					onSceneChange={onSceneChange}
+					onPlay={onPlay}
+					onSelect={onSelectionChange}
+				/>
+			) : null}
+
+			{partOf ? (
+				<StateDeltaSection
+					scene={scene}
+					node={node}
+					machine={partOf.machine}
+					def={partOf.def}
+					state={authored}
+					picks={picks}
+					unit={unit}
+					playing={playing}
+					onEdit={setAuthoring}
+					onPlay={onPlay}
+					onSceneChange={onSceneChange}
+				/>
+			) : null}
+
 			{/* Beside it, and for the same reason: "wearing Heading" is part of what
 			    the selection is, and a panel that only said so forty rows down
 			    beside `size` would be a panel that never said it. */}
@@ -1415,6 +2202,19 @@ export function Inspector({
 				picks={picks}
 				onSceneChange={onSceneChange}
 			/>
+
+			{/* The one place the state block reaches outside itself, and it earns the
+			    trespass: with a state open above, every row from here down still
+			    writes the definition, and a person who has just typed a colour into
+			    a delta row is exactly the person about to type one into the row
+			    below it. The block's own banner cannot say this, because this is a
+			    statement about what is *not* in the block. */}
+			{authored ? (
+				<p className={styles.baseLine} data-role="base-note">
+					Everything below is <strong>{partOf?.def.name}</strong> itself, not{" "}
+					{authored.name} — shared by every state that says nothing.
+				</p>
+			) : null}
 
 			<h3>Position</h3>
 			{managed ? (

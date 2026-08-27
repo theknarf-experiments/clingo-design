@@ -51,6 +51,7 @@ export function ranked(): Scene {
 	return {
 		tokens,
 		styles: [],
+		machines: [],
 		nodes: [
 			frame("page", "Page", [0, 0, 720, 400], { fill: [ref("surface")] }, [
 				text("heading", "Heading", [32, 40, 560, 32], "Variety or restraint", {

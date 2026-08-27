@@ -10,6 +10,39 @@
 
 .node {
 	box-sizing: border-box;
+
+	/*
+	 * How a played state moves, when something above is playing one.
+	 *
+	 * The three custom properties are set by whoever is running the machine —
+	 * see Editor.tsx — and they inherit, so one declaration on an ancestor paces
+	 * every node under it. Unset they fall back to zero milliseconds, which is
+	 * no animation at all: a canvas nobody is previewing must never lag behind
+	 * the pointer, and a drag that eased into place would be a drag that missed.
+	 *
+	 * The property list is the one a state can change: `left`/`top`/`width`/
+	 * `height` because `StatePart.frame` is four dimensions, and the paint
+	 * properties a `PropName` becomes in `paint.ts`. `all` would have been
+	 * shorter and wrong — it would animate the `content` of a text node and the
+	 * `position` of everything, and a browser asked to tween a string simply
+	 * snaps it while spending the frames anyway.
+	 *
+	 * `transform` is in the list because the *exported* file moves a state with
+	 * `translate()` to stay on the compositor. The canvas does not: it is drawing
+	 * one absolutely-positioned box per node from numbers it already has, and
+	 * writing a translate here would mean keeping a second account of where every
+	 * node is. Listing it costs nothing and means the two files agree about what
+	 * a state may move.
+	 */
+	transition-property: left, top, width, height, transform, background-color,
+		color, border-color, border-width, border-radius, opacity, box-shadow,
+		font-size, font-weight, letter-spacing;
+	transition-duration: var(--dc-play-duration, 0ms);
+	/* No clamp, deliberately: a negative delay starts the move partway through,
+	   which is the one motion setting a document may legitimately write negative
+	   — the same exception `mdelay` makes in the program. */
+	transition-delay: var(--dc-play-delay, 0ms);
+	transition-timing-function: var(--dc-play-easing, linear);
 }
 
 /* A line or arrow, drawn across its own box. Overflow is visible so a thick
