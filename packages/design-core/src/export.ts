@@ -2501,7 +2501,7 @@ function stateLayerFor(
 		}
 		if (retypes(index, state, copy.part)) {
 			say(
-				`${stateName(machine, state.id)} restyles the words in ${nodeLabel(index, nodeId)}, which takes its size from them, and nothing in the file re-measures them: the box is the one the picture was drawn at.`,
+				`${stateName(machine, state.id)} restyles the words in ${nodeLabel(index, nodeId)}, and the file carries the box they come to in that state. What it does not carry is the frame around them: a container is not re-hugged per state, so words that outgrow their parent overflow it here exactly as they do on the canvas.`,
 			);
 		}
 		const before = copyPaint(
@@ -2604,6 +2604,15 @@ function moveDeclarations(from: ModelState, to: ModelState): Declarations {
  * a second list is a second list to keep in step. {@link autoSizes} is the other
  * half: a part with a fixed size is not sized by its words, so restyling them
  * costs the file nothing worth naming.
+ *
+ * What this reports changed when `stateMeasures` was wired up. It used to mean
+ * "the box in the file is the wrong one" — the copy carried the definition's
+ * measurement whatever the state did to the type. Now the copy is measured in
+ * its own state's typography and the box in the file is right, so the same
+ * condition reports the one thing still missing: the *container* is not
+ * re-hugged, because there is no `lask/3` for an instance's copy of a laid-out
+ * definition for a per-state container arithmetic to be the second half of. See
+ * the note on {@link stateMeasures}, which is where that exclusion is argued.
  */
 function retypes(index: DocIndex, state: MachineState, part: string): boolean {
 	const doc = index.byId.get(part);

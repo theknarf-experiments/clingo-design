@@ -899,26 +899,23 @@ function stateChangesType(state: MachineState, part: string): boolean {
  * nothing and a machine that restyles a label contributes one table per state
  * that restyles it.
  *
+ * This is the analysis half of a pass with two. The other half is a host that
+ * runs a canvas over these rows — `measureScene` in the app — and a compiler that
+ * writes the answers back as `lask/3` under the copy's own term, which is
+ * `emitStateAsked` and the two MACHINE_RULES lines that read it. All three have
+ * to agree about which copies exist and how their rows are keyed, and they agree
+ * by calling this rather than by each walking the document.
+ *
  * **What this does not do**, so that nobody reads a promise into it. It measures
  * *leaves*: a part that hugs its own content. It does not lay a copy out and it
  * does not compute a container copy's natural size, because an instance's copy of
  * a laid-out definition does not re-solve its layout in the first place — there
  * is no `lask/3` for `inst(I,N)` today, so there is nothing for a per-state
- * container arithmetic to be the second half of. A state that changes the wording
- * of a hugging text node still does not resize the frame around it, and that
- * remains a named exclusion rather than a silence.
- *
- * **And nothing calls it yet.** This is the analysis half of a pass whose other
- * half — a host that runs a canvas over these rows, and a compiler that turns the
- * answers into `lask/3` for a `stt(I,S,N)` term — is not written, so no exported
- * file and no canvas is any different for its existence. It is recorded here
- * rather than left for a reader to discover, because a function this size that is
- * exported from the package index reads as shipped behaviour and is not: the
- * spec's §3.6 excludes per-state measurement outright, both the exporter and the
- * Machines panel say so to the designer in as many words, and this exists as the
- * proof that the exclusion is a wiring job rather than a consequence of the
- * encoding — the invariant survives it, which is the part that was worth settling
- * before anyone builds the rest.
+ * container arithmetic to be the second half of. So a state that rewords a label
+ * resizes *the label*, and the frame around it stays where the definition put it
+ * unless the state moves it too. That is a named exclusion rather than a silence,
+ * and it is the one a designer meets: the words fit their own box, and the
+ * button they sit in is still the button's size.
  */
 export function stateMeasures(
 	scene: Scene,

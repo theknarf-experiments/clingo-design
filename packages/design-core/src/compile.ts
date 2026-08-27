@@ -48,6 +48,7 @@ import {
 	naturalSize,
 	rowCount,
 	rowPicks,
+	stateMeasures,
 	type Measurements,
 	type Size,
 } from "./measure.ts";
@@ -294,11 +295,21 @@ export const probeAtom = (
  * Without it such a node has no size equation at all and simplex puts it
  * anywhere legal; with it the box is merely approximate, which is a design that
  * looks wrong rather than a design that is arbitrary.
+ *
+ * Emitted in a section of their own rather than inside {@link LAYOUT_RULES},
+ * where they lived while a layout was the only thing that ever asked. A state
+ * copy asks too — a hover that changes the wording is measured under the copy's
+ * own term, see MACHINE_RULES — and a machine is perfectly legal in a document
+ * with no automatic layout anywhere in it. Left where they were, such a document
+ * would emit a copy's table and hold no rule that reads it, which is the
+ * quietest possible failure: a box that is simply the wrong size, with every
+ * fact it needed present in the program.
  */
 const ASKED_RULES = [
 	"#defined lrow/4.",
 	"#defined lrowif/4.",
 	"#defined laskdef/3.",
+	"#defined lask/3.",
 	"lrowout(N,I) :- lrowif(N,I,V,A), not pick(V,A).",
 	"lask(N,S,Z) :- lrow(N,I,S,Z), not lrowout(N,I).",
 	"lrowany(N,S) :- lrow(N,I,S,_), not lrowout(N,I).",
@@ -349,7 +360,6 @@ const LAYOUT_RULES = [
 	"lalignself(N,A) :- l_word(N,alignSelf,A).",
 	"",
 	"#defined lslot/3.",
-	...ASKED_RULES,
 	"% Which axis is which, so one set of equations covers both directions.",
 	"lmain(C,x) :- layout(C,row).",
 	"lmain(C,y) :- layout(C,column).",
@@ -1061,12 +1071,37 @@ const MACHINE_RULES = [
 	"% every instance is in one answer set, so a rule may compare two of them and",
 	"% simplex places both — which is the whole reason this is a copy and not a",
 	"% second solve.",
-	"frame(stt(I,S,N),D,V) :- mcopy(I,S,N), mbase(I,N,D,V), not msfval(I,S,N,D).",
+	"frame(stt(I,S,N),D,V) :- mcopy(I,S,N), mbase(I,N,D,V), not msfval(I,S,N,D),",
+	"                         not msasked(I,S,N,D).",
 	"frame(stt(I,S,N),D,V) :- mcopy(I,S,N), resolved(sfval(I,S,N,D),L), numeral(L,V).",
 	"% ...and it only counts where it reads as a length, so a delta pointed at a",
 	"% dangling token or at \"50%\" falls back to the base rather than leaving the",
 	"% copy with no geometry at all. Same reading frame/3 itself gets.",
 	"msfval(I,S,N,D) :- resolved(sfval(I,S,N,D),L), numeral(L,_).",
+	"",
+	"% ---- a copy that hugs its words is measured in its own state's type ----",
+	"% The base is the *definition's* box, measured in the definition's typography,",
+	"% so a state that changes the words, the size, the weight or the family leaves",
+	"% the copy asking for a box that belongs to a design nobody is looking at. A",
+	"% hover that doubles the label is the whole case: without this the text grows",
+	"% and the box it is in does not.",
+	"%",
+	"% The table is filed under the copy's own term — `lask(stt(i1,hover,label),",
+	"% width,Z)` — and read by the rules that were already there. ASKED_RULES is",
+	"% generic in its first argument, so `lrow`/`lrowif`/`laskdef` select a row for",
+	"% a copy exactly as they do for a node, and a state whose wording varies with a",
+	"% pick gets one row per combination like anything else. Reusing them is safe",
+	"% rather than merely tidy: every consumer of lask/3 in LAYOUT_RULES is gated",
+	"% behind lslot/2 or layout/2, and a copy is never in either — it is not a",
+	"% node/1 and no container arranges it — so a copy's table reaches this rule and",
+	"% nothing else in the program.",
+	"%",
+	"% Below an explicit delta and above the base, which is the order the three",
+	"% sources have to be in: a width the designer typed into the hover state is an",
+	"% instruction and wins, a measurement is what the words come to when nobody",
+	"% said, and the base is what the definition was drawn at.",
+	"msasked(I,S,N,D) :- mcopy(I,S,N), lask(stt(I,S,N),D,_).",
+	"frame(stt(I,S,N),D,V) :- mcopy(I,S,N), lask(stt(I,S,N),D,V), not msfval(I,S,N,D).",
 	"",
 	"% A state copy is not a node/1, so the scene defaults do not reach it. Its",
 	"% own, in the same shape and for the same reason: written so it cannot unsay",
@@ -2017,6 +2052,78 @@ function emitAsked(
 }
 
 /**
+ * The same table, for the copies a machine's states make of a part that hugs
+ * its words.
+ *
+ * A separate pass rather than a branch inside {@link emitAsked}, because the two
+ * are asking different questions of different things. `emitAsked` walks the
+ * document's nodes and computes each one's natural size — a leaf's measurement,
+ * a hugging container's bottom-up sum. A copy is not a node and is never a
+ * container: {@link stateMeasures} already decided which copies exist and what
+ * strings each row of each one is, the host measured exactly those strings, and
+ * all that is left here is to write the answer down under the copy's term.
+ *
+ * The axes come from the *host's* table rather than from `stateMeasures` run
+ * again. Both would normally agree — the host builds one from the other — but
+ * they are two walks over a document that may have been edited between them, and
+ * a table whose rows were measured against one set of axes and keyed by another
+ * is a box picked from the wrong row: silently wrong, and wrong per universe.
+ * Reading the axes off the sizes that were actually measured makes that
+ * impossible rather than unlikely.
+ *
+ * A copy with no measurement emits nothing at all, and that is the correct
+ * degradation rather than an oversight. The first render happens before anything
+ * has been measured and a headless solve has no canvas, so the guard in
+ * MACHINE_RULES falls through to `mbase/4` and the copy is the box the definition
+ * was drawn at — exactly what every copy was before this pass existed.
+ */
+function emitStateAsked(
+	lines: string[],
+	scene: Scene,
+	measurements: Measurements | undefined,
+): void {
+	if (measurements === undefined) return;
+	for (const measure of stateMeasures(scene)) {
+		const table = measurements[measure.id];
+		if (table === undefined) continue;
+		const say = (name: string, size: Size, ...before: Array<string | number>) => {
+			lines.push(atom(name, measure.id, ...before, "width", wholeEmu(size.width)));
+			lines.push(atom(name, measure.id, ...before, "height", wholeEmu(size.height)));
+		};
+		const axes = table.axes;
+		const first = table.sizes[0];
+		// A table with no rows at all is a host that measured nothing; there is no
+		// size to state and `mbase/4` is the honest answer.
+		if (first === undefined) continue;
+		if (axes.length === 0) {
+			say("lask", first);
+			continue;
+		}
+		const dropped = table.dropped ?? [];
+		if (dropped.length > 0) {
+			lines.push(
+				`% ${measure.id}: ${rowCount(axes)} rows, and ${dropped.join(", ")} read` +
+					" at its first alternative — over the measurement budget.",
+			);
+		}
+		const rows = rowCount(axes);
+		for (let row = 0; row < rows; row++) {
+			const size = table.sizes[row];
+			// A short table is a host that stopped early rather than one that said
+			// something wrong. The rows it did measure still hold; the rest fall to
+			// `laskdef/3` below, which is what that rule is for.
+			if (size === undefined) continue;
+			const picks = rowPicks(axes, row);
+			say("lrow", size, row);
+			for (const axis of axes) {
+				lines.push(atom("lrowif", measure.id, row, axis.variable, picks[axis.variable]));
+			}
+		}
+		say("laskdef", first);
+	}
+}
+
+/**
  * One machine, reduced to the three things the program needs to know about it.
  *
  * Read once per compile and handed to everything that asks, because three
@@ -2528,6 +2635,10 @@ export function compile(
 			for (const dim of dims) machineLines.push(atom("mfshadow", node.id, part, dim));
 		}
 	}
+	// What each copy of a hugging part comes to in its own state's typography.
+	// Beside the shadows rather than beside the document's own `lask/3` tables,
+	// because this is a fact about a copy and the copies are what this section is.
+	emitStateAsked(machineLines, scene, options.measurements);
 	// The delta fields and the motion settings, as ordinary variables — the one
 	// place a machine may legitimately branch the space, and only where a designer
 	// wrote alternatives inside one. See `machineValues`, which is also what
@@ -2733,6 +2844,10 @@ export function compile(
 		section("style rules", STYLE_RULES),
 		section("derivations", derivedLines),
 		section("layout", laidOut ? [...LAYOUT_OPTIONS, ...layoutLines] : layoutLines),
+		// Always emitted, unlike the layout rules beneath them: a state copy's
+		// measured box is an `lask/3` table too, and a machine does not need a
+		// layout anywhere in the document. See {@link ASKED_RULES}.
+		section("asked rules", ASKED_RULES),
 		laidOut ? section("layout rules", LAYOUT_RULES) : "",
 		// Always emitted, unlike the layout rules: `gsolved(N)` is something a
 		// hand-written rule may assert, and a contract that quietly does nothing

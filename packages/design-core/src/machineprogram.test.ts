@@ -26,6 +26,7 @@ import { directSolver } from "./directSolver.ts";
 import { makeNode } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
 import { statePart, stateFrameVar, statePropVar } from "./machines.ts";
+import { type Measurements, oneSize, stateMeasures } from "./measure.ts";
 import type {
 	Constraint,
 	Machine,
@@ -194,8 +195,11 @@ const rule = (
  * exactly what an ordinary solve assumes: every rule's switch, the pull toward
  * the stored frames, and the picture.
  */
-async function answers(scene: Scene): Promise<string[][]> {
-	const { program, guards } = compile(scene);
+async function answers(
+	scene: Scene,
+	measurements?: Measurements,
+): Promise<string[][]> {
+	const { program, guards } = compile(scene, { measurements });
 	const session = await directSolver.open(program, "--project");
 	try {
 		const outcome = await session.solve({
@@ -210,8 +214,8 @@ async function answers(scene: Scene): Promise<string[][]> {
 }
 
 /** The one answer set of a document that has only one. */
-async function only(scene: Scene): Promise<string[]> {
-	const models = await answers(scene);
+async function only(scene: Scene, measurements?: Measurements): Promise<string[]> {
+	const models = await answers(scene, measurements);
 	assert.equal(models.length, 1, "this document is meant to hold one design");
 	return models[0];
 }
@@ -1270,4 +1274,112 @@ test("a delta field and a motion setting are rows like any other row", () => {
 		if (!key.startsWith("sprop(") && !key.startsWith("sfval(") && !key.startsWith("mval(")) continue;
 		assert.equal(counts[key], variables[key], key);
 	}
+});
+
+/* ------------------------------------------------------------------ */
+/* A copy is measured in its own state's typography                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The label, reworded by one state and left alone by the other.
+ *
+ * Long enough that the wrong answer is unmistakable: the definition draws the
+ * label 136 px wide, and a host measuring these words comes back with 300.
+ */
+const reword = (text: string): Record<string, StatePart> => ({
+	label: { props: { text: single(text) } },
+});
+
+test("a state that rewords a hugging part is measured in its own type", async () => {
+	// Before this was wired, `stateMeasures` computed the table and the compiler
+	// threw it away: the copy took `mbase/4`, so the words grew and the box they
+	// sit in did not. The whole pass is three pieces that have to agree — the
+	// analysis here, a host with a canvas, and `emitStateAsked` — so the test
+	// names all three by using the first to key the second and reading the third.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				states: [
+					{ id: "rest" },
+					{ id: "hover", parts: reword("Go somewhere far away") },
+				],
+			}),
+		],
+	});
+	const hover = statePart("b1", "hover", "label");
+	assert.deepEqual(
+		stateMeasures(scene).map((m) => m.id),
+		[hover],
+		"only the state that changes the type is worth measuring",
+	);
+	// What the host hands back, keyed by the copy's own term.
+	const measured: Measurements = {
+		label: oneSize({ width: px(30), height: px(20) }),
+		[hover]: oneSize({ width: px(300), height: px(20) }),
+	};
+	const atoms = await only(scene, measured);
+	assert.equal(frameOf(atoms, hover).width, px(300), "the copy hugs its own words");
+	assert.equal(
+		frameOf(atoms, statePart("b1", "rest", "label")).width,
+		px(136),
+		"a state that changes no type is the definition's box, not the other state's",
+	);
+	// And the invariant is untouched by any of it: a measurement is a fact about
+	// a copy, never an alternative to choose between.
+	assert.deepEqual(
+		atoms.filter((atom) => atom.startsWith("pick(stt(") || atom.startsWith("alt(stt(")),
+		[],
+	);
+});
+
+test("a width the state states beats the words it would otherwise hug", async () => {
+	// The three sources in their order: a delta the designer typed, then the
+	// measurement, then the definition's box. A hover that says "be 200 wide" is
+	// an instruction and is not overruled by what the words happen to come to.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				states: [
+					{ id: "rest" },
+					{
+						id: "hover",
+						parts: {
+							label: {
+								props: { text: single("Go somewhere far away") },
+								frame: { width: dimension(px(200)) },
+							},
+						},
+					},
+				],
+			}),
+		],
+	});
+	const hover = statePart("b1", "hover", "label");
+	const atoms = await only(scene, {
+		[hover]: oneSize({ width: px(300), height: px(20) }),
+	});
+	assert.equal(frameOf(atoms, hover).width, px(200));
+	// The height said nothing, so that dimension is still the measurement's —
+	// the guard is per dimension, like every other guard in this section.
+	assert.equal(frameOf(atoms, hover).height, px(20));
+});
+
+test("a copy nobody measured is the box the definition was drawn at", async () => {
+	// The first render happens before anything has been measured and a headless
+	// solve has no canvas at all, so this is the ordinary case rather than the
+	// degenerate one — and it has to be exactly what a machine did before the
+	// measurement pass existed.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				states: [{ id: "rest" }, { id: "hover", parts: reword("Go somewhere far away") }],
+			}),
+		],
+	});
+	const atoms = await only(scene);
+	assert.equal(frameOf(atoms, statePart("b1", "hover", "label")).width, px(136));
+	assert.equal(frameOf(atoms, statePart("b1", "rest", "label")).width, px(136));
 });

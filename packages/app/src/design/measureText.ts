@@ -47,6 +47,7 @@ import {
 	rowCount,
 	rowPicks,
 	sizeFromCssPx,
+	stateMeasures,
 	toMeasure,
 } from "@clingo-design/design-core";
 
@@ -191,5 +192,51 @@ export function measureScene(scene: Scene): Measurements {
 		}
 		out[node.id] = dropped.length > 0 ? { axes, sizes, dropped } : { axes, sizes };
 	}
+	measureStates(scene, out);
 	return out;
+}
+
+/**
+ * The same pass, for the copies a machine's states make of a part that hugs its
+ * words.
+ *
+ * A state that changes the wording, the size, the weight or the family gives its
+ * copy a box of its own, and the base was measured in the *definition's*
+ * typography — so without this a hover that doubles the label grows the text and
+ * leaves the box it sits in exactly where it was. The tables land in the same
+ * `Measurements` beside the document's own, keyed by the copy's term, and the
+ * compiler writes them out as `lask/3` under that term.
+ *
+ * All the deciding happened in `stateMeasures`: which copies exist, which axes
+ * key their rows, and what strings each row is once the delta, the part's own
+ * value and its style have been read in the right order. That is deliberate and
+ * it is why this function is short — the precedence rules belong beside the
+ * program that has to agree with them, not in the one host that happens to own a
+ * canvas. What is left here is the half design-core genuinely cannot do, which
+ * is to ask a font engine how wide some words are.
+ *
+ * No `capAxes` call, unlike the loop above. `stateMeasures` has already capped
+ * them against a share of the budget worked out from how many copies of the part
+ * there are to measure — a machine does not make one table bigger, it makes more
+ * tables — so capping again here would drop a second axis for no reason and
+ * report it twice.
+ */
+function measureStates(scene: Scene, out: Record<string, Measured>): void {
+	for (const measure of stateMeasures(scene)) {
+		const sizes = measure.rows.map((row) =>
+			measureText(
+				row.text,
+				fontString({
+					family: row.family ?? ARTBOARD_FONT,
+					size: row.size ?? PROPS.size.fallback,
+					weight: row.weight ?? PROPS.weight.fallback,
+				}),
+				lineHeightEmu(row.size, row.lineHeight),
+			),
+		);
+		out[measure.id] =
+			measure.dropped.length > 0
+				? { axes: measure.axes, sizes, dropped: measure.dropped }
+				: { axes: measure.axes, sizes };
+	}
 }
