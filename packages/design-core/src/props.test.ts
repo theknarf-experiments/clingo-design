@@ -69,7 +69,19 @@ test("a kind only lists properties that exist, and only if it paints", () => {
 		for (const prop of Object.keys(spec.defaults) as PropName[]) {
 			assert.ok(spec.props.includes(prop), `${kind} defaults an unlisted ${prop}`);
 		}
-		if (!spec.drawable) assert.deepEqual(spec.props, []);
+		// A kind with no pixels of its own used to be a kind with no properties,
+		// and for eight kinds that is still exactly right: a group is whatever
+		// its children are, and an instance is the copy its definition derives
+		// inside it.
+		//
+		// A camera and a light broke the equivalence, and they broke it honestly.
+		// `drawable` is a claim about *pixels this node paints on the canvas* —
+		// it decides hit testing, snapping and paint order — while a lens and a
+		// lamp are numbers the 3D renderer reads to decide what everything *else*
+		// looks like. So the invariant is narrower than it was and says what it
+		// always meant: a kind with no pixels and nothing in three dimensions to
+		// answer for has nothing to hold.
+		if (!spec.drawable && !spec.spatial) assert.deepEqual(spec.props, []);
 	}
 });
 
@@ -90,7 +102,14 @@ test("everything with an appearance of its own can be faded", () => {
 		// A kind with no properties has no appearance of its own to fade: a group
 		// is whatever its children are, and an instance is the copy its
 		// definition derives inside it.
-		const paints = KINDS[kind].props.length > 0;
+		//
+		// `drawable` as well as the count, and the second half is what a camera
+		// and a light added. Both hold properties and neither has a silhouette,
+		// and fading a lamp is not dimming it — `opacity` is how much of the
+		// pixels a node paints you can see through, so on a node that paints none
+		// it is a control that would do nothing at all. Brightness is
+		// `intensity`, which the lamp holds instead and which means what it says.
+		const paints = KINDS[kind].drawable && KINDS[kind].props.length > 0;
 		assert.equal(KINDS[kind].props.includes("opacity"), paints);
 	}
 	for (const kind of ["group", "instance"] as const) {

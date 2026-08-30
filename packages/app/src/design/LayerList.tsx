@@ -54,6 +54,19 @@ const GLYPH: Record<SceneNode["kind"], string> = {
 	text: "T",
 	group: "▣",
 	instance: "◈",
+	// The third axis. A mesh, a model, a camera and a light are ordinary scene
+	// nodes — that is the whole architecture — so they need no other line in this
+	// file: they are rows in the tree, they drag, they reorder, they nest, and
+	// none of that asks what a node *is*. This table is the one place that does,
+	// because a glyph is not derivable from `KINDS`, and an exhaustive record is
+	// the right shape for it: a kind with no icon would be a row a person cannot
+	// tell from its neighbour.
+	viewport: "▦",
+	pivot: "✛",
+	mesh: "⬡",
+	model: "⬢",
+	camera: "◎",
+	light: "☀",
 };
 
 interface DocRow {

@@ -26,26 +26,45 @@ import {
 	type ValueType,
 	isLengthType,
 	lit,
+	msOf,
 	single,
 	wordOf,
 } from "./values.ts";
 import {
 	type AutoLayout,
+	type AssetInfo,
+	type Axis3,
+	BLEND_KINDS,
+	type Blend,
+	type BlendKind,
+	type BlendStop,
 	CHILD_PROPS,
+	COMPARE_OPS,
 	CONTAINER_PROPS,
+	type CompareOp,
+	type Condition,
+	DIMENSIONS_3D,
 	EASINGS,
 	FRAME_DIMS,
 	GUIDE_PROPS,
 	GUIDE_PROP_NAMES,
 	type Guide,
+	INPUT_KINDS,
+	type InputKind,
+	type Keyframe,
 	LAYOUT_PROPS,
+	type LoopMode,
 	CONSTRAINT_KINDS,
 	DIMENSIONS,
 	EDGES,
 	MOTION_PROPS,
 	MOTION_PROP_NAMES,
 	PROP_NAMES,
+	SPATIALS,
+	SPATIAL_DIMS,
 	TRIGGERS,
+	TURNS,
+	TURN_NAMES,
 	type Constraint,
 	DEFAULT_FRAME,
 	type Dimension,
@@ -53,22 +72,33 @@ import {
 	type FrameValue,
 	KINDS,
 	type Machine,
+	type MachineInput,
+	type MachineLayer,
 	type MachineState,
+	type MeshRef,
 	type MotionProp,
 	PROPS,
 	type PropName,
+	RESERVED_STATES,
 	RULES_HEADER,
 	STRENGTHS,
 	STYLE_PROPS,
 	type Scene,
 	type SceneNode,
+	type Spatial,
+	type SpatialValue,
 	type StatePart,
 	type Style,
 	type SurfaceGuides,
 	type StyleVariant,
+	type Timeline,
+	type Track,
 	type Transition,
 	type Trigger,
+	type Turn,
+	type TurnValue,
 	dimension,
+	dimensionSpec,
 	emptyScene,
 	makeFrame,
 	starterTokens,
@@ -339,7 +369,49 @@ export function normalizeScene(input: unknown): Scene {
 			typeof input.unit === "string" && isUnit(input.unit)
 				? input.unit
 				: DEFAULT_UNIT,
+		// Absent stays absent, and that is the whole of the decision: a document
+		// with no imported geometry has no asset index, `{}` would be a second
+		// spelling of the same claim, and `referencedAssets` would then have two
+		// shapes to answer for. Entries nothing references are **kept** on the way
+		// in — a paste may be about to reference one, and dropping them here would
+		// make opening a file a destructive act. `pruneAssets` drops them on an
+		// edit, which is where a person is present to have meant it.
+		...normalizeAssets(input.assets),
 	};
+}
+
+/**
+ * The asset index, or nothing where the document holds none.
+ *
+ * Filtered rather than rejected wholesale, like the styles and the machines and
+ * for their reason: one unreadable entry is one asset the studio cannot show a
+ * size for, and the models that reference it still draw as their bounding boxes
+ * and still say so. Losing the whole index would turn one bad row into every
+ * model in the document going unnamed.
+ *
+ * Returned as a fragment to spread rather than as a value, so that "no assets"
+ * writes no key at all — see {@link Scene.assets}.
+ */
+function normalizeAssets(value: unknown): { assets?: Record<string, AssetInfo> } {
+	if (!isRecord(value)) return {};
+	const out: Record<string, AssetInfo> = {};
+	for (const [hash, raw] of Object.entries(value)) {
+		if (!isRecord(raw)) continue;
+		if (raw.format !== "gltf" && raw.format !== "glb") continue;
+		const bytes = Number(raw.bytes);
+		const triangles = Number(raw.triangles);
+		if (!Number.isFinite(bytes) || !Number.isFinite(triangles)) continue;
+		out[hash] = {
+			format: raw.format,
+			bytes,
+			triangles,
+			// The name is what a person reads and nothing else reads it, so a
+			// missing one is not a reason to lose the entry. The hash is the honest
+			// fallback: it is what a relink dialogue would have to print anyway.
+			name: typeof raw.name === "string" ? raw.name : hash,
+		};
+	}
+	return Object.keys(out).length > 0 ? { assets: out } : {};
 }
 
 function isConstraint(value: unknown): value is Constraint {
@@ -579,6 +651,341 @@ function normalizeMachines(list: readonly unknown[]): Machine[] {
 			root: raw.root,
 			states,
 			transitions: normalizeTransitions(raw.transitions),
+			// Three optional lists, and all three keep their absence. A machine
+			// with no `inputs` is a machine nobody drives from outside, which is
+			// every machine any document written before this rung holds; a reader
+			// that wrote `[]` would still be right and a reader that wrote a
+			// default input would change what those documents mean. `layers` is
+			// the same claim about a one-layer machine, and the program mints
+			// `mlayer(M,base)` for it rather than the document doing so.
+			...listField("inputs", normalizeInputs(raw.inputs)),
+			...listField("layers", normalizeLayers(raw.layers)),
+			...listField("timelines", normalizeTimelines(raw.timelines)),
+		});
+	}
+	return out;
+}
+
+/**
+ * An optional list as a fragment to spread: the key where there is something to
+ * say, and no key at all where there is not.
+ *
+ * Three fields want this and each of them means something by the absence, so it
+ * is one helper rather than three ternaries — the shape `normalizeLines` already
+ * uses to keep "no lines" spelled once.
+ */
+function listField<K extends string, T>(
+	key: K,
+	list: T[],
+): { [P in K]?: T[] } {
+	return (list.length > 0 ? { [key]: list } : {}) as { [P in K]?: T[] };
+}
+
+/**
+ * The inputs of one machine.
+ *
+ * An id that is not an ASP constant, or one already taken in this machine, is
+ * dropped for {@link normalizeStates}' reason word for word: it reaches the
+ * program as `minput(M,X)` and inside `mcondin(M,T,K,X)`, so a name no term can
+ * hold takes the document down with a syntax error, and two inputs answering to
+ * one name are one input as far as the solver is concerned.
+ *
+ * A `kind` the table has not got is the third: it decides which comparisons the
+ * input may be asked of and which facts it emits, so an unknown one is an input
+ * with no behaviour at all rather than an input with an odd label. That is the
+ * judgement a bogus {@link Trigger} gets, one rung down.
+ *
+ * `initial`, `min` and `max` are **kept as they were typed**, unread and
+ * unrepaired, and this is the one place worth arguing. They are plain strings
+ * rather than {@link Value}s on purpose — see {@link MachineInput} — and a
+ * number that reads as nothing is not a broken document, it is a range the
+ * checks will decline to say anything about. A reader that dropped `min: "1e9"`
+ * would silently turn "this guard is impossible" into "this guard is fine".
+ */
+function normalizeInputs(value: unknown): MachineInput[] {
+	if (!Array.isArray(value)) return [];
+	const out: MachineInput[] = [];
+	const taken = new Set<string>();
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		const id = raw.id;
+		if (typeof id !== "string" || wordOf(id) !== id || taken.has(id)) continue;
+		const kind = raw.kind;
+		if (typeof kind !== "string" || !Object.hasOwn(INPUT_KINDS, kind)) continue;
+		taken.add(id);
+		out.push({
+			id,
+			name: typeof raw.name === "string" ? raw.name : id,
+			kind: kind as InputKind,
+			...(typeof raw.initial === "string" ? { initial: raw.initial } : {}),
+			...(typeof raw.min === "string" ? { min: raw.min } : {}),
+			...(typeof raw.max === "string" ? { max: raw.max } : {}),
+		});
+	}
+	return out;
+}
+
+/**
+ * The layers of one machine, in order — **and the order is the priority**, the
+ * way {@link normalizeStates}' order is the initial state.
+ *
+ * Which is why a duplicate id drops the *second* and keeps the first, exactly as
+ * a duplicate state id does: dropping the first would move every later layer up
+ * one and change which of them writes a contested property, and a reader that
+ * could re-rank a machine's layers is a reader that changes what every instance
+ * of the definition draws.
+ */
+function normalizeLayers(value: unknown): MachineLayer[] {
+	if (!Array.isArray(value)) return [];
+	const out: MachineLayer[] = [];
+	const taken = new Set<string>();
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		const id = raw.id;
+		if (typeof id !== "string" || wordOf(id) !== id || taken.has(id)) continue;
+		taken.add(id);
+		out.push({ id, name: typeof raw.name === "string" ? raw.name : id });
+	}
+	return out;
+}
+
+/**
+ * The timelines of one machine.
+ *
+ * A timeline nothing plays is legal and is kept: it costs a handful of variables
+ * and no copies at all, and it is how somebody works on an animation before
+ * wiring it up. What is dropped is a timeline the program could not name — an id
+ * that is not an ASP constant, or a repeat — and a `loop` word the table has not
+ * got falls back rather than losing the timeline, which is the judgement an
+ * unknown {@link Easing} gets and for the same reason: the mode is the shape of
+ * the playback, not whether there is any.
+ */
+function normalizeTimelines(value: unknown): Timeline[] {
+	if (!Array.isArray(value)) return [];
+	const out: Timeline[] = [];
+	const taken = new Set<string>();
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		const id = raw.id;
+		if (typeof id !== "string" || wordOf(id) !== id || taken.has(id)) continue;
+		taken.add(id);
+		const length = settingValue(raw.length, "duration");
+		const loop = raw.loop;
+		out.push({
+			id,
+			name: typeof raw.name === "string" ? raw.name : id,
+			tracks: normalizeTracks(raw.tracks),
+			// Absent is the last keyframe's time, derived rather than stored, so a
+			// timeline cannot disagree with its own contents — which means a
+			// `length` that reads as nothing has to stay absent rather than become
+			// zero, or a document with a mistyped duration would play nothing.
+			...(length ? { length } : {}),
+			...(loop === "none" || loop === "loop" || loop === "pingPong"
+				? { loop: loop as LoopMode }
+				: {}),
+		});
+	}
+	return out;
+}
+
+/**
+ * The tracks of one timeline.
+ *
+ * **A track that names none of `prop`, `dim` and `turn` is read as no track at
+ * all**, and this is the one place the machine reader drops something for saying
+ * nothing rather than for being unspellable. The reason is that a track's whole
+ * identity is what it animates: it reaches the program as `trkp(N,P)` or
+ * `trkd(N,D)`, a term built out of exactly that, so a track with no subject has
+ * no term, and its keyframes would be values keyed by nothing. A track that
+ * names *two* keeps the first in table order — property, then dimension, then
+ * rotation — because two subjects is two tracks sharing a keyframe list, and
+ * splitting them here would invent a track the designer never wrote.
+ *
+ * The `part` is **not** checked against the definition, the way a state's delta
+ * key is not: a part deleted and drawn again should find its animation waiting
+ * rather than gone.
+ */
+function normalizeTracks(value: unknown): Track[] {
+	if (!Array.isArray(value)) return [];
+	const out: Track[] = [];
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		const part = raw.part;
+		if (typeof part !== "string" || !part) continue;
+		const prop =
+			typeof raw.prop === "string" && Object.hasOwn(PROPS, raw.prop)
+				? (raw.prop as PropName)
+				: undefined;
+		const dim =
+			prop === undefined &&
+			typeof raw.dim === "string" &&
+			DIMENSIONS_3D.includes(raw.dim as Axis3)
+				? (raw.dim as Axis3)
+				: undefined;
+		const turn =
+			prop === undefined &&
+			dim === undefined &&
+			typeof raw.turn === "string" &&
+			Object.hasOwn(TURNS, raw.turn)
+				? (raw.turn as Turn)
+				: undefined;
+		if (prop === undefined && dim === undefined && turn === undefined) continue;
+		// What a keyframe's value *is* decides whether it gets the lattice sweep: a
+		// property carries its own type, a dimension is a length whichever of the
+		// six it is, and a rotation is an angle, which has no lattice at all.
+		const type: ValueType =
+			prop !== undefined
+				? PROPS[prop].type
+				: dim !== undefined
+					? dimensionSpec(dim).type
+					: "angle";
+		out.push({
+			part,
+			...(prop !== undefined ? { prop } : {}),
+			...(dim !== undefined ? { dim } : {}),
+			...(turn !== undefined ? { turn } : {}),
+			keys: orderKeys(normalizeKeyframes(raw.keys, type)),
+		});
+	}
+	return out;
+}
+
+/** One track's keyframes, in the shape the document holds them now. */
+function normalizeKeyframes(value: unknown, type: ValueType): Keyframe[] {
+	if (!Array.isArray(value)) return [];
+	const out: Keyframe[] = [];
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		const at = settingValue(raw.at, "duration");
+		const what = settingValue(raw.value, type);
+		// A keyframe with no time or no value is not a keyframe that says
+		// something odd, it is half a keyframe: the program mints `kat` and `kval`
+		// per key and the export interpolates between two of them, so one with
+		// neither end would be a segment with nowhere to start. Both are required
+		// where the three fields of a {@link Track} are not, because a track can
+		// be being built and a key cannot be half-placed.
+		if (!at || !what) continue;
+		const easing = raw.easing;
+		out.push({
+			at,
+			value: what,
+			...(typeof easing === "string" && Object.hasOwn(EASINGS, easing)
+				? { easing: easing as Easing }
+				: {}),
+		});
+	}
+	return out;
+}
+
+/**
+ * A track's keys in time order, with two keys at one time collapsed to the
+ * first.
+ *
+ * **Only where every key's time is a literal this reader can read.** A
+ * keyframe's `at` is a {@link Value}, so it may name a token, and a token may
+ * hold two alternatives — which means "time order" is a fact about a *universe*
+ * rather than about the document, and a reader that sorted on the first
+ * alternative would reorder somebody's timeline on the strength of a design they
+ * are not looking at. Where any time is unreadable the document's own order
+ * stands, and a key that lands before its predecessor in some universe is
+ * derived as `mkbackwards/4` and reported — which is exactly the class of bug a
+ * multiverse invents and a linter over the document cannot catch.
+ *
+ * Idempotent, as every pass in this file has to be: sorting a sorted list is the
+ * same list, and a de-duplicated one has nothing left to collapse.
+ */
+function orderKeys(keys: Keyframe[]): Keyframe[] {
+	const times = keys.map((key) =>
+		key.at.length === 1 && key.at[0].kind === "literal"
+			? msOf(key.at[0].value)
+			: undefined,
+	);
+	if (times.some((ms) => ms === undefined)) return keys;
+	const order = keys
+		.map((key, index) => ({ key, ms: times[index] as number, index }))
+		.sort((a, b) => a.ms - b.ms || a.index - b.index);
+	const out: Keyframe[] = [];
+	const at = new Set<number>();
+	for (const entry of order) {
+		if (at.has(entry.ms)) continue;
+		at.add(entry.ms);
+		out.push(entry.key);
+	}
+	return out;
+}
+
+/**
+ * A state's blend, or nothing.
+ *
+ * A `kind` the table has not got loses the blend rather than the state, because
+ * the kind decides how the stops are read: `oneD` lays them along an input's
+ * axis and `direct` weights each by its own input, and a third word would be a
+ * mixing rule nothing implements. A stop whose `at` is outside the input's
+ * declared range is **kept** — that is `mstopout/3`'s whole job, the Machines
+ * panel offers a canned rule that forbids it by name, and a reader that dropped
+ * the stop would take away the symptom and any way of finding out. The same
+ * goes for a stop naming a timeline the machine has not got, for the reason a
+ * transition naming a missing state is kept.
+ */
+function normalizeBlend(value: unknown): Blend | undefined {
+	if (!isRecord(value)) return undefined;
+	const kind = value.kind;
+	if (typeof kind !== "string" || !Object.hasOwn(BLEND_KINDS, kind)) {
+		return undefined;
+	}
+	const stops: BlendStop[] = [];
+	if (Array.isArray(value.stops)) {
+		for (const raw of value.stops) {
+			if (!isRecord(raw)) continue;
+			if (typeof raw.timeline !== "string" || !raw.timeline) continue;
+			stops.push({
+				timeline: raw.timeline,
+				...(typeof raw.at === "string" ? { at: raw.at } : {}),
+				...(typeof raw.by === "string" ? { by: raw.by } : {}),
+			});
+		}
+	}
+	const input = value.input;
+	return {
+		kind: kind as BlendKind,
+		...(typeof input === "string" ? { input } : {}),
+		stops,
+	};
+}
+
+/**
+ * One transition's guard.
+ *
+ * **A condition naming an input the machine has not got is kept**, and it is the
+ * fourth dangling reference this file deliberately preserves. `mcbad(M,T,K)`
+ * exists to report exactly that — along with an operator the input's kind does
+ * not take and a comparand that reads as no number — and `mguardnever/2` reads
+ * it, so the edge shows up as impossible with a name attached. A reader that
+ * dropped the condition would turn a guarded edge into an unguarded one, which
+ * is not a smaller mistake than the one it was hiding: it is a machine that
+ * silently starts firing.
+ *
+ * What is dropped is a condition the program could not hold: an `input` that is
+ * not an ASP constant, since it is an argument of `mcondin/4`, and an `op` the
+ * table has not got, since the op is what decides which fact the condition
+ * becomes and an unknown one would become none of them.
+ */
+function normalizeConditions(value: unknown): Condition[] {
+	if (!Array.isArray(value)) return [];
+	const out: Condition[] = [];
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		const input = raw.input;
+		if (typeof input !== "string" || wordOf(input) !== input) continue;
+		const op = raw.op;
+		if (typeof op !== "string" || !Object.hasOwn(COMPARE_OPS, op)) continue;
+		out.push({
+			input,
+			op: op as CompareOp,
+			// Kept as typed, for {@link normalizeInputs}' reason: a comparand that
+			// reads as nothing is what `mcbad/3` is looking for, and repairing it
+			// here would be repairing the document into silence.
+			...(typeof raw.value === "string" ? { value: raw.value } : {}),
 		});
 	}
 	return out;
@@ -595,6 +1002,14 @@ function normalizeMachines(list: readonly unknown[]): Machine[] {
  * every instance of the definition draws. Keeping the earlier one is also what
  * {@link normalizeLines} does with a repeated guide name, and one rule for
  * "first wins" is worth more than a per-case argument.
+ *
+ * A state whose id is one of {@link RESERVED_STATES} is dropped, on that same
+ * "could not be what it says it is" judgement. `entry`, `exit` and `any` are
+ * words the program reads as *positions on an edge* — where a machine begins,
+ * where a layer stops, and an edge that may be taken from anywhere — so a state
+ * called `exit` is a term the rules already mean something else by, and keeping
+ * it would make one picture wrong in a way nothing reports: `mefrom/3` would
+ * offer it as an ordinary source and as the sugar at the same time.
  */
 function normalizeStates(value: unknown): MachineState[] {
 	if (!Array.isArray(value)) return [];
@@ -607,11 +1022,26 @@ function normalizeStates(value: unknown): MachineState[] {
 		// inside `stt(I,S,N)` and inside every variable key a delta mints, so a
 		// state called `Pressed Down` is a term nothing can hold.
 		if (typeof id !== "string" || wordOf(id) !== id || taken.has(id)) continue;
+		if (RESERVED_STATES.has(id)) continue;
 		taken.add(id);
+		const layer = raw.layer;
+		const timeline = raw.timeline;
+		const blend = normalizeBlend(raw.blend);
 		out.push({
 			id,
 			name: typeof raw.name === "string" ? raw.name : id,
 			parts: normalizeStateParts(raw.parts),
+			// A layer id and a timeline id are strings or nothing, and neither is
+			// checked against the machine's own lists — the same string-or-nothing
+			// question {@link SceneNode.state} gets, and the same answer. A state
+			// naming a layer that was deleted is the *first* layer, which is what
+			// `layerOf` already falls back to, and a state naming a timeline that
+			// was deleted plays nothing and says so through `mtplays/3` finding no
+			// `mtimeline/2`. Repairing either would spend a real edit — one a
+			// collaborator pulls — on a question that answers itself.
+			...(typeof layer === "string" ? { layer } : {}),
+			...(typeof timeline === "string" ? { timeline } : {}),
+			...(blend ? { blend } : {}),
 		});
 	}
 	return out;
@@ -679,16 +1109,37 @@ function normalizeStatePart(raw: Record<string, unknown>): StatePart {
 	}
 	if (isRecord(raw.frame)) {
 		const frame: NonNullable<StatePart["frame"]> = {};
-		for (const dim of DIMENSIONS) {
+		// All six, not four. A state that lifts a mesh is the same kind of claim
+		// as one that moves a button two pixels down, and the loop is over the
+		// combined table so that the day a seventh axis exists this line is
+		// already right. A flat document holds no `z` or `depth` entry, so the two
+		// extra passes read nothing and write nothing.
+		for (const dim of DIMENSIONS_3D) {
 			const value = raw.frame[dim];
 			// A dimension a state does not mention is the instance's own — the
 			// guard in the program is per dimension — so unlike a node's frame
 			// there is nothing to default here and a missing one is the point.
 			if (Array.isArray(value)) {
-				frame[dim] = snapValue(value as Value, FRAME_DIMS[dim].type);
+				frame[dim] = snapValue(value as Value, dimensionSpec(dim).type);
 			}
 		}
 		part.frame = frame;
+	}
+	if (isRecord(raw.turn)) {
+		const turn: NonNullable<StatePart["turn"]> = {};
+		for (const axis of TURN_NAMES) {
+			const value = raw.turn[axis];
+			if (Array.isArray(value)) {
+				// Through the same sweep every other stored value goes through,
+				// which asks the type table whether this quantity has a lattice to
+				// be off. `angle` says no — `mdegOf` is exact or nothing and a
+				// stored `"22.5deg"` is exactly 22500 thousandths — so this is a
+				// no-op by construction rather than by omission, and it stays right
+				// if an angle ever grows one.
+				turn[axis] = snapValue(value as Value, "angle");
+			}
+		}
+		part.turn = turn;
 	}
 	// `true` or absent, with no `false`, exactly as {@link SceneNode.component}
 	// is: a part is drawn unless a state says otherwise, so "shown" needs no
@@ -751,14 +1202,28 @@ function normalizeTransitions(value: unknown): Transition[] {
 			const setting = settingValue(raw[prop], MOTION_PROPS[prop].type);
 			if (setting) motion[prop] = setting;
 		}
+		// The exit time is a fourth setting of exactly this shape and is read
+		// exactly this way, against the same `duration` type. It is read out of
+		// band rather than out of `MOTION_PROP_NAMES` for one reason and it is not
+		// a design one — see {@link MotionProp}, which records why that union
+		// cannot grow yet and what the one-line unblock is. When it does grow,
+		// this line goes and the loop above covers it.
+		const exit = settingValue(raw.exit, MOTION_PROPS.duration.type);
 		const easing = raw.easing;
 		const only = raw.only;
+		const conditions = normalizeConditions(raw.conditions);
 		out.push({
 			id,
 			from,
 			to,
 			trigger: trigger as Trigger,
 			...motion,
+			...(exit ? { exit } : {}),
+			// Absent and empty mean the same thing here — an unguarded edge — so
+			// unlike `only` there is nothing to tell apart and an empty list is
+			// dropped to absent. Every transition in every document written before
+			// guards existed is unguarded, and it has to keep costing nothing.
+			...(conditions.length > 0 ? { conditions } : {}),
 			// An easing the table has not got falls back rather than losing the
 			// transition, which is the judgement {@link Scene.unit} gets and not
 			// the one a bogus trigger gets. The difference is what the field
@@ -982,6 +1447,102 @@ function normalizeLines(value: unknown): Guide[] | undefined {
 }
 
 /**
+ * Where a node sits on the third axis, or nothing where it says nothing usable.
+ *
+ * Sparse in, sparse out: a dimension the document does not mention is z 0 or
+ * depth 0, exactly as the program's own default rule makes it for a node in the
+ * third axis, so there is nothing to fill in and a missing entry is the point.
+ * That is the opposite of {@link normalizeFrame}, which defaults every one of
+ * its four, and the difference is the whole no-regression story — a document
+ * with no 3D in it must come back holding no `spatial` anywhere, or the
+ * compiler's gate opens on a file that never asked for it.
+ *
+ * The lengths get the lattice sweep, because a `z` is one more place a document
+ * can hold `"20.5px"` and one more place that would otherwise read as no length
+ * at all and quietly put the node back on the page.
+ */
+function normalizeSpatial(value: unknown): SpatialValue | undefined {
+	if (!isRecord(value)) return undefined;
+	const out: SpatialValue = {};
+	for (const dim of SPATIALS) {
+		const stored = value[dim];
+		// A dimension that is not a list of alternatives is not a dimension: the
+		// third axis has no legacy bare-number spelling to migrate, because it did
+		// not exist before values did.
+		if (!Array.isArray(stored) || stored.length === 0) continue;
+		out[dim] = snapValue(stored as Value, SPATIAL_DIMS[dim].type);
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * How a node is turned, or nothing.
+ *
+ * The twin of {@link normalizeSpatial}, over the twin table, with one difference
+ * stated rather than absorbed: **an angle is not snapped.** `snapValue` asks the
+ * type table whether the quantity has a lattice to be off, and `angle` has none
+ * — `mdegOf` is exact or nothing and a stored `"22.5deg"` is exactly 22500
+ * thousandths of a degree, which no rewriting could improve on. The call is made
+ * anyway, through the same one reader, so that the answer stays in the table
+ * rather than in a comment somebody has to find.
+ */
+function normalizeTurn(value: unknown): TurnValue | undefined {
+	if (!isRecord(value)) return undefined;
+	const out: TurnValue = {};
+	for (const axis of TURN_NAMES) {
+		const stored = value[axis];
+		if (!Array.isArray(stored) || stored.length === 0) continue;
+		out[axis] = snapValue(stored as Value, "angle");
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Which state an instance is drawn in on each further layer, or nothing.
+ *
+ * Both halves are plain ids and neither is checked against a machine, for
+ * {@link SceneNode.state}'s reason exactly: `shownStates` falls back to each
+ * layer's own initial state, so a machine edited down leaves its instances
+ * legal, and a reader that rewrote them would spend a real edit on a question
+ * that answers itself every time it is asked.
+ */
+function normalizeNodeStates(
+	value: unknown,
+): Record<string, string> | undefined {
+	if (!isRecord(value)) return undefined;
+	const out: Record<string, string> = {};
+	for (const [layer, state] of Object.entries(value)) {
+		if (typeof state === "string" && state) out[layer] = state;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * True when a stored value is the whole of a {@link MeshRef}.
+ *
+ * Every field is required except `source`, and that is not strictness for its
+ * own sake: the hash is the only way back to the bytes, the format decides which
+ * parser reads them, the bounds are what the node draws as while the payload is
+ * missing or being fetched, and the triangle count is what the budget rule and
+ * the layer row are about. A reference missing any of them is a model that would
+ * draw at no size from no file, which is the judgement a path with no usable
+ * vertices already gets.
+ *
+ * What is deliberately *not* asked is whether {@link Scene.assets} knows the
+ * hash. See the call site.
+ */
+function isMeshRef(value: unknown): value is MeshRef {
+	if (!isRecord(value)) return false;
+	if (typeof value.asset !== "string" || !value.asset) return false;
+	if (value.format !== "gltf" && value.format !== "glb") return false;
+	if (!Number.isFinite(Number(value.triangles))) return false;
+	const bounds = value.bounds;
+	if (!isRecord(bounds)) return false;
+	const axes: readonly (Dimension | Spatial)[] = [...DIMENSIONS, ...SPATIALS];
+	return axes.every((axis) => Number.isFinite(Number(bounds[axis])));
+}
+
+/**
  * Keeps only placeable nodes, at every depth.
  *
  * `legacy` says the document predates EMU, and it reaches exactly one thing: a
@@ -1069,6 +1630,67 @@ function pruneNodes(list: readonly unknown[], legacy: boolean): SceneNode[] {
 		// over, and the field's own doc-comment promises it in as many words.
 		if (fixed.state !== undefined && typeof fixed.state !== "string") {
 			const { state: _dropped, ...rest } = fixed;
+			fixed = rest as SceneNode;
+		}
+		// And the per-layer twin of it. Entries that are not state ids are dropped
+		// one at a time rather than losing the record, because an instance that
+		// lost one entry should still be drawn in the states it can still name —
+		// and a record left with nothing goes entirely, so that "this instance says
+		// nothing about the further layers" has one spelling.
+		if (fixed.states !== undefined) {
+			const states = normalizeNodeStates(fixed.states);
+			if (states) {
+				fixed = { ...fixed, states };
+			} else {
+				const { states: _dropped, ...rest } = fixed;
+				fixed = rest as SceneNode;
+			}
+		}
+		// The third axis, and how the node is turned. Both are absence-as-flat, so
+		// both are touched only where the document holds them and both go entirely
+		// when nothing usable survives — "this node is flat" and "this node is not
+		// turned" each get one spelling, which is what keeps a leftover `{}` from
+		// putting a whole document into three dimensions.
+		if (fixed.spatial !== undefined) {
+			const spatial = normalizeSpatial(fixed.spatial);
+			if (spatial) {
+				fixed = { ...fixed, spatial };
+			} else {
+				const { spatial: _dropped, ...rest } = fixed;
+				fixed = rest as SceneNode;
+			}
+		}
+		if (fixed.turn !== undefined) {
+			const turn = normalizeTurn(fixed.turn);
+			if (turn) {
+				fixed = { ...fixed, turn };
+			} else {
+				const { turn: _dropped, ...rest } = fixed;
+				fixed = rest as SceneNode;
+			}
+		}
+		// Which camera a view looks through is an id and nothing else — the same
+		// string-or-nothing question `style` and `state` get. **A camera naming a
+		// node the document no longer holds is kept**, and that is the whole of the
+		// decision: it is the dangling `instanceOf` argument one field over,
+		// deleting a camera has to leave a legal document, and `vcam/2` simply
+		// derives nothing so the renderer frames the subtree itself and the status
+		// line says so. A reader that cleared the field would make undoing the
+		// deletion give back the camera and not the view that looked through it.
+		if (fixed.camera !== undefined && typeof fixed.camera !== "string") {
+			const { camera: _dropped, ...rest } = fixed;
+			fixed = rest as SceneNode;
+		}
+		// Imported geometry. Dropped when it is not the shape a {@link MeshRef} is,
+		// because half a reference is a model that would draw at no size from no
+		// file — the judgement a path with no usable vertices gets. **Kept when the
+		// asset index has never heard of its hash**, because that is a missing file
+		// rather than a broken document: `spatialBudget` lists it, the export names
+		// it in `lost`, and the model draws as its own bounding box meanwhile. The
+		// difference is the difference between "relink this" and "your chair is
+		// gone", and only one of the two is ever true.
+		if (fixed.mesh !== undefined && !isMeshRef(fixed.mesh)) {
+			const { mesh: _dropped, ...rest } = fixed;
 			fixed = rest as SceneNode;
 		}
 		out.push(

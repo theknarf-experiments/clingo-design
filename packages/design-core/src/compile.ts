@@ -37,11 +37,21 @@
  */
 import { componentDef, componentDefs, instanceNodes, instancePart } from "./components.ts";
 import {
+	guardOf,
+	inputInitial,
+	inputRange,
+	keyEasing,
+	keyframeParts,
+	layerOf,
 	machineForRoot,
+	machineLayers,
 	materializedParts,
-	shownState,
+	shownStates,
+	statePlays,
 	stateFrameVar,
 	statePropVar,
+	stateTurnVar,
+	trackTerm,
 } from "./machines.ts";
 import {
 	askedAxes,
@@ -53,19 +63,25 @@ import {
 	type Size,
 } from "./measure.ts";
 import {
+	type Axis3,
+	BLEND_KINDS,
 	CHILD_PROPS,
+	COMPARE_OPS,
 	CONSTRAINT_KINDS,
 	CONSTRAINT_NAMES,
 	CONTAINER_PROPS,
 	DIMENSIONS,
-	type Dimension,
+	DIMENSIONS_3D,
 	EDGES,
 	EDGE_NAMES,
 	GUIDE_PROPS,
 	GUIDE_PROP_NAMES,
+	INPUT_KINDS,
 	LAYOUT_PROPS,
 	LAYOUT_PROP_NAMES,
 	type Machine,
+	type MachineLayer,
+	type MachineState,
 	MOTION_PROPS,
 	MOTION_PROP_NAMES,
 	type MotionProp,
@@ -86,11 +102,17 @@ import {
 	levelOf,
 	motionValueOf,
 	rangesOverGroup,
+	RESERVED_STATES,
+	SPATIALS,
 	type Scene,
 	type SceneNode,
+	spatialDim,
+	type Turn,
+	TURN_NAMES,
 	weightOf,
 	wornProps,
 } from "./scene.ts";
+import { isSpatialScene } from "./spatial.ts";
 import {
 	DERIVATIONS,
 	type Derivation,
@@ -102,14 +124,20 @@ import {
 	guideAtVar,
 	guideVar,
 	isLengthType,
+	keyTimeVar,
+	keyValueVar,
 	layoutVar,
+	mdegOf,
 	motionVar,
 	msOf,
+	permilleOf,
 	propVar,
 	referencedTokens,
+	rotateVar,
 	stylePartVar,
 	styleVar,
 	tallyOf,
+	timelineLenVar,
 	tokenVar,
 	type Value,
 	wordOf,
@@ -504,6 +532,16 @@ const GEOMETRY_RULES = [
 	"#defined gkind/1.",
 	"gaxis(x). gaxis(y).",
 	"gspan(width). gspan(height).",
+	"% The planar half of the same vocabulary, named separately so that it can",
+	"% stay two-and-two while gaxis/1 and gspan/1 grow a third axis behind the",
+	"% `spatial` gate — see the third-axis rules below. Every rule that wants the",
+	"% whole vocabulary goes on reading gaxis/1 and gspan/1 and picks the third",
+	"% axis up for nothing; the handful that must not are the ones that would",
+	"% otherwise put a coordinate on a node that has no business having one, and",
+	"% each of those says so where it stands. On a flat document gplane/1 *is*",
+	"% gaxis/1, atom for atom, which is what makes the narrowing free.",
+	"gplane(x). gplane(y).",
+	"gplanespan(width). gplanespan(height).",
 	"% Naming a node in a geometric constraint is what hands it over. The",
 	"% switch is deliberately not consulted: which unknowns exist must not",
 	"% depend on which constraints are assumed, and a node the solver places",
@@ -518,8 +556,25 @@ const GEOMETRY_RULES = [
 	"% equation in the guide rules, which is exact rather than nearest.",
 	"gsolved(N) :- constraint(C), c_kind(C,K), gkind(K), c_node(C,N),",
 	"              not gdatum(N).",
-	"gpos(N,A) :- gsolved(N), gaxis(A).",
-	"gsize(N,S) :- gsolved(N), gspan(S).",
+	"% Which unknowns a solved node actually gets, and this is the one place in",
+	"% the geometry rules where the third axis is *narrowed* rather than picked up",
+	"% for free. Reading gaxis/1 here would be the same bug the datum exception two",
+	"% lines up exists to prevent, one axis over and much harder to see: in a",
+	"% document that holds a viewport anywhere, a plain rectangle on another",
+	"% artboard named by an `align` would gain gpos(N,z) — while the scene default",
+	"% writes frame(N,z,0) only for a node that is in the third axis, so neither",
+	"% pull inequality below would ground and gd(N,z) would be a variable in the",
+	"% shared &minimize with nothing bounding it from below. An unbounded objective",
+	"% is not a wrong picture, it is no answer at all, and the whole document stops",
+	"% answering rather than one rectangle going astray.",
+	"%",
+	"% So: the two planar axes for everything, and the third only for the nodes",
+	"% that are in it. On a flat document gplane/1 is gaxis/1 and s3/1 is empty, so",
+	"% these four rules derive precisely the atoms the two they replace did.",
+	"gpos(N,A) :- gsolved(N), gplane(A).",
+	"gpos(N,z) :- gsolved(N), s3(N).",
+	"gsize(N,S) :- gsolved(N), gplanespan(S).",
+	"gsize(N,depth) :- gsolved(N), s3(N).",
 	"",
 	"% ---- nearest to where the document put it ----",
 	"&sum{ lv(N,A); -gd(N,A) } <= V :- gpos(N,A), frame(N,A,V).",
@@ -550,13 +605,26 @@ const GEOMETRY_RULES = [
 	"",
 	"% ---- world coordinates ----",
 	"% Only along the chains that need one: a solved node and its ancestors.",
-	"gworld(N,A) :- gsolved(N), gaxis(A).",
+	"% Derived from gpos/2 rather than restating its body, which is atom-identical",
+	"% today — gpos(N,A) is exactly gsolved(N) and an axis — and narrows for free",
+	"% tomorrow, so the third axis cannot arrive here and not there.",
+	"gworld(N,A) :- gpos(N,A).",
 	"gworld(P,A) :- gworld(N,A), child(P,N).",
 	"% An offset that is the solver's — a laid-out child's, or a solved node's",
 	"% — enters as the unknown; anything else enters as the number the document",
 	"% stores, which is what keeps a deep tree cheap.",
 	"gmoved(N,A) :- gpos(N,A).",
-	"gmoved(N,A) :- lslot(_,N,_), gaxis(A).",
+	"% A laid-out child's offset is the solver's on the axes the layout arranges,",
+	"% and those are the planar two: there are no layout equations in the third",
+	"% axis and there is not going to be one, because a row is an arrangement on a",
+	"% surface. Written `gplane(A)` rather than `gaxis(A)` for exactly that reason —",
+	"% with the third axis here, a laid-out node in a spatial document would take",
+	"% lv(N,z) into the world chain, and nothing anywhere would ground an equation",
+	"% for it: the whole z chain above that node would come back off an arbitrary",
+	"% number, which is the silent-wrong-answer this file spends its comments on.",
+	"% A laid-out node a rule *also* places is covered by the clause above, which",
+	"% is where lv(N,z) genuinely is the solver's.",
+	"gmoved(N,A) :- lslot(_,N,_), gplane(A).",
 	"&sum{ wv(N,A); -wv(P,A); -lv(N,A) } = 0 :- gworld(N,A), child(P,N), gmoved(N,A).",
 	"&sum{ wv(N,A); -wv(P,A) } = V :- gworld(N,A), child(P,N), not gmoved(N,A),",
 	"                                 frame(N,A,V).",
@@ -585,6 +653,130 @@ const GEOMETRY_RULES = [
 	"&sum{ ge(N,E); -2*wv(N,A); -K*lsz(N,S) } = 0 :- gedgeof(N,E), gedge(E,A,pos),",
 	"    goff(E,K), gspanof(A,S).",
 	"&sum{ ge(N,E); -2*lsz(N,E) } = 0 :- gedgeof(N,E), gedge(E,_,span).",
+]
+
+/**
+ * The third axis: the gate, who is in it, and how far a thing is turned.
+ *
+ * **A 3D object is an ordinary scene node.** A mesh, a camera and a light reach
+ * the program through `node/1`, `kind/2`, `child/2`, `order/2`, `visible/1` and
+ * `frame/3`, exactly as a rectangle does, and there is no parallel description
+ * of them anywhere — which is why the layer list, hit testing, grouping, the
+ * multiverse, the unsat core and `why` all work on one without a line being
+ * written for them. Nothing in this section is a special case for a kind; it is
+ * two more dimensions of `frame/3` and one more quantity a node may carry.
+ *
+ * Three decisions are doing all of the work here, and each of them is a thing
+ * that would otherwise have been a second implementation:
+ *
+ *  - **`gaxis/1` and `gspan/1` grow rather than being joined by a parallel
+ *    table.** Every rule that reads the geometry vocabulary — the pull, the
+ *    world chain, the edge equation, `gcoord/2`, `mbase/4`, the state copies'
+ *    own defaults — picks the third axis up with no line of its own. A
+ *    `gzaxis/1` beside them would have meant writing each of those rules twice
+ *    and keeping the two copies in step forever.
+ *  - **The gate is one atom.** With no `spatial` the two widening rules ground
+ *    away, so `gaxis/1` is the two it has always been, no node gains a
+ *    `frame(N,z,0)`, no `gsolved` node gains a z unknown, and a flat document is
+ *    the document it was. That is the entirety of the no-regression promise, and
+ *    it is checkable by grepping one program for `gaxis(z)`.
+ *  - **Who is in the third axis is a claim about the *document*, not about
+ *    `frame/3`.** `s3/1` is seeded from `kind/2` and from `zstated/1`, which the
+ *    compiler states before any rule runs. Deriving it from `frame(N,z,_)`
+ *    instead would close a loop through the negation in the scene default that
+ *    *writes* `frame(N,z,0)` for an `s3` node, and leave the program with no
+ *    stable model at all.
+ *
+ * Emitted always, like the geometry, component, style and guide rules and for
+ * the same reason: `spatial`, `zstated/1` and `kind(N,viewport)` are all things
+ * a hand-written rule may assert — "every card on this artboard is lifted" is
+ * one rule — and a contract that quietly does nothing on some documents is not
+ * one. With no facts, none of it grounds.
+ */
+const SPATIAL_RULES = [
+	"#defined spatial/0.",
+	"#defined zstated/1.",
+	"#defined rval/2.",
+	"#defined mdeg/2.",
+	"#defined looks/2.",
+	"#defined tris/2.",
+	"#defined asset/2.",
+	"#defined instance/2.",
+	"#defined cpart/2.",
+	"% ---- the third axis exists, or it does not ----",
+	"% The compiler states `spatial.` for a document that holds a viewport or a",
+	"% node with a z, a depth or a turn on it. These two derivations are the same",
+	"% claim for a document a *rule* built: a viewport a rule minted is a viewport,",
+	"% and a node a rule lifted is lifted, and neither should have to remember to",
+	"% assert the gate as well. Asserting it directly is still allowed and gets the",
+	"% axis with no viewport anywhere, which is the courtesy ggrid/1 and machine/1",
+	"% already get.",
+	"spatial :- kind(N,viewport).",
+	"spatial :- zstated(_).",
+	"gaxis(z) :- spatial.",
+	"gspan(depth) :- spatial.",
+	"gturn(rotateX) :- spatial.",
+	"gturn(rotateY) :- spatial.",
+	"gturn(rotateZ) :- spatial.",
+	"",
+	"% ---- which nodes are in it ----",
+	"% A viewport is the seam: above it a flat rectangle on the artboard, below it",
+	"% a scene. So the view itself is in the third axis, everything under one",
+	"% inherits it down child/2 — which is also how a machine's state copy inherits",
+	"% it, since a copy hangs off the instance part it is a copy of — and a node the",
+	"% document lifted, deepened or turned is in it wherever it happens to sit. That",
+	"% last clause is why a `rect` with a z on a plain artboard is spatial and a",
+	"% `mesh` somebody dragged out of a view is not: the document decides, not the",
+	"% kind.",
+	"s3(N) :- kind(N,viewport).",
+	"s3(C) :- s3(P), child(P,C).",
+	"s3(N) :- zstated(N).",
+	"% An instance's part is in the third axis where the definition's part is.",
+	"% zstated/1 is emitted per *document* node, so a definition part the document",
+	"% lifted by name has one and inst(I,part) has nothing; the climb above only",
+	"% rescues it when some ancestor is already s3. Without this line an instance of",
+	"% a definition holding a lifted rect, placed on a plain artboard, is flat — and",
+	"% the definition beside it on the canvas is not, which is two pictures of one",
+	"% component.",
+	"s3(inst(I,N)) :- instance(I,R), cpart(R,N), s3(N).",
+	"",
+	"% ---- how far a node is turned ----",
+	"% The same shape frame/3 has, one quantity over: a rotation is a value like",
+	"% any other, so it is picked per universe and may name a token — an `angle`",
+	"% token holding [0deg, 30deg] is a card that lies flat in one design and tilts",
+	"% in another, and that really is two designs. Held in thousandths of a degree",
+	"% because a fact has to be an integer and a designer types half a degree on the",
+	"% first day; a thousandth of one is an arcsecond and a bit, four orders finer",
+	"% than anything a screen resolves.",
+	"t_value(N,R,L) :- resolved(rval(N,R),L).",
+	"turn(N,R,V) :- t_value(N,R,L), mdeg(L,V).",
+	"% Written as the twin of framed/2 rather than off t_value/3, and the",
+	"% difference matters: an instance's part is turned by tbase/4 in the component",
+	"% rules and has no rval/2 of its own, so a guard that asked whether the",
+	"% *document* said anything would default it to zero as well and leave two turn/3",
+	"% atoms for one (node, axis) — which is not two designs, it is one arbitrary",
+	"% answer. Reading turn/3 itself and excluding zero is what makes the default",
+	"% unable to unsay itself, exactly as `framed(N,A) :- frame(N,A,V), V != 0` is.",
+	"turned(N,R) :- turn(N,R,V), V != 0.",
+	"% A rotation that reads as no angle at all is no rotation, and it is zero",
+	"% deliberately rather than by accident: a radian is fifty-seven thousand two",
+	"% hundred and ninety-five thousandths of a degree and a fraction that never",
+	"% ends, because pi is irrational — so mdeg/2 emits nothing at all for \"1rad\"",
+	"% rather than a rounding nobody typed, and the fallback here is the same answer",
+	"% frame/3 gives a dimension that reads as no length. Only for a node in the",
+	"% third axis, for the scene defaults' reason — a viewport on page four does not",
+	"% give every headline in the document three rotations.",
+	"turn(N,R,0) :- s3(N), gturn(R), not turned(N,R).",
+	"grotated(N) :- turned(N,_).",
+	"",
+	"% ---- what a view looks through ----",
+	"% A camera the document names but that is not a camera, or is not in this view,",
+	"% decides nothing — the same silence a dangling instanceOf leaves, and the",
+	"% renderer then frames the subtree itself and says so. Deliberately *not*",
+	"% guarded by hidden/1: vcam/2 is a claim about which camera a view looks",
+	"% through, not about what is painted, and a designer hiding a camera means",
+	"% \"stop drawing the camera's marker\", never \"stop looking\".",
+	"vcam(V,C) :- looks(V,C), kind(C,camera), s3(C), kind(V,viewport).",
 ]
 
 /**
@@ -693,9 +885,14 @@ const GUIDE_RULES = [
 	"% at all, which would leave the whole grid floating on a free variable. This",
 	"% is the same bargain the world-coordinate chain strikes a few lines up: the",
 	"% unknown where the solver owns it, the stored number where it does not.",
+	"% Planar, and it costs nothing to say so: a grid cuts a *surface* into tracks,",
+	"% gcountof/2 and ggutterof/2 carry x and y and nothing else, so gspanned/2 is",
+	"% never about a depth and a gowns(S,depth) would be an atom no rule could",
+	"% read. The gsize/2 clause above already carries the third axis wherever a rule",
+	"% genuinely placed the surface.",
 	"gowns(S,Z) :- gsize(S,Z).",
-	"gowns(S,Z) :- layout(S,_), gspan(Z).",
-	"gowns(S,Z) :- lslot(_,S,_), gspan(Z).",
+	"gowns(S,Z) :- layout(S,_), gplanespan(Z).",
+	"gowns(S,Z) :- lslot(_,S,_), gplanespan(Z).",
 	"gspanned(S,Z) :- gtrack(S,A,_), gspanof(A,Z).",
 	"&sum{ lsz(S,Z) } = V :- gspanned(S,Z), not gowns(S,Z), frame(S,Z,V).",
 	"% ...and its world coordinate, which is derived only from gsolved above and",
@@ -779,11 +976,16 @@ const FREEDOM_RULES = [
 	// `lslot/3`. Stating a rule twice is stating it once.
 	...ASKED_RULES,
 	"% Every coordinate the solver decides rather than reads off the document.",
+	"% The first two carry the third axis for free, because gpos/2 and gsize/2",
+	"% already narrowed it to the nodes that are in it. The three below are the",
+	"% layout's, and they stay planar for gmoved/2's reason: a probe on lv(N,z) of",
+	"% a node no rule places is a &maximize over a variable no equation bounds, and",
+	"% an unbounded objective is not a wide answer, it is no answer.",
 	"gcoord(N,A) :- gpos(N,A).",
 	"gcoord(N,S) :- gsize(N,S).",
-	"gcoord(N,A) :- lslot(_,N,_), gaxis(A).",
-	"gcoord(N,S) :- lslot(_,N,_), gspan(S).",
-	"gcoord(C,S) :- layout(C,_), gspan(S).",
+	"gcoord(N,A) :- lslot(_,N,_), gplane(A).",
+	"gcoord(N,S) :- lslot(_,N,_), gplanespan(S).",
+	"gcoord(C,S) :- layout(C,_), gplanespan(S).",
 	"gdir(min). gdir(max).",
 	"{ gpull }.",
 	"% One coordinate, one direction, and only with the pull off — anything more",
@@ -844,8 +1046,26 @@ const SCENE_DEFAULT_RULES = [
 	"ordered(N) :- order(N,I), I != 1.",
 	"order(N,1) :- node(N), not ordered(N).",
 	"framed(N,A) :- frame(N,A,V), V != 0.",
-	"frame(N,A,0) :- node(N), gaxis(A), not framed(N,A).",
-	"frame(N,S,0) :- node(N), gspan(S), not framed(N,S).",
+	"frame(N,A,0) :- node(N), gplane(A), not framed(N,A).",
+	"frame(N,S,0) :- node(N), gplanespan(S), not framed(N,S).",
+	"% ...and the third axis only for the nodes that are in it. Written this way",
+	"% round rather than as `gaxis(A)` because a spatial document still holds",
+	"% artboards, cards and headlines that have no business gaining two coordinates",
+	"% and two more atoms each: a viewport on page four does not put the whole",
+	"% document into three dimensions, it puts its own subtree there.",
+	"frame(N,z,0) :- node(N), s3(N), not framed(N,z).",
+	"frame(N,depth,0) :- node(N), s3(N), not framed(N,depth).",
+	"% And one more, which is not a default so much as the seam having a floor.",
+	"% gworld/2 climbs child/2 out of the viewport and up to the artboard the view",
+	"% is drawn on, and an artboard is *not* in the third axis — s3/1 is narrow on",
+	"% purpose. So the z chain would run out of equations exactly one node above the",
+	"% seam: no gmoved/2, no frame(N,z,V), neither chain rule grounds, and wv(N,z)",
+	"% comes back off a number simplex was free to choose, taking every z under it",
+	"% along. Where a page is in depth is not a design decision — a page is at z 0,",
+	"% which is where the document already draws it. Deliberately without a node/1",
+	"% guard: a state copy is not a node/1 and its ancestors above the seam need the",
+	"% floor for the same reason.",
+	"frame(N,z,0) :- gworld(N,z), not framed(N,z).",
 ]
 
 /**
@@ -906,6 +1126,22 @@ const COMPONENT_RULES = [
 	"% it stays the definition's arrangement. Its x and y are left to the scene",
 	"% defaults, which is what puts them at zero.",
 	"mbase(I,R,Z,V) :- instance(I,R), gspan(Z), frame(I,Z,V).",
+	"% How far an instance's part is turned before any state has an opinion.",
+	"%",
+	"% Beside mbase/4 and split out for mbase/4's exact reason — the machine",
+	"% section also writes turn(inst(I,N),R,V), the shown state's copy aliased back,",
+	"% and a rule cannot read its own head. Here rather than in MACHINE_RULES, which",
+	"% is where a first draft put it: rotation is a *component* fact, so a",
+	"% definition holding a turned mesh, placed twice, with no machine anywhere in",
+	"% the document, must draw two turned meshes. Filed under the machine it would",
+	"% have drawn two flat ones, and the bug would have looked like a machine bug on",
+	"% a document that has no machine.",
+	"%",
+	"% `#defined mrshadow/3` is what makes the guard ground away where there is no",
+	"% machine at all, the same shape the mshadow/2 guard on rendered/3 has.",
+	"#defined mrshadow/3.",
+	"tbase(I,N,R,V) :- instance(I,R0), cinner(R0,N), turn(N,R,V).",
+	"turn(inst(I,N),R,V) :- tbase(I,N,R,V), not mrshadow(I,N,R).",
 	"",
 	"% ---- the definition's variables, minted once per instance ----",
 	"% This is what makes an instance a *point* in the component's space rather",
@@ -960,6 +1196,60 @@ const MOTION_DEFAULTS = MOTION_PROP_NAMES.flatMap((prop) => {
 	const ms = msOf(MOTION_PROPS[prop].fallback)
 	return ms === undefined ? [] : [atom(MOTION_DEFAULT_PREDICATES[prop], ms)]
 })
+
+/**
+ * What an exit time is when a transition does not say — the fourth motion
+ * setting, written out by hand because it is not yet in the table.
+ *
+ * **This is the one place the ladder is not a table lookup, and the reason is an
+ * ordering knot rather than a design decision.** `MOTION_DEFAULT_PREDICATES` is
+ * a `Record<MotionProp, string>`, so the moment `"exit"` joins the
+ * {@link MotionProp} union — which is where it belongs, and which `scene.ts`
+ * argues for at length — this file must gain the `exit: "mdefexit"` entry in the
+ * same commit or it will not typecheck. `scene.ts` belongs to an earlier step
+ * that had already landed when this one began, and its own comment records the
+ * deferral and names this file as the unblock. So the union is still three, and
+ * the fourth setting is read straight off {@link Transition.exit} here, in
+ * `machineValues` and in `unreadVariables`.
+ *
+ * **The one-line unblock, for whoever does it:** add `"exit"` to `MotionProp`
+ * and its entry to `MOTION_PROPS` (`{ label: "Exit time", type: "duration",
+ * fallback: "0ms", signed: false }`), add `exit: "mdefexit"` to
+ * {@link MOTION_DEFAULT_PREDICATES}, and delete this constant along with the
+ * three special cases that name it. Nothing else changes, because everything
+ * else iterates `MOTION_PROP_NAMES` already — which is exactly why the setting
+ * was specified as a table entry in the first place.
+ *
+ * Zero, which is "any time", and is what every transition in every document
+ * written before this rung means. Unsigned for `duration`'s reason and not
+ * `delay`'s: a negative exit time would be a transition takeable before its own
+ * state began, which is not a thing to ask for however generously it is read.
+ */
+const EXIT_FALLBACK = "0ms"
+
+/**
+ * The exit default and the three reserved ids, emitted **always**, beside
+ * {@link MOTION_DEFAULTS} and for its reason exactly.
+ *
+ * A hand-written rule may assert `mtrans/2` — a machine a rule brought into
+ * being is as legal as a node one did — and a transition with no exit time at
+ * all is a transition nothing gates. The reserved ids are the same courtesy one
+ * step further out: `mfrom(m,t,entry)` typed into the Rules panel gets the same
+ * reading a document's own entry edge does, and it can only get it if
+ * `mreserved/1` is stated whether or not this document holds a machine.
+ *
+ * Three constants and **not three states**, which is the whole of rung three. A
+ * {@link MachineState} is a delta over the definition's parts; Entry, Exit and
+ * Any have no appearance and never will, so as states they would be three empty
+ * deltas per machine, three copies per instance per part in `mcopy/3`, three
+ * rows in every state strip, and three terms a rule could name that would say
+ * nothing — and `shown/2` could carry one, which would mean "draw this button in
+ * Exit", which is not a picture.
+ */
+const LADDER_DEFAULTS = [
+	...(msOf(EXIT_FALLBACK) === undefined ? [] : [atom("mdefexit", msOf(EXIT_FALLBACK) as number)]),
+	...[...RESERVED_STATES].map((id) => atom("mreserved", id)),
+]
 
 /**
  * State machines, as rules over the facts a machine and its instances emit.
@@ -1045,14 +1335,21 @@ const MACHINE_RULES = [
 	"minstance(I,M) :- instance(I,R), machine_of(M,R).",
 	"minitial(M,S) :- mindex(M,S,1).",
 	"",
-	"% Every instance of a driven definition is in *some* state, and never in two.",
-	"% The default is written the way the scene defaults are — the guard excludes",
-	"% the value the default supplies — so that supplying the default is not itself",
-	"% the reason the default no longer applies, which is the pair with no stable",
-	"% model. The compiler emits shown/2 as a fact for every instance the document",
-	"% holds; this rule is for the ones a rule of yours brought into being.",
-	"mstated(I) :- minstance(I,M), shown(I,S), not minitial(M,S).",
-	"shown(I,S) :- minstance(I,M), minitial(M,S), not mstated(I).",
+	"% Every instance of a driven definition is in *some* state, and never in two",
+	"% *of one layer*. The default is written the way the scene defaults are — the",
+	"% guard excludes the value the default supplies — so that supplying the default",
+	"% is not itself the reason the default no longer applies, which is the pair with",
+	"% no stable model. The compiler emits shown/2 as a fact for every instance the",
+	"% document holds, one per layer; these rules are for the ones a rule of yours",
+	"% brought into being.",
+	"%",
+	"% L is threaded through both halves and nowhere else changes. On a machine with",
+	"% no layers in the document, the reader mints one called `base`, every state is",
+	"% in it, mlinitial(M,base,S) is minitial(M,S) and these two derive precisely the",
+	"% atoms the un-layered pair did — which is asserted as sorted-set equality over",
+	"% the template corpus rather than argued for here.",
+	"mstated(I,L) :- minstance(I,M), shown(I,S), mslayer(M,S,L), not mlinitial(M,L,S).",
+	"shown(I,S) :- minstance(I,M), mlinitial(M,L,S), not mstated(I,L).",
 	"",
 	"% ---- which parts get a copy ----",
 	"% Derived rather than emitted per instance: the analysis decides the parts",
@@ -1107,8 +1404,26 @@ const MACHINE_RULES = [
 	"% own, in the same shape and for the same reason: written so it cannot unsay",
 	"% itself.",
 	"mframed(I,S,N,D) :- frame(stt(I,S,N),D,V), V != 0.",
-	"frame(stt(I,S,N),A,0) :- mcopy(I,S,N), gaxis(A), not mframed(I,S,N,A).",
-	"frame(stt(I,S,N),Z,0) :- mcopy(I,S,N), gspan(Z), not mframed(I,S,N,Z).",
+	"frame(stt(I,S,N),A,0) :- mcopy(I,S,N), gplane(A), not mframed(I,S,N,A).",
+	"frame(stt(I,S,N),Z,0) :- mcopy(I,S,N), gplanespan(Z), not mframed(I,S,N,Z).",
+	"% ...and the third axis only for the copies that are in it, which is the same",
+	"% narrowing the scene defaults got and for the same reason. Written `gplane` and",
+	"% `s3` rather than `gaxis` because gaxis/1 grows the moment the document holds",
+	"% one viewport, and these two lines would then give *every state copy of every",
+	"% part of every instance in the document* a z and a depth — including the",
+	"% four-state button on page one that has never heard of the third axis. Worse",
+	"% than wasteful: inst(I,N) would be flat, because the scene defaults are",
+	"% narrowed, while stt(I,S,N) was three-dimensional, and the alias below joins",
+	"% the two.",
+	"%",
+	"% s3(stt(I,S,N)) costs no rule of its own, which is the part worth checking",
+	"% rather than believing: `s3(C) :- s3(P), child(P,C)` climbs child/2, and the",
+	"% copies are parented to the instance tree a few lines down precisely so the",
+	"% world chain reaches them. So a copy is in the third axis exactly when the part",
+	"% it is a copy of is, with no negation in the path and no cycle.",
+	"frame(stt(I,S,N),z,0) :- mcopy(I,S,N), s3(stt(I,S,N)), not mframed(I,S,N,z).",
+	"frame(stt(I,S,N),depth,0) :- mcopy(I,S,N), s3(stt(I,S,N)),",
+	"                             not mframed(I,S,N,depth).",
 	"",
 	"% Appearance, the same way — and this is where the invariant lives. A property",
 	"% no state touches is read from the *instance's* one variable, shared by every",
@@ -1126,8 +1441,51 @@ const MACHINE_RULES = [
 	"% and rendered/3 stay untimed and stay about inst(I,N), so the canvas, hit",
 	"% testing, isPartOf, partLabel, the layer list and both export targets never",
 	"% learn that states exist.",
-	"frame(inst(I,N),D,V) :- frame(stt(I,S,N),D,V), shown(I,S).",
-	"rendered(inst(I,N),P,L) :- rendered(stt(I,S,N),P,L), shown(I,S).",
+	"%",
+	"% Each of the three carrying aliases is **two rules rather than one**, and the",
+	"% split is what makes layers work without moving a single atom on a document",
+	"% that has one. Where some layer owns the field, only the layer that *writes*",
+	"% it — the last one that owns it, mwriter/4 — aliases its copy back; where no",
+	"% layer owns it at all, every shown copy aliases, exactly as the single shipped",
+	"% rule did.",
+	"%",
+	"% Without the writer guard, two layers each painting a card derive two",
+	"% rendered/3 literals for one property, and rendered/3 is a relation: that is",
+	"% not two designs, it is one arbitrary answer, silently — the exact disease the",
+	"% mshadow/2 guard was added to cure, one rung up.",
+	"%",
+	"% The unowned half is a **departure from the frozen spec, and it is the one",
+	"% departure in this block worth reading.** The spec's narrowed-alias section",
+	"% argues the guard removes only duplicate derivations, and for a property it",
+	"% is right: an",
+	"% unowned property is read by the copy from the instance's own variable, and the",
+	"% base rule derives the same atom. It is *wrong for a dimension*, because a",
+	"% dimension has a third source the section did not consider — lask(stt(I,S,N),",
+	"% D,V), the box a copy hugs its own words to. That is not in mfshadow/3, so the",
+	"% narrow guard alone would have left the measured copy unaliased and the",
+	"% instance drawn at the definition's box: the state copy grows and the picture",
+	"% does not, which is the exact failure the merged plan warns about one",
+	"% predicate over. The unowned clause keeps it, and keeps every atom identical on",
+	"% a one-layer document into the bargain.",
+	"frame(inst(I,N),D,V) :- frame(stt(I,S,N),D,V), shown(I,S), minstance(I,M),",
+	"                        mslayer(M,S,L), mfwriter(M,L,N,D).",
+	"frame(inst(I,N),D,V) :- frame(stt(I,S,N),D,V), shown(I,S), minstance(I,M),",
+	"                        not mfowned(M,N,D).",
+	"rendered(inst(I,N),P,L) :- rendered(stt(I,S,N),P,L), shown(I,S), minstance(I,M),",
+	"                           mslayer(M,S,Lay), mwriter(M,Lay,N,P).",
+	"rendered(inst(I,N),P,L) :- rendered(stt(I,S,N),P,L), shown(I,S), minstance(I,M),",
+	"                           not mowned(M,N,P).",
+	"% Rotation, the third of the family, and it did not exist when that section",
+	"% was written. Two layers that both turn one part would derive two turn/3 for",
+	"% one (node, axis), which is the same one-arbitrary-answer the other two refuse.",
+	"turn(inst(I,N),R,V) :- turn(stt(I,S,N),R,V), shown(I,S), minstance(I,M),",
+	"                       mslayer(M,S,L), mrwriter(M,L,N,R).",
+	"turn(inst(I,N),R,V) :- turn(stt(I,S,N),R,V), shown(I,S), minstance(I,M),",
+	"                       not mrowned(M,N,R).",
+	"% Hiding needs no writer, and that is not an omission. Hiding does not",
+	"% conflict: two layers that both take a part out of the picture agree, and one",
+	"% that hides while another paints is not a disagreement about a value, it is a",
+	"% part that is not there. Any layer that hides, hides.",
 	"hidden(inst(I,N)) :- mhidden(I,S,N), shown(I,S).",
 	"",
 	"% ---- a copy is parented where its part is ----",
@@ -1168,18 +1526,434 @@ const MACHINE_RULES = [
 	"% them by name and land in a core like every other rule. The Machines panel",
 	"% offers the four canned `custom` constraints that do exactly that; there is no",
 	"% new constraint kind and no new machinery.",
-	"mreach(M,S) :- minitial(M,S).",
-	"mreach(M,S2) :- mreach(M,S1), mfrom(M,T,S1), mto(M,T,S2).",
+	"%",
+	"% Four of them now walk mefrom/3 — the *effective* source of an edge — rather",
+	"% than mfrom/3, and mreach/2 starts at every layer's own initial state rather",
+	"% than the machine's. On a document with no reserved id and one layer,",
+	"% mefrom/3 IS mfrom/3 and mlinitial/3 IS minitial/2, so all four are the rules",
+	"% that shipped, atom for atom. That is the whole of the no-regression argument",
+	"% for rungs three and four, and it is asserted rather than believed.",
+	"mreach(M,S) :- mlinitial(M,_,S).",
+	"mreach(M,S2) :- mreach(M,S1), mefrom(M,T,S1), mto(M,T,S2).",
 	"munreached(M,S) :- mstate(M,S), not mreach(M,S).",
-	"mleaves(M,S) :- mfrom(M,_,S).",
+	"mleaves(M,S) :- mefrom(M,_,S).",
 	"mdeadend(M,S) :- mstate(M,S), not mleaves(M,S).",
-	"mnondet(M,S,G) :- mfrom(M,T1,S), mfrom(M,T2,S), T1 < T2,",
-	"                  mtrigger(M,T1,G), mtrigger(M,T2,G).",
-	"mdangling(M,T) :- mfrom(M,T,S), not mstate(M,S).",
-	"mdangling(M,T) :- mto(M,T,S), not mstate(M,S).",
-	"% Two shown states is not an instance in two states, it is two pictures on top",
-	"% of each other. Nothing the document can write does it; a rule can.",
-	"mtwoshown(I) :- shown(I,S1), shown(I,S2), S1 < S2.",
+	"% Two edges on one trigger are only nondeterministic when their guards can",
+	"% both hold and neither outranks the other. With no conditions moverlap/3 is",
+	"% always true and with no Any edge every rank is 1, so on a document with",
+	"% neither this is the rule that shipped.",
+	"mnondet(M,S,G) :- mefrom(M,T1,S), mefrom(M,T2,S), T1 < T2,",
+	"                  mtrigger(M,T1,G), mtrigger(M,T2,G),",
+	"                  moverlap(M,T1,T2), mrank(M,T1,R), mrank(M,T2,R).",
+	"% A reserved id in a transition's end is exempt here and reported as",
+	"% mmisplaced/2 instead, because \"this edge names a state you deleted\" and",
+	"% \"this edge tries to leave Exit\" are two different mistakes and a designer",
+	"% fixes them two different ways.",
+	"mdangling(M,T) :- mfrom(M,T,S), not mstate(M,S), not mreserved(S).",
+	"mdangling(M,T) :- mto(M,T,S), not mstate(M,S), not mreserved(S).",
+	"% Two shown states *of one layer* is not an instance in two states, it is two",
+	"% pictures on top of each other. Two shown states of two layers is a machine",
+	"% doing its job, which is the whole of rung four. Nothing the document can",
+	"% write does the former; a rule can.",
+	"mtwoshown(I) :- minstance(I,M), shown(I,S1), shown(I,S2), S1 < S2,",
+	"                mslayer(M,S1,L), mslayer(M,S2,L).",
+	"",
+	"% ================== the ladder: five rungs above a state =================",
+	"% Inputs, guards, the three reserved ids, layers, timelines and blend states.",
+	"% The invariant is the same sentence for every one of them and it is the",
+	"% sentence at the top of this block, restated for five new kinds of thing:",
+	"% **nothing here is ever an alt/2 and nothing gets a pick/2.** Adding any of",
+	"% them to a document must leave its universe count exactly where it was.",
+	"%",
+	"% Each rung earns that a different way, and the five arguments are worth",
+	"% having in one place, because a step that loses one of them loses the",
+	"% feature:",
+	"%",
+	"%  - **An input earns it by being invisible to the picture.** No projected",
+	"%    atom depends on an input's value. shown/2 is a fact the compiler emits",
+	"%    from the document, so which state is *drawn* never consults one; what an",
+	"%    input decides is which transitions a runtime may take. Two universes",
+	"%    differing only in an input would be pixel-identical and would collapse,",
+	"%    so the honest answer is not to add a projection but to notice there is",
+	"%    nothing to project — and every one of the six input predicates below is a",
+	"%    fact rather than a variable.",
+	"%  - **A condition earns it by being read at grounding.** Every comparison",
+	"%    here is between two CONSTANTS: the range the input declared and the",
+	"%    literal the condition named. Nothing in this block ever evaluates a",
+	"%    runtime value. What it computes is which guards are *possible*, which is",
+	"%    a claim about the document.",
+	"%  - **Entry, Exit and Any earn it by being sugar.** Three reserved ids, three",
+	"%    facts and four rules. No states, no copies, no variables.",
+	"%  - **A layer earns it by composing rather than choosing.** Two layers are",
+	"%    two shown/2 facts in ONE answer set, not a choice between them, and the",
+	"%    composition is a rule. This is the rung where the copy encoding pays for",
+	"%    itself: had a state been a choice rule, a four-state layer beside a",
+	"%    three-state one would have been twelve universes nobody was choosing",
+	"%    between eleven of, and \"does the glow line up while the button is also",
+	"%    pressed\" would have had nowhere to be asked, because the two layers'",
+	"%    states would be in two different answer sets.",
+	"%  - **A timeline earns it by being keyframes.** THE SOLVER DECIDES KEYFRAMES",
+	"%    AND NEVER FRAMES. Grounding scales with how many keyframes a document",
+	"%    holds and with nothing else; there is no frame rate in this program and",
+	"%    no time in this block that is not a keyframe's own. A keyframe's time and",
+	"%    its value are ordinary Values and *may* branch — that is the one",
+	"%    exception on the ladder, and it is the same exception a delta's two fills",
+	"%    already are.",
+	"%",
+	"% Everything below is `#defined` first, because a document with no machine",
+	"% heads none of it and clingo would otherwise remark once per predicate on a",
+	"% body atom no rule heads — a message that is true, useless, and shown to the",
+	"% designer as a problem with their own rules.",
+	"#defined minput/2.",
+	"#defined minkind/3.",
+	"#defined minbool/3.",
+	"#defined minnum/3.",
+	"#defined minlow/3.",
+	"#defined minhigh/3.",
+	"#defined mcond/3.",
+	"#defined mcondin/4.",
+	"#defined mcondop/4.",
+	"#defined mcrange/6.",
+	"#defined mcnot/5.",
+	"#defined mcis/5.",
+	"#defined mcisnot/5.",
+	"#defined mcfired/4.",
+	"#defined mcbad/3.",
+	"#defined mreserved/1.",
+	"#defined mlayer/2.",
+	"#defined mlindex/3.",
+	"#defined mslayer/3.",
+	"#defined mlfirst/3.",
+	"#defined mlshadow/4.",
+	"#defined mlfshadow/4.",
+	"#defined mlrshadow/4.",
+	"#defined mdefexit/1.",
+	"#defined mtimeline/2.",
+	"#defined mtplays/3.",
+	"#defined mtrack/3.",
+	"#defined mtrackof/4.",
+	"#defined mkey/4.",
+	"#defined mkeasing/5.",
+	"#defined mloop/3.",
+	"#defined mkpart/3.",
+	"#defined mblend/3.",
+	"#defined mblendin/3.",
+	"#defined mstop/4.",
+	"#defined mstopat/4.",
+	"#defined mstopby/4.",
+	"#defined permille/2.",
+	"#defined mdeg/2.",
+	"#defined gturn/1.",
+	"#defined tbase/4.",
+	"#defined s3/1.",
+	"",
+	"% ---- layers ----",
+	"% A layer is an id and a position, and THE POSITION IS THE PRIORITY — the same",
+	"% \"the order is the answer\" the initial state and order/2 already use, one axis",
+	"% over, and the reason there is no `priority` field to disagree with the list.",
+	"% A machine with no layers in the document emits one, called base, and every",
+	"% state is in it, so every rule here is the rule that shipped on such a machine.",
+	"mlinitial(M,L,S) :- mlfirst(M,L,S).",
+	"mtlayer(M,T,L) :- mfrom(M,T,S), mslayer(M,S,L).",
+	"% An edge out of a reserved id belongs to the layer its *destination* is in,",
+	"% which is the only reading available: `entry` and `any` are not states and so",
+	"% are in no layer, and an Entry edge that belonged to no layer could never find",
+	"% the initial state it is sugar for.",
+	"mtlayer(M,T,L) :- mfrom(M,T,R), mreserved(R), mto(M,T,S), mslayer(M,S,L).",
+	"mcrosslayer(M,T) :- mtlayer(M,T,L1), mto(M,T,S), mslayer(M,S,L2), L1 != L2.",
+	"",
+	"% ---- Entry, Exit and Any ----",
+	"% Entry is sugar over the initial state — a `load` trigger already fires once",
+	"% when the runtime starts, so this program shipped Entry under another name —",
+	"% and it is a *rule* rather than a rewrite in the compiler so that a",
+	"% hand-written mfrom(M,t,entry) gets the reading a document's own edge does.",
+	"% Any is a source that stands for every state of its own layer. Exit is a",
+	"% destination and derives nothing but the fact that a layer stops.",
+	"mefrom(M,T,S) :- mfrom(M,T,S), not mreserved(S).",
+	"mefrom(M,T,S) :- mfrom(M,T,entry), mlinitial(M,L,S), mtlayer(M,T,L).",
+	"manyfrom(M,T) :- mfrom(M,T,any).",
+	"mefrom(M,T,S) :- manyfrom(M,T), mstate(M,S), mslayer(M,S,L), mtlayer(M,T,L).",
+	"mstops(M,T) :- mto(M,T,exit).",
+	"% Specific beats Any, which is Rive's rule and the only one that makes a",
+	"% fallback usable — a fallback that beat the specific case would be a fallback",
+	"% nobody could override. Encoded as a rank so that mnondet/3 stops screaming at",
+	"% the ordinary idiom.",
+	"%",
+	"% `not mreserved(S)` rather than `mstate(M,S)`, and the difference is not a",
+	"% shortcut: machines.ts records as intentional that a nondeterministic pair may",
+	"% be reported on a `from` the machine has not got, because two edges leaving the",
+	"% same missing state are still two edges the designer wrote and meant. Asking",
+	"% for mstate/2 here would take that back silently, and only for the pair that",
+	"% has *also* lost its state — the worst moment to stop reporting anything.",
+	"mrank(M,T,1) :- mfrom(M,T,S), not mreserved(S).",
+	"mrank(M,T,2) :- manyfrom(M,T).",
+	"mmisplaced(M,T) :- mfrom(M,T,exit).",
+	"mmisplaced(M,T) :- mto(M,T,entry).",
+	"mmisplaced(M,T) :- mto(M,T,any).",
+	"",
+	"% ---- guards ----",
+	"% A transition fires when its trigger happens AND every one of its conditions",
+	"% holds. The conjunction is total and there is no `or`: two guards that should",
+	"% be alternatives are two transitions, which is what Rive does and which here",
+	"% has a second payoff — two transitions are two ids, so a violation can name the",
+	"% one that is impossible instead of pointing at half a boolean expression.",
+	"%",
+	"% The arithmetic is a CLOSED WINDOW rather than an operator, and the",
+	"% normalisation into one happens in TypeScript (`normalizeCondition`) rather",
+	"% than here. Six operators compared symbolically is six pairs of rules that each",
+	"% have to know which way `ge` points; six operators normalised into an interval",
+	"% is one comparison, L1 > H2, that answers every pair — which is why the clash",
+	"% block is four lines.",
+	"mguarded(M,T) :- mcond(M,T,_).",
+	"mclash(M,T1,T2) :- mcrange(M,T1,_,X,L1,H1), mcrange(M,T2,_,X,L2,H2), L1 > H2.",
+	"% A hole against the point it excludes. `ne` gets no window because a hole is",
+	"% not an interval, and it clashes with exactly one thing.",
+	"mclash(M,T1,T2) :- mcnot(M,T1,_,X,V), mcrange(M,T2,_,X,V,V).",
+	"mclash(M,T1,T2) :- mcis(M,T1,_,X,B1), mcis(M,T2,_,X,B2), B1 != B2.",
+	"mclash(M,T1,T2) :- mcis(M,T1,_,X,B), mcisnot(M,T2,_,X,B).",
+	"% L1 > H2 alone suffices for the window case because this closure covers the",
+	"% other direction; writing both would be the same claim twice.",
+	"mdisjoint(M,T1,T2) :- mclash(M,T1,T2).",
+	"mdisjoint(M,T1,T2) :- mclash(M,T2,T1).",
+	"% NOT PROVABLY DISJOINT, which is a sound refusal to guess rather than a claim",
+	"% that some valuation exists. The default for two unguarded edges is overlap,",
+	"% which is what makes mnondet/3 on a document with no conditions the rule that",
+	"% shipped, atom for atom.",
+	"moverlap(M,T1,T2) :- mfrom(M,T1,_), mfrom(M,T2,_), not mdisjoint(M,T1,T2).",
+	"% The clash rules asked of one transition against itself, plus a window that",
+	"% misses the input's own declared range, plus a condition that is not one.",
+	"% Three rules because they are three different mistakes a person makes.",
+	"mguardnever(M,T) :- mclash(M,T,T).",
+	"mguardnever(M,T) :- mcrange(M,T,_,X,_,H), minlow(M,X,Lo), Lo > H.",
+	"mguardnever(M,T) :- mcrange(M,T,_,X,L,_), minhigh(M,X,Hi), L > Hi.",
+	"mguardnever(M,T) :- mcbad(M,T,_).",
+	"mfeasible(M,T) :- mtrans(M,T), not mguardnever(M,T).",
+	"% Whether the input declares an end at all. Absent is OPEN, not zero, in both",
+	"% directions and in every reader: a designer who has not said how far the",
+	"% drawer opens has not said that it does not open.",
+	"minbounded(M,X) :- minlow(M,X,_).",
+	"minbounded(M,X) :- minhigh(M,X,_).",
+	"",
+	"% ---- exit time, the fourth motion setting ----",
+	"% How long T's `from` state must have been held before T may be taken. A",
+	"% trigger arriving early is DROPPED and not remembered — a debounce — which is",
+	"% a stated departure from Rive, whose exit time fires the transition when the",
+	"% time elapses. The reason is runtime.ts's own: a deferred fire is a state",
+	"% change nobody's finger caused, arriving at a moment nothing on the page marks.",
+	"%",
+	"% Clamped at zero the way duration and stagger are, and for their reason: a",
+	"% negative exit time would be a transition takeable before its own state began.",
+	"mexit(M,T,V) :- resolved(mval(M,T,exit),L), millis(L,V), V >= 0.",
+	"mexit(M,T,0) :- resolved(mval(M,T,exit),L), millis(L,V), V < 0.",
+	"mreadsexit(M,T) :- resolved(mval(M,T,exit),L), millis(L,_).",
+	"mexit(M,T,V) :- mtrans(M,T), mdefexit(V), not mreadsexit(M,T).",
+	"",
+	"% ---- reachability once the guards are taken into account ----",
+	"% A subset of mreach/2's edges, so mgreach is a subset of mreach and this check",
+	"% is STRICTLY STRONGER than the one that shipped rather than merely different.",
+	"% Sound where it fires: a guard mguardnever rejects is one no runtime valuation",
+	"% can satisfy, so the edge genuinely can never be taken.",
+	"%",
+	"% Deliberately incomplete the other way, and that is stated rather than hidden.",
+	"% A state reachable only through a *sequence* of guards that cannot all hold in",
+	"% order is still called reachable here, because tracking which valuations",
+	"% survive each hop is tracking (state x valuation), which is the combinatorial",
+	"% explosion this whole design is built to avoid. Refusing to guess is the house",
+	"% position and this is where it is paid for.",
+	"mgreach(M,S) :- mlinitial(M,_,S).",
+	"mgreach(M,S2) :- mgreach(M,S1), mefrom(M,T,S1), mfeasible(M,T), mto(M,T,S2).",
+	"mgunreached(M,S) :- mstate(M,S), not mgreach(M,S).",
+	"",
+	"% ---- who writes what, when two layers both have an opinion ----",
+	"% RESOLVE FIRST, REPORT SECOND, and the order is the decision.",
+	"%",
+	"% Resolve, because the program must produce a picture: leaving the aliases to",
+	"% fire for both layers derives two literals for one relation, which is one",
+	"% arbitrary answer rather than two designs. Refusing by making the document",
+	"% unsatisfiable would be worse — two layers that both animate opacity is the",
+	"% most ordinary thing anybody builds with layers, and a tool that answered it",
+	"% with a blank canvas and an unsat core is a tool nobody reaches rung four with.",
+	"%",
+	"% Report, because we can, and because it is the reason to build this here. The",
+	"% conflict is derived against terms the document named — the machine, the two",
+	"% layers, the part and the field — so a canned `custom` check turns it into an",
+	"% ordinary viol/1 with a switch, a name in the unsat core, a strength that can",
+	"% be softened to a preference, and `why` and `relax` for free. Rive resolves the",
+	"% same way and reports none of it; the report is the whole point of the rung.",
+	"mwriter(M,L,N,P) :- mlshadow(M,L,N,P),",
+	"                    K = #max{ J : mlshadow(M,L2,N,P), mlindex(M,L2,J) },",
+	"                    mlindex(M,L,K).",
+	"mfwriter(M,L,N,D) :- mlfshadow(M,L,N,D),",
+	"                     K = #max{ J : mlfshadow(M,L2,N,D), mlindex(M,L2,J) },",
+	"                     mlindex(M,L,K).",
+	"mrwriter(M,L,N,R) :- mlrshadow(M,L,N,R),",
+	"                     K = #max{ J : mlrshadow(M,L2,N,R), mlindex(M,L2,J) },",
+	"                     mlindex(M,L,K).",
+	"% Whether ANY layer owns the field, which is the guard the unowned half of each",
+	"% alias reads. A separate predicate rather than `not mwriter(M,_,N,P)` because",
+	"% the alias needs the negation *before* it binds a layer, and because one",
+	"% predicate named for the question is cheaper to read than a negated aggregate.",
+	"mowned(M,N,P) :- mlshadow(M,_,N,P).",
+	"mfowned(M,N,D) :- mlfshadow(M,_,N,D).",
+	"mrowned(M,N,R) :- mlrshadow(M,_,N,R).",
+	"% ...and the fact that there was a decision to make. STATIC: it fires when two",
+	"% layers *could* both write the field, whether or not the two states that do are",
+	"% both on screen. That is the right default and not laziness — a machine is a",
+	"% claim about all of its runs, and a check that only fired in the universe you",
+	"% happened to be looking at would be a check that passed until it shipped.",
+	"mfight(M,L1,L2,N,P) :- mlshadow(M,L1,N,P), mlshadow(M,L2,N,P), L1 < L2.",
+	"mffight(M,L1,L2,N,D) :- mlfshadow(M,L1,N,D), mlfshadow(M,L2,N,D), L1 < L2.",
+	"mrfight(M,L1,L2,N,R) :- mlrshadow(M,L1,N,R), mlrshadow(M,L2,N,R), L1 < L2.",
+	"% The same fight, in this universe, on this instance, as drawn — for the panel,",
+	"% which is answering a different question (\"why is this pixel this colour\") and",
+	"% is allowed to be about the moment.",
+	"mfightat(I,L1,L2,N,P) :- minstance(I,M), mfight(M,L1,L2,N,P),",
+	"                         shown(I,S1), mslayer(M,S1,L1),",
+	"                         shown(I,S2), mslayer(M,S2,L2).",
+	"",
+	"% ---- a state's own rotation ----",
+	"% The third field a delta may hold, in the shape of the other two. tbase/4 is",
+	"% the component rules' answer to \"how far is this instance's part turned before",
+	"% any state has an opinion\", and it lives there rather than here for the reason",
+	"% recorded beside it: a rotated mesh inside a definition, placed twice, with no",
+	"% machine anywhere, must draw two turned meshes.",
+	"turn(stt(I,S,N),R,V) :- mcopy(I,S,N), tbase(I,N,R,V), not msrval(I,S,N,R).",
+	"turn(stt(I,S,N),R,V) :- mcopy(I,S,N), resolved(srval(I,S,N,R),L), mdeg(L,V).",
+	"% ...and it only counts where it reads as an angle, so a delta pointed at a",
+	"% dangling token or at \"1rad\" — which is irrational in degrees and so emits no",
+	"% mdeg/2 at all — falls back to the base rather than leaving the copy unturned",
+	"% by accident. Same reading turn/3 itself gets one level up.",
+	"msrval(I,S,N,R) :- resolved(srval(I,S,N,R),L), mdeg(L,_).",
+	"% A copy's own default, written so it cannot unsay itself — the twin of",
+	"% mframed/4 above, and narrowed to s3 for the same reason those are: a viewport",
+	"% on page four must not give every state copy of every button on page one three",
+	"% rotations it has never heard of.",
+	"mturned(I,S,N,R) :- turn(stt(I,S,N),R,V), V != 0.",
+	"turn(stt(I,S,N),R,0) :- mcopy(I,S,N), s3(stt(I,S,N)), gturn(R),",
+	"                        not mturned(I,S,N,R).",
+	"",
+	"% ---- timelines ----",
+	"% Keyframes, and nothing but keyframes. There is no frame, no frame rate and no",
+	"% time in this block that is not a keyframe's own: a twenty-key timeline costs",
+	"% the same whether it plays over 100ms or ten seconds, and whether the browser",
+	"% draws it at 60Hz or 120.",
+	"mkat(M,W,R,K,V) :- resolved(kat(M,W,R,K),L), millis(L,V), V >= 0.",
+	"mkat(M,W,R,K,0) :- resolved(kat(M,W,R,K),L), millis(L,V), V < 0.",
+	"% The empty maximum, written down — the same trailing 0 lbiggest/2 carries and",
+	"% for the same reason: a timeline with no keyframe that reads as a duration must",
+	"% still have a length, and #max over nothing is #inf, which clingo remarks on",
+	"% once per timeline on every document somebody is in the middle of authoring.",
+	"mtlast(M,W,V) :- mtimeline(M,W), V = #max{ T : mkat(M,W,_,_,T); 0 }.",
+	"mtlen(M,W,V) :- resolved(tlen(M,W),L), millis(L,V), V >= 0.",
+	"% A negative stated length is a typo, not a timeline that runs backwards, and",
+	"% it clamps exactly where mdur/3 does. This line is not in the frozen spec's §8",
+	"% and is added here on purpose: without it a document that typed \"-1s\" derives",
+	"% no mtlen/3 at all, while `timelineLength` in machines.ts answers 0 — and a",
+	"% panel and a program that disagree about how long an animation is is the",
+	"% quietest bug this rung can have.",
+	"mtlen(M,W,0) :- resolved(tlen(M,W),L), millis(L,V), V < 0.",
+	"mreadstlen(M,W) :- resolved(tlen(M,W),L), millis(L,_).",
+	"% Absent is the last keyframe's time, DERIVED rather than stored, so a timeline",
+	"% cannot disagree with its own contents. Present and shorter than the last",
+	"% keyframe is legal and means what it says: the tail is not played.",
+	"mtlen(M,W,V) :- mtimeline(M,W), mtlast(M,W,V), not mreadstlen(M,W).",
+	"mkpast(M,W,R,K) :- mkat(M,W,R,K,T), mtlen(M,W,Len), T > Len.",
+	"mknext(M,W,R,K1,K2) :- mkey(M,W,R,K1), mkey(M,W,R,K2), K2 = K1 + 1.",
+	"% A keyframe that resolved to a time BEFORE its predecessor's. Not a thing a",
+	"% linter over the document could ever catch, because a keyframe's time is a",
+	"% Value and this is a property of an answer rather than of a document — which",
+	"% is exactly the class of bug a multiverse invents. Derived and offered to the",
+	"% Rules panel; not canned, because a designer who wants it writes one line.",
+	"mkbackwards(M,W,R,K2) :- mknext(M,W,R,K1,K2), mkat(M,W,R,K1,T1),",
+	"                         mkat(M,W,R,K2,T2), T2 < T1.",
+	"",
+	"% ---- a keyframe copy, where a rule asked for one ----",
+	"% RATIONED HARDER THAN A STATE COPY, and the default is none. A timeline on its",
+	"% own costs two variables per keyframe and one per timeline and not a single",
+	"% copy: that is enough for the export, which needs times and values and lets the",
+	"% compositor do the rest, and enough for the canvas, which lerps between two",
+	"% entries of an answer set it already holds. Minting a copy per keyframe by",
+	"% default is the one decision that would make this rung unaffordable — a",
+	"% twenty-key timeline on a twelve-part definition placed twenty times is 4,800",
+	"% poses nobody asked to place. mkpart/3 is `keyframeParts`' answer, seeded only",
+	"% from the geometric constraints that name a kfr(...) term.",
+	"%",
+	"% Its geometry and its paint come from the track where the track speaks and from",
+	"% the state's own copy where it does not — the same absent-is-inherit every",
+	"% other copy in this program uses. **Never a node/1**, for stt/3's reasons.",
+	"mkcopy(I,W,R,K) :- minstance(I,M), mkey(M,W,R,K), mtrackof(M,W,R,N), mkpart(M,W,N).",
+	"frame(kfr(I,W,R,K),D,V) :- mkcopy(I,W,R,K), R = trkd(_,D), minstance(I,M),",
+	"                           resolved(kval(M,W,R,K),L), numeral(L,V).",
+	"mkeydim(I,W,R,K,D) :- mkcopy(I,W,R,K), R = trkd(_,D), minstance(I,M),",
+	"                      resolved(kval(M,W,R,K),L), numeral(L,_).",
+	"frame(kfr(I,W,R,K),D,V) :- mkcopy(I,W,R,K), mtrackof(M,W,R,N), minstance(I,M),",
+	"                           mtplays(M,S,W), frame(stt(I,S,N),D,V),",
+	"                           not mkeydim(I,W,R,K,D).",
+	"rendered(kfr(I,W,R,K),P,L) :- mkcopy(I,W,R,K), R = trkp(_,P), minstance(I,M),",
+	"                              resolved(kval(M,W,R,K),L).",
+	"mkeyprop(I,W,R,K,P) :- mkcopy(I,W,R,K), R = trkp(_,P), minstance(I,M),",
+	"                       resolved(kval(M,W,R,K),_).",
+	"rendered(kfr(I,W,R,K),P,L) :- mkcopy(I,W,R,K), mtrackof(M,W,R,N), minstance(I,M),",
+	"                              mtplays(M,S,W), rendered(stt(I,S,N),P,L),",
+	"                              not mkeyprop(I,W,R,K,P).",
+	"% A rotation track, in the shape of the dimension pair. The merge widened Track",
+	"% with a `turn` field and specified \"the same rules one quantity over\" without",
+	"% writing them; these are them, reading mdeg/2 where the dimension pair reads",
+	"% numeral/2, because an angle and a length have two readers that refuse each",
+	"% other's texts.",
+	"turn(kfr(I,W,R,K),Rot,V) :- mkcopy(I,W,R,K), R = trkr(_,Rot), minstance(I,M),",
+	"                            resolved(kval(M,W,R,K),L), mdeg(L,V).",
+	"mkeyturn(I,W,R,K,Rot) :- mkcopy(I,W,R,K), R = trkr(_,Rot), minstance(I,M),",
+	"                         resolved(kval(M,W,R,K),L), mdeg(L,_).",
+	"turn(kfr(I,W,R,K),Rot,V) :- mkcopy(I,W,R,K), mtrackof(M,W,R,N), minstance(I,M),",
+	"                            mtplays(M,S,W), turn(stt(I,S,N),Rot,V),",
+	"                            not mkeyturn(I,W,R,K,Rot).",
+	"% Parented where its part is, for gworld/2's chain — the same rule shape a state",
+	"% copy gets and for the same reason. A keyframe copy hangs off the *instance*",
+	"% tree, never off a state copy and never off another keyframe copy, so no node",
+	"% ever gains a second parent and readModel never sees one.",
+	"child(inst(I,P),kfr(I,W,R,K)) :- mkcopy(I,W,R,K), mtrackof(M,W,R,N),",
+	"                                 minstance(I,M), instance(I,Root), cinner(Root,N),",
+	"                                 child(P,N), cpart(Root,P).",
+	"child(I,kfr(I,W,R,K)) :- mkcopy(I,W,R,K), mtrackof(M,W,R,N), minstance(I,M),",
+	"                         instance(I,N).",
+	"",
+	"% ---- blend states ----",
+	"% Several timelines mixed by a number input. The mixing is arithmetic over a",
+	"% runtime value, so NONE of it is solved and none of it can be: the input is not",
+	"% in the program. What *is* solved is everything the stops are made of — every",
+	"% keyframe of every timeline a stop names — and what the checks need: the",
+	"% thresholds, in thousandths, against the input's own declared range.",
+	"mstopout(M,S,J) :- mstopat(M,S,J,N), mblendin(M,S,X), minlow(M,X,Lo), N < Lo.",
+	"mstopout(M,S,J) :- mstopat(M,S,J,N), mblendin(M,S,X), minhigh(M,X,Hi), N > Hi.",
+	"% mhasstop/2 guards both aggregates rather than being implied by mblendin/3,",
+	"% and it is not defensive tidiness: a blend state with an input and no stops is",
+	"% exactly what a half-built one is, and #min over nothing is #sup, which clingo",
+	"% remarks on once per blend state on every document somebody is authoring. The",
+	"% same argument lbiggest/2 makes with its trailing `; 0`, except that here there",
+	"% is no sensible empty answer, so the rule declines to hold at all.",
+	"mhasstop(M,S) :- mstopat(M,S,_,_).",
+	"mstoplo(M,S,N) :- mhasstop(M,S), N = #min{ V : mstopat(M,S,_,V) }.",
+	"mstophi(M,S,N) :- mhasstop(M,S), N = #max{ V : mstopat(M,S,_,V) }.",
+	"% The converse of mstopout/3 and deliberately not canned: the axis extends past",
+	"% the outermost stop, so part of the input's range plays one timeline flat.",
+	"% Legal, sometimes meant, and worth being able to ask about.",
+	"mstopgap(M,S) :- mblendin(M,S,X), minlow(M,X,Lo), mstoplo(M,S,N), Lo < N.",
+	"mstopgap(M,S) :- mblendin(M,S,X), minhigh(M,X,Hi), mstophi(M,S,N), Hi > N.",
+	"% A state holding both a timeline and a blend is REPORTED rather than repaired,",
+	"% because a state with two sources is a mistake a person should see rather than",
+	"% one a reader should quietly pick a side in. (When forced, every reader picks",
+	"% the blend: it is the more specific claim, and picking the other way would make",
+	"% a half-deleted blend silently play one arbitrary timeline flat.)",
+	"mtwosource(M,S) :- mtplays(M,S,_), mblend(M,S,_).",
+	"% An exit time longer than the from-state's own timeline, which makes the",
+	"% transition *unreachable* rather than merely odd — the deeper reading of the",
+	"% brief's check, shipped beside the literal one rather than substituted for it.",
+	"% mloop(M,W,none) is in the body because a looping timeline never ends, so no",
+	"% exit time is past it, and reporting one would be reporting a bug against a",
+	"% design that works.",
+	"mexitpast(M,T) :- mexit(M,T,E), mfrom(M,T,S), mtplays(M,S,W), mtlen(M,W,Len),",
+	"                  mloop(M,W,none), E > Len.",
 ]
 
 /**
@@ -1244,12 +2018,34 @@ const STYLE_RULES = [
 /**
  * The geometric vocabulary, as facts. Written out of the one table that says
  * what an edge is, so no rule ever names an edge.
+ *
+ * A row on the third axis is the same fact **behind the gate**, so a flat
+ * document grounds not one of them and a rule that asserts `spatial.` gets all
+ * of them. That is what keeps the promise of §3.7 of `docs/three-d-spec.md`
+ * checkable by grep: no `gedge(front` in a program for a document with no
+ * viewport in it.
+ *
+ * **There are no z rows in {@link EDGES} yet**, so this branch is generated and
+ * grounds nothing, and that is a finding rather than an oversight. `EdgeSpec.axis`
+ * cannot widen to `"x" | "y" | "z"` without deciding what the canvas overlay
+ * *draws* for a rule about `centerZ` — `annotate.ts` hands the axis straight to
+ * two helpers that take the planar pair — and that is a design decision about
+ * the overlay rather than a type to widen. Written now rather than later because
+ * the guard is the whole of what this file has to say about those rows: the day
+ * the table grows them, the facts appear behind `spatial` with no edit here.
  */
 const EDGE_FACTS = EDGE_NAMES.flatMap((edge) => {
 	const spec = EDGES[edge]
+	// A trailing `.` for a fact, a `:- spatial.` for a rule that is one only in a
+	// document with a third axis. The widening to `string` is what says the row
+	// cannot exist yet: `EdgeSpec.axis` is still the planar pair, so TypeScript is
+	// right that the comparison never holds and wrong that it is unintentional.
+	const guard = (spec.axis as string) === "z" ? " :- spatial." : "."
+	const say = (name: string, ...args: Array<string | number>): string =>
+		`${name}(${args.join(",")})${guard}`
 	return [
-		atom("gedge", edge, spec.axis, spec.role),
-		...(spec.place ? [atom("gplace", edge, spec.place)] : []),
+		say("gedge", edge, spec.axis, spec.role),
+		...(spec.place ? [say("gplace", edge, spec.place)] : []),
 	]
 })
 
@@ -1294,6 +2090,40 @@ const GEOMETRIC_CONSTRAINT_RULES = [
 	"% quantity, which is the silence a rule that says nothing has always got, and",
 	"% it drops out of `annotate` and `why` by the same door.",
 	"gnoedge(N,E) :- gdatum(N), gedge(E,_,span).",
+	"% ---- and the two the third axis adds ----",
+	"% A turned box's extent on an axis is |w*cos t| + |h*sin t|, and its left edge",
+	"% is its centre less half of that. clingo-lpx decides LINEAR arithmetic over",
+	"% rationals, which is the only reason a document full of rules has an exact",
+	"% answer rather than a search — so there is no encoding of that here and there",
+	"% is not going to be one. Fixing the angle per universe does not rescue it",
+	"% either: cos 30 is irrational, so the coefficient could not be an integer even",
+	"% then.",
+	"%",
+	"% Rotation is about the node's own **centre**, and that one decision is what",
+	"% makes the line worth drawing rather than merely unavoidable. It splits the",
+	"% quantities cleanly: a turn about the centre does not move the centre, so",
+	"% centerX, centerY and centerZ stay exactly as true as they were; a span is the",
+	"% node in its own frame, and turning a card does not widen the card, so width,",
+	"% height and depth stay exact. Only the *faces* go — left, right, top, bottom,",
+	"% front, back — because the box's face is not where the pixels are, and",
+	"% ge(N,left) would be a number about a rectangle the document does not contain.",
+	"%",
+	"% Refused the way gdatum/1 refuses a span edge on a column line, one line up,",
+	"% and for the same reason: the quantity is never minted, the relation that",
+	"% wanted it goes unstated, and a rule that quietly means nothing beats one that",
+	"% quietly means something else. Silence in ASP is invisible, so the editor is",
+	"% where it is made visible — `refusedEdge` in spatial.ts is the twin of these",
+	"% two lines, and the Rules panel greys the row and says which of the two",
+	"% sentences applies.",
+	"gnoedge(N,E) :- grotated(N), gedge(E,_,pos), gplace(E,lead).",
+	"gnoedge(N,E) :- grotated(N), gedge(E,_,pos), gplace(E,trail).",
+	"% A node that is not in the third axis has no quantity there. gedgeof/2 below",
+	"% reads only c_node/2 and gneed/2, so without this an `align [card, cube] on",
+	"% centerZ` would ground ge(card,centerZ) out of unknowns nothing constrains and",
+	"% report itself satisfied — the same wrong-rectangle answer, one axis over.",
+	"% Ranged over the constraint's own members rather than written `not s3(N)` with",
+	"% N unbound, which is the same domain gedgeof/2 takes and the only safe one.",
+	"gnoedge(N,E) :- gcon(C), c_node(C,N), gedge(E,z,_), not s3(N).",
 	"gedgeof(N,E) :- gcon(C), c_node(C,N), gneed(C,E), not gnoedge(N,E).",
 	"% The switch, exactly as the property kinds use it.",
 	"gon(C,K) :- gcon(C), c_kind(C,K), active(C).",
@@ -1442,7 +2272,10 @@ export const CONTRACT = `% Predicates you can rely on:
 % One limit worth knowing, because nothing will tell you: gringo's integers are
 % 32-bit and wrap in silence, and the widest term below is 4*V, so a dimension
 % past about 2^31/4 EMU — 56,000 px, a 48-foot artboard — comes back negative
-% rather than large.
+% rather than large. The third axis adds no coefficient to any right-hand side —
+% z is a pos and depth is a span, so both flow through the equations the planar
+% four already do — so that limit is unchanged. An angle has its own, much
+% smaller one: ten turns, 3,600,000 thousandths of a degree.
 %
 % Variables are named after where they live:
 %   prop(Node, Property)        a node's property
@@ -1535,7 +2368,10 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               A fact where the document holds one number for
 %                               a dimension; derived from f_value/3 where it
 %                               holds a choice, so a node can sit in one place
-%                               in one universe and elsewhere in another
+%                               in one universe and elsewhere in another.
+%                               ...and z|depth in a document with a third axis,
+%                               for the nodes that are in it — see Three
+%                               dimensions below
 %   f_value(N, D, Lit)          derived: resolved(fval(N,D)) — projected, so
 %                               two positions really are two designs
 %   rendered(N, Prop, Lit)      what it draws with — an interned literal id, or
@@ -1571,6 +2407,136 @@ export const CONTRACT = `% Predicates you can rely on:
 % the diagonal in some designs and not others and the two are different
 % pictures. visible/1 is projected, so that really is two universes.
 %
+% Three dimensions. A mesh, a camera and a light are nodes. Not a parallel
+% document, not a special case, not a renderer with its own model: node/1 with a
+% kind/2, a child/2, an order/2, a visible/1 and a frame/3, exactly like a
+% rectangle. So they are in the layer list, they are selectable, a rule can name
+% one, one can be hidden, and each takes part in the multiverse — and none of
+% that had to be built, because none of it asks what a node is.
+%
+% They hang inside a viewport, which is a flat rectangle on the artboard that
+% contains a scene and names the camera looking at it. That is the seam: above
+% it, this is the same 2D tool it was; below it, there is a third axis.
+%
+%   kind(N, viewport|pivot|mesh|model|camera|light)
+%   looks(V, C)                    V looks through camera C
+%   vcam(V, C)                     derived: ...and C really is a camera in V.
+%                                  Deliberately blind to hidden/1: hiding a
+%                                  camera means stop drawing its marker, never
+%                                  stop looking
+%   tris(N, K)                     model N holds K triangles. Emitted so you can
+%                                  hold an opinion about it:
+%                                    viol(mesh_budget) :- tris(_,K), K > 200000.
+%   asset(N, "hash")               ...and which payload it is. Quoted, because a
+%                                  content hash is arbitrary text and an ASP
+%                                  constant is not
+%   spatial                        this document has a third axis at all
+%   zstated(N)                     the document gave N a z, a depth or a turn
+%   s3(N)                          derived: N is in it — a viewport, anything
+%                                  under one (a state copy included, since the
+%                                  copies hang off the instance tree), anything
+%                                  zstated, and an instance's copy of a part
+%                                  that is
+%
+% The third axis is the same frame/3 you already have, with two more dimensions
+% in it. Nothing about the predicate changed:
+%
+%   frame(N, z|depth, Emu)         only for an s3 node, and only in a document
+%                                  that has a third axis. gaxis/1 and gspan/1
+%                                  grow to hold them behind \`spatial\`, so every
+%                                  rule here — the pull, the world chain, the
+%                                  edge equation, gcoord/2, mbase/4, a state
+%                                  copy's own defaults — covers three axes with
+%                                  no line of its own, and a flat document
+%                                  grounds not one atom of it
+%   gplane(x). gplane(y).          the planar half, named separately, for the
+%   gplanespan(width|height).      handful of rules that must stay two-and-two:
+%                                  gpos/2, gsize/2, gmoved/2, gcoord/2 and the
+%                                  frame defaults. Without that, a rectangle on
+%                                  an artboard far from any view would gain a z
+%                                  unknown with nothing pulling on it, and an
+%                                  unbounded objective is no answer at all
+%
+% Rotation is held per axis, in **thousandths of a degree**, about the node's
+% own centre:
+%
+%   mdeg(Lit, Mdeg)                the ANGLE a literal reads as: "45deg" is
+%                                  45000 and "0.25turn" is 90000 too. Exact or
+%                                  absent — "1rad" is 57295.779... thousandths,
+%                                  so it emits nothing at all, and a bare number
+%                                  is refused except for 0
+%   rval(N, rotateX|rotateY|rotateZ)     the variable a rotation is, so an
+%                                  \`angle\` token with two alternatives is the
+%                                  flat design and the tilted one
+%   t_value(N, R, Lit)             derived: resolved(rval(N,R)) — projected, so
+%                                  two rotations really are two designs
+%   turn(N, R, Mdeg)               derived: how far, this universe. 0 where the
+%                                  document says nothing
+%   turned(N, R)                   derived: and not by zero
+%   grotated(N)                    derived: some rotation of N is not zero
+%
+% AND HERE IS THE LIMIT, WHICH YOU HAVE TO KNOW. clingo-lpx decides LINEAR
+% arithmetic. A turned box's extent on an axis is |w*cos t| + |h*sin t|, and its
+% left edge is its centre less half of that. That is trigonometry: there is no
+% encoding of it here, and there is not going to be one. So on a node with any
+% non-zero rotation:
+%
+%   HONEST   centerX, centerY, centerZ   a turn about the centre does not move
+%                                        the centre
+%   HONEST   width, height, depth        a span is the node in its own frame,
+%                                        and turning a card does not widen it
+%   REFUSED  left, right, top, bottom, front, back
+%                                        the box's face is not where the pixels
+%                                        are, and ge(N,left) would be a number
+%                                        about a rectangle you do not have
+%
+%   gnoedge(N,E) :- grotated(N), gedge(E,_,pos), gplace(E,lead).
+%   gnoedge(N,E) :- grotated(N), gedge(E,_,pos), gplace(E,trail).
+%
+% The quantity is therefore never created and the relation that wanted it goes
+% unstated — the same silence gdatum/1 arranges for a span edge on a column
+% line, for the same reason and by the same two lines. A rule that quietly means
+% nothing beats one that quietly means something else, and the editor is where
+% the refusal is made visible: it greys the edge and says why. \`align ... on
+% centerX\` is the offer it makes instead, and for most uses of \`align\` it is
+% what was meant.
+%
+% What is *not* refused is placing a turned node. Rotation about the centre
+% commutes with translation, so gsolved/1, the pull, the world chain and a pin
+% on a centre all work on one exactly.
+%
+% Two 3D nodes, related. A rule over them is an ordinary rule, because they are
+% ordinary nodes — this stands two meshes 240px apart in depth and lines their
+% centres up on the page, in a scene the camera is free to look at from
+% anywhere:
+%
+%   gsolved(cube). gsolved(pillar).
+%   &sum{ wv(cube,z); -wv(pillar,z) } = 240*emupx.
+%   &sum{ ge(cube,centerX); -ge(pillar,centerX) } = 0.
+%
+% The second of those is what \`align [cube, pillar] on centerX\` compiles to and
+% could have been written in the Rules panel instead. The first could not: EDGES
+% has no z rows yet, so there is no \`front\`, \`centerZ\`, \`back\` or \`depth\` to
+% name in the panel and no gedge/3 fact for one — the vocabulary is where the
+% third axis is still missing, and until it grows a rule about depth is written
+% against wv/2 and lsz/2 directly, as above. gnoedge/2 already holds the refusal
+% those rows will need: a node that is not s3 has no quantity on the third axis,
+% so an align on centerZ across the seam will be refused rather than satisfied
+% by a box the document does not contain.
+%
+% A rule across a viewport's wall is worth one warning. wv/2 is the world chain
+% summed through child/2, which climbs out of the view and up the artboard, so
+% \`align [card, cube] on centerY\` is exact about where the cube sits in the
+% *scene* — and the scene is drawn through a camera. Move the camera and the
+% pixels move and the rule stays satisfied. That is allowed, because a node is a
+% node; it is not refused, because it is well defined; and the editor says so.
+%
+% An imported mesh is a node and its vertices are not. The same trade a path
+% makes — points live on the document node and never reach here — one scale up:
+% the frame is the geometry's bounding box, so snapping, layout, constraints and
+% grouping all work on a model unchanged, and the only facts about the payload
+% that reach a rule are tris/2 and asset/2.
+%
 % Constraints, as facts. The geometric ones speak of edges rather than
 % properties, and their dimension is resolved per universe, not stored:
 %
@@ -1590,8 +2556,14 @@ export const CONTRACT = `% Predicates you can rely on:
 %   c_soft(C)                   derived: C is ranked rather than prohibited
 %   c_value(C, Emu)             derived: numeral(resolved(cval(C)))
 %   gkind(K)                    K places its nodes rather than colours them
-%   gedge(E, x|y, pos|span|axis)   what an edge is
+%   gedge(E, x|y, pos|span|axis)   what an edge is. A z row is emitted behind
+%                               \`spatial\` and there are none yet — see Three
+%                               dimensions
 %   gplace(E, lead|mid|trail)      and where on the node it sits
+%   gnoedge(N, E)               derived: N has no such quantity, so nothing is
+%                               stated about it. A span edge of a datum, a face
+%                               of a turned node, the third axis of a node that
+%                               is not in it
 %
 % viol/1 is a derivable predicate too, and that is what the kind \`custom\` is
 % for. It has no members, no property and no edge, and the generated program
@@ -2150,8 +3122,83 @@ interface MachineFacts {
 	parts: string[];
 	/** Part id -> the properties *some* state of the machine overrides on it. */
 	shadow: Map<string, PropName[]>;
-	/** Part id -> the dimensions some state overrides. */
-	fshadow: Map<string, Dimension[]>;
+	/**
+	 * Part id -> the dimensions some state overrides.
+	 *
+	 * All six in a document with a third axis, four in one without — see
+	 * {@link stateDimensions}. A state that lifts a mesh 40px towards the viewer
+	 * is a state that moves it, and there is nothing about `mfshadow/3` or the
+	 * copy rules that ever asked which axis a dimension was on.
+	 */
+	fshadow: Map<string, Axis3[]>;
+	/**
+	 * Part id -> the rotations some state overrides.
+	 *
+	 * Always all three axes' worth of question, never narrowed by
+	 * {@link stateDimensions}, and the asymmetry with `fshadow` is the point. A
+	 * dimension list has to match the one `sfval/4` is minted over or a state copy
+	 * moves and the picture does not; a rotation has exactly one list, because
+	 * there is no flat rotation to leave out — a delta that turns a part is a
+	 * delta about the third axis whatever else the document holds.
+	 */
+	rshadow: Map<string, Turn[]>;
+	/**
+	 * The machine's layers, in document order, minting `base` where the document
+	 * has none — {@link machineLayers}' answer and nobody else's.
+	 *
+	 * **The position is the priority.** `mlindex/3` is written from this array's
+	 * order, `mwriter/4` reads that index, and there is no `priority` field
+	 * anywhere to disagree with the list.
+	 */
+	layers: MachineLayer[];
+	/**
+	 * `[layer, part, prop]` — which layer's states own which property of which
+	 * part, and the three tables that make a fight nameable.
+	 *
+	 * Flat triples rather than a map of maps because that is exactly the shape of
+	 * the facts: `mlshadow(M,L,N,P)` is one line per triple, and a nested
+	 * structure would be flattened back at the one place that reads it.
+	 *
+	 * `shadow` above is the union of these over the layers, and the two are built
+	 * from the same predicate rather than one from the other: `mshadow/2` says
+	 * "the instance does not draw this from its own variable" and `mlshadow/4`
+	 * says "this layer has an opinion", and deriving either from the other would
+	 * make one of the two sentences a coincidence.
+	 */
+	lshadow: Array<[string, string, PropName]>;
+	lfshadow: Array<[string, string, Axis3]>;
+	lrshadow: Array<[string, string, Turn]>;
+	/**
+	 * Timeline id -> the parts its keyframe copies are minted for — `mkpart/3`,
+	 * which is {@link keyframeParts}' answer.
+	 *
+	 * **Empty for every document that has not written a rule about a keyframe**,
+	 * which is the point rather than a degenerate case: a timeline is variables,
+	 * and a *placed* keyframe is a copy.
+	 */
+	keyParts: Map<string, Set<string>>;
+}
+
+/**
+ * Which dimensions a state's delta may speak about, in this document.
+ *
+ * The one place the answer is decided, because three callers ask and they must
+ * not be able to disagree: {@link machineFacts} writes `mfshadow/3` from it,
+ * {@link machineValues} mints the `sfval/4` variables from it, and
+ * {@link variableCounts} tells the studio which rows exist from the same walk.
+ * Two of those disagreeing is the quietest bug this feature can have — a state
+ * copy that moves and a picture that does not, in a document that solves cleanly
+ * and reports nothing.
+ *
+ * Widened per *document* rather than per part, and deliberately the coarser
+ * question: a state may lift a flat card in a document that has a viewport
+ * somewhere, and asking "is this part spatial" instead would have made the
+ * answer depend on where the part happens to sit today. What keeps that from
+ * costing anything is that the delta has to actually hold a value for the
+ * dimension before any of the three does anything with it.
+ */
+function stateDimensions(scene: Scene): readonly Axis3[] {
+	return isSpatialScene(scene) ? DIMENSIONS_3D : DIMENSIONS;
 }
 
 /**
@@ -2165,14 +3212,33 @@ interface MachineFacts {
  * and `mcopy/3` grounds nothing. The same silence a dangling `instanceOf` leaves.
  */
 function machineFacts(scene: Scene): MachineFacts[] {
+	const dims = stateDimensions(scene);
 	return (scene.machines ?? []).map((machine) => {
 		const materialised = materializedParts(scene, machine);
 		const def = componentDef(scene, machine.root);
 		const parts = (def?.parts ?? [])
 			.filter((part) => materialised.has(part.id))
 			.map((part) => part.id);
+		const layers = machineLayers(machine);
 		const shadow = new Map<string, PropName[]>();
-		const fshadow = new Map<string, Dimension[]>();
+		const fshadow = new Map<string, Axis3[]>();
+		const rshadow = new Map<string, Turn[]>();
+		const lshadow: Array<[string, string, PropName]> = [];
+		const lfshadow: Array<[string, string, Axis3]> = [];
+		const lrshadow: Array<[string, string, Turn]> = [];
+		/** Whether any of these states says anything at all about one field. */
+		const owns = (
+			states: readonly MachineState[],
+			part: string,
+			field: "props" | "frame" | "turn",
+			key: string,
+		): boolean =>
+			states.some((state) => {
+				const table = state.parts[part]?.[field] as
+					| Record<string, Value | undefined>
+					| undefined;
+				return (table?.[key]?.length ?? 0) > 0;
+			});
 		for (const part of parts) {
 			// Read out of the tables rather than off the delta's own keys, so the
 			// facts come out in one fixed order however the document was edited, and
@@ -2180,19 +3246,51 @@ function machineFacts(scene: Scene): MachineFacts[] {
 			// reaches the program as a term. `Object.keys` on a `Partial<Record>` is
 			// the shape that lets that happen.
 			const props = PROP_NAMES.filter((prop) =>
-				machine.states.some(
-					(state) => (state.parts[part]?.props?.[prop]?.length ?? 0) > 0,
-				),
+				owns(machine.states, part, "props", prop),
 			);
-			const dims = DIMENSIONS.filter((dim) =>
-				machine.states.some(
-					(state) => (state.parts[part]?.frame?.[dim]?.length ?? 0) > 0,
-				),
+			const moved = dims.filter((dim) => owns(machine.states, part, "frame", dim));
+			const turned = TURN_NAMES.filter((turn) =>
+				owns(machine.states, part, "turn", turn),
 			);
 			if (props.length > 0) shadow.set(part, props);
-			if (dims.length > 0) fshadow.set(part, dims);
+			if (moved.length > 0) fshadow.set(part, moved);
+			if (turned.length > 0) rshadow.set(part, turned);
 		}
-		return { machine, parts, shadow, fshadow };
+		// The same three questions asked of one layer's states at a time. Two walks
+		// rather than one that partitions, because the union is not the sum of the
+		// parts in the sense that matters: `mshadow/2` must hold where *any* state
+		// owns the field, including one whose layer the document has since deleted
+		// — `layerOf` folds such a state into the first layer, and the union has to
+		// mean what it meant before layers existed either way.
+		for (const layer of layers) {
+			const states = machine.states.filter(
+				(state) => layerOf(machine, state) === layer.id,
+			);
+			if (states.length === 0) continue;
+			for (const part of parts) {
+				for (const prop of PROP_NAMES) {
+					if (owns(states, part, "props", prop)) lshadow.push([layer.id, part, prop]);
+				}
+				for (const dim of dims) {
+					if (owns(states, part, "frame", dim)) lfshadow.push([layer.id, part, dim]);
+				}
+				for (const turn of TURN_NAMES) {
+					if (owns(states, part, "turn", turn)) lrshadow.push([layer.id, part, turn]);
+				}
+			}
+		}
+		return {
+			machine,
+			parts,
+			shadow,
+			fshadow,
+			rshadow,
+			layers,
+			lshadow,
+			lfshadow,
+			lrshadow,
+			keyParts: keyframeParts(scene, machine),
+		};
 	});
 }
 
@@ -2218,6 +3316,19 @@ function machineFacts(scene: Scene): MachineFacts[] {
  * Disabled transitions are skipped, the same reading the compiler already gives
  * a switched-off constraint: out of the program is out of the program, and a
  * duration nothing reads is a duration nothing reads.
+ *
+ * **Nothing on the ladder is minted here except the places a designer wrote a
+ * {@link Value}**, and the list of those is short and worth naming, because the
+ * whole rung-one argument is that it does not grow: a transition's exit time, a
+ * state's rotation delta, a keyframe's time, a keyframe's value and a timeline's
+ * length. An **input** is not on that list and must never be. Its declaration,
+ * its range and every condition's comparand are plain strings that reach the
+ * program as *facts*, because nothing in the picture, in the base layer of the
+ * export, or in any projected atom moves when an input moves — so a document
+ * holding two starting values for a boolean would hold two universes identical
+ * in every projected atom, which is exactly the collapse `#project` exists to
+ * prevent. A step that finds itself calling `visit` with an input key has taken
+ * a wrong turn, and that is the first thing a reviewer of rung one checks.
  */
 function machineValues(
 	scene: Scene,
@@ -2233,8 +3344,48 @@ function machineValues(
 					visit(motionVar(machine.id, transition.id, prop), value);
 				}
 			}
+			// The fourth motion setting, by hand rather than out of the table — see
+			// EXIT_FALLBACK, which records why the table is still three and what the
+			// one-line unblock is. The key is `mval(M,T,exit)`, in the family and read
+			// by the same `resolved/2`, so nothing downstream can tell.
+			if (transition.exit && transition.exit.length > 0) {
+				visit(motionVar(machine.id, transition.id, "exit"), transition.exit);
+			}
+		}
+		// A keyframe's time and its value belong to the MACHINE, not to the
+		// instance, and that split is the budget: every instance moves by the same
+		// clock and holds the same colour, so a timeline costs `2*keyframes + 1`
+		// variables however many instances it drives. What belongs to an instance is
+		// a keyframe's *placement*, which is what simplex solves and is a copy
+		// rather than a variable — see `mkpart/3` and `keyframeParts`.
+		for (const timeline of machine.timelines ?? []) {
+			for (const track of timeline.tracks) {
+				const term = trackTerm(track);
+				// A track that names neither a property, a dimension nor a rotation is
+				// no track at all — the same reading `trackTerm` and the document reader
+				// both give it — so it mints nothing rather than minting a variable
+				// under a term nobody can read back.
+				if (term === undefined) continue;
+				track.keys.forEach((key, index) => {
+					if (key.at.length > 0) {
+						visit(keyTimeVar(machine.id, timeline.id, term, index + 1), key.at);
+					}
+					if (key.value.length > 0) {
+						visit(keyValueVar(machine.id, timeline.id, term, index + 1), key.value);
+					}
+				});
+			}
+			if (timeline.length && timeline.length.length > 0) {
+				visit(timelineLenVar(machine.id, timeline.id), timeline.length);
+			}
 		}
 	}
+	// The same list `mfshadow/3` is written over, and it has to be: the shadow says
+	// which dimensions the instance no longer draws from its own base, and the
+	// variables say what the copies hold instead. A widened shadow with a narrow
+	// set of variables is a part that stops moving; the reverse is a part that
+	// moves twice.
+	const dims = stateDimensions(scene);
 	const byId = new Map(facts.map((entry) => [entry.machine.id, entry]));
 	for (const node of instanceNodes(scene)) {
 		// Which machine drives an instance is `machineForRoot`'s answer and nobody
@@ -2257,10 +3408,19 @@ function machineValues(
 						visit(statePropVar(node.id, state.id, part, prop), value);
 					}
 				}
-				for (const dim of DIMENSIONS) {
+				for (const dim of dims) {
 					const value = delta.frame?.[dim];
 					if (value && value.length > 0) {
 						visit(stateFrameVar(node.id, state.id, part, dim), value);
+					}
+				}
+				// The third field, over all three axes and never narrowed — see
+				// MachineFacts.rshadow for why a rotation has one list where a
+				// dimension has two.
+				for (const turn of TURN_NAMES) {
+					const value = delta.turn?.[turn];
+					if (value && value.length > 0) {
+						visit(stateTurnVar(node.id, state.id, part, turn), value);
 					}
 				}
 			}
@@ -2354,6 +3514,22 @@ export function compile(
 	const wearLines: string[] = [];
 
 	const nodeLines: string[] = [];
+	/**
+	 * The gate, and the whole of what a flat document pays for the third axis.
+	 *
+	 * One atom, stated when the document holds a viewport or any node with a `z`,
+	 * a `depth` or a turn on it — which is `isSpatialScene`'s question, asked
+	 * through `isSpatialScene` rather than asked again here, because the reader
+	 * and the compiler disagreeing about what "spatial" means is the one way the
+	 * no-regression promise could rot without anybody noticing.
+	 *
+	 * With it absent, `gaxis(z)` and `gspan(depth)` never derive, the scene
+	 * defaults state four frames per node rather than six, `EDGE_FACTS`'s z rows
+	 * ground away, and no `gsolved` node gains a z unknown. Everything else in the
+	 * third axis is guarded by `s3/1`, which is empty in a document that states no
+	 * `zstated/1` and holds no viewport.
+	 */
+	if (isSpatialScene(scene)) nodeLines.push("spatial.");
 	// Facts describing every automatic layout. The rules that interpret them
 	// are generic, so a document never changes the shape of the program.
 	const layoutLines: string[] = [];
@@ -2425,6 +3601,74 @@ export function compile(
 				continue;
 			}
 			emitValue(frameVar(node.id, dim), value);
+		}
+		/**
+		 * The third axis, on the same terms as the four above and with one
+		 * difference that is the whole of the no-regression story: it is **sparse**.
+		 * A document with no 3D in it holds no `spatial` and no `turn` anywhere,
+		 * emits none of these lines, states no `zstated/1`, and so has no `s3/1`,
+		 * no `spatial`, no `gaxis(z)` and not one extra atom. A node that does hold
+		 * one goes in through exactly the machinery a width goes through — a fact
+		 * where the document wrote one number, an `fval(N,z)` variable where it
+		 * wrote a choice — so `frame/3` carries six dimensions and no rule, no
+		 * reader and no exporter learns that the fourth and fifth arrived later.
+		 */
+		let zstated = false;
+		for (const dim of SPATIALS) {
+			const value = node.spatial?.[dim];
+			if (value === undefined || value.length === 0) continue;
+			// Stated is stated: a `z` that reads as no length at all — a percentage,
+			// a dangling token — still puts the node in the third axis, and then
+			// falls to the default of 0 like a frame dimension that reads as
+			// nothing. `isSpatialNode` on the TypeScript side asks the same question
+			// the same way, which is what keeps the two answers equal.
+			zstated = true;
+			if (value.length === 1 && value[0].kind === "literal") {
+				nodeLines.push(atom("frame", node.id, dim, spatialDim(node, dim)));
+				continue;
+			}
+			emitValue(frameVar(node.id, dim), value);
+		}
+		/**
+		 * Rotation, which is a variable *always* — never the fact a single-literal
+		 * dimension gets.
+		 *
+		 * The asymmetry is deliberate and it is what `#project t_value/3` is for. A
+		 * frame dimension is a fact where the document wrote one number because
+		 * paying for a `pick` on the four dimensions of every rectangle in a
+		 * document would multiply the program for nothing; rotations are held by
+		 * the handful of nodes that are turned at all, and every one of them wants
+		 * to be able to name an `angle` token — "the whole rack tilts, or it does
+		 * not" is one token and two designs. Minting the variable unconditionally
+		 * is what makes that a projected difference rather than an arbitrary pick.
+		 */
+		for (const turn of TURN_NAMES) {
+			const value = node.turn?.[turn];
+			if (value === undefined || value.length === 0) continue;
+			zstated = true;
+			emitValue(rotateVar(node.id, turn), value);
+		}
+		// The claim about the document that `s3/1` is seeded from — see
+		// SPATIAL_RULES for why it is stated here rather than read back out of
+		// `frame/3`, which would close a loop through a negation.
+		if (zstated) nodeLines.push(atom("zstated", node.id));
+		// What a view looks through. A fact, not a value: which camera a view uses
+		// is structure rather than a design decision, the same call `gline/3`'s
+		// axis makes. A dangling id, an id naming a rect and a camera in another
+		// view all reach the program identically and all derive no `vcam/2`.
+		if (node.kind === "viewport" && node.camera !== undefined) {
+			nodeLines.push(atom("looks", node.id, node.camera));
+		}
+		// An imported mesh is a node and its vertices are not — the same trade a
+		// path makes with its points, one scale up. What reaches a rule is the
+		// count, so that `viol(mesh_budget) :- tris(_,K), K > 200000.` is a rule a
+		// team can write on day one, and the content hash, quoted because a hash is
+		// arbitrary text and an ASP constant is not.
+		if (node.mesh !== undefined) {
+			nodeLines.push(
+				atom("tris", node.id, Math.max(0, Math.round(node.mesh.triangles))),
+			);
+			nodeLines.push(atom("asset", node.id, quote(node.mesh.asset)));
 		}
 		const parent = parents.get(node.id);
 		if (parent) nodeLines.push(atom("child", parent.id, node.id));
@@ -2543,7 +3787,8 @@ export function compile(
 	 */
 	const machineLines: string[] = [];
 	const machines = machineFacts(scene);
-	for (const { machine, parts } of machines) {
+	for (const entry of machines) {
+		const { machine, parts } = entry;
 		machineLines.push(atom("machine", machine.id));
 		// Which machine drives a root is `machineForRoot`'s answer and nobody
 		// else's, and this is the one line that has to agree with it. A document
@@ -2584,6 +3829,84 @@ export function compile(
 				}
 			}
 		}
+		/**
+		 * The layers, and which layer each state is in.
+		 *
+		 * Always at least one: `machineLayers` mints `base` for a machine that says
+		 * nothing about layers, which is every machine in every document written
+		 * before this rung, and minting it here rather than special-casing "or the
+		 * implicit one" in each of the four rules that quantify over layers is what
+		 * keeps every one of those rules the rule that shipped.
+		 *
+		 * `mlindex/3` is the array's own order and **the order is the priority** —
+		 * later layers win, the same way document order is already the initial state
+		 * and the paint order, so there is no `priority` field to disagree with the
+		 * list.
+		 */
+		for (const [index, layer] of entry.layers.entries()) {
+			machineLines.push(atom("mlayer", machine.id, layer.id));
+			machineLines.push(atom("mlindex", machine.id, layer.id, index + 1));
+			// The layer's own initial state: its first, in document order. Nothing at
+			// all for a layer with no states — which is what a layer somebody has just
+			// added is, and which the default rule for `shown/2` then simply says
+			// nothing about, rather than drawing the instance in a state that does not
+			// exist.
+			const first = machine.states.find((s) => layerOf(machine, s) === layer.id);
+			if (first) machineLines.push(atom("mlfirst", machine.id, layer.id, first.id));
+		}
+		for (const state of machine.states) {
+			machineLines.push(atom("mslayer", machine.id, state.id, layerOf(machine, state)));
+		}
+		for (const [layerId, part, prop] of entry.lshadow) {
+			machineLines.push(atom("mlshadow", machine.id, layerId, part, prop));
+		}
+		for (const [layerId, part, dim] of entry.lfshadow) {
+			machineLines.push(atom("mlfshadow", machine.id, layerId, part, dim));
+		}
+		for (const [layerId, part, turn] of entry.lrshadow) {
+			machineLines.push(atom("mlrshadow", machine.id, layerId, part, turn));
+		}
+		/**
+		 * What a host hands this machine — **six predicates, and every one of them a
+		 * fact.**
+		 *
+		 * That is rung one's whole invariant and it is checkable by grep: no
+		 * `emitValue` is called anywhere in this block, no `alt/2` is minted, no
+		 * `pick/2` decides anything about an input, and a document with three inputs
+		 * has exactly the universe count of the same document with none. An input
+		 * decides which transitions a *runtime* may take; it decides nothing an
+		 * onlooker can see, so two universes differing only in one would be
+		 * pixel-identical and collapse.
+		 *
+		 * The numbers are whole **thousandths**, through `permilleOf` inside
+		 * `inputInitial` and `inputRange` — one unit for a starting value, a range
+		 * end, a condition's comparand and a blend threshold, so that nobody
+		 * anywhere has to divide by a thousand to compare two of them.
+		 */
+		for (const input of machine.inputs ?? []) {
+			// A kind the table does not know is not repaired into `boolean`: the
+			// input says nothing at all, exactly as a node whose kind the table does
+			// not know draws nothing. `mcbad/3` then reports every condition about it,
+			// which is where a person can actually see the mistake.
+			if (!Object.hasOwn(INPUT_KINDS, input.kind)) continue;
+			machineLines.push(atom("minput", machine.id, input.id));
+			machineLines.push(atom("minkind", machine.id, input.id, input.kind));
+			const initial = inputInitial(input);
+			if (typeof initial === "boolean") {
+				machineLines.push(
+					atom("minbool", machine.id, input.id, initial ? "true" : "false"),
+				);
+			} else if (typeof initial === "number") {
+				machineLines.push(atom("minnum", machine.id, input.id, initial));
+			}
+			// **Absent is open, not zero**, in both directions: a designer who has not
+			// said how far the drawer opens has not said that it does not open at all,
+			// and a compiler that wrote `minlow(M,X,0)` here would have the two checks
+			// that read a range reporting violations against a claim nobody made.
+			const { min, max } = inputRange(input);
+			if (min !== undefined) machineLines.push(atom("minlow", machine.id, input.id, min));
+			if (max !== undefined) machineLines.push(atom("minhigh", machine.id, input.id, max));
+		}
 		for (const transition of machine.transitions) {
 			// A switched-off transition stays in the document and stays out of the
 			// program, exactly as a switched-off constraint does — which is why
@@ -2605,6 +3928,141 @@ export function compile(
 			for (const prop of transition.only ?? []) {
 				if (prop in PROPS) machineLines.push(atom("monly", machine.id, transition.id, prop));
 			}
+			/**
+			 * The guard, normalised once and written down in the shape the checks
+			 * compare in.
+			 *
+			 * **Every comparison the program then makes is between two constants** —
+			 * the range the input declared and the literal the condition named — which
+			 * is what keeps rung two out of the design space. `normalizeCondition` in
+			 * `machines.ts` is the only place the six operators become intervals, and
+			 * it is there rather than here because the panel needs the same answer to
+			 * grey a row and say what is wrong with it. A closed window is what makes
+			 * the clash rules four lines instead of twelve; `gt` becoming `v + 1` is
+			 * exact rather than approximate, and it is exact *because* a ratio reaches
+			 * the program as a whole number of thousandths.
+			 *
+			 * A condition that is not one — an input the machine has not got, an
+			 * operator its kind does not take, a comparand that reads as nothing —
+			 * comes back as `mcbad/3` and is kept rather than dropped. Dropping it
+			 * would repair the document into silence: the edge would read as unguarded
+			 * and fire on every trigger, which is a wrong machine rather than a
+			 * reported one.
+			 */
+			const guard = guardOf(machine, transition);
+			(transition.conditions ?? []).forEach((condition, index) => {
+				const k = index + 1;
+				const normal = guard[index];
+				const say = (name: string, ...args: Array<string | number>): void => {
+					machineLines.push(atom(name, machine.id, transition.id, k, ...args));
+				};
+				machineLines.push(atom("mcond", machine.id, transition.id, k));
+				// The operator only reaches the program where the table knows it; a
+				// stored word from an older vocabulary would otherwise be a term no
+				// rule could read, and `mcbad/3` is already reporting it.
+				if (Object.hasOwn(COMPARE_OPS, condition.op)) say("mcondop", condition.op);
+				if (normal === undefined || normal.kind === "bad") {
+					// `mcondin/4` is deliberately *not* stated for a bad condition. Its
+					// fourth argument would be an input id the machine has not got — a
+					// term that reads as a constant and names nothing — and every rule
+					// that joins on it would then ground against a phantom. What the
+					// program needs to know about a broken condition is that it is
+					// broken, which is exactly `mcbad/3`; what it *says* is broken is
+					// the panel's business and it reads that off the document.
+					machineLines.push(atom("mcbad", machine.id, transition.id, k));
+					return;
+				}
+				say("mcondin", normal.input);
+				if (normal.kind === "range") say("mcrange", normal.input, normal.lo, normal.hi);
+				else if (normal.kind === "not") say("mcnot", normal.input, normal.value);
+				else if (normal.kind === "is") {
+					say("mcis", normal.input, normal.value ? "true" : "false");
+				} else if (normal.kind === "isNot") {
+					say("mcisnot", normal.input, normal.value ? "true" : "false");
+				} else say("mcfired", normal.input);
+			});
+		}
+		/**
+		 * Timelines: keyframes, and nothing but keyframes.
+		 *
+		 * **The solver decides keyframes and never frames.** What is stated here is
+		 * one `mkey/4` and one `mkeasing/5` per keyframe and one `mtrack/3` per
+		 * track, and what is minted beside it in `machineValues` is two variables per
+		 * keyframe and one per timeline. There is no frame rate in any of it, and a
+		 * twenty-key timeline costs the same whether it plays over 100ms or ten
+		 * seconds.
+		 *
+		 * The index is the **document's** position, 1-based, and not the position the
+		 * resolved times put the keyframe in. That is deliberate: `kat(M,W,R,K)` is
+		 * the variable keyframe K's time *is*, so a K that depended on the answer
+		 * would be a variable whose name depended on its own value. The document
+		 * reader sorts the list, `solvedKeys` sorts by the resolved time and keeps
+		 * this index, and `mkbackwards/4` is what reports a universe where the two
+		 * orders disagree.
+		 */
+		for (const timeline of machine.timelines ?? []) {
+			machineLines.push(atom("mtimeline", machine.id, timeline.id));
+			// A stored loop mode the vocabulary does not know falls back rather than
+			// being carried, exactly as an unknown easing does: `mexitpast/2` reads
+			// `mloop(M,W,none)` and a mode no rule can match would silently disable a
+			// check rather than change one.
+			const loop = timeline.loop;
+			const mode = loop === "loop" || loop === "pingPong" ? loop : "none";
+			machineLines.push(atom("mloop", machine.id, timeline.id, mode));
+			for (const track of timeline.tracks) {
+				const term = trackTerm(track);
+				// A track that names none of `prop`, `dim` and `turn` is no track at
+				// all — the same reading `trackTerm`, `materializedParts` and the
+				// document reader all give it — so it states nothing rather than
+				// stating a track under a term nobody can read back.
+				if (term === undefined) continue;
+				machineLines.push(atom("mtrack", machine.id, timeline.id, term));
+				machineLines.push(atom("mtrackof", machine.id, timeline.id, term, track.part));
+				track.keys.forEach((key, index) => {
+					machineLines.push(atom("mkey", machine.id, timeline.id, term, index + 1));
+					machineLines.push(
+						atom("mkeasing", machine.id, timeline.id, term, index + 1, keyEasing(key)),
+					);
+				});
+			}
+			// The rationing, stated as the facts it is. Empty for every document that
+			// has not written a geometric rule about a keyframe, which is what keeps
+			// "a timeline on its own costs no copies" true — see `keyframeParts`.
+			for (const part of entry.keyParts.get(timeline.id) ?? []) {
+				machineLines.push(atom("mkpart", machine.id, timeline.id, part));
+			}
+		}
+		// Which state plays which timeline. Through `statePlays`, so that a blend
+		// state's stops are counted and a state holding both a timeline and a blend
+		// resolves the one way every reader in the tool resolves it — and is still
+		// reported, as `mtwosource/2`.
+		for (const state of machine.states) {
+			for (const timeline of statePlays(machine, state)) {
+				machineLines.push(atom("mtplays", machine.id, state.id, timeline.id));
+			}
+			const blend = state.blend;
+			if (blend === undefined) continue;
+			// `oneD` rather than `1d`, and the spelling is not cosmetic: a blend kind
+			// reaches the program as itself and an ASP constant may not begin with a
+			// digit. A kind the table does not know says nothing at all.
+			if (!Object.hasOwn(BLEND_KINDS, blend.kind)) continue;
+			machineLines.push(atom("mblend", machine.id, state.id, blend.kind));
+			if (blend.input !== undefined) {
+				machineLines.push(atom("mblendin", machine.id, state.id, blend.input));
+			}
+			blend.stops.forEach((stop, index) => {
+				const j = index + 1;
+				machineLines.push(atom("mstop", machine.id, state.id, j, stop.timeline));
+				// In thousandths, through the same reader an input's range goes
+				// through, which is the whole reason `mstopout/3` is one comparison. A
+				// threshold that reads as no number states nothing, and the stop is
+				// then a stop with no place on the axis rather than one at zero.
+				const at = stop.at === undefined ? undefined : permilleOf(stop.at);
+				if (at !== undefined) machineLines.push(atom("mstopat", machine.id, state.id, j, at));
+				if (stop.by !== undefined) {
+					machineLines.push(atom("mstopby", machine.id, state.id, j, stop.by));
+				}
+			});
 		}
 	}
 	const byMachineId = new Map(machines.map((entry) => [entry.machine.id, entry]));
@@ -2620,7 +4078,17 @@ export function compile(
 		// being a design space and become a sprite sheet. Changing it is an edit;
 		// *watching* a transition play costs no solve at all, because every state's
 		// values are already in this one answer set.
-		machineLines.push(atom("shown", node.id, shownState(entry.machine, node)));
+		//
+		// **One per layer**, because an instance is now in one state per layer and
+		// two layers running at once is what the rung is for. `shown/2` carries no
+		// layer argument and does not need one: `mslayer/3` says which layer a state
+		// is in, so the pair is recoverable and `mtwoshown/1` can tell "two pictures
+		// on top of each other" from "a machine doing its job". On a one-layer
+		// machine `shownStates` answers a record of one, holding exactly what
+		// `shownState` answered, so this is the single fact it always was.
+		for (const stateId of Object.values(shownStates(entry.machine, node))) {
+			machineLines.push(atom("shown", node.id, stateId));
+		}
 		// And which of the instance's own variables a state has taken over. Per
 		// property and per dimension rather than per part, because that is the
 		// precision the rules need: a state that moves a badge leaves the badge's
@@ -2633,6 +4101,17 @@ export function compile(
 		}
 		for (const [part, dims] of entry.fshadow) {
 			for (const dim of dims) machineLines.push(atom("mfshadow", node.id, part, dim));
+		}
+		// The third of the family, and the one that closes a gap the component rules
+		// left open on purpose. `COMPONENT_RULES` states
+		// `turn(inst(I,N),R,V) :- tbase(I,N,R,V), not mrshadow(I,N,R)` with a
+		// `#defined mrshadow/3` so that it grounds away on a document with no
+		// machine; this is the fact that heads it. Without it a state that turns a
+		// part would derive two turn/3 atoms for one (node, axis) — the definition's
+		// angle and the state's — which is not two designs, it is one arbitrary
+		// answer, silently.
+		for (const [part, turns] of entry.rshadow) {
+			for (const turn of turns) machineLines.push(atom("mrshadow", node.id, part, turn));
 		}
 	}
 	// What each copy of a hugging part comes to in its own state's typography.
@@ -2736,9 +4215,11 @@ export function compile(
 	 * uses, because which literal a dimension resolves to is the solver's answer,
 	 * not something known here.
 	 *
-	 * Four bridges, because there are four quantities and a literal has no
-	 * type. The reader is chosen by what the value *is* rather than by who is
-	 * asking, exactly as it is on the TypeScript side:
+	 * Six bridges, because a literal has no type and the reader is chosen by what
+	 * the value *is* rather than by who is asking, exactly as it is on the
+	 * TypeScript side. Six readers over five quantities, and the arithmetic is
+	 * right: `tally/2` and `permille/2` are two readers for the one `ratio`
+	 * quantity, the way `emuOf` and a float reader are two for `length`:
 	 *
 	 *   numeral(Lit,N)  a length, in EMU. `emuOf`, exact or nothing — so the
 	 *                   `Math.round` that used to sit here is deleted rather
@@ -2752,11 +4233,42 @@ export function compile(
 	 *   millis(Lit,Ms)  a duration, in whole milliseconds. `msOf`, exact or
 	 *                   nothing for `emuOf`'s reason — a fact has to be an
 	 *                   integer, and "1.5ms" is not a whole millisecond.
+	 *   mdeg(Lit,Mdeg)  an angle, in whole thousandths of a degree. `mdegOf`,
+	 *                   exact or nothing for the same reason once more, and it is
+	 *                   the sharpest of them: "1rad" is 57295.779... and π is
+	 *                   irrational, so a radian that is not zero reads as no angle
+	 *                   at all rather than as a rounded one.
+	 *   permille(Lit,N) a RATIO, in whole thousandths: "0.5" is 500, "1" is 1000,
+	 *                   "-2.25" is -2250. Exact or nothing once more — "0.0005"
+	 *                   is not a whole thousandth and emits nothing — and a
+	 *                   percentage is *refused* rather than divided by a hundred,
+	 *                   because "50%" and "0.5" being the same quantity written
+	 *                   two ways is how a blend threshold and an input range end
+	 *                   up silently a factor of a hundred apart. A designer who
+	 *                   wants percentages declares the input's range as 0..100
+	 *                   and every number in the machine is in one unit, which is
+	 *                   what Rive does and is right.
 	 *
-	 * All four are emitted for every literal that admits them, and a literal
-	 * happily carries two — `"12"` is both 114300 EMU and a tally of 12, because
-	 * a literal is interned by its text and the rule that reads it is what says
-	 * which it meant. The two time cases are the sharpest illustration and worth
+	 * Emitted for every literal, on the same terms as the other four and not
+	 * behind the `spatial` gate, which is a deliberate exception to "nothing about
+	 * the third axis grounds in a flat document". A bridge is a fact about a
+	 * *literal*, not about the document's geometry: `millis/2` is emitted for a
+	 * document with no machine and `tally/2` for one with no grid, and a rule
+	 * reading `mdeg(L,V)` off a camera's `fov` or off a token is a rule somebody
+	 * may write on a document that holds no viewport. Gating it would make the
+	 * angle the one quantity a rule needs permission to read.
+	 *
+	 * All six are emitted for every literal that admits them, and a literal
+	 * happily carries several — `"12"` is 114300 EMU, a tally of 12 **and** a
+	 * permille of 12000, because a literal is interned by its text and the rule
+	 * that reads it is what says which it meant. The count-and-ratio overlap is
+	 * the one deliberate collision in the family: a count and a ratio are the same
+	 * characters and differ only in what asks, every reader in the program asks by
+	 * name (`tally` for a track count, `permille` for a blend threshold), so the
+	 * overlap costs one atom per integer literal and confuses nothing. Adding a
+	 * disambiguating rule would mean deciding at interning time what a number is
+	 * *for*, which is the one thing an interned literal deliberately does not know.
+	 * The two time cases are the sharpest illustration and worth
 	 * spelling out: `"200"` carries a `tally` and no `millis`, because a bare
 	 * number is ambiguous between two units a factor of a thousand apart; while
 	 * `"200ms"` carries a `millis` and neither of the others, because it is not a
@@ -2783,6 +4295,14 @@ export function compile(
 		if (ms !== undefined) {
 			numeralLines.push(atom("millis", literals.id(text), ms));
 		}
+		const mdeg = mdegOf(text);
+		if (mdeg !== undefined) {
+			numeralLines.push(atom("mdeg", literals.id(text), mdeg));
+		}
+		const permille = permilleOf(text);
+		if (permille !== undefined) {
+			numeralLines.push(atom("permille", literals.id(text), permille));
+		}
 	}
 
 	const generated = [
@@ -2801,6 +4321,8 @@ export function compile(
 			"#defined tally/2.",
 			"#defined word/2.",
 			"#defined millis/2.",
+			"#defined mdeg/2.",
+			"#defined permille/2.",
 			...numeralLines,
 		]),
 		section("choices", [
@@ -2856,6 +4378,11 @@ export function compile(
 			...GEOMETRIC_KINDS,
 			...EDGE_FACTS,
 			...GEOMETRY_RULES,
+			// After the equations rather than before them, because the third axis
+			// is not a second geometry: it is the same `gaxis`/`gspan`/`frame/3`
+			// vocabulary with two more dimensions in it, and reading the widening
+			// after the rules it widens is the order that says so.
+			...SPATIAL_RULES,
 			...FREEDOM_RULES,
 		]),
 		section("guides", guideFacts),
@@ -2888,7 +4415,7 @@ export function compile(
 		// After the component rules, which is where `instance/2`, `cpart/2`,
 		// `cinner/2` and `mbase/4` are said, and before the scene defaults, so a
 		// copy's own defaults are stated after the frames they guard.
-		section("machine rules", [...MOTION_DEFAULTS, ...MACHINE_RULES]),
+		section("machine rules", [...MOTION_DEFAULTS, ...LADDER_DEFAULTS, ...MACHINE_RULES]),
 		// After the component rules, so a node an instance derived defaults the
 		// same way a node a hand-written rule derived does.
 		section("scene defaults", SCENE_DEFAULT_RULES),
@@ -3127,6 +4654,96 @@ export function compile(
 			"#project mdur/3.",
 			"#project mdelay/3.",
 			"#project mstagger/3.",
+			"% ---- the ladder ----",
+			"% What is wrong with a machine once its guards, its layers and its",
+			"% timelines are taken into account, read back so a panel can say it",
+			"% without asking a second question — and derived rather than forbidden,",
+			"% so a rule of yours is what turns any of them into a violation with a",
+			"% name, a switch, a softenable strength and a `why`.",
+			"#show mexit(M,T,V) : mexit(M,T,V), scenery.",
+			"#show mguardnever(M,T) : mguardnever(M,T), scenery.",
+			"#show mgunreached(M,S) : mgunreached(M,S), scenery.",
+			"#show mmisplaced(M,T) : mmisplaced(M,T), scenery.",
+			"#show mfight(M,L1,L2,N,P) : mfight(M,L1,L2,N,P), scenery.",
+			"#show mffight(M,L1,L2,N,D) : mffight(M,L1,L2,N,D), scenery.",
+			"#show mrfight(M,L1,L2,N,R) : mrfight(M,L1,L2,N,R), scenery.",
+			"#show mstopout(M,S,J) : mstopout(M,S,J), scenery.",
+			"#show mstopgap(M,S) : mstopgap(M,S), scenery.",
+			"#show mtwosource(M,S) : mtwosource(M,S), scenery.",
+			"#show mexitpast(M,T) : mexitpast(M,T), scenery.",
+			"#show mkbackwards(M,W,R,K) : mkbackwards(M,W,R,K), scenery.",
+			"% Which layer a state is in and where a layer sits, because a reader that",
+			"% has two shown/2 for one instance cannot tell a machine doing its job",
+			"% from two pictures on top of each other without them.",
+			"#show mslayer(M,S,L) : mslayer(M,S,L), scenery.",
+			"#show mlindex(M,L,K) : mlindex(M,L,K), scenery.",
+			"% What this universe made of a timeline. A keyframe copy's frame/3 and",
+			"% rendered/3 reach the answer set through the two generic #shows above,",
+			"% exactly as a state copy's do; these carry what no other predicate does.",
+			"#show mkat(M,W,R,K,V) : mkat(M,W,R,K,V), scenery.",
+			"#show mtlen(M,W,V) : mtlen(M,W,V), scenery.",
+			"#show mloop(M,W,Mode) : mloop(M,W,Mode), scenery.",
+			"#show mkeasing(M,W,R,K,E) : mkeasing(M,W,R,K,E), scenery.",
+			"% minput/2 and its five companions are shown by NOTHING and projected by",
+			"% nothing, and that is not an omission. An input is a fact the document",
+			"% already holds; the panel reads it from the document, and showing it",
+			"% would put a value in the model no reader could do anything with. A step",
+			"% that finds itself wanting `#show minput` is asking a question about the",
+			"% document, and machines.ts is where document questions are answered.",
+			"%",
+			"% An exit time is motion, and motion is a design decision like a gap: a",
+			"% `duration` token with two alternatives really is two designs, and",
+			"% without this they differ in nothing projected and collapse into one",
+			"% universe with an arbitrary pick. Same argument mdur/3 already carries,",
+			"% one setting over — and the same again for a keyframe's own time and for",
+			"% a timeline's length, because \"the overshoot happens at `--beat`\" is two",
+			"% timelines when `--beat` holds both ends of a motion scale.",
+			"#project mexit/3.",
+			"#project mkat/5.",
+			"#project mtlen/3.",
+			"% ---- three copies' values, and a gap this rung inherits ----",
+			"% `f_value/3` is projected, which is what makes \"this card is in one of two",
+			"% places\" two universes. **sfval(I,S,N,D) was projected by nothing**, and",
+			"% has been since state machines shipped: a state delta whose y held two",
+			"% alternatives was ONE universe with an arbitrary pick, and the two designs",
+			"% a designer wrote collapsed, silently. (A state's *paint* deltas were",
+			"% always fine — they reach rendered/3, which is projected.) This rung adds",
+			"% kval and the third axis adds srval to the same un-projected family, so",
+			"% \"the overshoot goes one of two distances\" and \"the card tilts one of two",
+			"% ways on hover\" would have collapsed the same way.",
+			"%",
+			"% Three derivations in f_value/3's exact shape, and three projections. They",
+			"% partition nothing differently on a document whose deltas each hold one",
+			"% alternative, which is every template — asserted rather than assumed, in",
+			"% machineprogram.test.ts, because that is a fact about today's templates",
+			"% and not about the encoding.",
+			"sf_value(I,S,N,D,L) :- resolved(sfval(I,S,N,D),L).",
+			"sr_value(I,S,N,R,L) :- resolved(srval(I,S,N,R),L).",
+			"kf_value(M,W,R,K,L) :- resolved(kval(M,W,R,K),L).",
+			"#project sf_value/5.",
+			"#project sr_value/5.",
+			"#project kf_value/5.",
+			"% ---- three dimensions ----",
+			"% frame(N,z,V) and frame(N,depth,V) reach the answer set through the",
+			"% generic #show frame/3 above, which is the whole cost of the third axis",
+			"% in atoms: two per node in a viewport's subtree, and nothing anywhere",
+			"% else. What is left here is what no other predicate carries.",
+			"#defined turn/3.",
+			"#defined tris/2.",
+			"#defined looks/2.",
+			"#defined vcam/2.",
+			"#show turn(N,R,V) : turn(N,R,V), scenery.",
+			"#show tris(N,K) : tris(N,K), scenery.",
+			"#show looks(V,C) : looks(V,C), scenery.",
+			"#show vcam(V,C) : vcam(V,C), scenery.",
+			"% A rotation is a design decision like a position: an `angle` token with",
+			"% two alternatives is the flat design and the tilted one, and without this",
+			"% they differ in nothing that is projected and collapse into one universe",
+			"% with an arbitrary pick. Exactly the argument f_value/3 already makes,",
+			"% one quantity over. Nothing here projects on a node's *presence* in the",
+			"% third axis: s3/1 is a fact about the document, true in every universe.",
+			"#defined t_value/3.",
+			"#project t_value/3.",
 		]),
 	]
 		.filter(Boolean)
@@ -3170,6 +4787,22 @@ export function variableCounts(scene: Scene): Record<string, number> {
 			const value = node.frame[dim];
 			if (value.length === 1 && value[0].kind === "literal") continue;
 			if (value.length > 0) out[frameVar(node.id, dim)] = value.length;
+		}
+		// The third axis on the same terms, and rotation on terms of its own: the
+		// compiler mints a rotation's variable whether or not it holds a choice —
+		// see the emission — so a single-alternative one is a row the inspector can
+		// show, dim and pin, exactly as it is for a token-linked frame dimension.
+		// The two walks agree because they are written against the same rule, which
+		// is what stops a pin surviving in the panel and vanishing from the program.
+		for (const dim of SPATIALS) {
+			const value = node.spatial?.[dim];
+			if (value === undefined || value.length === 0) continue;
+			if (value.length === 1 && value[0].kind === "literal") continue;
+			out[frameVar(node.id, dim)] = value.length;
+		}
+		for (const turn of TURN_NAMES) {
+			const value = node.turn?.[turn];
+			if (value && value.length > 0) out[rotateVar(node.id, turn)] = value.length;
 		}
 		// A layout's settings only branch anything while the layout is on and
 		// has something to arrange, so an abandoned one is not a variable.
@@ -3284,6 +4917,12 @@ export function unreadVariables(scene: Scene): Set<string> {
 			worn.add(node.style);
 		}
 		read.push(...Object.values(node.props), ...DIMENSIONS.map((d) => node.frame[d]));
+		// A `length` token a mesh's depth names and an `angle` token a rack's tilt
+		// names are both read, and leaving them out here would report them unread
+		// and grey their alternatives on the strength of a projection artefact —
+		// precisely the failure this function exists to avoid.
+		read.push(...SPATIALS.map((d) => node.spatial?.[d]));
+		read.push(...TURN_NAMES.map((t) => node.turn?.[t]));
 		if (isLaidOut(node)) {
 			read.push(...CONTAINER_PROPS.map((p) => layoutValueOf(node, p)));
 			for (const child of node.children ?? []) {
@@ -3322,12 +4961,36 @@ export function unreadVariables(scene: Scene): Set<string> {
 	for (const machine of scene.machines ?? []) {
 		for (const state of machine.states) {
 			for (const delta of Object.values(state.parts)) {
-				read.push(...Object.values(delta.props ?? {}), ...Object.values(delta.frame ?? {}));
+				read.push(
+					...Object.values(delta.props ?? {}),
+					...Object.values(delta.frame ?? {}),
+					...Object.values(delta.turn ?? {}),
+				);
 			}
 		}
 		for (const transition of machine.transitions) {
 			if (!transition.enabled) continue;
 			read.push(...MOTION_PROP_NAMES.map((prop) => motionValueOf(transition, prop)));
+			// The fourth motion setting, by hand — see EXIT_FALLBACK. A `duration`
+			// token that every debounce in the document points at is a motion scale
+			// like any other, and leaving it out here would report it unread and grey
+			// its alternatives on the strength of a projection artefact.
+			read.push(transition.exit);
+		}
+		// A keyframe's time, a keyframe's value and a timeline's length are all
+		// Values and all three may name a token. "The overshoot happens at `--beat`"
+		// is the whole reason a keyframe's time is a Value rather than a number, and
+		// a `--beat` reported unread would be a motion scale the panel greyed.
+		//
+		// Read more generously than the compiler emits, exactly as the deltas above
+		// are: a track that names no field mints nothing, but the keyframes somebody
+		// typed into it are still values they wrote, and naming the field again would
+		// bring them back.
+		for (const timeline of machine.timelines ?? []) {
+			read.push(timeline.length);
+			for (const track of timeline.tracks) {
+				for (const key of track.keys) read.push(key.at, key.value);
+			}
 		}
 	}
 	for (const style of scene.styles ?? []) {

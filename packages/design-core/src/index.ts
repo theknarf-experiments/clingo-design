@@ -6,6 +6,7 @@ export * from "./components.ts";
 export * from "./machines.ts";
 export * from "./machinecheck.ts";
 export * from "./geometry.ts";
+export * from "./spatial.ts";
 export * from "./measure.ts";
 export * from "./tree.ts";
 export * from "./lines.ts";

@@ -36,7 +36,9 @@ import {
 	isGridded,
 	layoutLength,
 	stateTouches,
+	turnMdeg,
 } from "./scene.ts";
+import { TEMPLATES } from "./templates/index.ts";
 import { EMU_PER_PX, UNIT_NAMES, UNITS, emuOf } from "./units.ts";
 import {
 	type Value,
@@ -1050,4 +1052,673 @@ test("a document with a machine is read once, however many times it is opened", 
 		nodes: [...wired().nodes, { ...wired().nodes[1], id: "b2", state: 3 }],
 	});
 	assert.deepEqual(normalizeScene(JSON.parse(JSON.stringify(messy))), messy);
+});
+
+/* ------------------------------------------------------------------ */
+/* Reading a document that has a third axis in it                      */
+/* ------------------------------------------------------------------ */
+
+/** A page with a 3D view on it, in the shape a stored document holds one. */
+const staged = (over: Record<string, unknown> = {}) => ({
+	tokens: [],
+	styles: [],
+	machines: [],
+	constraints: [],
+	rules: "",
+	unit: "px",
+	nodes: [
+		{
+			id: "page",
+			kind: "frame",
+			name: "Page",
+			frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("800px")], height: [lit("600px")] },
+			props: {},
+			children: [
+				{
+					id: "view",
+					kind: "viewport",
+					name: "Hero",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("480px")], height: [lit("320px")] },
+					props: {},
+					camera: "cam",
+					children: [
+						{
+							id: "cam",
+							kind: "camera",
+							name: "Camera",
+							frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("0px")], height: [lit("0px")] },
+							props: {},
+						},
+						{
+							id: "cube",
+							kind: "mesh",
+							name: "Cube",
+							frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("100px")], height: [lit("100px")] },
+							props: {},
+							spatial: { z: [lit("24px")], depth: [lit("40px")] },
+							turn: { rotateY: [lit("22.5deg")] },
+						},
+					],
+				},
+			],
+		},
+	],
+	...over,
+});
+
+/** The node with this id, wherever it is. */
+const nodeAt = (scene: Scene, id: string): SceneNode | undefined => {
+	const walk = (nodes: readonly SceneNode[]): SceneNode | undefined => {
+		for (const node of nodes) {
+			if (node.id === id) return node;
+			const found = node.children ? walk(node.children) : undefined;
+			if (found) return found;
+		}
+		return undefined;
+	};
+	return walk(scene.nodes);
+};
+
+test("a document with no imported geometry opens with no asset index at all", () => {
+	// Absent rather than `{}`, so "this document holds no imported geometry" has
+	// one spelling and `referencedAssets` has one shape to answer for.
+	assert.equal(normalizeScene({}).assets, undefined);
+	assert.equal(normalizeScene({ assets: {} }).assets, undefined);
+	assert.equal(normalizeScene({ assets: "later" }).assets, undefined);
+	assert.ok(!Object.hasOwn(normalizeScene({}), "assets"));
+});
+
+test("an asset index survives whole, and one bad row is one row", () => {
+	const scene = normalizeScene(
+		staged({
+			assets: {
+				h1: { format: "glb", bytes: 2048, triangles: 900, name: "Chair" },
+				// No format nothing can parse, so nothing could ever read the bytes.
+				h2: { bytes: 1, triangles: 1, name: "Mystery" },
+				h3: { format: "gltf", bytes: 12, triangles: 4 },
+			},
+		}),
+	);
+	assert.deepEqual(scene.assets?.h1, {
+		format: "glb",
+		bytes: 2048,
+		triangles: 900,
+		name: "Chair",
+	});
+	assert.equal(scene.assets?.h2, undefined, "an unparseable row is dropped");
+	// A name is what a person reads and nothing else reads it, so the hash
+	// stands in rather than the entry being lost.
+	assert.equal(scene.assets?.h3.name, "h3");
+});
+
+test("a third axis is sparse on the way in, and flat has one spelling", () => {
+	const scene = normalizeScene(
+		staged({
+			nodes: [
+				{
+					id: "solo",
+					kind: "mesh",
+					name: "Solo",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("10px")], height: [lit("10px")] },
+					props: {},
+					// A non-value entry is not a dimension; an empty one says nothing.
+					spatial: { z: "24px", depth: [] },
+					turn: {},
+				},
+			],
+		}),
+	);
+	const solo = nodeAt(scene, "solo");
+	assert.ok(solo);
+	// Nothing usable survived either record, so neither key is written — a
+	// leftover `{}` would otherwise put a whole document into three dimensions.
+	assert.ok(!Object.hasOwn(solo, "spatial"));
+	assert.ok(!Object.hasOwn(solo, "turn"));
+});
+
+test("a z is snapped onto its unit's lattice, and an angle is not", () => {
+	const scene = normalizeScene(
+		staged({
+			nodes: [
+				{
+					id: "solo",
+					kind: "mesh",
+					name: "Solo",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("10px")], height: [lit("10px")] },
+					props: {},
+					// Half a pixel is 4762.5 EMU, which is no length at all, so it
+					// would have read as zero and put the mesh back on the page.
+					spatial: { z: [lit("20.5px")] },
+					// An angle has no lattice to be off: `mdegOf` is exact or
+					// nothing and 22.5 degrees is exactly 22500 thousandths.
+					turn: { rotateY: [lit("22.5deg")], rotateZ: [lit("0.25turn")] },
+				},
+			],
+		}),
+	);
+	const solo = nodeAt(scene, "solo");
+	assert.ok(solo);
+	assert.notDeepEqual(solo.spatial?.z, [lit("20.5px")]);
+	assert.ok(emuOf(String((solo.spatial?.z?.[0] as { value: string }).value)) !== undefined);
+	assert.deepEqual(solo.turn?.rotateY, [lit("22.5deg")]);
+	assert.deepEqual(solo.turn?.rotateZ, [lit("0.25turn")]);
+	assert.equal(turnMdeg(solo, "rotateY"), 22500);
+});
+
+test("a camera a viewport no longer holds is kept, because deleting one must leave a legal document", () => {
+	const scene = normalizeScene(
+		staged({
+			nodes: [
+				{
+					id: "view",
+					kind: "viewport",
+					name: "Hero",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("480px")], height: [lit("320px")] },
+					props: {},
+					// The camera it named has been deleted out from under it.
+					camera: "cam",
+					children: [],
+				},
+				{
+					id: "other",
+					kind: "viewport",
+					name: "Other",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("10px")], height: [lit("10px")] },
+					props: {},
+					camera: 7,
+					children: [],
+				},
+			],
+		}),
+	);
+	// The dangling `instanceOf` argument, one field over: `vcam/2` derives
+	// nothing, the renderer frames the subtree itself and says so, and undoing
+	// the deletion gives back a view that is still looking through the camera.
+	assert.equal(nodeAt(scene, "view")?.camera, "cam");
+	// A camera that is not an id at all is a different question, and gets the
+	// answer `style` and `state` get.
+	assert.ok(!Object.hasOwn(nodeAt(scene, "other") as SceneNode, "camera"));
+});
+
+test("a model whose file is missing is a relink, and half a reference is not a model", () => {
+	const bounds = { x: 0, y: 0, width: 100, height: 100, z: 0, depth: 100 };
+	const scene = normalizeScene(
+		staged({
+			// The index has never heard of `gone`, which is a missing file.
+			assets: { here: { format: "glb", bytes: 4, triangles: 2, name: "Here" } },
+			nodes: [
+				{
+					id: "chair",
+					kind: "model",
+					name: "Chair",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("100px")], height: [lit("100px")] },
+					props: {},
+					mesh: { asset: "gone", format: "glb", bounds, triangles: 900 },
+				},
+				{
+					id: "half",
+					kind: "model",
+					name: "Half",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("100px")], height: [lit("100px")] },
+					props: {},
+					// No bounds: nothing to draw while the payload is away, and the
+					// same judgement a path with no usable vertices gets.
+					mesh: { asset: "here", format: "glb", triangles: 4 },
+				},
+			],
+		}),
+	);
+	assert.equal(nodeAt(scene, "chair")?.mesh?.asset, "gone");
+	assert.equal(nodeAt(scene, "chair")?.mesh?.triangles, 900);
+	assert.ok(!Object.hasOwn(nodeAt(scene, "half") as SceneNode, "mesh"));
+	// And the node itself is never lost for either reason — "relink this" and
+	// "your chair is gone" are two sentences and only the first one is true.
+	assert.ok(nodeAt(scene, "half"));
+});
+
+test("a mesh outside every viewport is kept, and says nothing", () => {
+	// It is `node/1` with a `kind/2` like everything else, no viewport contains
+	// it so no renderer ever sees it, and it is exactly what dragging a mesh out
+	// of a view in the layer list leaves behind. Correcting it would be
+	// correcting something a designer did on purpose.
+	const scene = normalizeScene(
+		staged({
+			nodes: [
+				{
+					id: "stray",
+					kind: "mesh",
+					name: "Stray",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("10px")], height: [lit("10px")] },
+					props: {},
+				},
+			],
+		}),
+	);
+	assert.equal(nodeAt(scene, "stray")?.kind, "mesh");
+});
+
+test("a document with a 3D view is read once, however many times it is opened", () => {
+	const once = normalizeScene(
+		staged({ assets: { h1: { format: "glb", bytes: 8, triangles: 3, name: "Chair" } } }),
+	);
+	const twice = normalizeScene(JSON.parse(JSON.stringify(once)));
+	assert.deepEqual(twice, once);
+	// And over the document that exercises every branch above.
+	const messy = normalizeScene(
+		staged({
+			assets: { h1: { bytes: 8 } },
+			nodes: [
+				{
+					id: "solo",
+					kind: "mesh",
+					name: "Solo",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("10px")], height: [lit("10px")] },
+					props: {},
+					spatial: { z: [lit("20.5px")], depth: "no" },
+					turn: { rotateY: [lit("22.5deg")] },
+					camera: 7,
+					mesh: { asset: "h1" },
+				},
+			],
+		}),
+	);
+	assert.deepEqual(normalizeScene(JSON.parse(JSON.stringify(messy))), messy);
+});
+
+/* ------------------------------------------------------------------ */
+/* Reading the rest of the ladder                                      */
+/* ------------------------------------------------------------------ */
+
+test("a state id the program already means something by is dropped", () => {
+	// `entry`, `exit` and `any` are positions on an edge — where a machine
+	// begins, where a layer stops, and an edge that may be taken from anywhere.
+	// A state called `exit` would be offered by `mefrom/3` as an ordinary source
+	// and as the sugar at once, which is one picture wrong in a way nothing
+	// reports.
+	const scene = normalizeScene(
+		wired({
+			states: [
+				{ id: "rest", name: "Rest", parts: {} },
+				{ id: "entry", name: "Entry", parts: {} },
+				{ id: "exit", name: "Exit", parts: {} },
+				{ id: "any", name: "Any", parts: {} },
+				{ id: "hover", name: "Hover", parts: {} },
+			],
+		}),
+	);
+	assert.deepEqual(
+		scene.machines[0].states.map((s) => s.id),
+		["rest", "hover"],
+	);
+	// The edges that name them are kept, which is the whole point of the words.
+	assert.equal(
+		normalizeScene(
+			wired({
+				transitions: [
+					{ id: "start", from: "entry", to: "rest", trigger: "load" },
+					{ id: "stop", from: "rest", to: "exit", trigger: "click" },
+				],
+			}),
+		).machines[0].transitions.length,
+		2,
+	);
+});
+
+test("an input the program could not name is dropped, and a range nobody can read is kept", () => {
+	const scene = normalizeScene(
+		wired({
+			inputs: [
+				{ id: "open", name: "Open", kind: "number", initial: "0", min: "0", max: "1" },
+				{ id: "open", name: "Twice", kind: "boolean" },
+				{ id: "Not A Term", name: "Bad", kind: "boolean" },
+				{ id: "odd", name: "Odd", kind: "colour" },
+				{ id: "saved", kind: "trigger" },
+				// A range that reads as no number is not a broken document: it is a
+				// range the checks decline to say anything about, and dropping it
+				// would silently turn "this guard is impossible" into "this is fine".
+				{ id: "wide", name: "Wide", kind: "number", min: "1e9" },
+			],
+		}),
+	);
+	const inputs = scene.machines[0].inputs ?? [];
+	assert.deepEqual(
+		inputs.map((i) => i.id),
+		["open", "saved", "wide"],
+		"a repeat keeps the first, a non-constant and an unknown kind go",
+	);
+	assert.equal(inputs[0].kind, "number");
+	assert.equal(inputs[0].min, "0");
+	assert.equal(inputs[1].name, "saved", "a missing name falls back to the id");
+	assert.equal(inputs[2].min, "1e9");
+	// Absence keeps meaning "nobody drives this machine from outside", which is
+	// every machine any document written before this rung holds.
+	assert.equal(normalizeScene(wired()).machines[0].inputs, undefined);
+});
+
+test("a guard naming an input the machine has not got is kept, so something can report it", () => {
+	const scene = normalizeScene(
+		wired({
+			inputs: [{ id: "open", name: "Open", kind: "number" }],
+			transitions: [
+				{
+					id: "over",
+					from: "rest",
+					to: "hover",
+					trigger: "pointerenter",
+					conditions: [
+						{ input: "open", op: "gt", value: "0.5" },
+						// The input was deleted. `mcbad/3` is looking for exactly this.
+						{ input: "gone", op: "eq", value: "true" },
+						// An operator the table has not got would become none of the
+						// condition facts at all, so it is not a condition.
+						{ input: "open", op: "approx", value: "1" },
+						{ input: "Not A Term", op: "eq", value: "1" },
+					],
+				},
+				{ id: "out", from: "hover", to: "rest", trigger: "pointerleave", conditions: [] },
+			],
+		}),
+	);
+	const [over, out] = scene.machines[0].transitions;
+	assert.deepEqual(over.conditions, [
+		{ input: "open", op: "gt", value: "0.5" },
+		{ input: "gone", op: "eq", value: "true" },
+	]);
+	// Absent and empty are the same claim here — an unguarded edge — so an empty
+	// list is dropped and every transition written before guards existed still
+	// costs nothing.
+	assert.ok(!Object.hasOwn(out, "conditions"));
+});
+
+test("an exit time is a duration value, read the way the other three are", () => {
+	const scene = normalizeScene(
+		wired({
+			transitions: [
+				{ id: "a", from: "rest", to: "hover", trigger: "click", exit: "300ms" },
+				{ id: "b", from: "hover", to: "rest", trigger: "click", exit: 300 },
+				{ id: "c", from: "rest", to: "hover", trigger: "load" },
+			],
+		}),
+	);
+	const [a, b, c] = scene.machines[0].transitions;
+	assert.deepEqual(a.exit, [lit("300ms")]);
+	// A bare number is ambiguous by a factor of a thousand, so it comes back as
+	// itself and `msOf` refuses it — the same answer `duration` already gives,
+	// and better than guessing which unit somebody meant.
+	assert.deepEqual(b.exit, [lit("300")]);
+	assert.equal(msOf("300"), undefined);
+	assert.ok(!Object.hasOwn(c, "exit"));
+});
+
+test("the order of the layers is the priority, so a repeat keeps the first", () => {
+	const scene = normalizeScene(
+		wired({
+			layers: [
+				{ id: "base", name: "Base" },
+				{ id: "glow", name: "Glow" },
+				{ id: "base", name: "Second base" },
+				{ id: "Not A Term", name: "Bad" },
+			],
+			states: [
+				{ id: "rest", name: "Rest", parts: {}, layer: "base" },
+				{ id: "lit", name: "Lit", parts: {}, layer: "gone" },
+			],
+		}),
+	);
+	const machine = scene.machines[0];
+	assert.deepEqual(
+		(machine.layers ?? []).map((l) => l.id),
+		["base", "glow"],
+	);
+	assert.equal(machine.layers?.[0].name, "Base", "dropping the first would re-rank");
+	// A state naming a layer that was deleted is the first layer, which is what
+	// `layerOf` already falls back to — nothing is corrected on the way in.
+	assert.equal(machine.states[1].layer, "gone");
+	assert.equal(normalizeScene(wired()).machines[0].layers, undefined);
+});
+
+test("a timeline keeps its keys in time order, where the document says what time is", () => {
+	const scene = normalizeScene(
+		wired({
+			timelines: [
+				{
+					id: "open",
+					name: "Open",
+					loop: "pingPong",
+					length: "600ms",
+					tracks: [
+						{
+							part: "label",
+							dim: "y",
+							keys: [
+								{ at: "200ms", value: "8px" },
+								{ at: "0ms", value: "0px", easing: "easeIn" },
+								{ at: "200ms", value: "99px" },
+							],
+						},
+						{ part: "label", turn: "rotateZ", keys: [{ at: "0ms", value: "30deg" }] },
+						// A track with no subject has no term to reach the program as,
+						// so its keys would be values keyed by nothing.
+						{ part: "label", keys: [{ at: "0ms", value: "1" }] },
+						{ part: "label", prop: "nosuchprop", keys: [] },
+					],
+				},
+				{ id: "open", name: "Twice", tracks: [] },
+				{ id: "Not A Term", name: "Bad", tracks: [] },
+			],
+		}),
+	);
+	const timelines = scene.machines[0].timelines ?? [];
+	assert.deepEqual(
+		timelines.map((t) => t.id),
+		["open"],
+	);
+	const tracks = timelines[0].tracks;
+	assert.deepEqual(
+		tracks.map((t) => t.dim ?? t.turn ?? t.prop),
+		["y", "rotateZ"],
+	);
+	assert.equal(timelines[0].loop, "pingPong");
+	assert.deepEqual(timelines[0].length, [lit("600ms")]);
+	// Sorted, and two keys at one time keep the first.
+	assert.deepEqual(
+		tracks[0].keys.map((k) => k.at),
+		[[lit("0ms")], [lit("200ms")]],
+	);
+	assert.deepEqual(tracks[0].keys[0].easing, "easeIn");
+	assert.deepEqual(tracks[0].keys[1].value, [lit("8px")]);
+	// A rotation track's value is an angle, which has no lattice, so it comes
+	// back exactly as it was typed.
+	assert.deepEqual(tracks[1].keys[0].value, [lit("30deg")]);
+});
+
+test("a keyframe whose time names a token leaves the document's own order alone", () => {
+	// "Time order" is a fact about a *universe* once a time can name a token, and
+	// a reader that sorted on the first alternative would reorder somebody's
+	// timeline on the strength of a design they are not looking at. The program
+	// derives `mkbackwards/4` for the case a linter cannot catch.
+	const scene = normalizeScene(
+		wired({
+			timelines: [
+				{
+					id: "open",
+					name: "Open",
+					tracks: [
+						{
+							part: "label",
+							dim: "y",
+							keys: [
+								{ at: "300ms", value: "8px" },
+								{ at: [{ kind: "token", token: "beat" }], value: "0px" },
+								{ at: "100ms", value: "4px" },
+							],
+						},
+					],
+				},
+			],
+		}),
+	);
+	assert.deepEqual(
+		scene.machines[0].timelines?.[0].tracks[0].keys.map((k) => k.value),
+		[[lit("8px")], [lit("0px")], [lit("4px")]],
+	);
+});
+
+test("a blend keeps stops nothing can satisfy, and loses a mixing rule nothing implements", () => {
+	const scene = normalizeScene(
+		wired({
+			inputs: [{ id: "open", name: "Open", kind: "number", min: "0", max: "1" }],
+			states: [
+				{
+					id: "rest",
+					name: "Rest",
+					parts: {},
+					blend: {
+						kind: "oneD",
+						input: "open",
+						stops: [
+							{ timeline: "shut", at: "0" },
+							// Outside the input's declared range: `mstopout/3` is looking
+							// for exactly this, and the panel offers a rule that forbids
+							// it by name. Dropping it would take away the symptom.
+							{ timeline: "wide", at: "4" },
+							{ at: "1" },
+						],
+					},
+				},
+				{ id: "hover", name: "Hover", parts: {}, blend: { kind: "twoD", stops: [] } },
+			],
+		}),
+	);
+	const [rest, hover] = scene.machines[0].states;
+	assert.equal(rest.blend?.kind, "oneD");
+	assert.equal(rest.blend?.input, "open");
+	assert.deepEqual(rest.blend?.stops, [
+		{ timeline: "shut", at: "0" },
+		{ timeline: "wide", at: "4" },
+	]);
+	// A kind the table has not got is a mixing rule nothing implements, so the
+	// blend goes and the state stays — a state with no source draws its delta.
+	assert.ok(!Object.hasOwn(hover, "blend"));
+});
+
+test("an instance says which state of each further layer it is drawn in", () => {
+	const scene = normalizeScene({
+		...wired(),
+		nodes: [
+			wired().nodes[0],
+			{ ...wired().nodes[1], states: { glow: "lit", trim: 7 } },
+			{ ...wired().nodes[1], id: "b2", states: {} },
+		],
+	});
+	// `state` keeps saying what it says about the first layer; entries that are
+	// not state ids go one at a time rather than losing the record.
+	assert.equal(scene.nodes[1].state, "hover");
+	assert.deepEqual(scene.nodes[1].states, { glow: "lit" });
+	assert.ok(!Object.hasOwn(scene.nodes[2], "states"));
+});
+
+test("a document with the whole ladder in it is read once, however many times it is opened", () => {
+	const once = normalizeScene(
+		wired({
+			inputs: [{ id: "open", name: "Open", kind: "number", min: "0", max: "1" }],
+			layers: [{ id: "base", name: "Base" }, { id: "glow", name: "Glow" }],
+			timelines: [
+				{
+					id: "open",
+					name: "Open",
+					loop: "loop",
+					tracks: [
+						{ part: "label", dim: "z", keys: [{ at: "0ms", value: "0px" }, { at: "1s", value: "40px" }] },
+						{ part: "label", turn: "rotateY", keys: [{ at: "0ms", value: "0deg" }] },
+					],
+				},
+			],
+			states: [
+				{ id: "rest", name: "Rest", parts: {}, layer: "base", timeline: "open" },
+				{
+					id: "lit",
+					name: "Lit",
+					layer: "glow",
+					parts: {
+						label: {
+							frame: { z: [lit("40px")], y: [lit("8px")] },
+							turn: { rotateY: [lit("30deg")] },
+						},
+					},
+				},
+			],
+			transitions: [
+				{
+					id: "over",
+					from: "any",
+					to: "lit",
+					trigger: "pointerenter",
+					exit: "300ms",
+					conditions: [{ input: "open", op: "ge", value: "0.5" }],
+				},
+			],
+		}),
+	);
+	const twice = normalizeScene(JSON.parse(JSON.stringify(once)));
+	assert.deepEqual(twice, once);
+	// And the state delta really does carry the third axis and a rotation.
+	const lit40 = once.machines[0].states[1].parts.label;
+	assert.deepEqual(lit40.frame?.z, [lit("40px")]);
+	assert.deepEqual(lit40.turn?.rotateY, [lit("30deg")]);
+	assert.equal(stateTouches({ turn: lit40.turn }), true);
+});
+
+/* ------------------------------------------------------------------ */
+/* No regression: every existing document reads back as it always did  */
+/* ------------------------------------------------------------------ */
+
+test("no template gains a single field the third axis or the ladder added", () => {
+	// The invariant, asserted rather than assumed. Every field this step added is
+	// optional and absence means what it always meant, so a document written
+	// before any of it existed has to come back holding none of it — otherwise
+	// the compiler's `spatial.` gate opens on a file that never asked for it, and
+	// a viewport on page four puts the whole document into three dimensions.
+	for (const template of TEMPLATES) {
+		const raw = JSON.parse(JSON.stringify(template.create()));
+		const once = normalizeScene(raw);
+		const twice = normalizeScene(JSON.parse(JSON.stringify(once)));
+		assert.deepEqual(twice, once, `${template.id} is read once`);
+		assert.ok(!Object.hasOwn(once, "assets"), `${template.id} has no assets`);
+
+		const seen: string[] = [];
+		const walk = (nodes: readonly SceneNode[]) => {
+			for (const node of nodes) {
+				for (const key of ["spatial", "turn", "camera", "mesh", "states"]) {
+					if (Object.hasOwn(node, key)) seen.push(`${node.id}.${key}`);
+				}
+				if (node.children) walk(node.children);
+			}
+		};
+		walk(once.nodes);
+		for (const machine of once.machines) {
+			for (const key of ["inputs", "layers", "timelines"]) {
+				if (Object.hasOwn(machine, key)) seen.push(`${machine.id}.${key}`);
+			}
+			for (const state of machine.states) {
+				for (const key of ["layer", "timeline", "blend"]) {
+					if (Object.hasOwn(state, key)) seen.push(`${state.id}.${key}`);
+				}
+				for (const [part, delta] of Object.entries(state.parts)) {
+					if (Object.hasOwn(delta, "turn")) seen.push(`${state.id}.${part}.turn`);
+					for (const dim of ["z", "depth"]) {
+						if (delta.frame && Object.hasOwn(delta.frame, dim)) {
+							seen.push(`${state.id}.${part}.${dim}`);
+						}
+					}
+				}
+			}
+			for (const transition of machine.transitions) {
+				for (const key of ["conditions", "exit"]) {
+					if (Object.hasOwn(transition, key)) seen.push(`${transition.id}.${key}`);
+				}
+			}
+		}
+		assert.deepEqual(seen, [], `${template.id} gained ${seen.join(", ")}`);
+	}
 });

@@ -45,9 +45,11 @@ import {
 	guideVar,
 	layoutVar,
 	lit,
+	mdegOf,
 	motionVar,
 	msOf,
 	ref,
+	rotateVar,
 	resolveValue,
 	single,
 	styleVar,
@@ -125,7 +127,21 @@ export type PropName =
 	| "size"
 	| "weight"
 	| "lineHeight"
-	| "align";
+	| "align"
+	// From here down: the properties of a thing in three dimensions, plus the
+	// one CSS number that has nothing to do with the scene. See §1.2 of
+	// `docs/three-d-spec.md`, and note that colour is *reused* rather than
+	// re-invented — a mesh's base colour is `fill` and a light's is `ink`, which
+	// is what lets a brand palette light a 3D scene with nothing wired up.
+	| "solid"
+	| "roughness"
+	| "metalness"
+	| "lamp"
+	| "intensity"
+	| "fov"
+	| "near"
+	| "far"
+	| "perspective";
 
 export interface PropSpec {
 	label: string;
@@ -273,6 +289,127 @@ export const PROPS: Record<PropName, PropSpec> = {
 		styleable: true,
 		inherited: true,
 	},
+	/**
+	 * Which primitive a `mesh` is.
+	 *
+	 * A closed menu and therefore a {@link Value} like a `direction` is, which is
+	 * the whole reason it is a property rather than a field: `[box, sphere]` is a
+	 * real design question with two answers, and a `solid` token pointed at by
+	 * six meshes is a family that changes shape together. A field would have made
+	 * that a second kind of variation with its own editor, and the multiverse
+	 * would have had nothing to say about it.
+	 */
+	solid: {
+		label: "Solid",
+		type: "solid",
+		fallback: VALUE_TYPES.solid.fallback,
+		styleable: false,
+		inherited: false,
+	},
+	/**
+	 * How rough the surface is: 0 is a mirror, 1 is chalk.
+	 *
+	 * A `number`, not a new quantity, and for the reason {@link lineHeight} is
+	 * one: it is a bare proportion, compared and interpolated as itself, and
+	 * `numeralOf` already reads exactly that. **Clamped to [0,1] where it is
+	 * read, not here** — the reader is `roughnessOf` in `spatial.ts` and the
+	 * clamp is stated once, because two clamp sites is two answers and only one
+	 * of them can be checked headless.
+	 */
+	roughness: {
+		label: "Roughness",
+		type: "number",
+		fallback: "0.6",
+		styleable: true,
+		inherited: false,
+	},
+	metalness: {
+		label: "Metalness",
+		type: "number",
+		fallback: "0",
+		styleable: true,
+		inherited: false,
+	},
+	/**
+	 * Which kind of lamp a `light` is.
+	 *
+	 * Same argument as {@link solid}: "key light or ambient" is a design
+	 * decision, so it is a value with a menu behind it rather than a field with a
+	 * dropdown of its own.
+	 */
+	lamp: {
+		label: "Lamp",
+		type: "lamp",
+		fallback: VALUE_TYPES.lamp.fallback,
+		styleable: false,
+		inherited: false,
+	},
+	/**
+	 * How bright a light is. Unbounded above; negative is clamped to zero where
+	 * it is read, exactly as a negative gap is.
+	 */
+	intensity: {
+		label: "Intensity",
+		type: "number",
+		fallback: "1",
+		styleable: true,
+		inherited: false,
+	},
+	/**
+	 * A camera's vertical field of view.
+	 *
+	 * The one property of the `angle` type, and it is here rather than as a plain
+	 * number so that a document can hold "wide and long" as two alternatives of
+	 * one `angle` token and get two designs of the same scene — which is the
+	 * whole grid argument, applied to a lens.
+	 */
+	fov: {
+		label: "Field of view",
+		type: "angle",
+		fallback: "50deg",
+		styleable: false,
+		inherited: false,
+	},
+	/**
+	 * The near and far clip planes, as ordinary lengths in EMU.
+	 *
+	 * Lengths rather than bare numbers because they *are* lengths in the world
+	 * the scene is measured in, which means a `length` token drives them and the
+	 * unit machinery reads them with no new reader. `far` below `near` is refused
+	 * by `lensOf` rather than clamped here, for {@link roughness}' reason.
+	 */
+	near: {
+		label: "Near",
+		type: "length",
+		fallback: pxLength(1),
+		styleable: false,
+		inherited: false,
+	},
+	far: {
+		label: "Far",
+		type: "length",
+		fallback: pxLength(20000),
+		styleable: false,
+		inherited: false,
+	},
+	/**
+	 * How far the eye is from a CSS 3D scene — the `perspective` declaration, and
+	 * nothing whatsoever to do with a `camera` node.
+	 *
+	 * Offered on `frame` only. It is the one number CSS needs before a `rotateY`
+	 * on a child means anything, and it is a length like every other, so a
+	 * document may hold two of them. The exporter is the only reader; nothing on
+	 * the canvas and nothing in the program consults it, because inside a
+	 * viewport the camera decides the projection and outside one there is no
+	 * projection to decide.
+	 */
+	perspective: {
+		label: "Perspective",
+		type: "length",
+		fallback: pxLength(1200),
+		styleable: false,
+		inherited: false,
+	},
 };
 
 export const PROP_NAMES = Object.keys(PROPS) as PropName[];
@@ -300,7 +437,20 @@ export type NodeKind =
 	| "path"
 	| "text"
 	| "group"
-	| "instance";
+	| "instance"
+	// The seam, and what is on the far side of it. A `viewport` is an ordinary
+	// 2D rectangle on the artboard that happens to contain a 3D scene; the five
+	// below it are that scene. Every one of them is `node/1` with a `kind/2`, a
+	// `child/2`, an `order/2`, a `visible/1` and a `frame/3` — there is no
+	// parallel 3D document model, which is what makes the layer list, hit
+	// testing, grouping, undo, sync, the multiverse, pinning and the unsat core
+	// work on a mesh the day the kind is added.
+	| "viewport"
+	| "pivot"
+	| "mesh"
+	| "model"
+	| "camera"
+	| "light";
 
 /**
  * What a kind of node *is*, in one place.
@@ -383,6 +533,41 @@ export interface KindSpec {
 	 * works on one unchanged.
 	 */
 	plotted: boolean;
+	/**
+	 * This kind lives in three dimensions: it reads {@link SceneNode.spatial} and
+	 * {@link SceneNode.turn}, it is drawn by the 3D renderer rather than by the
+	 * DOM, and the HTML export cannot carry it.
+	 *
+	 * **Not the same question as being *inside* a viewport**, and the difference
+	 * is load-bearing. A `rect` with a `z` and a `rotateZ` is a flat box that CSS
+	 * can draw exactly, with a real `translate3d`; a `mesh` is geometry CSS has
+	 * no word for. This column is the second of those, and it is what the
+	 * exporter branches on. What decides where a node *is* is
+	 * {@link SceneNode.spatial}, which every kind may hold.
+	 *
+	 * Required rather than optional, for {@link styleable}'s reason one table
+	 * over: the answer is a fact about the kind and belongs beside it, and a list
+	 * somewhere else quietly falls behind.
+	 */
+	spatial: boolean;
+	/**
+	 * The pointer stops here: what is inside is picked by something else.
+	 *
+	 * True for exactly one kind, `viewport`. A mesh's silhouette on screen is a
+	 * projection of its geometry through a camera, and this document's own hit
+	 * testing knows about axis-aligned rectangles in EMU — so `hitTestTree`
+	 * descending into a viewport would answer with a frame that has nothing to do
+	 * with the pixels anybody clicked. It stops at the box instead, and the
+	 * raycaster inside the viewport answers the question it is actually equipped
+	 * for.
+	 *
+	 * Deliberately *not* the same as {@link surface}, which also clips: a surface
+	 * takes new nodes drawn over it, and dragging a rectangle over a 3D view
+	 * means "a rectangle on top of the view", never "a rectangle inside the
+	 * scene". `opaque` buys the clipping and the pointer behaviour without the
+	 * drop behaviour.
+	 */
+	opaque: boolean;
 }
 
 /** Which corner-to-corner run a diagonal kind draws. */
@@ -391,7 +576,19 @@ export type Diagonal = "down" | "up";
 export const KINDS: Record<NodeKind, KindSpec> = {
 	frame: {
 		label: "Frame",
-		props: ["fill", "radius", "stroke", "strokeWidth", "shadow", "opacity"],
+		// `perspective` last, and only here: it is the CSS declaration that makes
+		// a `rotateY` on a child mean anything, so it belongs to the surface the
+		// turned children sit on and nowhere else. Nothing on the canvas and
+		// nothing in the program reads it — see `PROPS.perspective`.
+		props: [
+			"fill",
+			"radius",
+			"stroke",
+			"strokeWidth",
+			"shadow",
+			"opacity",
+			"perspective",
+		],
 		defaults: { fill: [lit("#ffffff")] },
 		defaultSize: { width: fromPx(480), height: fromPx(320) },
 		drawable: true,
@@ -403,6 +600,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: false,
 		measured: false,
 		plotted: false,
+		spatial: false,
+		opaque: false,
 	},
 	rect: {
 		label: "Rectangle",
@@ -421,6 +620,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: false,
 		measured: false,
 		plotted: false,
+		spatial: false,
+		opaque: false,
 	},
 	ellipse: {
 		// A corner radius on something with no corners says nothing, so fill is
@@ -438,6 +639,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: false,
 		measured: false,
 		plotted: false,
+		spatial: false,
+		opaque: false,
 	},
 	line: {
 		// No shadow: a box-shadow follows the node's box, and for a stroked kind
@@ -459,6 +662,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: true,
 		measured: false,
 		plotted: false,
+		spatial: false,
+		opaque: false,
 	},
 	arrow: {
 		label: "Arrow",
@@ -477,6 +682,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: true,
 		measured: false,
 		plotted: false,
+		spatial: false,
+		opaque: false,
 	},
 	path: {
 		// Not a `shape`: the pen is a mode you stay in for several clicks, and
@@ -501,6 +708,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: false,
 		measured: false,
 		plotted: true,
+		spatial: false,
+		opaque: false,
 	},
 	text: {
 		label: "Text",
@@ -530,6 +739,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: false,
 		measured: true,
 		plotted: false,
+		spatial: false,
+		opaque: false,
 	},
 	group: {
 		label: "Group",
@@ -545,6 +756,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: false,
 		measured: false,
 		plotted: false,
+		spatial: false,
+		opaque: false,
 	},
 	/**
 	 * A use of a component — see `components.ts`.
@@ -576,6 +789,189 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		diagonal: false,
 		measured: false,
 		plotted: false,
+		spatial: false,
+		opaque: false,
+	},
+	/**
+	 * The seam: a rectangle on the artboard that contains a 3D scene, and names
+	 * the camera it looks through.
+	 *
+	 * `tool: true` and `shape: false`, so it gets its own toolbar slot beside
+	 * `frame` rather than hiding behind the shape menu — a 3D view is not a
+	 * shape, and the one thing worse than an extra button is a button nobody
+	 * finds. `surface: false` and `opaque: true` for the reason on
+	 * {@link KindSpec.opaque}: it clips and it stops the pointer, and it does not
+	 * accept a drop.
+	 *
+	 * It is not itself `spatial`. Everything above it — artboards, layout,
+	 * guides, the grid, the HTML exporter, the 2D pointer — is exactly the tool
+	 * it is today, because a viewport is a rectangle with a fill and a radius and
+	 * nothing above it has to look inside. Everything below it is three
+	 * dimensional.
+	 */
+	viewport: {
+		label: "3D view",
+		props: ["fill", "radius", "stroke", "strokeWidth", "opacity"],
+		defaults: { fill: [lit("#0b1020")] },
+		defaultSize: { width: fromPx(480), height: fromPx(320) },
+		drawable: true,
+		tool: true,
+		container: true,
+		surface: false,
+		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
+		measured: false,
+		plotted: false,
+		spatial: false,
+		opaque: true,
+	},
+	/**
+	 * A transform node inside a scene: a place and a rotation, and no size.
+	 *
+	 * `pivot` rather than reusing `group`, and the difference is not cosmetic. A
+	 * group is `wrapsChildren: true`: it re-fits to its children's 2D bounding
+	 * box and dissolves when ungrouped. Inside a viewport that re-fitting is
+	 * meaningless — the bounding box of rotated solids is exactly the
+	 * trigonometry a linear solver cannot do — so a 3D grouping node is a
+	 * transform with a place and a rotation of its own and nothing to re-fit.
+	 * Naming it `pivot` says which of the two it is.
+	 */
+	pivot: {
+		label: "Pivot",
+		props: [],
+		defaults: {},
+		defaultSize: { width: fromPx(0), height: fromPx(0) },
+		drawable: false,
+		tool: false,
+		container: true,
+		surface: false,
+		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
+		measured: false,
+		plotted: false,
+		spatial: true,
+		opaque: false,
+	},
+	/**
+	 * One of the six primitives, named by a {@link Value} — see `PROPS.solid`.
+	 *
+	 * Not `tool: true`, and neither is anything else in three dimensions: you
+	 * cannot drag a box out in three dimensions with a two-dimensional pointer
+	 * and mean anything by it. A mesh, a camera and a light are added by an edit
+	 * from the viewport's own menu, exactly as a group comes from a selection and
+	 * an instance from a definition.
+	 */
+	mesh: {
+		label: "Solid",
+		props: ["solid", "fill", "roughness", "metalness", "opacity"],
+		defaults: {
+			solid: [lit(VALUE_TYPES.solid.fallback)],
+			fill: [lit(PROPS.fill.fallback)],
+			roughness: [lit(PROPS.roughness.fallback)],
+		},
+		defaultSize: { width: fromPx(100), height: fromPx(100) },
+		drawable: true,
+		tool: false,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
+		measured: false,
+		plotted: false,
+		spatial: true,
+		opaque: false,
+	},
+	/**
+	 * Imported geometry — see {@link SceneNode.mesh}.
+	 *
+	 * A separate kind rather than a flag on {@link mesh}, and the precedent is
+	 * exact: `rect` is parametric and `path` is `plotted: true` with its vertices
+	 * on the node. A mesh is one of six primitives named by a value; a model is a
+	 * payload whose reference is a field. Two kinds, for the same reason there
+	 * are two kinds today.
+	 *
+	 * It states **no `fill` default on purpose**: an imported material is the
+	 * file's, and a fill the document did not ask for would silently repaint
+	 * every imported asset the moment it landed. Stated, it overrides — which is
+	 * the affordance a designer wants and the default nobody wants.
+	 */
+	model: {
+		label: "Model",
+		props: ["fill", "roughness", "metalness", "opacity"],
+		defaults: {},
+		defaultSize: { width: fromPx(100), height: fromPx(100) },
+		drawable: true,
+		tool: false,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
+		measured: false,
+		plotted: false,
+		spatial: true,
+		opaque: false,
+	},
+	/**
+	 * An eye in the scene. Not `drawable`: what a camera contributes to the
+	 * picture is the projection, not a silhouette, and the marker the editor
+	 * draws for it is an overlay rather than a node's pixels.
+	 *
+	 * It still holds properties, and it is the first kind in this table that
+	 * does so without painting. A lens is a set of numbers the renderer reads;
+	 * `drawable` is a claim about pixels, and the two have finally come apart.
+	 */
+	camera: {
+		label: "Camera",
+		props: ["fov", "near", "far"],
+		defaults: {},
+		defaultSize: { width: fromPx(0), height: fromPx(0) },
+		drawable: false,
+		tool: false,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
+		measured: false,
+		plotted: false,
+		spatial: true,
+		opaque: false,
+	},
+	/**
+	 * A lamp. Its colour is `ink` — "the colour the thing itself is" — which is
+	 * the property a `color` token already drives, so a brand palette lights the
+	 * scene with nothing wired up.
+	 *
+	 * `drawable: false` for {@link camera}'s reason, and yet `visible/1` still
+	 * governs it: hiding a light is how a state darkens a scene, and that is one
+	 * of the affordances the "a 3D object is an ordinary scene node" decision was
+	 * bought for. Hiding a *camera*, by contrast, means stop drawing its marker
+	 * and not stop looking — see `vcam/2`.
+	 */
+	light: {
+		label: "Light",
+		props: ["lamp", "ink", "intensity"],
+		defaults: {
+			lamp: [lit(VALUE_TYPES.lamp.fallback)],
+			ink: [lit("#ffffff")],
+			intensity: [lit(PROPS.intensity.fallback)],
+		},
+		defaultSize: { width: fromPx(0), height: fromPx(0) },
+		drawable: false,
+		tool: false,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
+		measured: false,
+		plotted: false,
+		spatial: true,
+		opaque: false,
 	},
 };
 
@@ -600,6 +996,20 @@ export interface Kinded {
 
 export const isDrawable = (node: Kinded): boolean => KINDS[node.kind].drawable;
 export const isSurface = (node: Kinded): boolean => KINDS[node.kind].surface;
+/**
+ * True when this kind *is* geometry in three dimensions — a mesh, a model, a
+ * camera, a light or a pivot.
+ *
+ * The question the exporter asks before it tries to write markup for a node,
+ * and the question the 3D renderer asks before it mounts one. Not the question
+ * "is this node inside a viewport", which is about the tree and is answered in
+ * `spatial.ts`: a `rect` with a `z` is a flat box CSS can draw exactly, and a
+ * `mesh` on a plain artboard is still geometry nothing on the DOM path can
+ * carry.
+ */
+export const isSpatialKind = (node: Kinded): boolean => KINDS[node.kind].spatial;
+/** True when the pointer stops at this node — see {@link KindSpec.opaque}. */
+export const isOpaque = (node: Kinded): boolean => KINDS[node.kind].opaque;
 export const wrapsChildren = (node: Kinded): boolean =>
 	KINDS[node.kind].wrapsChildren;
 export const isDiagonal = (node: Kinded): boolean => KINDS[node.kind].diagonal;
@@ -1390,6 +1800,378 @@ export const sceneContext = (
 	picks: Picks = {},
 ): ResolveContext => ({ tokens: scene.tokens, picks });
 
+/* ------------------------------------------------------------------ */
+/* The third axis                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * **{@link Dimension} and {@link FrameValue} are not widened. A parallel
+ * two-row table is added beside them, and `frame/3` in the generated program
+ * carries all six.**
+ *
+ * The alternative — six required keys on `FrameValue` — was worked through and
+ * rejected three times over, and the reasons are the reasons the whole
+ * no-regression promise holds:
+ *
+ *   - `FrameValue` is `Record<Dimension, Value>`, *required*. Widening it makes
+ *     every {@link makeFrame}, every template, every test fixture and every
+ *     stored document invalid until it grows two more keys. That is not a
+ *     migration, it is a rewrite.
+ *   - `makeFrame` would then write two more values per node, so every rectangle
+ *     in every document would gain two `frame/3` facts and two more chances to
+ *     vary. Multiplicity is something a designer asks for, not something every
+ *     box on the canvas is born with.
+ *   - The scene defaults in the generated program key off the geometry
+ *     vocabulary, so widening it there gives every node in every document a
+ *     `frame(N,z,0)` whether or not the document has ever heard of a third
+ *     axis. A viewport on page four should put *its own subtree* into three
+ *     dimensions, not the whole file.
+ *
+ * So the third axis is **optional and sparse everywhere**: absent is z 0 and
+ * depth 0, which is where a flat document already is, and a document with no 3D
+ * in it holds no `spatial` anywhere and costs exactly nothing.
+ */
+
+/** The two numbers that put a node in the third dimension. */
+export type Spatial = "z" | "depth";
+
+/**
+ * Any of the six — the vocabulary a rule and the solver share.
+ *
+ * Named `Axis3` rather than `Dimension3` because it is what an *edge* is about
+ * as well as what a frame holds, and because the four-versus-six distinction is
+ * the only thing about it worth reading off the name.
+ */
+export type Axis3 = Dimension | Spatial;
+
+/**
+ * The two spatial dimensions, in one place — the twin of {@link FRAME_DIMS}.
+ *
+ * {@link DimensionSpec} is reused unchanged: `z` is a `pos` and `depth` is a
+ * `span`, which is all the geometry rules ever ask of a dimension. That reuse
+ * is what makes the third axis cost one table rather than a parallel rule set —
+ * a `pos` flows through the same equations `x` does, with the same coefficients,
+ * so nothing about the grounding ceiling moves either.
+ */
+export const SPATIAL_DIMS: Record<Spatial, DimensionSpec> = {
+	z: { label: "z", type: "length", fallback: pxLength(0), role: "pos" },
+	depth: { label: "depth", type: "length", fallback: pxLength(0), role: "span" },
+};
+
+export const SPATIALS = Object.keys(SPATIAL_DIMS) as Spatial[];
+
+/** The six, planar first, so a loop over them is a loop in reading order. */
+export const DIMENSIONS_3D: Axis3[] = [...DIMENSIONS, ...SPATIALS];
+
+/**
+ * What one dimension is, whichever of the six it is — the lookup that lets a
+ * caller iterate {@link DIMENSIONS_3D} without knowing which table a name came
+ * out of.
+ */
+export const dimensionSpec = (dim: Axis3): DimensionSpec =>
+	Object.hasOwn(FRAME_DIMS, dim)
+		? FRAME_DIMS[dim as Dimension]
+		: SPATIAL_DIMS[dim as Spatial];
+
+/** What a node holds about the third axis. Sparse: absent is z 0, depth 0. */
+export type SpatialValue = Partial<Record<Spatial, Value>>;
+
+/**
+ * A sparse spatial record from plain numbers, for a gesture or a template.
+ *
+ * **Sparse on purpose, and it is the whole of the no-regression story in one
+ * function**: only the dimensions the caller names are written, so
+ * `makeSpatial({})` is `{}` and a node that has never been lifted holds nothing
+ * at all. In pixels, for {@link makeFrame}'s reason — there is no document here
+ * to ask what unit it is in, and a length in another unit gets into the document
+ * by being typed or by being kept.
+ */
+export function makeSpatial(spatial: Partial<Record<Spatial, number>>): SpatialValue {
+	const out: SpatialValue = {};
+	for (const dim of SPATIALS) {
+		const given = spatial[dim];
+		if (given !== undefined) out[dim] = single(writeLength(given));
+	}
+	return out;
+}
+
+/**
+ * What one spatial dimension comes to in EMU, following whatever token it names
+ * — the twin of {@link frameDim}, and the same walk the generated program does.
+ *
+ * **Absent is 0**, exactly as the program's own default rule makes it for a node
+ * that is in the third axis, and exactly as a frame dimension that resolves to
+ * no length at all is. So a reader never has to ask whether the field is there.
+ */
+export function spatialDim(
+	node: SceneNode,
+	dim: Spatial,
+	context: ResolveContext = NO_CONTEXT,
+): Emu {
+	const resolved = resolveValue(
+		context,
+		node.spatial?.[dim],
+		frameVar(node.id, dim),
+	);
+	return (resolved === undefined ? undefined : emuOf(resolved)) ?? 0;
+}
+
+/**
+ * Both, as the plain pair — the twin of {@link frameOf}.
+ *
+ * Structurally `SpatialFrame` from `geometry.ts`, which is the name the rest of
+ * the system knows this pair by; it is spelled `Record<Spatial, number>` here
+ * only because the two are the same type and this file is the one that owns the
+ * word `Spatial`. See the note in the return-value report for why the import is
+ * not written yet.
+ */
+export function spatialOf(
+	node: SceneNode,
+	context: ResolveContext = NO_CONTEXT,
+): Record<Spatial, number> {
+	return {
+		z: spatialDim(node, "z", context),
+		depth: spatialDim(node, "depth", context),
+	};
+}
+
+/**
+ * A node with some of its third axis replaced by numbers — the twin of
+ * {@link withFrame}, and it obeys the same rules with one stated exception.
+ *
+ * The same: the write lands on **the alternative the visible universe picked**,
+ * an alternative that names a token or is derived is left exactly as it is, and
+ * each dimension is written back in the unit it was already spelled in.
+ *
+ * The exception: a dimension the node **does not hold at all** is written as a
+ * fresh single-alternative literal rather than skipped. That is not the
+ * inconsistency it looks like. A frame always has four dimensions, so an absent
+ * one there is impossible and a non-literal one is a deliberate link a drag must
+ * not unwire; the third axis is sparse, so absence is *silence* rather than a
+ * link, and writing a number where the document said nothing is exactly what
+ * dragging a mesh forward means. There is no other way to state a z for the
+ * first time.
+ *
+ * `depth` is **not** clamped to {@link MIN_NODE_SIZE}, where `width` and
+ * `height` are: a plane is a real primitive with a real depth of zero, and a
+ * clamp would make the flattest solid in the menu unspellable.
+ */
+export function withSpatial(
+	node: SceneNode,
+	patch: Partial<Record<Spatial, number>>,
+	context: ResolveContext = NO_CONTEXT,
+): SceneNode {
+	let spatial: SpatialValue | undefined;
+	for (const dim of SPATIALS) {
+		const next = patch[dim];
+		if (next === undefined) continue;
+		const value = node.spatial?.[dim];
+		if (value === undefined || value.length === 0) {
+			spatial ??= { ...node.spatial };
+			spatial[dim] = single(writeLength(next));
+			continue;
+		}
+		const index = activeIndex(value, frameVar(node.id, dim), context.picks);
+		const term = index === -1 ? undefined : value[index];
+		if (term?.kind !== "literal") continue;
+		if (emuOf(term.value) === next) continue;
+		const written = writeLength(next, unitOf(term.value));
+		if (term.value === written) continue;
+		spatial ??= { ...node.spatial };
+		spatial[dim] = value.map((t, i) => (i === index ? lit(written) : t));
+	}
+	return spatial ? { ...node, spatial } : node;
+}
+
+/**
+ * True when a drag cannot write this spatial dimension: the alternative on
+ * screen is a link rather than a number, so the answer lives in the token.
+ *
+ * The twin of {@link frameFrozen}, and it answers `false` for a dimension the
+ * node does not hold — see {@link withSpatial} for why silence is writable where
+ * a link is not.
+ */
+export function spatialFrozen(
+	node: SceneNode,
+	dim: Spatial,
+	context: ResolveContext = NO_CONTEXT,
+): boolean {
+	const value = node.spatial?.[dim];
+	if (value === undefined || value.length === 0) return false;
+	const index = activeIndex(value, frameVar(node.id, dim), context.picks);
+	return index === -1 || value[index].kind !== "literal";
+}
+
+/* ------------------------------------------------------------------ */
+/* Rotation                                                            */
+/* ------------------------------------------------------------------ */
+
+/** One of the three axes a node may be turned about. */
+export type Turn = "rotateX" | "rotateY" | "rotateZ";
+
+export interface TurnSpec {
+	label: string;
+	/** The axis it turns about, so a rule and the renderer read one table. */
+	axis: "x" | "y" | "z";
+	/** The CSS function, for the 3D-transform half of the export. */
+	css: "rotateX" | "rotateY" | "rotateZ";
+}
+
+/**
+ * The three rotations, in one place.
+ *
+ * **Order of application is fixed and is not a document field: `rotateZ`, then
+ * `rotateY`, then `rotateX`, about the node's own centre, then the
+ * translation.** That is CSS's own order for `rotateX(..) rotateY(..)
+ * rotateZ(..)` read left to right, and three.js's default `XYZ` Euler order read
+ * as intrinsic rotations, so the two renderers agree with no conversion. A
+ * document field for the order was considered and rejected: it is a fifth thing
+ * that can differ between the canvas and the file, in exchange for expressing
+ * rotations that are also expressible by composing a {@link KINDS.pivot}.
+ *
+ * **About the node's own centre**, and that is the decision the whole feature
+ * turns on rather than a convenience. A rotation about the centre does not move
+ * the centre, so `centerX`, `centerY` and `centerZ` stay exactly the linear
+ * quantities they were and a rotated node can still be placed, sized and put in
+ * the world chain by a linear solver. What it cannot be is *measured* on a face:
+ * a turned box's left edge is `cx − (|w·cos θ| + |h·sin θ|)/2`, which is not
+ * linear in anything, so those quantities are refused rather than approximated.
+ */
+export const TURNS: Record<Turn, TurnSpec> = {
+	rotateX: { label: "Turn about X", axis: "x", css: "rotateX" },
+	rotateY: { label: "Turn about Y", axis: "y", css: "rotateY" },
+	rotateZ: { label: "Turn about Z", axis: "z", css: "rotateZ" },
+};
+
+export const TURN_NAMES = Object.keys(TURNS) as Turn[];
+
+/** What a node holds about how it is turned. Sparse: absent is 0 everywhere. */
+export type TurnValue = Partial<Record<Turn, Value>>;
+
+/**
+ * What one rotation comes to, in **thousandths of a degree**, following whatever
+ * token it names — the twin of {@link spatialDim} one quantity over.
+ *
+ * Thousandths because a fact has to be an integer and a designer will type
+ * `22.5deg` on the first day; a thousandth of a degree is an arcsecond and a
+ * bit, four orders finer than anything a screen resolves. Read with `mdegOf`,
+ * which is exact or nothing, so a rotation spelled in a unit no whole thousandth
+ * spells reads as **no rotation at all** rather than as a rounded one — the same
+ * answer the generated program gives, and the same reason `motionMs` gives for
+ * refusing `"1.5ms"`.
+ */
+export function turnMdeg(
+	node: SceneNode,
+	turn: Turn,
+	context: ResolveContext = NO_CONTEXT,
+): number {
+	const resolved = resolveValue(
+		context,
+		node.turn?.[turn],
+		rotateVar(node.id, turn),
+	);
+	return (resolved === undefined ? undefined : mdegOf(resolved)) ?? 0;
+}
+
+/** All three, in thousandths of a degree. */
+export function turnOf(
+	node: SceneNode,
+	context: ResolveContext = NO_CONTEXT,
+): Record<Turn, number> {
+	return {
+		rotateX: turnMdeg(node, "rotateX", context),
+		rotateY: turnMdeg(node, "rotateY", context),
+		rotateZ: turnMdeg(node, "rotateZ", context),
+	};
+}
+
+/**
+ * True when any of the three is non-zero **in this universe**.
+ *
+ * The universe matters, and it is why this takes a context rather than looking
+ * at the field: an `angle` token holding `[0deg, 30deg]` is a card that lies
+ * flat in one design and tilts in another, and the quantities a rule may be
+ * about differ between the two. A reader that asked only whether `node.turn`
+ * existed would refuse a rule about the flat design's left edge, which is a
+ * refusal with nothing behind it.
+ */
+export function isTurned(
+	node: SceneNode,
+	context: ResolveContext = NO_CONTEXT,
+): boolean {
+	return TURN_NAMES.some((turn) => turnMdeg(node, turn, context) !== 0);
+}
+
+/**
+ * True when a resize gesture cannot be trusted on this node, because it is
+ * turned.
+ *
+ * The editor reads this beside {@link frameFrozen} and hides the resize handles.
+ * `resizeFrame` drags a *side of an axis-aligned box*, and on a turned node the
+ * side under the pointer is not the side the arithmetic would move — so the
+ * handle would be a control that did something other than what it looked like.
+ * The inspector's width and height fields still work and are still exact.
+ *
+ * A separate name from {@link isTurned} rather than an alias of it, though they
+ * agree today, because they are two different questions and only one of them is
+ * settled: `isTurned` is a fact about the document, while this is a claim about
+ * what a gesture can do, and the day `geometry.ts` grows an oriented-box resize
+ * for the quarter-turn cases this one stops being the other.
+ */
+export function rotationFrozen(
+	node: SceneNode,
+	context: ResolveContext = NO_CONTEXT,
+): boolean {
+	return isTurned(node, context);
+}
+
+/* ------------------------------------------------------------------ */
+/* Imported geometry                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The reference to an imported mesh: small, diffable, and synced.
+ *
+ * **The bytes are not here**, and that is the one place this departs from the
+ * path precedent it otherwise follows exactly. A path's points are a few dozen
+ * numbers and belong in the document; a glTF is megabytes, the document is an
+ * Automerge document two people edit at once, and putting a binary blob in it
+ * would put that blob in every diff, every undo entry and every sync message. So
+ * the node holds the hash and the metadata — everything the *editor* needs to
+ * draw a layer row, run a constraint and know what it is looking at — and the
+ * payload lives in a content-addressed store beside the document.
+ *
+ * The cost of that split is one thing and it is stated rather than absorbed: an
+ * export has to be handed a resolver, because a file cannot reach into an object
+ * store.
+ */
+export interface MeshRef {
+	/** Content hash of the payload — the id the asset store keys it by. */
+	asset: string;
+	format: "gltf" | "glb";
+	/**
+	 * The box the vertices occupy, in the model's own space, in EMU.
+	 *
+	 * Six numbers — structurally `Box` from `geometry.ts`, which is
+	 * {@link Frame} and the third axis together. Spelled out here rather than
+	 * imported for the reason given on {@link spatialOf}.
+	 */
+	bounds: Frame & Record<Spatial, number>;
+	/** For the layer list, the budget rule and the status line. */
+	triangles: number;
+	/** The file it came from, so a relink has something to show. Free-form. */
+	source?: string;
+}
+
+/** What the document remembers about an asset it does not hold. */
+export interface AssetInfo {
+	format: "gltf" | "glb";
+	/** Payload length in bytes, so the studio can total it without loading it. */
+	bytes: number;
+	triangles: number;
+	name: string;
+}
+
 export interface SceneNode {
 	id: string;
 	kind: NodeKind;
@@ -1540,6 +2322,68 @@ export interface SceneNode {
 	 * definition in another state would move the component itself.
 	 */
 	state?: string;
+	/**
+	 * Which state of each *further* layer this instance is drawn in — layer id to
+	 * state id.
+	 *
+	 * {@link state} keeps saying what it says, and says it about the **first**
+	 * layer. Two fields for one idea is a smell and it is being paid for on
+	 * purpose: every machine that exists today has one layer, every instance that
+	 * exists today says its state in one string, and making them all grow a
+	 * record keyed by a layer id nobody named would be churn with no reader — and
+	 * a migration, which is a thing that can go wrong, in exchange for a tidiness
+	 * nobody can see.
+	 *
+	 * An entry here for the first layer wins over {@link state}, so there is
+	 * exactly one place a multi-layer document says the whole answer. Nothing is
+	 * corrected on the way in.
+	 */
+	states?: Record<string, string>;
+	/**
+	 * Where the node sits on the third axis and how deep it is — see
+	 * {@link SPATIAL_DIMS}.
+	 *
+	 * Optional and sparse, which is the whole design: a document with no 3D in it
+	 * holds no `spatial` anywhere, states no `frame(N,z,_)`, grounds no third
+	 * axis and costs exactly nothing. Absent is z 0 and depth 0, which is where a
+	 * flat document already is.
+	 *
+	 * **Read on every kind, not only the spatial ones.** A `rect` with a `z` is a
+	 * card lifted off the page, and the HTML export draws it with a real CSS
+	 * `translate3d`. What decides whether a node is *geometry* is
+	 * {@link KindSpec.spatial}; what this decides is only where the node is.
+	 */
+	spatial?: SpatialValue;
+	/**
+	 * How the node is turned, per axis — see {@link TURNS}.
+	 *
+	 * Optional and sparse for the same reason {@link spatial} is, and read on
+	 * every kind for the same reason. Rotation is about the node's own centre,
+	 * which is what keeps every centre and every span an honest linear quantity
+	 * on a turned node, and what makes the refusal of its *faces* a line a
+	 * designer can be shown rather than a limitation nobody mentions.
+	 */
+	turn?: TurnValue;
+	/**
+	 * On a `viewport`: the id of the `camera` node the view looks through.
+	 *
+	 * A dangling id derives nothing rather than failing, the way a dangling
+	 * {@link instanceOf} does — the renderer then frames the subtree with a
+	 * default camera and the status line says so. Naming a node that is not a
+	 * camera, or a camera outside this viewport's own subtree, is the same
+	 * silence, and it is silence rather than repair because deleting a camera has
+	 * to leave a legal document.
+	 */
+	camera?: string;
+	/**
+	 * On a `model`: the imported geometry — see {@link MeshRef}.
+	 *
+	 * The vertices themselves are **not here**. This is the reference, the box
+	 * they occupy and the counts; the payload lives in the asset store, keyed by
+	 * {@link MeshRef.asset}. It is the third axis's answer to {@link points}, and
+	 * it sits beside it for that reason.
+	 */
+	mesh?: MeshRef;
 }
 
 /** True when this node's children are placed by the solver. */
@@ -1671,6 +2515,25 @@ export interface EdgeSpec {
  *
  * `compile()` emits this table as facts and the rules read it, so an edge is
  * never named in a rule: adding one is an entry here.
+ *
+ * **The third axis's five rows — `front`, `centerZ`, `back`, `depth` and `z` —
+ * are not here yet, and their absence is a finding rather than an omission.**
+ * They need {@link EdgeSpec.axis} to widen from `"x" | "y"` to `"x" | "y" |
+ * "z"`, and that widening does not typecheck: `annotate.ts` reads
+ * `EDGES[edge].axis` and hands it straight to two module-private helpers that
+ * take the planar pair, and its own exported `Annotation.axis` is the planar
+ * pair as well, so a third axis costs twenty-three errors there and five more in
+ * `edits.ts`. Both files are outside this step's ownership, and `annotate.ts` is
+ * outside every step's — which means somebody has to decide what the canvas
+ * overlay *draws* for a rule about `centerZ` (nothing, almost certainly) before
+ * the vocabulary can grow. That is a design decision about the overlay, not a
+ * type to widen, and inventing it here would be exactly the silent redesign this
+ * work is not allowed to do.
+ *
+ * Everything downstream is written so that the five rows drop in with no further
+ * edit: {@link edgeOptions} filters by axis through a `Set<string>`,
+ * {@link PLACES}/{@link SPANS}/{@link AXES} are role filters, and
+ * `CONSTRAINT_KINDS[k].edges` widens with them.
  */
 export const EDGES: Record<Edge, EdgeSpec> = {
 	left: { label: "Left edge", axis: "x", role: "pos", place: "lead" },
@@ -1935,6 +2798,83 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 };
 
 export const CONSTRAINT_NAMES = Object.keys(CONSTRAINT_KINDS) as ConstraintKind[];
+
+/**
+ * True when this node id names something that lives in the third axis: a
+ * viewport, anything inside one, or a node the document has lifted or turned by
+ * name.
+ *
+ * The document-side half of `s3/1`, and deliberately module-private. Its public
+ * twin is `isSpatialNode` in `spatial.ts`, which is where every other spatial
+ * reading lives — but `spatial.ts` reads *this* file, so a reader here cannot
+ * call it without closing a cycle, and {@link edgeOptions} has to be here
+ * because `CONSTRAINT_KINDS` is. Two readers of one rule is the cost; the rule
+ * itself is three lines and is stated in the program as well, which is the
+ * arrangement `machineHealth` and `munreached/2` already keep and test.
+ *
+ * A member that is not a plain node id — a datum, an instance part `inst(I,N)`,
+ * a state copy `stt(I,S,N)`, a keyframe copy `kfr(I,W,R,K)` — answers **false**.
+ * That is a deliberate under-approximation rather than an oversight: reducing
+ * those terms needs the parsers in `components.ts` and `machines.ts`, both of
+ * which read this file, and offering an edge the program will refuse through
+ * `gnoedge/2` is a worse failure than not offering one it would have accepted.
+ * The panel's own refusal reader (`refusedEdge`, in `spatial.ts`) does reduce
+ * them, and it is the one that has to be exact.
+ */
+function inThirdAxis(scene: Scene, member: string): boolean {
+	let found = false;
+	const walk = (nodes: readonly SceneNode[], inside: boolean): void => {
+		for (const node of nodes) {
+			if (found) return;
+			const here = inside || node.kind === "viewport";
+			if (node.id === member) {
+				found =
+					here ||
+					Object.keys(node.spatial ?? {}).length > 0 ||
+					Object.keys(node.turn ?? {}).length > 0;
+				return;
+			}
+			if (node.children) walk(node.children, here);
+		}
+	};
+	walk(scene.nodes, false);
+	return found;
+}
+
+/**
+ * The edges this kind may be about, given the members it has.
+ *
+ * The table's own list narrowed to the axes the members actually live on: a rule
+ * over two rectangles is offered six places and two sizes, exactly as it is
+ * today, and one that names only nodes inside a 3D view is offered the third
+ * axis as well. Read here rather than filtered at the panel, because
+ * `annotate.ts`, `why.ts` and the seeding in `addConstraint` all ask the same
+ * question and three copies of it drift.
+ *
+ * **Empty members is the whole list**, because a rule being built has not said
+ * what it is about yet and refusing everything would be refusing the first
+ * click.
+ *
+ * Every member must be in the third axis for the third axis to be offered, not
+ * merely one: a rule spanning the seam is either exact-and-surprising (on a
+ * shared planar axis, where it measures model space and says nothing about
+ * pixels) or hollow (on z, where one member has no such quantity at all), and
+ * the second of those is the one this narrowing is here to prevent.
+ */
+export function edgeOptions(
+	scene: Scene,
+	kind: ConstraintKind,
+	members: readonly string[],
+): Edge[] {
+	const offered = CONSTRAINT_KINDS[kind].edges;
+	if (members.length === 0) return [...offered];
+	// A set of strings rather than of the axis union, so that this reads the same
+	// the day the third axis's edges land in `EDGES` — see the note in
+	// {@link EDGES} about why they have not yet.
+	const axes = new Set<string>(["x", "y"]);
+	if (members.every((member) => inThirdAxis(scene, member))) axes.add("z");
+	return offered.filter((edge) => axes.has(EDGES[edge].axis));
+}
 
 /* ------------------------------------------------------------------ */
 /* How firmly a rule holds                                             */
@@ -2680,7 +3620,27 @@ export const EASING_NAMES = Object.keys(EASINGS) as Easing[];
  */
 export const DEFAULT_EASING: Easing = "easeOut";
 
-/** One of the three numbers that pace a transition. */
+/**
+ * One of the three numbers that pace a transition.
+ *
+ * **It should be four.** {@link Transition.exit} is a fourth pacing number of
+ * exactly this shape — a `duration` {@link Value} that wants to name the same
+ * motion scale the other three do — and the plan for it is to be an entry here,
+ * so that `MOTION_DEFAULTS`, `machineValues`, `unreadVariables`, the document
+ * reader and the fourth row in `Transitions.tsx` all extend themselves with no
+ * edit at all. That is the whole reason the exit-time rung is cheap.
+ *
+ * It is **not** here yet, and the reason is an ordering error rather than a
+ * design one: `compile.ts` holds `MOTION_DEFAULT_PREDICATES:
+ * Record<MotionProp, string>`, so adding a member to this union makes that file
+ * fail to typecheck for want of one line — `exit: "mdefexit"` — and `compile.ts`
+ * belongs to a later step that this one may not edit. Adding the union member
+ * here would hand every step after this one a red build to fix.
+ *
+ * So {@link Transition.exit} is typed and read as a `duration` value on its own,
+ * and the moment `compile.ts`'s owner adds that one entry this union grows and
+ * the special case in the document reader goes away.
+ */
 export type MotionProp = "duration" | "delay" | "stagger";
 
 export interface MotionPropSpec {
@@ -2734,6 +3694,368 @@ export const MOTION_PROPS: Record<MotionProp, MotionPropSpec> = {
 
 export const MOTION_PROP_NAMES = Object.keys(MOTION_PROPS) as MotionProp[];
 
+/* ------------------------------------------------------------------ */
+/* Inputs: what a host hands a machine                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The three kinds of thing a host can hand a machine.
+ *
+ * Rive's three, and the same three for the same reason rather than out of
+ * imitation: a boolean is a condition that persists ("is this row selected"), a
+ * number is a quantity a guard can compare and a blend can interpolate along
+ * ("how far is the drawer open"), and a trigger is a moment that does not
+ * persist ("the save succeeded"). A fourth kind — a string, an enum — was
+ * considered and rejected: an enum is a boolean per case with a rule saying one
+ * holds, which is a thing a designer can already write, and a string input would
+ * be a guard the static checks could say nothing about, because there is no
+ * range for a string to fall outside of.
+ */
+export type InputKind = "boolean" | "number" | "trigger";
+
+export interface InputKindSpec {
+	label: string;
+	/**
+	 * Whether a value persists between triggers.
+	 *
+	 * False for exactly one kind, and it is the kind whose whole meaning is the
+	 * falseness: a trigger is consumed the instant a transition takes it, so
+	 * "fired" is true for one evaluation and false afterwards. A runtime that
+	 * kept it true would fire every guarded edge on the next unrelated event,
+	 * which reads to a person as a machine that has gone off on its own.
+	 */
+	holds: boolean;
+	/** What an input of this kind starts at when the document says nothing. */
+	fallback: string;
+}
+
+export const INPUT_KINDS: Record<InputKind, InputKindSpec> = {
+	boolean: { label: "Boolean", holds: true, fallback: "false" },
+	number: { label: "Number", holds: true, fallback: "0" },
+	trigger: { label: "Trigger", holds: false, fallback: "" },
+};
+
+export const INPUT_KIND_NAMES = Object.keys(INPUT_KINDS) as InputKind[];
+
+/**
+ * One input of one machine.
+ *
+ * **An input is a runtime value, and it is emphatically not a design-space
+ * one.** A `duration` on a transition *is* a design-space value: it may name a
+ * token, the token may hold two alternatives, and the two really are two
+ * designs, because the milliseconds show up in the exported file and a reader
+ * can tell them apart. An input has no such shadow. Nothing in the picture, in
+ * the base layer of the export, or in any projected atom moves when an input
+ * moves — so a document that held two starting values for a boolean would hold
+ * two universes identical in every projected atom, which is exactly the collapse
+ * `#project` exists to prevent, and here the honest answer is not to add a
+ * projection but to notice there is nothing to project.
+ *
+ * Which is why **every field here is a plain string, never a {@link Value}**. A
+ * `Value` would let a range name a token, and a range decides nothing anybody
+ * can see: it decides which guards the checks call impossible, and a document
+ * that held two opinions about that would be a document that could not say
+ * whether its own machine was broken. A budget is the thing alternatives are
+ * judged against, which is the argument `machinecheck.ts` already makes about
+ * the duration budget, one rung further out.
+ */
+export interface MachineInput {
+	/** Unique among the inputs of *its own machine*; a bare ASP constant. */
+	id: string;
+	/** What it is called. Free-form. */
+	name: string;
+	kind: InputKind;
+	/**
+	 * What it holds before anybody drives it.
+	 *
+	 * `"true"` / `"false"` for a boolean, read through `wordOf`; a numeral for a
+	 * number, read through `permilleOf`. Absent, unreadable, or set on a trigger
+	 * takes {@link INPUT_KINDS}' own fallback — a trigger has no resting value to
+	 * start at, because "not fired" is not a value, it is the absence of one.
+	 */
+	initial?: string;
+	/**
+	 * The closed ends of a number input's range, inclusive. Numerals, read
+	 * through `permilleOf`.
+	 *
+	 * **Absent is open, not zero.** An input with no `min` accepts anything, and
+	 * the checks that read a range simply say nothing about it. That is the
+	 * honest reading: a designer who has not said how far the drawer opens has
+	 * not said that it does not open at all, and a check that invented `0` would
+	 * report violations against a claim nobody made.
+	 *
+	 * Ignored on a boolean and on a trigger, where the range is the kind.
+	 */
+	min?: string;
+	max?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Conditions: what has to hold as well as the trigger                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How a condition compares.
+ *
+ * Six words and a seventh that takes no comparand, and the split is by what they
+ * can be asked of. `eq` and `ne` suit every kind; the four orderings suit a
+ * number and nothing else; `fired` suits a trigger and nothing else and takes no
+ * comparand, because "the trigger happened" is the whole of what there is to say
+ * about a moment.
+ *
+ * Spelled as constants rather than as `"="`, `"!="`, `">"` — they reach the
+ * program as themselves, inside `mcondop/4`, and `>` is not a term.
+ */
+export type CompareOp = "eq" | "ne" | "gt" | "lt" | "ge" | "le" | "fired";
+
+export interface CompareOpSpec {
+	label: string;
+	/** Which input kinds this op may be asked of. */
+	kinds: readonly InputKind[];
+	/** Whether it takes a comparand at all. */
+	comparand: boolean;
+}
+
+export const COMPARE_OPS: Record<CompareOp, CompareOpSpec> = {
+	eq: { label: "is", kinds: ["boolean", "number"], comparand: true },
+	ne: { label: "is not", kinds: ["boolean", "number"], comparand: true },
+	gt: { label: "is more than", kinds: ["number"], comparand: true },
+	lt: { label: "is less than", kinds: ["number"], comparand: true },
+	ge: { label: "is at least", kinds: ["number"], comparand: true },
+	le: { label: "is at most", kinds: ["number"], comparand: true },
+	fired: { label: "fired", kinds: ["trigger"], comparand: false },
+};
+
+export const COMPARE_OP_NAMES = Object.keys(COMPARE_OPS) as CompareOp[];
+
+/**
+ * One conjunct of one transition's guard.
+ *
+ * A transition fires when its trigger happens **and** every one of its
+ * conditions holds. The conjunction is total and there is no `or`: two guards
+ * that should be alternatives are two transitions, which is what Rive does, and
+ * which here has a second payoff — two transitions are two rows with two ids, so
+ * a violation can name the one that is impossible instead of pointing at half of
+ * a boolean expression.
+ *
+ * A plain string comparand, never a {@link Value}, for {@link MachineInput}'s
+ * reason exactly: a guard decides nothing an onlooker can see, so a comparand
+ * with two alternatives would be two universes identical in every projected
+ * atom. It would also make "this guard can never be satisfied" undecidable in
+ * the only way that matters — it would become "this guard can never be satisfied
+ * in three of the four universes", which is a sentence with nowhere to be said.
+ */
+export interface Condition {
+	/** An input id of the same machine. */
+	input: string;
+	op: CompareOp;
+	/**
+	 * What the input is compared against: `"true"`/`"false"` for a boolean, a
+	 * numeral for a number. Absent for `fired`, and ignored where the op takes
+	 * none.
+	 */
+	value?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Layers: two states at once, composed rather than chosen             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One layer of a machine: a name, and an order.
+ *
+ * Deliberately *not* a container of states. A layer holds no `states` array and
+ * no `transitions` array, and each {@link MachineState} names its layer instead
+ * — which is the opposite of how Rive's file format does it and is the right way
+ * round here, for two reasons that both come from the shipped encoding.
+ *
+ * A state id is already unique per *machine*, and `stt(I,S,N)` names a state
+ * with no layer in the term. Nesting the states under layers would either
+ * re-scope every id — changing the arity of `mstate/2`, `mindex/3`, `mcopy/3`
+ * and the shape of every state copy term a designer has already typed into a
+ * rule — or leave the ids machine-scoped anyway and make the nesting a second,
+ * redundant statement of where a state lives. And {@link Machine.states} in
+ * document order is what the state strip renders and what `mindex/3` numbers; a
+ * machine whose states lived in two arrays would need a third thing to say what
+ * order they are in.
+ *
+ * So a layer is an id and a name, and its **position in the list is its
+ * priority** — the same "the order *is* the answer" the initial state and
+ * `order/2` already use, one axis over. Later layers win.
+ */
+export interface MachineLayer {
+	/** Unique among the layers of its own machine; a bare ASP constant. */
+	id: string;
+	name: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Timelines: keyframes, and never frames                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * **The solver decides keyframes. It never decides frames.**
+ *
+ * Grounding scales with the number of keyframes a document holds and with
+ * nothing else. There is no frame rate in this file, in the generated program,
+ * in the model, or in the export. A timeline with nine keyframes costs the same
+ * whether it plays over 100ms or ten seconds, and whether the browser draws it
+ * at 60Hz or 120.
+ *
+ * What that buys: every keyframe's *time* and *value* are ordinary
+ * {@link Value}s, so they may name a token, follow a motion scale, and hold
+ * alternatives — and two alternatives inside a keyframe really are two designs,
+ * for the same reason a delta's two fills are. What it costs: everything
+ * *between* two keyframes is interpolated rather than solved, by the browser's
+ * compositor in the export and by lerping two copies the answer set already
+ * holds on the canvas. Neither costs a solve.
+ */
+
+/**
+ * One moment on one track: when, and what.
+ *
+ * `at` is a `duration` {@link Value} rather than a number for the reason a
+ * transition's duration is one: a keyframe wants to name the same motion scale
+ * everything else does, and "the overshoot happens at `--beat`" is a sentence a
+ * document should be able to hold both ends of.
+ */
+export interface Keyframe {
+	/** When, from the start of the timeline. A `duration` Value. */
+	at: Value;
+	/** What the track's property, dimension or rotation is at that moment. */
+	value: Value;
+	/**
+	 * How the segment *leaving* this keyframe is paced. The last keyframe's
+	 * easing is read by nothing, and is kept rather than refused, because a
+	 * keyframe that stops being last should not lose what somebody typed.
+	 */
+	easing?: Easing;
+}
+
+/**
+ * One property of one part, over time.
+ *
+ * A track names **exactly one** of {@link prop}, {@link dim} and {@link turn} —
+ * a track that named two would be two tracks sharing a keyframe list, and the
+ * moment somebody moved a keyframe on one of them it would be two tracks anyway.
+ * A track that names none is read as no track at all.
+ *
+ * Per part *and* per property rather than per part, because that is the grain a
+ * designer edits at and the grain a conflict happens at: two layers fighting
+ * over `opacity` of `panel` is a sentence about one property, and a per-part
+ * track would make it a sentence about six.
+ */
+export interface Track {
+	/** The definition part this animates. */
+	part: string;
+	prop?: PropName;
+	/**
+	 * One of the **six** axes, not four. A line that let a *state* lift a mesh in
+	 * z while forbidding a *timeline* from doing it would be an arbitrary line
+	 * through one feature, and the keyframe copy's frame rules leave the
+	 * dimension unbound and need no edit to carry the extra two.
+	 */
+	dim?: Axis3;
+	/**
+	 * A rotation, for the same reason {@link dim} spans six: a state may turn a
+	 * part, so a timeline may too. The rules for it are written in the shape of
+	 * the dimension pair.
+	 */
+	turn?: Turn;
+	/** In time order. The reader sorts; two keys at one time keep the first. */
+	keys: Keyframe[];
+}
+
+export type LoopMode = "none" | "loop" | "pingPong";
+
+export interface Timeline {
+	/** Unique in its machine; a bare ASP constant. */
+	id: string;
+	name: string;
+	tracks: Track[];
+	/**
+	 * How long it is, as a `duration` Value. Absent is **the last keyframe's
+	 * time**, derived rather than stored, so a timeline cannot disagree with its
+	 * own contents. Present and shorter than the last keyframe is legal and is
+	 * what it says: the tail is not played.
+	 */
+	length?: Value;
+	loop?: LoopMode;
+}
+
+/**
+ * `oneD` and not `"1d"`, and the spelling is not cosmetic: a blend kind reaches
+ * the program as itself, inside `mblend/3`, and `1d` is not an ASP constant — a
+ * constant may not begin with a digit. The same rule that makes `spaceBetween` a
+ * word rather than `space-between`.
+ */
+export type BlendKind = "oneD" | "direct";
+
+export const BLEND_KINDS: Record<BlendKind, { label: string }> = {
+	oneD: { label: "1D" },
+	direct: { label: "Direct" },
+};
+
+export const BLEND_KIND_NAMES = Object.keys(BLEND_KINDS) as BlendKind[];
+
+export interface BlendStop {
+	/** The timeline this stop plays. */
+	timeline: string;
+	/** 1D only: where on the blend input's axis this stop sits. A numeral. */
+	at?: string;
+	/** Direct only: the number input that is this stop's weight. */
+	by?: string;
+}
+
+/**
+ * Several timelines, mixed by a number input.
+ *
+ * The mixing is arithmetic over a runtime value, so **none of it is solved**,
+ * and none of it can be: the input is not in the program. What *is* solved is
+ * everything the stops are made of — every keyframe of every timeline a stop
+ * names, with its time and its value — and everything the checks need: the
+ * thresholds, in thousandths, against the input's declared range.
+ */
+export interface Blend {
+	kind: BlendKind;
+	/** 1D only: the number input the stops are laid out along. */
+	input?: string;
+	stops: BlendStop[];
+}
+
+/* ------------------------------------------------------------------ */
+/* Entry, Exit and Any: three reserved ids, and not three states       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * State ids a machine may not use, legal only as a {@link Transition.from} or
+ * {@link Transition.to}.
+ *
+ * They are deliberately not entries in {@link Machine.states}, and the argument
+ * is the one that keeps `stt/3` from being a `node/1`. A {@link MachineState} is
+ * *a delta over the definition's parts*; Entry, Exit and Any have no appearance
+ * and never will. As states they would be three empty deltas per machine, three
+ * copies per instance per part, three rows in every state strip, three terms a
+ * rule could name that would say nothing — and `shownState` could return one of
+ * them, which would mean "draw this button in Exit", which is not a picture.
+ * Every one of those costs is paid to express three words that are perfectly
+ * well expressed as three constants.
+ *
+ * A {@link Trigger} of `load` is already Entry: it fires once, when the runtime
+ * starts, and the runtime's `settle()` already follows a chain of them. So
+ * `entry` is sugar over the initial state rather than a fourth node, and it is
+ * spelled as a rule in the program so that a hand-written `mfrom(M,t,entry)`
+ * gets the same treatment a document one does.
+ */
+export const RESERVED_STATES: ReadonlySet<string> = new Set([
+	"entry",
+	"exit",
+	"any",
+]);
+
+/** True when a state id is one of the three the program reads as a word. */
+export const isReservedState = (id: string): boolean => RESERVED_STATES.has(id);
+
 /**
  * What one state says about one definition part — a **delta**, not a node.
  *
@@ -2777,8 +4099,27 @@ export interface StatePart {
 	 * everything inside it for nothing, which is what makes the materialisation
 	 * analysis in `machines.ts` affordable: a copy is minted for the parts some
 	 * state touches and their *ancestors*, and never for their children.
+	 *
+	 * Over all six axes, not four. A state that lifts a mesh is the same kind of
+	 * claim as one that moves a button two pixels down, and the delta is sparse
+	 * already — a dimension a state says nothing about is the instance's own — so
+	 * widening the key costs a document that has never heard of a third axis
+	 * nothing at all. What it does *not* do is widen the state copy's own default
+	 * rules in the program: those stay narrowed to the copies that are in the
+	 * third axis, or a viewport on page four would put every state of every
+	 * button on page one into three dimensions.
 	 */
-	frame?: Partial<Record<Dimension, Value>>;
+	frame?: Partial<Record<Axis3, Value>>;
+	/**
+	 * How this state turns the part, per axis — see {@link TURNS}.
+	 *
+	 * Absent-is-inherit like every other field here: a rotation the state says
+	 * nothing about is the instance's own, shared with every other state. Minting
+	 * a copy of a two-alternative angle per state would be 2^N designs where the
+	 * document holds two, which is the invariant this whole interface exists to
+	 * keep.
+	 */
+	turn?: Partial<Record<Turn, Value>>;
 	/**
 	 * Take this part out of the picture in this state.
 	 *
@@ -2802,11 +4143,18 @@ export interface StatePart {
  * nothing. Both are the same claim as no entry at all, and a reader that only
  * checked for the key would materialise a part, and a `sprop` variable with no
  * alternatives, on the strength of a leftover.
+ *
+ * {@link StatePart.turn} is read here too, and it has to be: a state whose only
+ * delta is a rotation materialises no copy without this line, so the mesh it
+ * meant to turn is never minted, `turn(stt(I,S,N),R,V)` has nothing to be about,
+ * and a hover that spins a card does nothing at all in a document that solves
+ * cleanly and reports nothing.
  */
 export const stateTouches = (part: StatePart): boolean =>
 	part.hidden === true ||
 	Object.values(part.props ?? {}).some((v) => (v?.length ?? 0) > 0) ||
-	Object.values(part.frame ?? {}).some((v) => (v?.length ?? 0) > 0);
+	Object.values(part.frame ?? {}).some((v) => (v?.length ?? 0) > 0) ||
+	Object.values(part.turn ?? {}).some((v) => (v?.length ?? 0) > 0);
 
 /**
  * One state of a machine: a name, and a delta per definition part.
@@ -2832,6 +4180,37 @@ export interface MachineState {
 	name: string;
 	/** Definition part id -> what this state changes about it. */
 	parts: Record<string, StatePart>;
+	/**
+	 * Which layer this state belongs to. Absent, or naming a layer the machine
+	 * has not got, is the **first** layer.
+	 *
+	 * Absent-is-first rather than absent-is-invalid, for {@link SceneNode.state}'s
+	 * reason: a machine edited down must leave its states legal, and a document
+	 * written before layers existed must mean exactly what it meant.
+	 */
+	layer?: string;
+	/**
+	 * A timeline this state plays, by id.
+	 *
+	 * A state that plays a timeline still has its {@link parts} delta, and the
+	 * two compose the way everything else here composes: the timeline decides
+	 * what it has a track for, and the delta decides the rest. The state's
+	 * **settled pose** — what `stt(I,S,N)` is, what the canvas draws, what a
+	 * cross-state constraint compares — is the timeline's value at its own
+	 * length, which is to say the last keyframe of each track. That is derived,
+	 * not typed: a document that stored the end pose twice would be a document
+	 * where moving the last keyframe left the picture behind.
+	 */
+	timeline?: string;
+	/**
+	 * A blend state — several timelines mixed by a number input.
+	 *
+	 * Wins over {@link timeline} where a document somehow holds both, and the
+	 * pair is *reported* rather than repaired, because a state with two sources
+	 * is a mistake a person should see rather than one a reader should quietly
+	 * pick a side in.
+	 */
+	blend?: Blend;
 }
 
 /**
@@ -2871,6 +4250,46 @@ export interface Transition {
 	 * press, ease back on release".
 	 */
 	only?: PropName[];
+	/**
+	 * Everything that must hold, as well as the trigger, for this edge to be
+	 * taken — see {@link Condition}.
+	 *
+	 * Absent or empty is an unguarded edge, which is every edge in every document
+	 * written before guards existed, and which must stay exactly as fast and
+	 * exactly as legal as it is today.
+	 *
+	 * A conjunction, in document order. The order decides nothing: the program
+	 * tests all of them at grounding and the runtime tests all of them at the
+	 * event, and neither short-circuits in a way an onlooker could detect. It is
+	 * kept because a person put them in that order and a list that reordered
+	 * itself would be a list nobody could edit.
+	 */
+	conditions?: Condition[];
+	/**
+	 * How long this transition's `from` state must have been held before this
+	 * edge may be taken, as a `duration` {@link Value} — Rive's exit time.
+	 *
+	 * A {@link Value} and not a plain string, unlike a condition's comparand, and
+	 * the difference is the point rather than an inconsistency: an exit time is
+	 * *pacing*. It belongs to the same family as `duration`, `delay` and
+	 * `stagger`, it wants to name the same `duration` token they do, and a motion
+	 * scale that made every transition brisk and left one debounce at 400ms would
+	 * be a motion scale with a hole in it. See {@link MotionProp} for why it is
+	 * not yet a member of that table, and what the one-line unblock is.
+	 *
+	 * **We have no untriggered transitions and this does not add any**, so it
+	 * means precisely: a trigger arriving before the `from` state has been held
+	 * this long does not move the machine, and is not remembered. That is a
+	 * debounce, and it is a deliberate, stated departure from Rive — Rive would
+	 * fire the transition when the time elapsed if the condition still held. The
+	 * reason is `runtime.ts`'s own: a deferred fire is a state change nobody's
+	 * finger caused, arriving at a moment nothing on the page marks, and a
+	 * runtime with a queue in it is a second animator arguing with the
+	 * compositor. A designer who wants "and then it moves on by itself" writes a
+	 * `load`-triggered edge out of the destination state, which `settle()`
+	 * already follows.
+	 */
+	exit?: Value;
 	/** Off keeps it in the document but out of the program. */
 	enabled: boolean;
 }
@@ -2900,6 +4319,44 @@ export interface Machine {
 	/** In order. **The first is the initial state.** Never empty. */
 	states: MachineState[];
 	transitions: Transition[];
+	/**
+	 * What a host can hand this machine — see {@link MachineInput}.
+	 *
+	 * Absent is a machine nobody drives from outside, which is every machine any
+	 * document currently holds, and the absence has to keep meaning that: a
+	 * reader that filled this in with an empty array would still be right, but a
+	 * reader that filled it in with a default input would change what the
+	 * existing documents mean.
+	 */
+	inputs?: MachineInput[];
+	/**
+	 * The machine's layers, in order. **Later layers win.**
+	 *
+	 * Absent or empty is a one-layer machine, which is every machine in every
+	 * document today. The reader mints nothing for it: a machine with no `layers`
+	 * emits one `mlayer(M,base)` and every state belongs to it.
+	 *
+	 * Copies **compose** where a choice rule would **multiply**, and this rung is
+	 * where the shipped encoding pays for itself. Had a state been a choice rule,
+	 * two layers would have been two choice rules, a four-state layer beside a
+	 * three-state layer would have been twelve universes nobody was choosing
+	 * between eleven of, and the question a person actually asks about layers —
+	 * "does the glow still line up when the button is also pressed?" — would have
+	 * been unaskable, because the two layers' states would be in different answer
+	 * sets. Under copies, two layers are two `shown/2` facts in one answer set
+	 * and the composite is a rule.
+	 */
+	layers?: MachineLayer[];
+	/**
+	 * Timelines, shared by the states that play them — see {@link Timeline}.
+	 *
+	 * On the machine rather than on the state, because two states routinely play
+	 * one animation (a `loop` and a `pressed` both playing `idle`) and because a
+	 * blend state plays several. A timeline nothing plays is legal, costs a
+	 * handful of variables and no copies, and is how somebody works on one before
+	 * wiring it up.
+	 */
+	timelines?: Timeline[];
 }
 
 /** Whatever a transition stores for one motion setting, if anything. */
@@ -3035,6 +4492,23 @@ export interface Scene {
 	 * reading that migration first.
 	 */
 	unit?: Unit;
+	/**
+	 * Metadata for every asset the document's models reference, by hash — see
+	 * {@link AssetInfo}.
+	 *
+	 * Beside the tokens and the machines rather than among the nodes: an asset is
+	 * shared, has its own identity and lifecycle, and two models may reference
+	 * one. A hash this index does not know is a **missing asset**, which is a
+	 * thing the studio reports and the export names in `lost` — never a thing
+	 * that fails a solve, and never a reason to drop the node that points at it.
+	 * "Relink this" and "your chair is gone" are two different sentences and only
+	 * the first one is true.
+	 *
+	 * Absent rather than `{}` on a document with no models, so that "this
+	 * document holds no imported geometry" has one spelling — the same rule
+	 * {@link SceneNode.lines} keeps about an empty list.
+	 */
+	assets?: Record<string, AssetInfo>;
 }
 
 /** The size the document's first frame is created at, in EMU. */
