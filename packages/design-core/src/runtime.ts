@@ -774,15 +774,24 @@ return {
  * of them. Every failure mode this module was shaped to prevent comes back at
  * exactly the moment a document gets interesting.
  *
- * The cheap half of the cost is separable and is *also* refused, for a smaller
- * reason: about 15 kB of the 25 kB is this interpreter's own comments, and a
- * `runtimeScript` that stripped them would halve the payload with no behaviour
- * change at all. What it would cost is that `evalRuntime` tests
- * {@link MACHINE_RUNTIME} and the page would run something else — a test proving
- * something about a slightly different text than the one that ships, which is
- * the failure {@link evalRuntime} exists to close. If that trade is ever worth
- * making, the way to make it is to strip once, in a function both this and
- * `evalRuntime` call, and to move the fixture in the same commit that does it.
+ * The cheap half of the cost is separable, and it is now **taken** — on the one
+ * condition this paragraph used to set for taking it. About 15 kB of the 25 kB
+ * is this interpreter's own comments, and stripping them halves the payload with
+ * no behaviour change at all. The objection was never the stripping; it was that
+ * `evalRuntime` would test {@link MACHINE_RUNTIME} while the page ran something
+ * else, which is a test proving something about a text that does not ship. So
+ * the strip happens exactly once, in {@link runtimeSource}, and *both* callers go
+ * through it: what the agreement matrix drives is character-for-character what
+ * lands in the file. The condition is met rather than waived.
+ *
+ * Measured rather than estimated, which is what made the trade obvious: 575
+ * lines, 25,420 bytes, of which 217 lines and 15,119 bytes are comments — 59%.
+ * The `machine` template's export grew 12,142 -> 27,255 bytes when the ladder
+ * landed, and 15.1 kB of that growth is prose. Stripping gives back the whole
+ * regression and leaves the interpreter one text.
+ *
+ * Conditional emission stays refused for the reason above it. It would save less
+ * than this does and cost a second interpreter.
  *
  * **This function is why an edit to {@link MACHINE_RUNTIME} moves a fixture in
  * another file, and the fact is written down here because the file it moves does
@@ -804,6 +813,35 @@ return {
  * the document *is*, they are computed from the same universes, and they do not
  * move when this text does.
  */
+/**
+ * {@link MACHINE_RUNTIME} without the prose — the text that actually ships, and
+ * the text every test drives.
+ *
+ * Whole-line comments and blank lines only. Nothing is minified, nothing is
+ * re-indented and no line is joined to another: the identifiers, the structure
+ * and the line breaks are the interpreter's own, so a stack trace out of
+ * somebody's page still points at a line whose neighbours are recognisable, and
+ * a reader who views source reads the same code this repository does — just
+ * without the essays explaining why it is that code.
+ *
+ * Safe as a line filter rather than as a parse, and that is checked rather than
+ * assumed: {@link MACHINE_RUNTIME} holds no block comments and no line where a
+ * `//` appears anywhere but at the start, so no string literal and no regex can
+ * be caught by this. `the strip takes only prose` pins both facts, and it is the
+ * test to look at first if this ever removes a line it should not.
+ *
+ * Computed once. The text is a constant and the emission runs per export.
+ */
+let stripped: string | undefined;
+
+export function runtimeSource(): string {
+	if (stripped !== undefined) return stripped;
+	stripped = MACHINE_RUNTIME.split("\n")
+		.filter((line) => line.trim() !== "" && !line.trim().startsWith("//"))
+		.join("\n");
+	return stripped;
+}
+
 export function runtimeScript(table: MachineTable): string {
 	const json = JSON.stringify(table).replace(/</g, "\\u003c");
 	const events = JSON.stringify(TRIGGER_EVENTS);
@@ -812,7 +850,7 @@ export function runtimeScript(table: MachineTable): string {
 		`var T = ${json};`,
 		`var E = ${events};`,
 		"var M = (function (T, E, root, onChange, clock) {",
-		MACHINE_RUNTIME,
+		runtimeSource(),
 		'})(T, E, typeof document === "undefined" ? null : document);',
 		"M.start();",
 		"})();",
@@ -974,13 +1012,16 @@ export function evalRuntime(
 	onChange?: (instance: string, state: string, layer: string) => void,
 	clock?: () => number,
 ): RuntimeHandle {
+	// runtimeSource(), not MACHINE_RUNTIME: the whole point of evaluating the text
+	// rather than importing an implementation is that the thing under test is the
+	// thing that ships, and what ships is stripped.
 	const factory = new Function(
 		"T",
 		"E",
 		"root",
 		"onChange",
 		"clock",
-		MACHINE_RUNTIME,
+		runtimeSource(),
 	) as (
 		table: MachineTable,
 		events: Record<string, string>,

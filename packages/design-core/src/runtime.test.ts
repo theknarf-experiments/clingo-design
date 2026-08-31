@@ -66,6 +66,7 @@ import {
 	TRIGGER_EVENTS,
 	evalRuntime,
 	runtimeScript,
+	runtimeSource,
 } from "./runtime.ts";
 import { EMU_PER_PX } from "./units.ts";
 import { lit, single } from "./values.ts";
@@ -371,8 +372,14 @@ test("the script carries the runtime verbatim, not a copy of it", () => {
 	// `runtimeScript` ever built its own text — even by reformatting this one —
 	// then every test below would be testing a string that is not the string that
 	// ships, and would keep passing while the export broke.
+	//
+	// `runtimeSource()` rather than `MACHINE_RUNTIME`, and the difference is the
+	// point rather than a weakening: the shipped text is the authored text with
+	// its prose removed, one strip, in one function, that `evalRuntime` also
+	// calls. So the string asserted here is still exactly the string every other
+	// test in this file drives — which is the property the test is named for.
 	const script = runtimeScript(menuTable());
-	assert.ok(script.includes(MACHINE_RUNTIME));
+	assert.ok(script.includes(runtimeSource()));
 
 	// And it is wrapped, not merely concatenated: nothing leaks into the page's
 	// global scope, and `M.start()` is what actually binds it.
@@ -1583,4 +1590,66 @@ test("the table carries no timeline and the runtime samples none", () => {
 	for (const word of ["keyframe", "lerp", "blend", "sample"]) {
 		assert.equal(MACHINE_RUNTIME.includes(word), false, `the runtime must not mention ${word}`);
 	}
+});
+
+/* ------------------------------------------------------------------ */
+/* The strip                                                           */
+/* ------------------------------------------------------------------ */
+
+test("the strip takes only prose, and the two facts that make it safe hold", () => {
+	// `runtimeSource` filters whole lines rather than parsing JavaScript, which is
+	// safe on exactly two conditions. Both are properties of MACHINE_RUNTIME
+	// rather than of the filter, so they are asserted here rather than trusted:
+	// nothing may hide a `//` inside a string or a regex, and nothing may open a
+	// block comment the line filter would leave half of.
+	const lines = MACHINE_RUNTIME.split("\n");
+	assert.deepEqual(
+		lines.filter((l) => !l.trim().startsWith("//") && l.includes("//")),
+		[],
+		"a // anywhere but the start of a line would make this a parse, not a filter",
+	);
+	assert.deepEqual(
+		lines.filter((l) => l.includes("/*") || l.includes("*/")),
+		[],
+		"a block comment cannot be removed a line at a time",
+	);
+
+	// What comes out is the code, in order, unchanged. Not reformatted, not
+	// re-indented, not joined — a line that survives is byte-identical, which is
+	// what keeps a stack trace out of somebody's page legible.
+	const source = runtimeSource();
+	assert.deepEqual(
+		source.split("\n"),
+		lines.filter((l) => l.trim() !== "" && !l.trim().startsWith("//")),
+	);
+	assert.equal(
+		source.split("\n").some((l) => l.trim().startsWith("//")),
+		false,
+		"no comment survives",
+	);
+
+	// And it is worth what it costs. The regression this repays was measured at
+	// +15.1 kB on the `machine` template; a floor rather than an equality, so the
+	// test does not fail every time somebody writes another paragraph.
+	assert.ok(
+		MACHINE_RUNTIME.length - source.length > 12000,
+		`the strip saved ${MACHINE_RUNTIME.length - source.length} bytes`,
+	);
+	assert.ok(source.startsWith('"use strict";'));
+});
+
+test("the stripped runtime is the one the agreement matrix drives", () => {
+	// The condition the payload note sets for taking this trade at all: one strip,
+	// in one function, that both callers go through. If `evalRuntime` ever went
+	// back to MACHINE_RUNTIME this test fails, and every other test in this file
+	// would quietly become a test about a text that does not ship.
+	const table = ladderTable();
+	assert.ok(runtimeScript(table).includes(runtimeSource()));
+	assert.equal(runtimeScript(table).includes(MACHINE_RUNTIME), false);
+
+	// Same table, same answers, through the text that ships.
+	const js = evalRuntime(table);
+	js.start();
+	assert.equal(js.state(instance), "shut");
+	assert.equal(js.step(instance, "shut", "pointerup"), "bright");
 });
