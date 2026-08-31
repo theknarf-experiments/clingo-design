@@ -37,6 +37,16 @@ export interface ProgramPanelProps {
 	/** The space as it stands, for the export tab. */
 	universes: readonly Universe[];
 	projectName: string;
+	/**
+	 * The last frame each 3D view drew, as a PNG data URL by viewport node id —
+	 * passed straight through to {@link ExportPanel}.
+	 *
+	 * This panel never looks at one. It is on the way because the studio holds the
+	 * pictures and the export is where they are wanted, and threading them rather
+	 * than reaching for a context keeps the one place that takes a photograph and
+	 * the one place that uses it visible in the same call chain.
+	 */
+	posters?: Record<string, string>;
 	/** Right-aligned slot in the tab strip — the studio puts its status there. */
 	status?: ReactNode;
 }
@@ -71,6 +81,7 @@ export function ProgramPanel({
 	approximations,
 	universes,
 	projectName,
+	posters,
 	status,
 }: ProgramPanelProps) {
 	const [tab, setTab] = useState<Tab>("rules");
@@ -108,6 +119,7 @@ export function ProgramPanel({
 							scene={scene}
 							universes={universes}
 							projectName={projectName}
+							posters={posters}
 						/>
 					) : tab === "rules" ? (
 						<div className={styles.editor}>

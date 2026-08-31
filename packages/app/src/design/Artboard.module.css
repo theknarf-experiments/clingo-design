@@ -61,3 +61,36 @@
 	outline: 1.5px dashed var(--dc-accent);
 	outline-offset: 1px;
 }
+
+/*
+ * A viewport that is not drawing: its own paint, with a caption on it.
+ *
+ * Plain DOM and deliberately so. `canvas-3d` has a `ViewportStill` that does the
+ * same job and is the right thing for a caller inside that package; using it
+ * here would download three.js in order to draw a label on a box the artboard
+ * has already painted, which is precisely what the lazy import exists to avoid.
+ * The two agree on what matters — `inset: 0` inside the node's own box, so
+ * swapping a still for a canvas never moves a pixel.
+ */
+.still {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	overflow: hidden;
+	border-radius: inherit;
+}
+
+.stillLabel {
+	/* Legible on a dark default fill and on a light one without knowing which:
+	   a pale word on a translucent dark plate. The same pill `ViewportStill`
+	   draws, so a view that flips between the two does not change appearance
+	   for a reason nobody asked about. */
+	font: 500 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+	color: #e2e8f0;
+	background: rgba(15, 23, 42, 0.55);
+	padding: 4px 10px;
+	border-radius: 999px;
+	pointer-events: none;
+	white-space: nowrap;
+}

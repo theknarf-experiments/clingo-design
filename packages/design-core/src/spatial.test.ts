@@ -37,15 +37,18 @@ import {
 	centreOf,
 	composeMatrix,
 	contentsOf,
+	crossesViewport,
 	emuFromRender,
 	identityMatrix,
 	isSpatialNode,
 	isSpatialScene,
 	localMatrix,
 	originMatrix,
+	inertConstraints,
 	planeOf,
 	radFromMdeg,
 	refusedBounds,
+	refusedEdge,
 	renderFromEmu,
 	renderPoint,
 	rotationMatrix,
@@ -60,7 +63,7 @@ import {
 import { TEMPLATES } from "./templates/index.ts";
 import { flatten, worldFrame } from "./tree.ts";
 import { EMU_PER_PX } from "./units.ts";
-import { lit, ref, rotateVar, single } from "./values.ts";
+import { lit, ref, rotateVar, single, tokenVar } from "./values.ts";
 
 const P = EMU_PER_PX;
 const px = (n: number) => n * P;
@@ -135,10 +138,39 @@ test("the gate opens for a viewport, for a stated z and for a turn, and for noth
 	);
 });
 
-test("every template is flat, and stays flat", () => {
+/**
+ * The templates that are in three dimensions, named rather than detected.
+ *
+ * A written list and **not** `TEMPLATES.filter(isSpatialScene)`, and the
+ * difference is the whole value of the two loops below. Filtered by the
+ * predicate under test, they would agree with it by construction: a bug that
+ * made every document read as flat would empty the spatial half and both loops
+ * would pass with nothing left to say. Named, the partition itself is the
+ * assertion — a template that quietly grows a viewport fails here, and so does
+ * one that quietly loses the one it has.
+ *
+ * It stays a set of one for as long as `solids` is the only template that states
+ * a third axis, which is the no-regression promise in its most literal form:
+ * twelve of the thirteen documents that shipped before the third axis existed
+ * are still, atom for atom, documents that have never heard of it.
+ */
+const SPATIAL_TEMPLATES = new Set(["solids"]);
+
+test("every template is flat, and stays flat — bar the one that says otherwise", () => {
 	for (const template of TEMPLATES) {
 		const document = template.create();
-		assert.equal(isSpatialScene(document), false, template.id);
+		const spatial = SPATIAL_TEMPLATES.has(template.id);
+		assert.equal(isSpatialScene(document), spatial, template.id);
+		if (spatial) {
+			// The other half of the partition, so the list above cannot be padded
+			// with a flat template and quietly excuse it from the loop.
+			assert.ok(viewports(document).length > 0, `${template.id} has no view`);
+			assert.ok(
+				flatten(document.nodes).some((n) => isSpatialNode(document, n)),
+				`${template.id} has no node in the third axis`,
+			);
+			continue;
+		}
 		assert.deepEqual(viewports(document), [], template.id);
 		for (const n of flatten(document.nodes)) {
 			assert.equal(isSpatialNode(document, n), false, `${template.id}/${n.id}`);
@@ -424,17 +456,31 @@ test("an unturned node has an exact box, in integer EMU", () => {
 test("every template's nodes get the same four numbers from both readers", () => {
 	for (const template of TEMPLATES) {
 		const document = template.create();
+		const flatDocument = !SPATIAL_TEMPLATES.has(template.id);
 		for (const n of flatten(document.nodes)) {
 			const box = axisBounds(document, n.id);
 			const flat = worldFrame(document.nodes, n.id);
-			assert.ok(box, `${template.id}/${n.id} refused`);
+			if (!box) {
+				// The only thing that may refuse: a turned node's faces are the
+				// trigonometry a linear solver cannot do. A *flat* document has no
+				// such node, so a refusal there is a bug rather than a boundary —
+				// which is why this is two assertions and not a `continue`.
+				assert.ok(!flatDocument, `${template.id}/${n.id} refused`);
+				assert.match(refusedBounds(document, n.id) ?? "", /turned/, `${template.id}/${n.id}`);
+				continue;
+			}
+			// Invariant 4, stated one node at a time: whatever else the third axis
+			// gave a node, the two readers still agree about the four numbers they
+			// have both always had.
 			assert.deepEqual(
 				{ x: box.x, y: box.y, width: box.width, height: box.height },
 				flat,
 				`${template.id}/${n.id}`,
 			);
-			assert.equal(box.z, 0);
-			assert.equal(box.depth, 0);
+			if (flatDocument) {
+				assert.equal(box.z, 0, `${template.id}/${n.id}`);
+				assert.equal(box.depth, 0, `${template.id}/${n.id}`);
+			}
 		}
 	}
 });
@@ -549,4 +595,175 @@ test("a scene position is the chain, the flip and the crossing, in one call", ()
 	assert.deepEqual(scenePosition(document, "cube"), [25, -40, -8]);
 	assert.equal(scenePosition(document, "view"), undefined, "no model space to be in");
 	assert.equal(scenePosition(document, "nobody"), undefined);
+});
+
+/* ------------------------------------------------------------------ */
+/* What a rule cannot be about                                         */
+/* ------------------------------------------------------------------ */
+
+/** A geometric rule, spelled the way the document spells one. */
+const rule = (
+	id: string,
+	kind: "align" | "gap" | "symmetric" | "pin",
+	nodes: string[],
+	edge: string,
+): Scene["constraints"][number] => ({
+	id,
+	kind,
+	nodes,
+	prop: "fill",
+	edge: edge as never,
+	enabled: true,
+});
+
+test("a face of a turned box is refused, and its centre and its size are not", () => {
+	// The twin of `gnoedge/2`'s two rotation clauses, asked one edge at a time.
+	// The point of the pair is the *asymmetry*: a rotation about the node's own
+	// centre leaves the centre and the span exactly where they were, and it is
+	// only the two ends of an axis that stop being a number.
+	const document = scene([
+		node("panel", "rect", { turn: { rotateY: single("30deg") } }),
+		node("card", "rect"),
+	]);
+
+	const said = refusedEdge(document, "panel", "left");
+	assert.ok(said, "a lead edge on a turned node");
+	assert.match(said, /“panel” is turned 30° about Y/);
+	assert.match(said, /linear arithmetic/);
+	assert.match(said, /Horizontal centre/i, "and it offers the rule that would hold");
+
+	assert.ok(refusedEdge(document, "panel", "right"), "and the trail edge");
+	assert.equal(refusedEdge(document, "panel", "centerX"), undefined, "a centre survives");
+	assert.equal(refusedEdge(document, "panel", "width"), undefined, "and so does a span");
+	assert.equal(refusedEdge(document, "card", "left"), undefined, "an unturned node keeps its faces");
+	assert.equal(refusedEdge(document, "nobody", "left"), undefined, "and a datum has no rotation");
+});
+
+test("a turn that resolves to nothing refuses nothing, and the universe decides which", () => {
+	// The argument for taking picks at all: an `angle` token holding two
+	// alternatives is a design that is turned and a design that is not, and
+	// refusing the edge in the flat one would be a warning with nothing behind it.
+	const document = scene(
+		[node("panel", "rect", { turn: { rotateZ: [ref("lean")] } })],
+		{
+			tokens: [
+				{ id: "lean", name: "Lean", type: "angle", value: [lit("0deg"), lit("20deg")] },
+			],
+		},
+	);
+	// The pick is on the *token*, which is where the branching is: the node holds
+	// one alternative and that alternative is a reference.
+	assert.equal(
+		refusedEdge(document, "panel", "left", { [tokenVar("lean")]: 0 }),
+		undefined,
+		"flat in this design",
+	);
+	assert.ok(
+		refusedEdge(document, "panel", "left", { [tokenVar("lean")]: 1 }),
+		"and turned in the next",
+	);
+});
+
+test("a gap over a turned member is inert and a mirror over one is exact", () => {
+	// Which places a kind reads is taken off `CONSTRAINT_KINDS[k].seed` rather
+	// than switched on the kind, which is what makes these two answers different
+	// without either of them being written down: `gap`'s seed measures at `trail`
+	// then `lead`, and `symmetric`'s measures at `mid` twice.
+	const document = scene(
+		[
+			node("panel", "rect", { turn: { rotateZ: single("12deg") } }),
+			node("card", "rect"),
+		],
+		{
+			constraints: [
+				rule("k_gap", "gap", ["card", "panel"], "x"),
+				rule("k_mirror", "symmetric", ["card", "panel"], "x"),
+				rule("k_align", "align", ["card", "panel"], "centerY"),
+				rule("k_left", "align", ["card", "panel"], "left"),
+			],
+		},
+	);
+
+	const found = inertConstraints(document);
+	assert.deepEqual(
+		found.map((one) => one.constraint).sort(),
+		["k_gap", "k_left"],
+		"the two that read a face, and neither of the two that do not",
+	);
+	assert.deepEqual(
+		found.map((one) => one.member),
+		["panel", "panel"],
+		"and it is the turned member that is named, not the selected one",
+	);
+	assert.match(
+		found.find((one) => one.constraint === "k_gap")?.why ?? "",
+		/measured from one face to the next/,
+	);
+
+	// A rule that is switched off says nothing about anything, so it is not here.
+	const off = {
+		...document,
+		constraints: document.constraints.map((c) => ({ ...c, enabled: false })),
+	};
+	assert.deepEqual(inertConstraints(off), []);
+});
+
+test("a refusal reader reduces a copy term before it asks", () => {
+	// `docs/merged-plan.md` §6.6: a rule may name the part, the instance's copy of
+	// it, one state's copy of that, or a keyframe's — and all four hand the *part*
+	// to simplex. Getting this wrong is not a wrong answer, it is silence: the
+	// program refuses the edge through `gnoedge/2` and the panel says nothing.
+	const document = scene([
+		node("def", "frame", {
+			children: [node("label", "text", { turn: { rotateZ: single("8deg") } })],
+		}),
+	]);
+	for (const member of [
+		"label",
+		"inst(b1,label)",
+		"stt(b1,hover,label)",
+		"kfr(b1,slide,trkd(label,y),2)",
+	]) {
+		assert.ok(
+			refusedEdge(document, member, "left"),
+			`${member} did not reduce to the part`,
+		);
+	}
+	assert.equal(
+		refusedEdge(document, "stt(b1,hover,nobody)", "left"),
+		undefined,
+		"a copy of a part the document has not got is nothing at all",
+	);
+});
+
+test("a rule across a viewport's wall is warned about rather than refused", () => {
+	// The third reader, and the only one that refuses nothing. The rule holds,
+	// exactly — and it holds about model space, while a camera moves the pixels.
+	const cube = node("cube", "mesh");
+	const other = node("ring", "mesh");
+	const document = scene([
+		node("art", "frame", {
+			children: [
+				node("hero", "viewport", { name: "Hero", children: [cube] }),
+				node("side", "viewport", { name: "Side", children: [other] }),
+				node("card", "rect", { name: "Card" }),
+			],
+		}),
+	]);
+
+	const across = crossesViewport(document, ["card", "cube"]);
+	assert.ok(across, "one in, one out");
+	assert.match(across, /inside the 3D view “Hero”/);
+	assert.match(across, /moving the camera moves the pixels/);
+
+	const two = crossesViewport(document, ["cube", "ring"]);
+	assert.ok(two, "two views is two cameras, and the same surprise");
+	assert.match(two, /Each is drawn through its own camera/);
+
+	assert.equal(crossesViewport(document, ["cube"]), undefined, "one member is no seam");
+	assert.equal(crossesViewport(document, ["card", "art"]), undefined, "both outside");
+	// A view is not inside itself, so a rule between a cube and the box it is
+	// drawn in *is* across the seam — and it is the most surprising case of all,
+	// because the two look like one thing on the page. Warned, like the rest.
+	assert.ok(crossesViewport(document, ["cube", "hero"]));
 });

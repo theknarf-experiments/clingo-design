@@ -9,12 +9,16 @@ import {
 	type Value,
 	type ValueType,
 	type Verdict,
+	angleUnitOf,
 	derive,
 	durationUnitOf,
+	isAngleType,
 	isLengthType,
 	isTimeType,
 	lit,
+	nearestMdeg,
 	nearestMs,
+	writeAngle,
 	writeDuration,
 	optionLabel,
 	ref,
@@ -286,6 +290,96 @@ export function DurationInput({
 	);
 }
 
+/**
+ * The one angle field — the third of these, and it exists for the reason the
+ * other two do rather than for symmetry's sake.
+ *
+ * {@link mdegOf} is exact or nothing, and the text on the way to a rotation
+ * passes through more not-an-angle states than a length or a duration does:
+ * `4`, `45`, `45d`, `45de` are all things a person types before `45deg`, and
+ * every one of them reads as *no angle at all*. A plain `<input>` would commit
+ * each of them, `turn/3` would fall to its zero default, and the card on the
+ * canvas would snap flat four times while somebody typed a number into a box.
+ * Worse than the length case, because a half-typed length at least reads as
+ * *some* length in the document's unit — `"45"` is forty-five pixels — whereas
+ * `"45"` is a count everywhere in this system and an angle nowhere.
+ *
+ * The three ways it differs from {@link LengthInput}, each argued:
+ *
+ *   - **No document-wide unit.** A document is measured in one length unit
+ *     because every length in the panel has to be comparable by eye; angles are
+ *     not compared against the page, they are compared against a circle, and
+ *     `deg`, `turn` and `grad` all say the same circle. So what is shown is
+ *     what is stored, exactly as a duration is.
+ *   - **It keeps the unit that was typed.** `angleUnitOf` reads the spelling out
+ *     of the text in the box, so a designer working in turns stays in turns and
+ *     `"0.25turn"` does not silently become `"90deg"` under the caret. Where the
+ *     value cannot be said in that unit exactly — `91` thousandths is not a
+ *     multiple of the 900 a gradian steps by — {@link writeAngle} falls back to
+ *     degrees, which spells every angle there is.
+ *   - **It commits through `nearestMdeg` rather than `mdegOf`.** The one
+ *     editorial rounding, and it names its caller the way `DurationInput`'s
+ *     does: a thousandth of a degree is an arcsecond and a bit, so `22.50005deg`
+ *     is not a whole one and refusing it outright would look like the field
+ *     being broken. Rounding it here is visible the moment the caret leaves,
+ *     because the draft is dropped on blur and the box shows what was kept.
+ *
+ * `"1rad"` is refused rather than rounded, which is deliberate and is the one
+ * place this field is stricter than it could be: π is irrational, so a radian
+ * is 57295.779… thousandths and no exact answer exists. `nearestMdeg` could
+ * have answered 57296 — the unit is known and only the arithmetic is
+ * irrational — but then the field and `mdegOf` would disagree about what an
+ * angle is, and a field that rewrote `1rad` as `57.296deg` would be answering in
+ * a unit the designer did not type.
+ */
+export function AngleInput({
+	value,
+	className,
+	role,
+	field,
+	title,
+	disabled,
+	onCommit,
+}: {
+	/** The stored literal — `"45deg"`, `"0.25turn"`, `"50grad"`, `"0"`. */
+	value: string;
+	className?: string;
+	role?: string;
+	field?: string;
+	title?: string;
+	disabled?: boolean;
+	/** The new stored literal, once what is in the box reads as an angle. */
+	onCommit: (text: string) => void;
+}) {
+	const [draft, setDraft] = useState<string | null>(null);
+	return (
+		<input
+			className={className}
+			data-role={role}
+			data-field={field}
+			title={title}
+			disabled={disabled}
+			value={draft ?? value}
+			onChange={(e) => {
+				const text = e.target.value;
+				setDraft(text);
+				const mdeg = nearestMdeg(text);
+				// `angleUnitOf` succeeds on exactly the text `nearestMdeg` succeeds
+				// on — both go through the same parse — so the fallback is
+				// unreachable and is written as `deg` rather than as the stored
+				// value's unit, which would read as a rule this field does not have.
+				if (mdeg !== undefined) {
+					onCommit(writeAngle(mdeg, angleUnitOf(text) ?? "deg"));
+				}
+			}}
+			onBlur={() => setDraft(null)}
+			onKeyDown={(e) => {
+				if (e.key === "Enter") e.currentTarget.blur();
+			}}
+		/>
+	);
+}
+
 export function ValueEditor({
 	label,
 	type,
@@ -312,6 +406,7 @@ export function ValueEditor({
 	const isColour = type === "color";
 	const isLength = isLengthType(type);
 	const isTime = isTimeType(type);
+	const isAngle = isAngleType(type);
 	/**
 	 * How a literal of this type reads on screen: a length in the document's
 	 * unit, anything on a closed menu by the menu's own name, everything else as
@@ -475,6 +570,20 @@ export function ValueEditor({
 									role="literal"
 									value={term.value}
 									title="How long, in milliseconds or seconds — 200ms, 0.2s"
+									onCommit={(text) => replace(index, lit(text))}
+								/>
+							) : term.kind === "literal" && isAngle ? (
+								// And the fifth quantity, for the third and last time. An
+								// angle passes through more not-an-angle states on the way to
+								// being typed than either of the two above — `45` is a count
+								// everywhere in this system and an angle nowhere — so a plain
+								// input would snap a turned card flat once per keystroke. See
+								// {@link AngleInput}.
+								<AngleInput
+									className={styles.text}
+									role="literal"
+									value={term.value}
+									title="How far round, in degrees, turns or gradians — 45deg, 0.25turn"
 									onCommit={(text) => replace(index, lit(text))}
 								/>
 							) : term.kind === "literal" ? (

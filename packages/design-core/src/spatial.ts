@@ -42,13 +42,20 @@
  * conversions at the bottom of the file cross into CSS pixels and radians,
  * which is the one boundary in this package where a float is the right answer.
  */
+import { parseInstancePart } from "./components.ts";
 import { type Frame, type Point } from "./geometry.ts";
+import { parseKeyCopy, parseStatePart, parseTrack } from "./machines.ts";
 import {
+	CONSTRAINT_KINDS,
+	type Constraint,
+	EDGES,
+	type Edge,
 	type Scene,
 	type SceneNode,
 	type Spatial,
 	type Turn,
 	TURN_NAMES,
+	edgeOn,
 	frameOf,
 	isTurned,
 	spatialDim,
@@ -56,7 +63,7 @@ import {
 } from "./scene.ts";
 import { ancestorsOf, findInTree, flatten } from "./tree.ts";
 import { type Emu, EMU_PER_PX, cssPxFromEmu, emuFromCssPx } from "./units.ts";
-import type { ResolveContext } from "./values.ts";
+import type { Picks, ResolveContext } from "./values.ts";
 
 /**
  * What a reading resolves against when the caller has no universe in mind — the
@@ -118,6 +125,18 @@ export interface Point3 {
  * `docs/three-d-spec.md` §3.1 rather than improved on: **one `viewport` node, or
  * one node holding a `spatial` or a `turn` entry.**
  *
+ * **A third source, added after the fact and for a defect.** As first written
+ * this asked only about *nodes*, and a machine state or a timeline track that
+ * lifts a part in z was not a third axis. That was silently wrong rather than
+ * merely narrow: `StatePart.frame` is keyed by `Axis3` and `Track.dim`
+ * spans six axes precisely so a state may lift a mesh and a timeline may animate
+ * it, and with the gate shut `stateDimensions` handed the compiler the planar
+ * four, no `sfval(I,S,N,z)` was ever minted, and a designer who opened the depth
+ * rows on a flat node and typed a number got no atom, no picture and no warning.
+ * So a delta counts exactly as a node's own entry does — see
+ * {@link thirdAxisParts}, which is the shared answer this and the compiler's
+ * `zstated/1` both read, so the two cannot drift.
+ *
  * Two things it deliberately does *not* count, both of which look like they
  * should:
  *
@@ -130,17 +149,80 @@ export interface Point3 {
  *     so that "flat" has one spelling, but a document may arrive from anywhere,
  *     and a record with no keys in it states nothing.
  *
- * When step M7 widens the gate, this widens with it, and the test that holds
- * them equal is M7's — the same arrangement `machineHealth` and `munreached/2`
- * have.
+ * The compiler's gate reads this function rather than asking again, and the test
+ * that holds them equal is `spatialprogram.test.ts`'s — the same arrangement
+ * `machineHealth` and `munreached/2` have.
  */
 export function isSpatialScene(scene: Scene): boolean {
-	return flatten(scene.nodes).some(
-		(node) =>
-			node.kind === "viewport" ||
-			Object.keys(node.spatial ?? {}).length > 0 ||
-			Object.keys(node.turn ?? {}).length > 0,
-	);
+	if (
+		flatten(scene.nodes).some(
+			(node) =>
+				node.kind === "viewport" ||
+				Object.keys(node.spatial ?? {}).length > 0 ||
+				Object.keys(node.turn ?? {}).length > 0,
+		)
+	) {
+		return true;
+	}
+	return thirdAxisParts(scene).size > 0;
+}
+
+/**
+ * Every definition part a *machine* has put in the third axis: one its states
+ * give a `z`, a `depth` or a turn, or one a timeline track animates on those
+ * axes.
+ *
+ * **The one place the question is answered**, because three readers ask it and
+ * two of them are in different packages' worth of machinery: {@link
+ * isSpatialScene} opens the compiler's `spatial.` gate with it,
+ * {@link isSpatialNode} is the twin of `s3/1` and has to agree node for node,
+ * and `compile.ts` emits `zstated/1` from it so that the part really is in the
+ * third axis rather than merely having atoms about one. Three answers to that
+ * would be the quietest bug the feature can have, which is the same argument
+ * `stateDimensions` makes one level down.
+ *
+ * **Why a delta makes the part itself spatial, rather than only its copies.**
+ * The alternative was to widen the gate and leave `zstated/1` alone, which
+ * derives `frame(stt(I,S,N),z,V)` from `sfval` — the rule leaves the dimension
+ * unbound — while `s3(stt(I,S,N))` stays false, so the copy has a z in the state
+ * that sets one and no z at all in the state beside it, the instance has a z
+ * only while that state is shown, and nothing in the document has a `depth`. A
+ * part that is somewhere on an axis in one state and nowhere on it in the next
+ * is not a design, it is an artefact of which rule happened to fire. Saying
+ * `zstated(part)` instead gives the part the same six numbers a node the
+ * document lifted by hand has, the defaults fill the states that say nothing,
+ * and the instance's copy inherits through `s3(inst(I,N))`.
+ *
+ * Keyed by the **definition part's own id**, which is what `StatePart` and
+ * `Track.part` are keyed by and what `cpart/2` carries. A part named by a state
+ * of a machine whose root is no longer a definition is still returned: the
+ * document said it, `zstated/1` for a node no rule reaches grounds nothing, and
+ * filtering here would make the answer depend on the component graph.
+ */
+export function thirdAxisParts(scene: Scene): Set<string> {
+	const out = new Set<string>();
+	const spatial = (axis: string) => axis === "z" || axis === "depth";
+	for (const machine of scene.machines ?? []) {
+		for (const state of machine.states) {
+			for (const [part, delta] of Object.entries(state.parts ?? {})) {
+				if (delta === undefined) continue;
+				const lifted = Object.entries(delta.frame ?? {}).some(
+					([axis, value]) => spatial(axis) && (value?.length ?? 0) > 0,
+				);
+				const turned = Object.values(delta.turn ?? {}).some(
+					(value) => (value?.length ?? 0) > 0,
+				);
+				if (lifted || turned) out.add(part);
+			}
+		}
+		for (const timeline of machine.timelines ?? []) {
+			for (const track of timeline.tracks) {
+				if (track.dim !== undefined && spatial(track.dim)) out.add(track.part);
+				if (track.turn !== undefined) out.add(track.part);
+			}
+		}
+	}
+	return out;
 }
 
 /** Every viewport in the document, in paint order. */
@@ -204,6 +286,10 @@ export function isSpatialNode(scene: Scene, node: SceneNode): boolean {
 	if (node.kind === "viewport") return true;
 	if (Object.keys(node.spatial ?? {}).length > 0) return true;
 	if (Object.keys(node.turn ?? {}).length > 0) return true;
+	// The fourth seed, and the reason it is a seed rather than a special case:
+	// the compiler emits `zstated/1` for exactly this set, so a part a state
+	// lifts is `s3` on both sides of the boundary. See {@link thirdAxisParts}.
+	if (thirdAxisParts(scene).has(node.id)) return true;
 	return viewportOf(scene, node.id) !== undefined;
 }
 
@@ -695,6 +781,277 @@ function describeTurn(node: SceneNode, context: ResolveContext): string {
 /** Thousandths of a degree as the shortest exact decimal: `22500` is `22.5`. */
 function degreeText(mdeg: number): string {
 	return String(Number((mdeg / 1000).toFixed(3)));
+}
+
+/* ------------------------------------------------------------------ */
+/* What a rule cannot be about                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The document node a constraint member names, where it names one.
+ *
+ * **Four spellings reduce to one node, and the order they are tried in is the
+ * whole of `docs/merged-plan.md` §6.6.** A rule may be written against a
+ * definition part (`label`), against one instance's copy of it
+ * (`inst(i1,label)`), against one state's copy of that (`stt(i1,hover,label)`)
+ * or — since the ladder — against a keyframe's copy (`kfr(i1,slide,r1,k2)`).
+ * All of them hand the *part* to simplex, so all of them must reduce before
+ * anything asks whether the thing is turned. Getting this wrong is not a wrong
+ * answer, it is silence: a rule over a turned mesh's state copy would be offered
+ * `left`, the program would refuse it through `gnoedge/2`, and the panel would
+ * say nothing at all — which is the one outcome the whole refusal-reader idea
+ * exists to prevent.
+ *
+ * A member that reduces to nothing is a **datum** — a guide, or one line of a
+ * column grid — which has a place, no size and no rotation, so it can never be
+ * the reason a quantity went missing. `undefined` rather than a throw, for the
+ * reason every reader in this file gives an id the tree does not hold.
+ *
+ * The bare id is tried *first* rather than last, which is not an optimisation: a
+ * document is free to name a node `inst_of_something`, and a parser is a
+ * guess where the tree is an answer.
+ *
+ * **Exported, where `docs/merged-plan.md` §6.6 called for a shared private
+ * helper, and the widening is reported rather than done quietly.** The three
+ * readers below share it as the plan intended; what the plan did not account for
+ * is that the *inspector* asks the same question from outside — "is this node
+ * one of the nodes that rule is about" — and its only alternative was the
+ * fourth copy of this reduction. A fourth copy is precisely what §6.6 exists
+ * against, so the helper is one function and it is public.
+ */
+export function constraintMemberNode(
+	scene: Scene,
+	member: string,
+): SceneNode | undefined {
+	return memberNode(scene, member);
+}
+
+function memberNode(scene: Scene, member: string): SceneNode | undefined {
+	const direct = findInTree(scene.nodes, member);
+	if (direct) return direct;
+	const key = parseKeyCopy(member);
+	const reduced =
+		parseInstancePart(member)?.node ??
+		parseStatePart(member)?.node ??
+		// A keyframe copy names its *track* rather than its part, because the copy
+		// is per property as well as per part — so the part comes out one parse
+		// further in, through the same bracket-counting reader.
+		(key ? (parseTrack(key.track)?.node ?? undefined) : undefined);
+	return reduced === undefined ? undefined : findInTree(scene.nodes, reduced);
+}
+
+/**
+ * Why this rule cannot be about this quantity on this member, in the words the
+ * panel shows — or nothing where it can.
+ *
+ * **The TypeScript twin of `gnoedge/2`**, and the two are held equal by a test
+ * against the real solver, exactly as `machineHealth` and `munreached/2` are.
+ * Two readers because neither can do the other's job: the panel has to grey the
+ * row while there is no answer set at all, and the program has to refuse the
+ * quantity while there is.
+ *
+ * The program's clauses, which this restates and does not improve on:
+ *
+ * ```prolog
+ * gnoedge(N,E) :- grotated(N), gedge(E,_,pos), gplace(E,lead).
+ * gnoedge(N,E) :- grotated(N), gedge(E,_,pos), gplace(E,trail).
+ * gnoedge(N,E) :- gcon(C), c_node(C,N), gedge(E,z,_), not s3(N).
+ * ```
+ *
+ * The first two are the rotation refusal: a turned box's face is at
+ * `cx ± (|w·cos θ| + |h·sin θ|)/2`, and `clingo-lpx` decides *linear*
+ * arithmetic, so the quantity is never minted and the rule quietly means
+ * nothing. The centres and the spans survive, exactly, because a rotation about
+ * the node's own centre leaves them alone.
+ *
+ * **The third clause is reachable in the program and not yet reachable here, and
+ * that is a fact about `EDGES` rather than about this function.** `EDGES` has no
+ * `z` rows — see the note on the table, which is a declared partial: widening
+ * `EdgeSpec.axis` costs `annotate.ts` twenty-three errors and somebody has to
+ * decide what the canvas overlay *draws* for a rule about `centerZ` first. So
+ * the clause is written below against the axis as a string, it grounds to
+ * nothing today, and the day the five rows land it starts answering with no
+ * further edit. Writing it as a `=== "z"` on the typed union instead would have
+ * been a compile error, and leaving it out would have been the silence this
+ * whole function is against.
+ *
+ * A span edge and a whole axis are **not** refused: `width`, `height`, `depth`
+ * and every centre are exact on a turned node. An axis edge — `gap`'s and
+ * `symmetric`'s spelling — is answered by {@link inertConstraints} instead,
+ * which knows the *kind* and therefore knows whether the rule reads the faces or
+ * the centres. This function is handed an edge and nothing else, and a function
+ * that guessed the kind from the edge would refuse a `symmetric` that holds.
+ */
+export function refusedEdge(
+	scene: Scene,
+	member: string,
+	edge: Edge,
+	picks: Picks = {},
+): string | undefined {
+	const node = memberNode(scene, member);
+	if (!node || !Object.hasOwn(EDGES, edge)) return undefined;
+	const spec = EDGES[edge];
+	const context: ResolveContext = { tokens: scene.tokens, picks };
+	// The third clause. `spec.axis` is `"x" | "y"` today, so this is written
+	// through a `string` rather than compared against the union — see above.
+	const axis: string = spec.axis;
+	if (axis === "z" && !isSpatialNode(scene, node)) {
+		return `“${node.name}” is not in a 3D view, so it has no front, no back and no depth. A rule about this quantity would be a rule about a box the document does not contain. Put it inside the view, or use a rule about the two axes it does have.`;
+	}
+	if (spec.role !== "pos" || spec.place === "mid") return undefined;
+	if (!isTurned(node, context)) return undefined;
+	const centre = edgeOn(spec.axis, "mid");
+	return `“${node.name}” is turned ${describeTurn(node, context)}, and the ${spec.label.toLowerCase()} of a turned box is trigonometry. The solver here is linear arithmetic — that is what makes every other rule in this document exact — so a rule about this edge would be a statement about a rectangle the design does not contain. Its centre and its size are still exactly what they say they are, so a rule on ${EDGES[centre].label.toLowerCase()} would hold.`;
+}
+
+/** One rule that names a quantity the program will not create, and why. */
+export interface InertConstraint {
+	/** The constraint's own term — `constraint(C)`, and what an unsat core blames. */
+	constraint: string;
+	/** The member as the document spells it, copy terms and all. */
+	member: string;
+	/** The quantity that goes unminted. An axis where the kind measures faces. */
+	edge: Edge;
+	why: string;
+}
+
+/**
+ * Every enabled constraint that names a quantity the program will not create.
+ *
+ * A rule that says nothing is a rule with a bug in it, and the tool is required
+ * to say so out loud: the Rules panel marks these rows and the status line
+ * counts them beside the broken ones. Silence in ASP is invisible, and an
+ * invisible refusal is worse than the wrong answer it replaced.
+ *
+ * **Which places a kind actually reads is taken off {@link CONSTRAINT_KINDS}
+ * rather than switched on the kind**, and the table that has the answer is the
+ * *seed*. A kind whose edge is a `pos` reads that edge's own place. A kind whose
+ * edge is a whole axis reads whichever places its seed measures at, which is the
+ * same list `gneed/2` derives through `glead`/`gmid`/`gtrail`: `gap`'s seed is
+ * `trail` then `lead`, so a gap over a turned member is refused, and
+ * `symmetric`'s is `mid` twice, so a mirror is exact on one. That is the spec's
+ * table read out of the document's own vocabulary instead of restated beside it.
+ *
+ * **Every member, not only a selected one.** That is the case a designer
+ * actually meets: `align [card, panel] on left` where *panel* is the turned one
+ * leaves `card` exactly as free as it was, so the thing that does not move is
+ * the thing nobody touched.
+ *
+ * The universe matters and is why this takes picks. An `angle` token holding
+ * `[0deg, 30deg]` is a rule that holds in one design and is inert in the next,
+ * and marking it inert in the flat one would be a warning with nothing behind
+ * it — the same argument `isTurned` makes for taking a context at all.
+ */
+export function inertConstraints(
+	scene: Scene,
+	picks: Picks = {},
+): InertConstraint[] {
+	const out: InertConstraint[] = [];
+	for (const constraint of scene.constraints) {
+		if (constraint.enabled === false) continue;
+		for (const found of inertMembers(scene, constraint, picks)) out.push(found);
+	}
+	return out;
+}
+
+/**
+ * One constraint's inert members, which is the part {@link inertConstraints}
+ * loops over and the part the Rules panel asks about one row at a time.
+ *
+ * Separate because the panel has a row and not a document: asking
+ * `inertConstraints` and filtering it by id would walk every rule in the
+ * document once per row, which on a page of forty rules is forty walks of forty
+ * rules to draw one mark.
+ */
+export function inertMembers(
+	scene: Scene,
+	constraint: Constraint,
+	picks: Picks = {},
+): InertConstraint[] {
+	const spec = CONSTRAINT_KINDS[constraint.kind];
+	const edge = constraint.edge;
+	if (!spec.geometric || edge === undefined || !Object.hasOwn(EDGES, edge)) {
+		return [];
+	}
+	const at = EDGES[edge];
+	const context: ResolveContext = { tokens: scene.tokens, picks };
+	const out: InertConstraint[] = [];
+	for (const member of constraint.nodes) {
+		if (at.role !== "axis") {
+			const why = refusedEdge(scene, member, edge, picks);
+			if (why !== undefined) out.push({ constraint: constraint.id, member, edge, why });
+			continue;
+		}
+		// An axis names no place of its own, so what the rule reads is what its
+		// seed measures at. `self` is `pin`'s spelling and `pin` never takes an
+		// axis; it is skipped rather than mapped, so a kind added later with a
+		// `self` seed on an axis reports nothing rather than the wrong thing.
+		const faces = spec.seed.some(
+			(term) => term.place === "lead" || term.place === "trail",
+		);
+		if (!faces) continue;
+		const node = memberNode(scene, member);
+		if (!node || !isTurned(node, context)) continue;
+		out.push({
+			constraint: constraint.id,
+			member,
+			edge,
+			why: `${spec.label} is measured from one face to the next, and “${node.name}” is turned ${describeTurn(node, context)}, so it has no face on this axis that a number could hold. Either measure between their centres with ${CONSTRAINT_KINDS.symmetric.label}, or take the turn off.`,
+		});
+	}
+	return out;
+}
+
+/**
+ * Why a rule over these members is measuring something other than what is on
+ * screen — or nothing, where every member is on the same side of every seam.
+ *
+ * **The third refusal-shaped reader, and the only one that refuses nothing.**
+ * `align [card, hero_cube] on centerY` is well-defined, exact, and not what a
+ * designer expects: `wv(cube,y)` is the world chain summed through `child/2`,
+ * which climbs out of the viewport and up the artboard, so the rule aligns the
+ * cube's position *in the viewport's model space, offset by the viewport's own
+ * frame* with the card's position on the page. There is no camera anywhere in
+ * that sum. Move the camera and the cube's pixels move; the constraint does not
+ * notice.
+ *
+ * It is allowed, and refusing it would be the parallel document model invariant
+ * 2 forbids — a node is a node. But an invisible surprise is the thing the
+ * refusal readers above exist against, so it gets the same treatment one step
+ * softer: a **warning** rather than a `gnoedge`, marked in the panel and counted
+ * in the status line beside the inert ones. `docs/merged-plan.md` §6.2 settles
+ * this and gives the sentence, which is kept verbatim.
+ *
+ * The comparison is on the *nearest* viewport, which is what makes a rule
+ * between two meshes in one view silent and a rule between two meshes in two
+ * different views loud: two model spaces are two cameras, and the surprise is
+ * the same one.
+ */
+export function crossesViewport(
+	scene: Scene,
+	members: readonly string[],
+): string | undefined {
+	const seen: Array<{ node: SceneNode; view: SceneNode | undefined }> = [];
+	for (const member of members) {
+		const node = memberNode(scene, member);
+		// A datum is a line on the page and has no viewport to be inside; it is
+		// skipped rather than counted as "outside", because a rule between a guide
+		// and a mesh is already a rule about the page.
+		if (node) seen.push({ node, view: viewportOf(scene, node.id) });
+	}
+	const inside = seen.filter((one) => one.view !== undefined);
+	if (inside.length === 0 || inside.length === seen.length) {
+		// All out, or all in — and all in still needs the two views to be one.
+		const views = new Set(inside.map((one) => one.view?.id));
+		if (views.size <= 1) return undefined;
+		const [a, b] = inside.filter(
+			(one, at, all) => all.findIndex((o) => o.view?.id === one.view?.id) === at,
+		);
+		return `“${a.node.name}” is inside the 3D view “${a.view?.name}” and “${b.node.name}” is inside “${b.view?.name}”. Each is drawn through its own camera, so this rule is exact about where they sit in their scenes and says nothing about where they land on the page. Put both members inside one view to constrain what you can see.`;
+	}
+	const within = inside[0];
+	const without = seen.find((one) => one.view === undefined);
+	return `“${within.node.name}” is inside the 3D view “${within.view?.name}” and “${without?.node.name}” is not. This rule is exact about where the ${within.node.name} sits in the scene, and the scene is drawn through a camera — so moving the camera moves the pixels and leaves this rule satisfied. Put both members inside the view, or both outside it, to constrain what you can see.`;
 }
 
 /* ------------------------------------------------------------------ */

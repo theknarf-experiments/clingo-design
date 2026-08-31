@@ -31,6 +31,18 @@ const GLYPHS: Partial<Record<Tool, ReactNode>> = {
 		</>
 	),
 	text: <path d="M3.4 4.7V3.3h9.2v1.4M8 3.3v9.4M6.1 12.7h3.8" />,
+	// A 3D view: the rectangle every other kind is, with a box drawn in it. The
+	// rectangle is the point — a viewport is placed, sized and snapped on the page
+	// like any other node, and only what is *inside* it is three-dimensional — so
+	// the glyph says "a window with a solid behind it" rather than drawing a cube
+	// on its own, which would read as the `mesh` this slot does not make.
+	viewport: (
+		<>
+			<rect x="1.7" y="3.2" width="12.6" height="9.6" rx="1.4" />
+			<path d="M5.6 9.9V6.7l2.4-1.3 2.4 1.3v3.2L8 11.2Z" />
+			<path d="M5.6 6.7 8 8v3.2M10.4 6.7 8 8" />
+		</>
+	),
 };
 
 export function ToolIcon({ tool }: { tool: Tool }) {

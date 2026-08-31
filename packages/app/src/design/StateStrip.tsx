@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 
 import {
 	type Machine,
-	initialState,
+	layerStates,
+	machineLayers,
 	stateName,
 } from "@clingo-design/design-core";
 
@@ -39,6 +40,21 @@ import styles from "./StateStrip.module.css";
  * Read-only is the absence of the four editing callbacks rather than a flag,
  * which is what the inspector renders: the same component, showing and playing,
  * with no way to rename a state in two places.
+ *
+ * **One layer's states, and never two layers' at once.** A machine with layers
+ * is in one state *per layer* simultaneously — that is the whole of what a layer
+ * is — so a strip that listed every state of every layer would be a row in which
+ * two chips are legitimately lit and the "start" mark appears twice, describing a
+ * choice the document does not make. The layer being shown is
+ * {@link StateStripProps.layer}, absent is the first layer's, and on the
+ * one-layer machine every document held before layers existed the two readings
+ * are the same list in the same order.
+ *
+ * **The order is the initial state *of its layer*.** `layerInitial` is the first
+ * state of the layer in document order, exactly as `initialState` is the first
+ * state of the machine, so reordering inside a layer is still the only control
+ * for where that layer starts — and moving a state to the front of the whole
+ * list is what makes it the first layer's start.
  */
 export interface StateStripProps {
 	machine: Machine;
@@ -48,6 +64,21 @@ export interface StateStripProps {
 	playing?: string;
 	/** States the answer set says are reachable; absent greys nothing. */
 	reachable?: ReadonlySet<string>;
+	/** Show only the states of this layer. Absent is the first layer's. */
+	layer?: string;
+	/**
+	 * States the *guard-aware* reachability calls unreachable — `mgunreached/2`,
+	 * a superset of everything outside {@link reachable}.
+	 *
+	 * Greyed harder than an ordinary unreachable state, and marked separately
+	 * rather than folded into one list, because the two are different news and
+	 * have different ways out. A state outside `reachable` needs a transition; a
+	 * state in here has one, and no valuation of the inputs can ever take it — so
+	 * the fix is in a guard rather than in the topology, and a strip that said the
+	 * same thing about both would send somebody to draw an edge that already
+	 * exists.
+	 */
+	deadWithGuards?: ReadonlySet<string>;
 	/** Play a state on the canvas. Null hands it back to the document. */
 	onPlay?: (state: string | null) => void;
 	/** Make a state the one the document draws. Absent where there is no subject. */
@@ -79,11 +110,12 @@ export interface StateStripProps {
 function Chip({
 	machine,
 	stateId,
-	index,
 	initial,
 	drawn,
 	played,
 	unreachable,
+	guarded,
+	moveTo,
 	onPlay,
 	onShow,
 	onRename,
@@ -92,11 +124,24 @@ function Chip({
 }: {
 	machine: Machine;
 	stateId: string;
-	index: number;
 	initial: boolean;
 	drawn: boolean;
 	played: boolean;
 	unreachable: boolean;
+	/** Reachable on paper and unreachable once the guards are read. */
+	guarded: boolean;
+	/**
+	 * Where ‹ would put it: the position of the previous state **of its own
+	 * layer**, or undefined where nothing precedes it there.
+	 *
+	 * Computed by the strip rather than as `index - 1`, and the difference is
+	 * whether the control works at all on a layered machine. `reorderState` moves
+	 * within `Machine.states`, which interleaves the layers; a state that is
+	 * second overall and first in the glow layer would be swapped past a state in
+	 * the press layer — a real edit, with no visible effect in the strip it was
+	 * pressed in, that quietly changed which state the press layer starts in.
+	 */
+	moveTo?: number;
 	onPlay?: (state: string | null) => void;
 	onShow?: (state: string) => void;
 	onRename?: (state: string, name: string) => void;
@@ -134,15 +179,22 @@ function Chip({
 				played && styles.played,
 				drawn && styles.drawn,
 				unreachable && styles.unreachable,
+				guarded && styles.guarded,
 			)}
 			data-role="state"
 			data-state={stateId}
 			data-initial={initial ? "" : undefined}
+			data-dead={guarded ? "" : undefined}
 			title={
 				`${name} — the id \`${stateId}\`, which is what a cross-state rule names ` +
 				`(stt(…,${stateId},…)) and what the exported file switches on.` +
-				(initial ? " First in the list, so this is where the machine starts." : "") +
-				(unreachable ? " No chain of transitions reaches it from the start." : "")
+				(initial
+					? " First in its layer, so this is where that layer starts."
+					: "") +
+				(unreachable ? " No chain of transitions reaches it from the start." : "") +
+				(guarded
+					? " A chain reaches it on paper, and no valuation of the inputs can take that chain — so the way out is a guard rather than an edge."
+					: "")
 			}
 		>
 			{onReorder ? (
@@ -150,9 +202,9 @@ function Chip({
 					type="button"
 					className={styles.move}
 					data-role="reorder-state"
-					disabled={index === 0}
-					title="Move earlier. Moving a state to the front is how a machine changes where it starts — there is no separate flag to set, so there is nothing that can disagree with the order."
-					onClick={() => onReorder(stateId, index - 1)}
+					disabled={moveTo === undefined}
+					title="Move earlier. Moving a state to the front of its layer is how that layer changes where it starts — there is no separate flag to set, so there is nothing that can disagree with the order."
+					onClick={() => moveTo !== undefined && onReorder(stateId, moveTo)}
 				>
 					‹
 				</button>
@@ -247,6 +299,8 @@ export function StateStrip({
 	shown,
 	playing,
 	reachable,
+	layer,
+	deadWithGuards,
 	onPlay,
 	onShow,
 	onAdd,
@@ -254,24 +308,49 @@ export function StateStrip({
 	onDelete,
 	onReorder,
 }: StateStripProps) {
-	const first = initialState(machine);
+	/**
+	 * Which layer's states these are, and where each of them sits in the machine's
+	 * own list.
+	 *
+	 * Two readings of one array rather than one, because the two questions have
+	 * two answers: what to *draw* is this layer's states in their own order, and
+	 * where to *move* one is its position among all of them, since that is what
+	 * `reorderState` addresses. `machineLayers` mints `base` for a machine the
+	 * document gave no layers, so an un-layered machine takes this path and comes
+	 * out with exactly the list it had before layers existed.
+	 */
+	const layers = machineLayers(machine);
+	const which = layer !== undefined && layers.some((l) => l.id === layer)
+		? layer
+		: layers[0].id;
+	const states = layerStates(machine, which);
+	const at = (id: string) => machine.states.findIndex((s) => s.id === id);
 
 	return (
-		<div className={styles.strip} data-role="states" data-machine={machine.id}>
+		<div
+			className={styles.strip}
+			data-role="states"
+			data-machine={machine.id}
+			data-layer={which}
+		>
 			<div className={styles.row}>
-				{machine.states.map((state, index) => (
+				{states.map((state, index) => (
 					<Chip
 						key={state.id}
 						machine={machine}
 						stateId={state.id}
-						index={index}
-						initial={state.id === first?.id}
+						// The first state of this layer is where this layer starts, which
+						// is `layerInitial`'s reading and is the first entry here by
+						// construction — `layerStates` keeps document order.
+						initial={index === 0}
 						drawn={state.id === shown}
 						played={state.id === playing}
 						// Absent greys nothing: with no answer in hand — an unsolved
 						// document, or an unsatisfiable one — every state is as reachable
 						// as the panel knows how to say.
 						unreachable={reachable !== undefined && !reachable.has(state.id)}
+						guarded={deadWithGuards?.has(state.id) ?? false}
+						moveTo={index === 0 ? undefined : at(states[index - 1].id)}
 						onPlay={onPlay}
 						onShow={onShow && state.id !== shown ? onShow : undefined}
 						onRename={onRename}
@@ -292,6 +371,13 @@ export function StateStrip({
 					</button>
 				) : null}
 			</div>
+
+			{states.length === 0 ? (
+				<p className={styles.note} data-role="no-layer-states">
+					No state belongs to this layer, so it shows nothing and composes
+					nothing. Add one, or move one here.
+				</p>
+			) : null}
 
 			{playing !== undefined ? (
 				<p className={styles.note} data-role="playing-note">

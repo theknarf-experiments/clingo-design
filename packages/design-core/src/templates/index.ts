@@ -13,6 +13,7 @@ import { blank } from "./blank.ts";
 import { buttons } from "./buttons.ts";
 import { card } from "./card.ts";
 import { component } from "./component.ts";
+import { deck } from "./deck.ts";
 import { machine } from "./machine.ts";
 import { map } from "./map.ts";
 import { pair } from "./pair.ts";
@@ -20,6 +21,7 @@ import { palette } from "./palette.ts";
 import { places } from "./places.ts";
 import { rail } from "./rail.ts";
 import { ranked } from "./ranked.ts";
+import { solids } from "./solids.ts";
 import { sudoku } from "./sudoku.ts";
 import { typography } from "./typography.ts";
 
@@ -56,6 +58,20 @@ export const TEMPLATES: Template[] = [
 		description:
 			"A button with rest, hover and pressed — and exactly as many designs as the same button with no machine at all.",
 		create: machine,
+	},
+	{
+		id: "deck",
+		name: "Inputs and layers",
+		description:
+			"Three inputs, three guarded edges and two layers on screen at once — and the same two designs as the same bar with no machine at all.",
+		create: deck,
+	},
+	{
+		id: "solids",
+		name: "Three dimensions",
+		description:
+			"A row of solids a rule lines up, painting from the page's own accent — a 3D view joins the design space instead of multiplying it.",
+		create: solids,
 	},
 	{
 		id: "buttons",

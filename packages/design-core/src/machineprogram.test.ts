@@ -21,23 +21,38 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { parseAtom, unquote } from "./atoms.ts";
-import { PULL_ATOM, SCENERY_ATOM, compile, variableCounts } from "./compile.ts";
+import { CONTRACT, PULL_ATOM, SCENERY_ATOM, compile, variableCounts } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
 import { makeNode } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
-import { statePart, stateFrameVar, statePropVar } from "./machines.ts";
+import {
+	LADDER_CHECKS,
+	MACHINE_CHECKS,
+	keyCopy,
+	statePart,
+	stateFrameVar,
+	statePropVar,
+	trackDim,
+	trackProp,
+} from "./machines.ts";
 import { type Measurements, oneSize, stateMeasures } from "./measure.ts";
 import type {
+	Blend,
 	Constraint,
+	Keyframe,
 	Machine,
+	MachineInput,
+	MachineLayer,
 	MachineState,
 	Scene,
 	SceneNode,
 	StatePart,
+	Timeline,
 	Transition,
 	Trigger,
 } from "./scene.ts";
 import { dimension } from "./scene.ts";
+import { TEMPLATES } from "./templates/index.ts";
 import { EMU_PER_PX } from "./units.ts";
 import { type Token, type Value, lit, motionVar, single, tokenVar } from "./values.ts";
 
@@ -64,8 +79,24 @@ const edge = (
 const machine = (spec: {
 	id?: string;
 	root?: string;
-	states: Array<{ id: string; name?: string; parts?: Record<string, StatePart> }>;
+	states: Array<{
+		id: string;
+		name?: string;
+		parts?: Record<string, StatePart>;
+		/**
+		 * The three fields the ladder added to a state, threaded through the same
+		 * builder rather than a second one — a state with a layer is a state, and a
+		 * builder that split them would let a test assert something about a layered
+		 * machine that is not true of the machine beside it.
+		 */
+		layer?: string;
+		timeline?: string;
+		blend?: Blend;
+	}>;
 	transitions?: Transition[];
+	inputs?: MachineInput[];
+	layers?: MachineLayer[];
+	timelines?: Timeline[];
 }): Machine => ({
 	id: spec.id ?? "m1",
 	name: "Button states",
@@ -75,9 +106,21 @@ const machine = (spec: {
 			id: state.id,
 			name: state.name ?? state.id,
 			parts: state.parts ?? {},
+			...(state.layer ? { layer: state.layer } : {}),
+			...(state.timeline ? { timeline: state.timeline } : {}),
+			...(state.blend ? { blend: state.blend } : {}),
 		}),
 	),
 	transitions: spec.transitions ?? [],
+	...(spec.inputs ? { inputs: spec.inputs } : {}),
+	...(spec.layers ? { layers: spec.layers } : {}),
+	...(spec.timelines ? { timelines: spec.timelines } : {}),
+});
+
+/** One keyframe, spelled the way a track holds one. */
+const key = (at: string, value: string): Keyframe => ({
+	at: [lit(at)],
+	value: [lit(value)],
 });
 
 /** One use of the definition, and what the document remembers about it. */
@@ -85,6 +128,12 @@ interface Use {
 	id: string;
 	/** Which state it is drawn in — {@link SceneNode.state}. */
 	state?: string;
+	/**
+	 * Which state it is drawn in **per layer** — {@link SceneNode.states}, the
+	 * field rung four added beside `state` rather than in place of it, so a
+	 * document written before layers existed still reads.
+	 */
+	states?: Record<string, string>;
 }
 
 /**
@@ -159,6 +208,7 @@ function buttons(spec: {
 						),
 						instanceOf: "btn",
 						...(use.state ? { state: use.state } : {}),
+						...(use.states ? { states: use.states } : {}),
 					})),
 				],
 			},
@@ -1382,4 +1432,1225 @@ test("a copy nobody measured is the box the definition was drawn at", async () =
 	const atoms = await only(scene);
 	assert.equal(frameOf(atoms, statePart("b1", "hover", "label")).width, px(136));
 	assert.equal(frameOf(atoms, statePart("b1", "rest", "label")).width, px(136));
+});
+
+/* ------------------------------------------------------------------ */
+/* The ladder: inputs, guards, reserved ids, layers, timelines, blends */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The one answer set of a document, with extra predicates asked for by name.
+ *
+ * Most of the ladder is deliberately carried by no atom: `minput/2` and its five
+ * companions are shown by nothing and projected by nothing, because an input is
+ * a fact the document already holds and a panel reads it from the document. That
+ * is the right shipping decision and it makes the rungs untestable through
+ * {@link answers}, so the `#show` is added **here**, in the test, rather than in
+ * the program — the same way `spatialprogram.test.ts` asks about `s3/1`. A test
+ * that had to ship a `#show` to be able to run would be a test that changed the
+ * thing it was measuring.
+ */
+async function asked(
+	scene: Scene,
+	signatures: readonly string[],
+	measurements?: Measurements,
+): Promise<string[]> {
+	const { program, guards } = compile(scene, { measurements });
+	const shows = signatures
+		.map((signature) => {
+			const [name, arity] = signature.split("/");
+			const vars = Array.from({ length: Number(arity) }, (_, i) => `X${i}`).join(",");
+			return `#show ${name}(${vars}) : ${name}(${vars}).`;
+		})
+		.join("\n");
+	const session = await directSolver.open(`${program}\n${shows}\n`, "--project");
+	try {
+		const outcome = await session.solve({
+			models: 0,
+			assumptions: [...guards, PULL_ATOM, SCENERY_ATOM].map((atom) => ({ atom })),
+		});
+		assert.equal(outcome.result, "SATISFIABLE", "the document has at least one design");
+		// The FIRST answer set, not the only one, and the difference matters only
+		// where it does not: every predicate this helper is used to ask about is a
+		// fact about the machine rather than about a universe — which layer a state
+		// is in, which window a guard is, which state a keyframe copy inherits from
+		// — so it is the same in all of them. A caller wanting a claim about the
+		// design space asks {@link run} or {@link answers}, which are about that.
+		return outcome.models[0];
+	} finally {
+		await session.close();
+	}
+}
+
+/** Atoms of one predicate, whole and sorted, so a deepEqual reads as a set. */
+const named = (atoms: readonly string[], name: string): string[] =>
+	atoms.filter((atom) => atom.startsWith(`${name}(`)).sort();
+
+/** Whether the generated program states a fact, verbatim. */
+const states = (scene: Scene, fact: string): boolean =>
+	compile(scene).program.includes(`\n${fact}\n`);
+
+const boolean = (id: string, initial?: string): MachineInput => ({
+	id,
+	name: id,
+	kind: "boolean",
+	...(initial === undefined ? {} : { initial }),
+});
+
+const number = (
+	id: string,
+	spec: { initial?: string; min?: string; max?: string } = {},
+): MachineInput => ({ id, name: id, kind: "number", ...spec });
+
+const track = (part: string, dim: "x" | "y", keys: Keyframe[]) => ({ part, dim, keys });
+
+/**
+ * A machine with every rung on it, used by the invariant test and by nothing
+ * else — a document that exercises one rung at a time is the wrong document for
+ * the one question that is about all five at once.
+ */
+const everything = () =>
+	machine({
+		inputs: [boolean("hovered", "false"), number("openness", { initial: "0", min: "0", max: "1" })],
+		layers: [
+			{ id: "motion", name: "Motion" },
+			{ id: "glow", name: "Glow" },
+			{ id: "badge", name: "Badge" },
+		],
+		timelines: [
+			{
+				id: "pulse",
+				name: "Pulse",
+				loop: "loop",
+				tracks: [track("label", "y", [key("0ms", "14px"), key("300ms", "2px")])],
+			},
+		],
+		states: [
+			{ id: "rest", layer: "motion", parts: nudge(14) },
+			{ id: "hover", layer: "motion", parts: nudge(10), timeline: "pulse" },
+			{ id: "dark", layer: "glow", parts: { panel: { props: { fill: single("#000000") } } } },
+			{ id: "lit", layer: "glow", parts: { panel: { props: { fill: single("#ffffff") } } } },
+			{
+				id: "mix",
+				layer: "badge",
+				blend: {
+					kind: "oneD",
+					input: "openness",
+					stops: [{ timeline: "pulse", at: "0.2" }, { timeline: "pulse", at: "0.8" }],
+				},
+			},
+		],
+		transitions: [
+			edge({ id: "start", from: "entry", to: "rest", trigger: "load" }),
+			edge({
+				id: "over",
+				from: "rest",
+				to: "hover",
+				exit: [lit("100ms")],
+				conditions: [{ input: "hovered", op: "eq", value: "true" }],
+			}),
+			edge({ id: "away", from: "any", to: "rest", trigger: "click" }),
+			edge({ id: "off", from: "dark", to: "exit", trigger: "click" }),
+		],
+	});
+
+test("the whole ladder adds no universes — five rungs in one assertion", async () => {
+	// THE GUARANTEE, restated for everything above a state. An input is a runtime
+	// value, a layer is a parallel copy, a keyframe is a fact and a blend is
+	// interpolation: not one of them is a design decision, so a document with two
+	// inputs, three layers, a timeline and a blend state has exactly the universe
+	// count of the same document with none of them. The cheap encoding of any one
+	// rung — a choice rule over an input's values, a choice over which layer wins
+	// — passes every other test below and fails this one, which is why it is
+	// first and why it is written before the encoding it checks.
+	const uses = [{ id: "b1" }];
+	const fill: Value = [lit("#3b82f6"), lit("#0f172a")];
+	const none = buttons({ uses, fill });
+	const flat = buttons({
+		uses,
+		fill,
+		machines: [
+			machine({
+				states: [{ id: "rest", parts: nudge(14) }, { id: "hover", parts: nudge(10) }],
+				transitions: [edge({ id: "over", from: "rest", to: "hover" })],
+			}),
+		],
+	});
+	const laddered = buttons({ uses, fill, machines: [everything()] });
+
+	const bare = (await run(none)).count;
+	assert.ok(bare > 1, "the document has a design space at all, or this proves nothing");
+	assert.equal((await run(flat)).count, bare, "states are not designs — the shipped claim");
+	assert.equal(
+		(await run(laddered)).count,
+		bare,
+		"and neither are inputs, layers, timelines or a blend",
+	);
+
+	// And the rungs really are in the document, so the equality above is not the
+	// equality of two documents with no ladder on them.
+	const atoms = await asked(laddered, [
+		"minput/2",
+		"mlayer/2",
+		"mtimeline/2",
+		"mblend/3",
+		"mcond/3",
+	]);
+	assert.equal(named(atoms, "minput").length, 2);
+	assert.equal(named(atoms, "mlayer").length, 3);
+	assert.equal(named(atoms, "mtimeline").length, 1);
+	assert.equal(named(atoms, "mblend").length, 1);
+	assert.equal(named(atoms, "mcond").length, 1);
+
+	// The invariant is checkable a second way, and this is the way a reviewer of
+	// rung one is told to check it: not one of the ladder's facts is a variable,
+	// so no key in the studio's own table names an input, a layer, a blend or a
+	// condition. `variableCounts` is the same walk the compiler mints from, so a
+	// row here that was not a variable there is impossible by construction — what
+	// this asserts is that the walk never visits a rung at all.
+	const keys = Object.keys(variableCounts(laddered));
+	for (const key of keys) {
+		for (const forbidden of ["hovered", "openness", "motion", "glow", "badge"]) {
+			assert.ok(
+				!key.includes(forbidden),
+				`${key} names ${forbidden}, so a rung became a design decision`,
+			);
+		}
+	}
+	// ...and nothing anywhere picks one.
+	const all = await answers(laddered);
+	for (const model of all) {
+		for (const atom of model) {
+			assert.ok(
+				!/^(pick|alt)\((minput|mlayer|mblend|mcond|mtimeline)/.test(atom),
+				`${atom} is a choice over a rung`,
+			);
+		}
+	}
+});
+
+test("an input is six facts and never a variable, and its numbers are thousandths", async () => {
+	// Rung one, and the whole of it. Every number an input carries — a starting
+	// value, a range end — is a whole count of thousandths through `permilleOf`,
+	// so that a threshold, a range end and a live value are three numbers nobody
+	// has to divide by a thousand to compare. That unit is the reason the guard
+	// arithmetic in rung two is exact rather than approximate.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				inputs: [
+					boolean("hovered", "true"),
+					number("openness", { initial: "0.5", min: "0", max: "1" }),
+					{ id: "poke", name: "poke", kind: "trigger" },
+					// Absent is OPEN, not zero, in both directions: a designer who has
+					// not said how far the drawer opens has not said that it does not.
+					number("loose"),
+					// A kind the table does not know says nothing at all, exactly as a
+					// node whose kind the table does not know draws nothing.
+					{ id: "odd", name: "odd", kind: "sideways" as MachineInput["kind"] },
+				],
+				states: [{ id: "rest" }],
+			}),
+		],
+	});
+	assert.ok(states(scene, "minput(m1,hovered)."));
+	assert.ok(states(scene, "minkind(m1,hovered,boolean)."));
+	assert.ok(states(scene, "minbool(m1,hovered,true)."));
+	assert.ok(states(scene, "minnum(m1,openness,500)."), "a half is five hundred thousandths");
+	assert.ok(states(scene, "minlow(m1,openness,0)."));
+	assert.ok(states(scene, "minhigh(m1,openness,1000)."));
+	// A trigger holds nothing: "not fired" is the absence of a value rather than
+	// one a store can keep, so there is no minbool and no minnum for it.
+	assert.ok(states(scene, "minput(m1,poke)."));
+	assert.ok(!compile(scene).program.includes("minbool(m1,poke"));
+	assert.ok(!compile(scene).program.includes("minnum(m1,poke"));
+	assert.ok(!compile(scene).program.includes("minlow(m1,loose"));
+	assert.ok(!compile(scene).program.includes("minhigh(m1,loose"));
+	assert.ok(!compile(scene).program.includes("minput(m1,odd)"));
+
+	// Facts, not variables: nothing in the studio's table names one, and nothing
+	// in the answer set is a pick over one.
+	assert.deepEqual(
+		Object.keys(variableCounts(scene)).filter((key) => key.includes("hovered")),
+		[],
+	);
+	// And whether the range is bounded at all is derived rather than assumed, so
+	// the two checks that read a range never report against a claim nobody made.
+	const atoms = await asked(scene, ["minbounded/2"]);
+	assert.deepEqual(named(atoms, "minbounded"), ["minbounded(m1,openness)"]);
+});
+
+test("a guard is a closed window, and six operators come to one comparison", async () => {
+	// Rung two. The normalisation into an interval happens in `machines.ts` so
+	// that the panel and the program cannot disagree about what a condition means;
+	// what this checks is that the interval reaches the program, that `gt` became
+	// `v + 1` exactly rather than approximately, and that the three shapes an
+	// interval cannot hold — a hole, a boolean, a trigger — reach it as their own
+	// predicates instead of being flattened into one that cannot say them.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				inputs: [boolean("on"), number("n", { min: "0", max: "1" }), { id: "poke", name: "poke", kind: "trigger" }],
+				states: [{ id: "rest" }, { id: "hover" }],
+				transitions: [
+					edge({ id: "a", from: "rest", to: "hover", conditions: [{ input: "n", op: "gt", value: "0.5" }] }),
+					edge({ id: "b", from: "rest", to: "hover", conditions: [{ input: "n", op: "le", value: "0.5" }] }),
+					edge({ id: "c", from: "rest", to: "hover", conditions: [{ input: "n", op: "ne", value: "0.5" }] }),
+					edge({ id: "d", from: "rest", to: "hover", conditions: [{ input: "on", op: "eq", value: "true" }] }),
+					edge({ id: "e", from: "rest", to: "hover", conditions: [{ input: "on", op: "ne", value: "true" }] }),
+					edge({ id: "f", from: "rest", to: "hover", conditions: [{ input: "poke", op: "fired" }] }),
+					// An input the machine has not got. Reported rather than dropped:
+					// dropping it would leave the edge reading as unguarded and firing on
+					// every trigger, which is a wrong machine rather than a reported one.
+					edge({ id: "g", from: "rest", to: "hover", conditions: [{ input: "ghost", op: "eq", value: "1" }] }),
+				],
+			}),
+		],
+	});
+	const atoms = await asked(scene, [
+		"mcrange/6",
+		"mcnot/5",
+		"mcis/5",
+		"mcisnot/5",
+		"mcfired/4",
+		"mcbad/3",
+		"mcondin/4",
+		"mguarded/2",
+		"mguardnever/2",
+		"mclash/3",
+		"mdisjoint/3",
+	]);
+	assert.deepEqual(named(atoms, "mcrange"), [
+		// A half is 500 thousandths, so "more than a half" is 501 and up — exact,
+		// because the unit is a whole number and not a float.
+		"mcrange(m1,a,1,n,501,1000000)",
+		"mcrange(m1,b,1,n,-1000000,500)",
+	]);
+	assert.deepEqual(named(atoms, "mcnot"), ["mcnot(m1,c,1,n,500)"]);
+	assert.deepEqual(named(atoms, "mcis"), ["mcis(m1,d,1,on,true)"]);
+	assert.deepEqual(named(atoms, "mcisnot"), ["mcisnot(m1,e,1,on,true)"]);
+	assert.deepEqual(named(atoms, "mcfired"), ["mcfired(m1,f,1,poke)"]);
+	assert.deepEqual(named(atoms, "mcbad"), ["mcbad(m1,g,1)"]);
+	// A bad condition states no mcondin/4 at all, and that is deliberate: its
+	// fourth argument would be an input id the machine has not got — a term that
+	// reads as a constant and names nothing — and every rule joining on it would
+	// ground against a phantom.
+	assert.ok(!atoms.includes("mcondin(m1,g,1,ghost)"));
+	assert.deepEqual(named(atoms, "mguardnever"), ["mguardnever(m1,g)"]);
+	// The window pair really is disjoint, and the closure covers both directions
+	// from one L1 > H2.
+	assert.ok(atoms.includes("mclash(m1,a,b)"));
+	assert.ok(atoms.includes("mdisjoint(m1,a,b)") && atoms.includes("mdisjoint(m1,b,a)"));
+	assert.equal(named(atoms, "mguarded").length, 7);
+});
+
+test("two edges whose guards cannot both hold are not a nondeterministic pair", async () => {
+	// The payoff of rung two, and the reason it is worth encoding at all: the
+	// ordinary idiom — two edges out of one state on one trigger, told apart by a
+	// condition — was reported as nondeterministic before guards existed, and a
+	// checker that screams at the ordinary idiom is a checker people turn off.
+	const guarded = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				inputs: [boolean("on")],
+				states: [{ id: "rest" }, { id: "hover" }, { id: "pressed" }],
+				transitions: [
+					edge({ id: "a", from: "rest", to: "hover", conditions: [{ input: "on", op: "eq", value: "true" }] }),
+					edge({ id: "b", from: "rest", to: "pressed", conditions: [{ input: "on", op: "ne", value: "true" }] }),
+				],
+			}),
+		],
+	});
+	assert.deepEqual(named(await answers(guarded).then((m) => m[0]), "mnondet"), []);
+
+	// ...and with no conditions at all, the pair is the rule that shipped: two
+	// edges, one trigger, reported. NOT PROVABLY DISJOINT is the default, which is
+	// a sound refusal to guess rather than a claim that no valuation exists.
+	const bare = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				states: [{ id: "rest" }, { id: "hover" }, { id: "pressed" }],
+				transitions: [
+					edge({ id: "a", from: "rest", to: "hover" }),
+					edge({ id: "b", from: "rest", to: "pressed" }),
+				],
+			}),
+		],
+	});
+	assert.deepEqual(named((await answers(bare))[0], "mnondet"), [
+		"mnondet(m1,rest,pointerenter)",
+	]);
+});
+
+test("a window outside its own input's range is a guard nothing can meet", async () => {
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				inputs: [number("n", { min: "0", max: "1" })],
+				states: [{ id: "rest" }, { id: "hover" }, { id: "far" }],
+				transitions: [
+					edge({ id: "over", from: "rest", to: "hover", conditions: [{ input: "n", op: "gt", value: "5" }] }),
+					edge({ id: "on", from: "hover", to: "far" }),
+				],
+			}),
+		],
+	});
+	const atoms = (await answers(scene))[0];
+	assert.deepEqual(named(atoms, "mguardnever"), ["mguardnever(m1,over)"]);
+	// And the reachability that takes guards into account is strictly stronger
+	// than the one that shipped: `hover` is reachable by an edge and unreachable
+	// through that edge's guard, so mreach says nothing and mgreach does.
+	assert.deepEqual(named(atoms, "munreached"), []);
+	assert.deepEqual(named(atoms, "mgunreached"), [
+		"mgunreached(m1,far)",
+		"mgunreached(m1,hover)",
+	]);
+});
+
+test("Entry, Exit and Any are three constants and never three states", async () => {
+	// Rung three, and the whole of what it costs. Three reserved ids, three facts
+	// and four rules; no states, no copies, no variables — because a state is a
+	// delta over the definition's parts and Entry has no appearance, so as a state
+	// it would be an empty delta, a copy per instance per part, a row in every
+	// strip, and a term `shown/2` could carry, which would mean "draw this button
+	// in Exit".
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				layers: [{ id: "main", name: "Main" }, { id: "extra", name: "Extra" }],
+				states: [
+					{ id: "rest", layer: "main" },
+					{ id: "hover", layer: "main" },
+					{ id: "badge", layer: "extra" },
+				],
+				transitions: [
+					edge({ id: "start", from: "entry", to: "hover", trigger: "load" }),
+					edge({ id: "home", from: "any", to: "rest", trigger: "click" }),
+					edge({ id: "gone", from: "hover", to: "exit", trigger: "pointerleave" }),
+					edge({ id: "wrong", from: "exit", to: "rest", trigger: "click" }),
+					edge({ id: "alsowrong", from: "rest", to: "entry", trigger: "click" }),
+					edge({ id: "nowhere", from: "rest", to: "deleted", trigger: "load" }),
+				],
+			}),
+		],
+	});
+	const atoms = await asked(scene, ["mefrom/3", "manyfrom/2", "mstops/2", "mrank/3", "mcopy/3"]);
+	// Entry resolves to the initial state OF ITS OWN LAYER, which is the only
+	// reading available: `entry` is in no layer, so the edge takes its layer from
+	// where it points.
+	assert.ok(atoms.includes("mefrom(m1,start,rest)"), "entry is the layer's first state");
+	// Any stands for every state of its own layer, and for no state of the other.
+	assert.ok(atoms.includes("mefrom(m1,home,rest)"));
+	assert.ok(atoms.includes("mefrom(m1,home,hover)"));
+	assert.ok(!atoms.includes("mefrom(m1,home,badge)"), "Any does not cross a layer");
+	assert.deepEqual(named(atoms, "manyfrom"), ["manyfrom(m1,home)"]);
+	assert.deepEqual(named(atoms, "mstops"), ["mstops(m1,gone)"]);
+	// Specific beats Any, which is Rive's rule and the only one that makes a
+	// fallback usable — encoded as a rank so that mnondet stops screaming at it.
+	assert.ok(atoms.includes("mrank(m1,home,2)"));
+	assert.ok(atoms.includes("mrank(m1,gone,1)"));
+	// Not states: no copy of anything is ever made for one, and no reserved id is
+	// ever a term in a copy.
+	assert.deepEqual(
+		named(atoms, "mcopy").filter((atom) => /entry|exit|any/.test(atom)),
+		[],
+	);
+	assert.ok(!compile(scene).program.includes("mstate(m1,entry)"));
+
+	// "This edge names a state you deleted" and "this edge tries to leave Exit"
+	// are two different mistakes, fixed two different ways, so they are two
+	// different predicates rather than one.
+	const health = (await answers(scene))[0];
+	assert.deepEqual(named(health, "mmisplaced"), [
+		"mmisplaced(m1,alsowrong)",
+		"mmisplaced(m1,wrong)",
+	]);
+	assert.deepEqual(named(health, "mdangling"), ["mdangling(m1,nowhere)"]);
+});
+
+test("an exit time is the fourth motion setting, and pacing is still a design", async () => {
+	// Rung three's other half. An exit time is motion, motion is a value, and a
+	// value with two alternatives is two designs — the brisk debounce and the
+	// patient one — which is what `#project mexit/3` is for and what would collapse
+	// into one universe with an arbitrary pick without it.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		tokens: [{ id: "beat", name: "Beat", type: "duration" as const, value: [lit("100ms"), lit("400ms")] }],
+		machines: [
+			machine({
+				states: [{ id: "rest" }, { id: "hover" }],
+				transitions: [
+					edge({ id: "plain", from: "rest", to: "hover" }),
+					edge({ id: "typo", from: "hover", to: "rest", exit: [lit("-50ms")] }),
+				],
+			}),
+		],
+	});
+	const atoms = (await answers(scene))[0];
+	// Absent is zero, which is "any time", and is what every transition written
+	// before this rung means.
+	assert.ok(atoms.includes("mexit(m1,plain,0)"));
+	// A negative exit time is a transition takeable before its own state began,
+	// so it clamps exactly where a duration does.
+	assert.ok(atoms.includes("mexit(m1,typo,0)"));
+
+	const varied = buttons({
+		uses: [{ id: "b1" }],
+		tokens: [{ id: "beat", name: "Beat", type: "duration" as const, value: [lit("100ms"), lit("400ms")] }],
+		machines: [
+			machine({
+				states: [{ id: "rest" }, { id: "hover" }],
+				transitions: [
+					edge({ id: "over", from: "rest", to: "hover", exit: [{ kind: "token", token: "beat" }] }),
+				],
+			}),
+		],
+	});
+	assert.equal((await run(varied)).count, 2, "a debounce scale is two designs");
+});
+
+test("an exit time longer than its own state's timeline makes the edge unreachable", async () => {
+	// The deeper reading of the brief's check, shipped beside the literal one
+	// rather than substituted for it: a transition that must wait longer to become
+	// available than the state it waits in lasts is a transition nothing can ever
+	// take.
+	const timelines: Timeline[] = [
+		{
+			id: "pulse",
+			name: "Pulse",
+			loop: "none",
+			tracks: [track("label", "y", [key("0ms", "14px"), key("200ms", "4px")])],
+		},
+	];
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				timelines,
+				states: [{ id: "rest", timeline: "pulse" }, { id: "hover" }],
+				transitions: [edge({ id: "over", from: "rest", to: "hover", exit: [lit("9s")] })],
+			}),
+		],
+	});
+	assert.deepEqual(named((await answers(scene))[0], "mexitpast"), ["mexitpast(m1,over)"]);
+
+	// ...and a looping timeline never ends, so no exit time is past it. Reporting
+	// one would be reporting a bug against a design that works.
+	const looping = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				timelines: [{ ...timelines[0], loop: "loop" }],
+				states: [{ id: "rest", timeline: "pulse" }, { id: "hover" }],
+				transitions: [edge({ id: "over", from: "rest", to: "hover", exit: [lit("9s")] })],
+			}),
+		],
+	});
+	assert.deepEqual(named((await answers(looping))[0], "mexitpast"), []);
+});
+
+test("three layers are three states at once in one answer set, and not three designs", async () => {
+	// Rung four, and the rung the copy encoding was bought for. Two layers are two
+	// `shown/2` facts in ONE answer set, so "is the glow lined up while the button
+	// is also pressed" is an ordinary rule over two terms — where under a choice
+	// rule the two layers' states would be in two different answer sets and the
+	// question would have nowhere to be asked.
+	const scene = buttons({ uses: [{ id: "b1" }], machines: [everything()] });
+	const atoms = (await answers(scene))[0];
+	assert.deepEqual(named(atoms, "shown"), [
+		"shown(b1,dark)",
+		"shown(b1,mix)",
+		"shown(b1,rest)",
+	]);
+	// Three shown states is a machine doing its job, not three pictures on top of
+	// each other — which is exactly the distinction mslayer/3 exists to let a
+	// reader draw, and mtwoshown/1 to report when it cannot.
+	assert.deepEqual(named(atoms, "mtwoshown"), []);
+	assert.ok(atoms.includes("mslayer(m1,rest,motion)"));
+	assert.ok(atoms.includes("mlindex(m1,glow,2)"));
+
+	// A stored state has to be a state of the layer it is stored under, or a
+	// document that moved `hover` from one layer to another would draw the
+	// instance in it on both — one picture on top of itself.
+	const picked = buttons({
+		uses: [{ id: "b1", states: { motion: "hover", glow: "lit" } }],
+		machines: [everything()],
+	});
+	assert.deepEqual(named((await answers(picked))[0], "shown"), [
+		"shown(b1,hover)",
+		"shown(b1,lit)",
+		"shown(b1,mix)",
+	]);
+});
+
+test("a machine with no layers still has one, and every rule is the rule that shipped", async () => {
+	// The whole no-regression argument for rung four in one assertion: the reader
+	// mints a layer called `base` for a machine that says nothing about layers,
+	// which is every machine in every document written before this rung, so the
+	// four rules that quantify over layers are not special-cased anywhere.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [machine({ states: [{ id: "rest", parts: nudge(14) }, { id: "hover", parts: nudge(10) }] })],
+	});
+	const atoms = (await answers(scene))[0];
+	assert.deepEqual(named(atoms, "mlindex"), ["mlindex(m1,base,1)"]);
+	assert.deepEqual(named(atoms, "mslayer"), [
+		"mslayer(m1,hover,base)",
+		"mslayer(m1,rest,base)",
+	]);
+	assert.deepEqual(named(atoms, "shown"), ["shown(b1,rest)"], "one layer, one shown state");
+});
+
+test("two layers with an opinion about one field: the later one writes, and both are named", async () => {
+	// RESOLVE FIRST, REPORT SECOND, and the order is the decision. Resolve because
+	// the program must produce a picture — leaving both aliases to fire derives two
+	// `rendered/3` literals for one property, which is one arbitrary answer rather
+	// than two designs. Report because we can, and because the report is the whole
+	// reason to build this here rather than let Rive's silent last-writer-wins be
+	// the only answer.
+	const contested = machine({
+		layers: [{ id: "under", name: "Under" }, { id: "over", name: "Over" }],
+		states: [
+			{
+				id: "u",
+				layer: "under",
+				parts: { panel: { props: { fill: single("#111111") }, frame: { x: dimension(px(1)) }, turn: { rotateZ: [lit("10deg")] } } },
+			},
+			{
+				id: "o",
+				layer: "over",
+				parts: { panel: { props: { fill: single("#222222") }, frame: { x: dimension(px(9)) }, turn: { rotateZ: [lit("40deg")] } } },
+			},
+		],
+	});
+	const scene = buttons({ uses: [{ id: "b1" }], machines: [contested] });
+	const atoms = await asked(scene, [
+		"mwriter/4",
+		"mfwriter/4",
+		"mrwriter/4",
+		"mfightat/5",
+		"mfshadow/3",
+		"mlfshadow/4",
+	]);
+
+	// Exactly one atom for the instance's field, and it is the later layer's.
+	const painted = renderedOf(atoms, "inst(b1,panel)");
+	assert.equal(painted.fill, "#222222", "the later layer writes");
+	assert.equal(
+		atoms.filter((atom) => atom.startsWith("rendered(inst(b1,panel),fill,")).length,
+		1,
+		"one property, one literal — not two designs but one relation",
+	);
+	assert.equal(frameOf(atoms, "inst(b1,panel)").x, px(9));
+	assert.equal(
+		atoms.filter((atom) => atom.startsWith("frame(inst(b1,panel),x,")).length,
+		1,
+	);
+	assert.deepEqual(named(atoms, "mwriter"), ["mwriter(m1,over,panel,fill)"]);
+	assert.deepEqual(named(atoms, "mfwriter"), ["mfwriter(m1,over,panel,x)"]);
+	assert.deepEqual(named(atoms, "mrwriter"), ["mrwriter(m1,over,panel,rotateZ)"]);
+	// Rotation is the third of the family and the one that did not exist when the
+	// alias was narrowed, so it gets the same assertion the other two just got.
+	assert.equal(
+		atoms.filter((atom) => atom.startsWith("turn(inst(b1,panel),rotateZ,")).length,
+		1,
+		"two layers turning one part is one angle, not two",
+	);
+	assert.ok(atoms.includes("turn(inst(b1,panel),rotateZ,40000)"), "and it is the later one");
+
+	// §9 question 3 of the merged plan, asserted rather than read off the source:
+	// mlfshadow/4 must be written over the SAME dimension list mfshadow/3 is, or
+	// mfwriter/4 is empty for a dimension the shadow claims and a state that moves
+	// a part moves its copy and leaves the picture where it was.
+	const shadowed = new Set(
+		named(atoms, "mfshadow").map((atom) => atom.replace(/^mfshadow\(b1,/, "").replace(/\)$/, "")),
+	);
+	const owned = new Set(
+		named(atoms, "mlfshadow").map((atom) =>
+			atom.replace(/^mlfshadow\(m1,[^,]+,/, "").replace(/\)$/, ""),
+		),
+	);
+	assert.deepEqual([...owned].sort(), [...shadowed].sort());
+
+	// ...and all three fights are derived against terms the document named, so a
+	// canned `custom` check turns each into an ordinary viol/1 with a switch, a
+	// name in the core, and `why` and `relax` for free.
+	//
+	// `L1 < L2` in the three fight rules is TERM order and not layer order — it is
+	// there to state the pair once rather than twice, and `over` sorts before
+	// `under` — so a reader takes the priority from mlindex/3 and never from the
+	// argument positions.
+	assert.deepEqual(named(atoms, "mfight"), ["mfight(m1,over,under,panel,fill)"]);
+	assert.deepEqual(named(atoms, "mffight"), ["mffight(m1,over,under,panel,x)"]);
+	assert.deepEqual(named(atoms, "mrfight"), ["mrfight(m1,over,under,panel,rotateZ)"]);
+	// The static one is about the machine; this one is about the instance in front
+	// of you, which is the different question a panel asks.
+	assert.deepEqual(named(atoms, "mfightat"), ["mfightat(b1,over,under,panel,fill)"]);
+});
+
+test("hiding needs no writer, because two layers that both hide agree", async () => {
+	// Not an omission and worth asserting rather than arguing: hiding does not
+	// conflict. Two layers that both take a part out of the picture agree, and one
+	// that hides while another paints is not a disagreement about a value, it is a
+	// part that is not there. Any layer that hides, hides.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				layers: [{ id: "a", name: "A" }, { id: "b", name: "B" }],
+				states: [
+					{ id: "sa", layer: "a", parts: { panel: { props: { fill: single("#111111") } } } },
+					{ id: "sb", layer: "b", parts: { panel: { hidden: true } } },
+				],
+			}),
+		],
+	});
+	// Read off `visible/1`, which is what the answer set carries: `hidden/1` is a
+	// body atom the scene rules negate and is shown by nothing, exactly as it is
+	// for a node the document hid.
+	const atoms = (await answers(scene))[0];
+	assert.ok(!atoms.includes("visible(inst(b1,panel))"), "the layer that hides, hides");
+	assert.ok(atoms.includes("visible(inst(b1,label))"), "and hides nothing else");
+	// ...while the layer that paints still paints, on a part its own layer owns.
+	assert.equal(renderedOf(atoms, "inst(b1,panel)").fill, "#111111");
+});
+
+test("a measured copy is one width for the instance, across one layer and across two", async () => {
+	// THE THIRD SOURCE, and the bug it hid. A copy that hugs its own words takes
+	// its box from `lask/3` rather than from a delta the designer typed, so the
+	// width was in neither shadow table — and both rules that read those tables
+	// then fired beside it: the base rule derived the definition's box as well as
+	// the measured one on a *one-layer* document, and the unowned half of the
+	// alias fired once per shown state on a two-layer one. Two frame/3 atoms for
+	// one (node, dimension) is one arbitrary answer, silently.
+	const layered = machine({
+		layers: [{ id: "words", name: "Words" }, { id: "glow", name: "Glow" }],
+		states: [
+			{ id: "rest", layer: "words" },
+			{ id: "wordy", layer: "words", parts: reword("Go somewhere far away") },
+			{ id: "dark", layer: "glow", parts: { panel: { props: { fill: single("#000000") } } } },
+		],
+	});
+	const wordy = statePart("b1", "wordy", "label");
+	const measured: Measurements = { [wordy]: oneSize({ width: px(300), height: px(20) }) };
+
+	const twoLayers = buttons({
+		uses: [{ id: "b1", states: { words: "wordy", glow: "dark" } }],
+		machines: [layered],
+	});
+	const atoms = await only(twoLayers, measured);
+	assert.equal(
+		atoms.filter((atom) => atom.startsWith("frame(inst(b1,label),width,")).length,
+		1,
+		"one width, not one per shown state",
+	);
+	assert.equal(frameOf(atoms, "inst(b1,label)").width, px(300), "and it is the measured one");
+
+	// The same document with one layer, which is where this has been since state
+	// machines shipped.
+	const flat = buttons({
+		uses: [{ id: "b1", state: "wordy" }],
+		machines: [
+			machine({ states: [{ id: "rest" }, { id: "wordy", parts: reword("Go somewhere far away") }] }),
+		],
+	});
+	const one = await only(flat, measured);
+	assert.equal(
+		one.filter((atom) => atom.startsWith("frame(inst(b1,label),width,")).length,
+		1,
+	);
+	assert.equal(frameOf(one, "inst(b1,label)").width, px(300));
+
+	// And the state that was not measured is still the definition's box, so the
+	// fix narrowed nothing it should not have.
+	assert.equal(frameOf(one, statePart("b1", "rest", "label")).width, px(136));
+});
+
+test("a timeline on its own is variables and facts, and not one copy", async () => {
+	// Rung five, and the decision that makes it affordable. THE SOLVER DECIDES
+	// KEYFRAMES AND NEVER FRAMES: a twenty-key timeline costs the same whether it
+	// plays over 100ms or ten seconds, and a keyframe copy is minted only where a
+	// geometric rule asked for one — a twenty-key timeline on a twelve-part
+	// definition placed twenty times would otherwise be 4,800 poses nobody asked
+	// to place.
+	const timelines: Timeline[] = [
+		{
+			id: "pulse",
+			name: "Pulse",
+			loop: "pingPong",
+			tracks: [track("label", "y", [key("0ms", "14px"), key("300ms", "2px")])],
+		},
+	];
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [machine({ timelines, states: [{ id: "rest", timeline: "pulse" }] })],
+	});
+	const atoms = await asked(scene, ["mkcopy/4", "mkpart/3", "mknext/5"]);
+	assert.deepEqual(named(atoms, "mkcopy"), [], "no rule asked, so no copy exists");
+	assert.deepEqual(named(atoms, "mkpart"), []);
+	assert.deepEqual(atoms.filter((atom) => atom.includes("kfr(")), []);
+	// What it does cost: the times, the length, the loop mode and the easings.
+	assert.deepEqual(named(atoms, "mkat"), [
+		"mkat(m1,pulse,trkd(label,y),1,0)",
+		"mkat(m1,pulse,trkd(label,y),2,300)",
+	]);
+	// Absent is the last keyframe's time, DERIVED rather than stored, so a
+	// timeline cannot disagree with its own contents.
+	assert.deepEqual(named(atoms, "mtlen"), ["mtlen(m1,pulse,300)"]);
+	assert.deepEqual(named(atoms, "mloop"), ["mloop(m1,pulse,pingPong)"]);
+	assert.deepEqual(named(atoms, "mknext"), ["mknext(m1,pulse,trkd(label,y),1,2)"]);
+
+	// A stated length shorter than the last keyframe is legal and means what it
+	// says: the tail is not played.
+	const clipped = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				timelines: [{ ...timelines[0], length: [lit("100ms")] }],
+				states: [{ id: "rest", timeline: "pulse" }],
+			}),
+		],
+	});
+	const short = await asked(clipped, ["mkpast/4"]);
+	assert.deepEqual(named(short, "mtlen"), ["mtlen(m1,pulse,100)"]);
+	assert.deepEqual(named(short, "mkpast"), ["mkpast(m1,pulse,trkd(label,y),2)"]);
+});
+
+test("a keyframe whose time resolves before its predecessor's is a fact about the answer", async () => {
+	// Not a thing a linter over the document could ever catch, because a
+	// keyframe's time is a Value and this is a property of an answer rather than
+	// of a document — which is exactly the class of bug a multiverse invents.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				timelines: [
+					{
+						id: "pulse",
+						name: "Pulse",
+						tracks: [track("label", "y", [key("300ms", "14px"), key("50ms", "2px")])],
+					},
+				],
+				states: [{ id: "rest", timeline: "pulse" }],
+			}),
+		],
+	});
+	assert.deepEqual(named((await answers(scene))[0], "mkbackwards"), [
+		"mkbackwards(m1,pulse,trkd(label,y),2)",
+	]);
+});
+
+test("a rule that names a keyframe mints its copy, and the copy is placed", async () => {
+	// The rationing, from the other side: `mkpart/3` is seeded only from the
+	// geometric constraints that name a `kfr(...)` term, and naming one is what
+	// turns a timeline into poses simplex can place.
+	const overshoot = keyCopy("b1", "pulse", trackDim("label", "y"), 2);
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		constraints: [rule("k", "align", ["label", overshoot], "left")],
+		machines: [
+			machine({
+				timelines: [
+					{
+						id: "pulse",
+						name: "Pulse",
+						tracks: [track("label", "y", [key("0ms", "14px"), key("300ms", "2px")])],
+					},
+				],
+				states: [{ id: "rest", timeline: "pulse" }],
+			}),
+		],
+	});
+	const atoms = await asked(scene, ["mkcopy/4", "mkpart/3", "mkeydim/5"]);
+	assert.deepEqual(named(atoms, "mkcopy"), [
+		"mkcopy(b1,pulse,trkd(label,y),1)",
+		"mkcopy(b1,pulse,trkd(label,y),2)",
+	]);
+	// The track's part and its ancestors, and nothing under either — the same
+	// materialisation analysis a state copy gets.
+	assert.deepEqual(named(atoms, "mkpart"), ["mkpart(m1,pulse,btn)", "mkpart(m1,pulse,label)"]);
+	// The track speaks about y, so y is the keyframe's own; everything else is
+	// inherited from the state whose timeline it is.
+	assert.equal(frameOf(atoms, overshoot).y, px(2));
+	assert.equal(frameOf(atoms, overshoot).width, px(136));
+});
+
+test("a keyframe copy inherits from one state, however many play the timeline", async () => {
+	// `mtplays/3` is a fact about the MACHINE — which states play which timeline —
+	// and says nothing about which of them is on screen, deliberately. Read as the
+	// join, each of the three inherit rules fired once per playing state, so a
+	// timeline two states play whose deltas disagree about the part it animates
+	// derived two frame/3 atoms for one (copy, dimension): not two poses, one
+	// arbitrary answer. The first playing state wins, and the tie-break is
+	// document order for the reason every other tie-break in the program is.
+	const overshoot = keyCopy("b1", "pulse", trackProp("label", "ink"), 1);
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		constraints: [rule("k", "align", ["label", overshoot], "left")],
+		machines: [
+			machine({
+				timelines: [
+					{
+						id: "pulse",
+						name: "Pulse",
+						tracks: [
+							{
+								part: "label",
+								prop: "ink",
+								keys: [{ at: [lit("0ms")], value: [lit("#ff0000")] }],
+							},
+						],
+					},
+				],
+				states: [
+					{ id: "first", parts: { label: { frame: { x: dimension(px(5)) } } }, timeline: "pulse" },
+					{ id: "second", parts: { label: { frame: { x: dimension(px(99)) } } }, timeline: "pulse" },
+				],
+			}),
+		],
+	});
+	const atoms = await asked(scene, ["mkbase/3", "mtplays/3"]);
+	assert.deepEqual(named(atoms, "mtplays"), [
+		"mtplays(m1,first,pulse)",
+		"mtplays(m1,second,pulse)",
+	]);
+	assert.deepEqual(named(atoms, "mkbase"), ["mkbase(m1,pulse,first)"]);
+	assert.equal(
+		atoms.filter((atom) => atom.startsWith(`frame(${overshoot},x,`)).length,
+		1,
+		"one pose, not one per playing state",
+	);
+	assert.equal(frameOf(atoms, overshoot).x, px(5), "and it is the first state's");
+});
+
+test("a blend state is arithmetic over a runtime value, and its stops are checked", async () => {
+	// The mixing is arithmetic over an input, so none of it is solved and none of
+	// it can be — the input is not in the program. What *is* solved is everything
+	// the stops are made of, and what the checks need: the thresholds, in
+	// thousandths, against the input's own declared range.
+	const timelines: Timeline[] = [
+		{
+			id: "pulse",
+			name: "Pulse",
+			tracks: [track("label", "y", [key("0ms", "14px")])],
+		},
+	];
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				inputs: [number("n", { min: "0", max: "1" })],
+				timelines,
+				states: [
+					{
+						id: "mix",
+						blend: {
+							kind: "oneD",
+							input: "n",
+							stops: [
+								{ timeline: "pulse", at: "-0.5" },
+								{ timeline: "pulse", at: "0.4" },
+								{ timeline: "pulse", at: "2" },
+							],
+						},
+					},
+				],
+			}),
+		],
+	});
+	assert.ok(states(scene, "mstopat(m1,mix,2,400)."), "a threshold is thousandths too");
+	const atoms = (await answers(scene))[0];
+	assert.deepEqual(named(atoms, "mstopout"), ["mstopout(m1,mix,1)", "mstopout(m1,mix,3)"]);
+
+	// The converse, and deliberately not canned: the axis extends past the
+	// outermost stop, so part of the input's range plays one timeline flat. Legal,
+	// sometimes meant, and worth being able to ask about.
+	const gapped = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				inputs: [number("n", { min: "0", max: "1" })],
+				timelines,
+				states: [
+					{
+						id: "mix",
+						timeline: "pulse",
+						blend: {
+							kind: "oneD",
+							input: "n",
+							stops: [{ timeline: "pulse", at: "0.2" }, { timeline: "pulse", at: "0.8" }],
+						},
+					},
+				],
+			}),
+		],
+	});
+	const gapAtoms = (await answers(gapped))[0];
+	assert.deepEqual(named(gapAtoms, "mstopgap"), ["mstopgap(m1,mix)"]);
+	// A state holding both a timeline and a blend is REPORTED rather than
+	// repaired, because a state with two sources is a mistake a person should see
+	// rather than one a reader should quietly pick a side in.
+	assert.deepEqual(named(gapAtoms, "mtwosource"), ["mtwosource(m1,mix)"]);
+});
+
+test("all ten canned checks ground on a document with a machine, and say nothing about it", async () => {
+	// The reason `#defined` is the first thing in the ladder block. A canned check
+	// offered before its predicate exists is not merely inert: `addMachineCheck`
+	// writes the rule into `scene.rules`, the compiler appends it verbatim, and
+	// clingo remarks once per undefined predicate — which lands in `diagnostics`,
+	// which the studio shows to the designer as a problem with *their* document.
+	const rules = [...MACHINE_CHECKS, ...LADDER_CHECKS].map((check) => check.rule).join("\n");
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		rules,
+		machines: [
+			machine({
+				states: [{ id: "rest", parts: nudge(14) }, { id: "hover", parts: nudge(10) }],
+				transitions: [
+					edge({ id: "over", from: "rest", to: "hover" }),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			}),
+		],
+	});
+	const { diagnostics, count } = await explore(scene, directSolver, { limit: 8 });
+	assert.equal(diagnostics, "", diagnostics);
+	assert.ok(count > 0, "a healthy machine violates none of the ten");
+
+	// ...and on a document with no machine at all, which is the case the block is
+	// `#defined` for.
+	const empty = buttons({ rules });
+	const bare = await explore(empty, directSolver, { limit: 8 });
+	assert.equal(bare.diagnostics, "", bare.diagnostics);
+});
+
+test("the three new projections move no template's universe count", async () => {
+	// §8's gate, and it is not optional. `f_value/3` is projected, which is what
+	// makes "this card is in one of two places" two universes; `sfval/4` was
+	// projected by nothing and has been since state machines shipped, so a state
+	// delta whose y held two alternatives was ONE universe with an arbitrary pick.
+	// The ladder adds `kval` and the third axis adds `srval` to the same family,
+	// and all three are now derived and projected.
+	//
+	// That partitions nothing differently on a document whose deltas each hold one
+	// alternative — which is every template, because every delta in
+	// `templates/machine.ts` is built with `single(...)`. But that is a fact about
+	// today's templates and not about the encoding, so it is re-checked here
+	// rather than assumed, exactly as the plan requires.
+	for (const template of TEMPLATES) {
+		const scene = template.create();
+		const counts = variableCounts(scene);
+		for (const [variable, count] of Object.entries(counts)) {
+			if (!/^(sfval|srval|kval)\(/.test(variable)) continue;
+			assert.equal(
+				count,
+				1,
+				`${template.id}/${variable} holds ${count} alternatives, so the finer ` +
+					"projection may split a universe and the goldens have to be recaptured",
+			);
+		}
+	}
+	// And the one template that holds a machine at all, counted for real: the
+	// projections are in the shipped program, so this is the number the goldens
+	// were captured at.
+	const machineTemplate = TEMPLATES.find((entry) => entry.id === "machine");
+	assert.ok(machineTemplate, "the machine template is what makes this test mean anything");
+	const before = await explore(machineTemplate.create(), directSolver, { limit: 64 });
+	assert.equal(before.count, 8, "unchanged by sf_value, sr_value and kf_value");
+});
+
+test("a state that lifts a part in z puts that part in the third axis, and the picture with it", async () => {
+	// **A shipped gap, repaired at the encoding rather than at the reading.**
+	// `StatePart.frame` is keyed over six axes and `Track.dim` spans six precisely
+	// so a state may lift a mesh and a timeline may animate it — and
+	// `isSpatialScene`, the twin of the compiler's `spatial.` gate, counted a
+	// `viewport` node and a `spatial` or `turn` on a *node* and neither of them on
+	// a delta. So `stateDimensions` handed the machine section the planar four, no
+	// `sfval(I,S,N,z)` was minted, and a designer who opened the depth rows on a
+	// flat part and typed a number got no atom, no picture and no warning. The
+	// Inspector puts those rows behind a toggle on any node, so it was reachable
+	// rather than theoretical.
+	//
+	// The repair is `thirdAxisParts`, and the half worth asserting is the second
+	// one: the *part* becomes `zstated`, not merely its copies. The narrower fix —
+	// open the gate and leave `zstated/1` alone — derives `frame(stt(...),z,V)`
+	// from `sfval` because that rule leaves the dimension unbound, while
+	// `s3(stt(...))` stays false. The copy would then have a z in the state that
+	// sets one and none at all in the state beside it, and nothing anywhere would
+	// have a `depth`. A part that is somewhere on an axis in one state and nowhere
+	// on it in the next is not a design.
+	const lifted = buttons({
+		// Drawn in `hover`, so the instance the picture holds is the lifted one and
+		// the assertion below is about a picture rather than about a copy.
+		uses: [{ id: "b1", state: "hover" }],
+		machines: [
+			machine({
+				states: [
+					{ id: "rest", name: "Rest", parts: {} },
+					{ id: "hover", name: "Hover", parts: { label: { frame: { z: dimension(px(40)) } } } },
+				],
+				transitions: [
+					edge({ id: "t1", from: "rest", to: "hover", trigger: "pointerenter" }),
+					edge({ id: "t2", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			}),
+		],
+	});
+	const atoms = await only(lifted);
+
+	assert.ok(states(lifted, "spatial."), "the gate is open");
+	// On the *part* and on nothing else, asserted against the program text rather
+	// than the answer set: `zstated/1` is a claim the compiler states about the
+	// document, and it is not in the `#show` block because no reader outside the
+	// program has any use for it.
+	const program = compile(lifted).program;
+	assert.ok(program.includes("\nzstated(label).\n"), "on the part itself");
+	assert.equal(program.includes("\nzstated(btn).\n"), false, "and not on its parent");
+
+	// The copy that was lifted has the z; the copy beside it has the default, not
+	// nothing; and both have a depth.
+	assert.equal(frameOf(atoms, "stt(b1,hover,label)").z, px(40));
+	assert.equal(frameOf(atoms, "stt(b1,rest,label)").z, 0);
+	assert.equal(frameOf(atoms, "stt(b1,hover,label)").depth, 0);
+	// And the picture moves with the copy, which is `merged-plan` §6.1's whole
+	// point: mfshadow and mlfshadow iterate one dimension list, so a state that
+	// lifts a part lifts the instance and not only its own copy.
+	assert.equal(frameOf(atoms, "inst(b1,label)").z, px(40), "the drawn state is hover");
+
+	// The gate is narrow: a delta about the four planar dimensions is not a third
+	// axis, and a document holding one is the flat document it always was.
+	const flat = buttons({
+		uses: [{ id: "b1" }],
+		machines: [
+			machine({
+				states: [
+					{ id: "rest", name: "Rest", parts: {} },
+					{ id: "hover", name: "Hover", parts: nudge(30) },
+				],
+				transitions: [edge({ id: "t1", from: "rest", to: "hover", trigger: "pointerenter" })],
+			}),
+		],
+	});
+	assert.equal(states(flat, "spatial."), false);
+	assert.deepEqual(named(await only(flat), "zstated"), []);
+});
+
+test("the contract names every predicate the ladder puts in the program", () => {
+	// The CONTRACT block is what a designer reads in the power panel before
+	// writing a rule, so a predicate the program derives and the contract does not
+	// name is a predicate nobody can find. This is a drift guard rather than a
+	// prose check: the list below is read off the emission and the rules in
+	// `compile.ts`, and the moment a rung gains a predicate without gaining a
+	// line here, this fails and says which.
+	const ladder = [
+		// Rung one: an input, and the bridge its numbers cross on.
+		"minput",
+		"minkind",
+		"minbool",
+		"minnum",
+		"minlow",
+		"minhigh",
+		"minbounded",
+		"permille",
+		// Rung two: the guard, as a closed window.
+		"mcond",
+		"mcondin",
+		"mcondop",
+		"mcrange",
+		"mcnot",
+		"mcis",
+		"mcisnot",
+		"mcfired",
+		"mcbad",
+		"mguarded",
+		"mclash",
+		"mdisjoint",
+		"moverlap",
+		"mguardnever",
+		"mfeasible",
+		"mgreach",
+		"mgunreached",
+		// Rung three: the reserved ids and the fourth motion setting.
+		"mreserved",
+		"mefrom",
+		"manyfrom",
+		"mstops",
+		"mrank",
+		"mmisplaced",
+		"mexit",
+		"mexitpast",
+		// Rung four: layers, and who writes what when two of them disagree.
+		"mlayer",
+		"mlindex",
+		"mslayer",
+		"mlfirst",
+		"mlinitial",
+		"mtlayer",
+		"mcrosslayer",
+		"mlshadow",
+		"mlfshadow",
+		"mlrshadow",
+		"mwriter",
+		"mfwriter",
+		"mrwriter",
+		"mowned",
+		"mfowned",
+		"mrowned",
+		"mfight",
+		"mffight",
+		"mrfight",
+		"mfightat",
+		// Rung five: timelines, keyframe copies and blend states.
+		"mtimeline",
+		"mtplays",
+		"mloop",
+		"mtrack",
+		"mtrackof",
+		"mkey",
+		"mkeasing",
+		"mkat",
+		"mtlen",
+		"mknext",
+		"mkpast",
+		"mkbackwards",
+		"mkbase",
+		"mkpart",
+		"mblend",
+		"mblendin",
+		"mstop",
+		"mstopat",
+		"mstopby",
+		"mstopout",
+		"mstopgap",
+		"mtwosource",
+		// The terms and the variable keys a rule may type.
+		"kat",
+		"kval",
+		"tlen",
+		"trkp",
+		"trkd",
+		"trkr",
+		"kfr",
+	];
+	for (const predicate of ladder) {
+		assert.ok(
+			CONTRACT.includes(predicate),
+			`the contract never mentions ${predicate}, so nobody can find it`,
+		);
+	}
+	// And the two sentences the whole ladder rests on, which a later edit is most
+	// likely to soften into something that is no longer a promise.
+	assert.match(CONTRACT, /THE SOLVER DECIDES\n?%? ?KEYFRAMES AND NEVER FRAMES/);
+	assert.match(CONTRACT, /THE ORDER IS THE\n%\s+PRIORITY/);
+	// The blend kind reaches the program as `oneD`, never as `1d`: an ASP
+	// constant may not begin with a digit, and a contract that promised the
+	// spelling the spec used would promise a term no rule can hold.
+	assert.match(CONTRACT, /mblend\(M, S, oneD\|direct\)/);
+	assert.ok(!CONTRACT.includes("mblend(M, S, 1d"));
 });

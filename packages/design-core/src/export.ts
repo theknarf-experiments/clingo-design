@@ -50,6 +50,31 @@
  * So it comes out as one — see {@link styleClasses} — and a wearer's rule holds
  * only what it says for itself. That is the whole of why the HTML target got
  * smaller and readable at the same time; nothing else in this file changed.
+ *
+ * **Behaviour leaves as three different things, and which one is not a
+ * preference.** A state CSS has a name for is a pseudo-class and no script at
+ * all — that promise is the reason `TRIGGERS` carries a `css` column, and a file
+ * that shipped JavaScript to do what `:hover` does would be a worse artefact
+ * than the one this tool replaces. A state it has no name for is a
+ * `data-state` attribute and the interpreter in `runtime.ts`, one table read by
+ * the studio and the file so the two cannot drift. A **timeline** is neither: it
+ * is `@keyframes`, played by the compositor, because the browser is a better
+ * animator than anything this file could emit and because a script that also
+ * paced the motion would apply every delay twice. Layers stack on top of all
+ * three without changing any of them — a machine is in one state per layer, so
+ * an element carries one attribute per layer, and the first layer's is the plain
+ * `data-state` a one-layer document has always had.
+ *
+ * **The third axis leaves as two answers, and the line between them is the
+ * `viewport` kind.** A flat box with a z and a lean is something CSS draws
+ * *exactly* — `translate3d`, the three rotation functions, `preserve-3d` on the
+ * ancestors and a `perspective` on the surface — so it is written and nothing is
+ * lost; see {@link transformOf}. A *scene* is geometry projected through a
+ * camera, which neither HTML nor SVG has any word for, so the walk stops at the
+ * box, the box is drawn, and {@link ExportResult.lost} names glTF as the way
+ * out. Deciding that per node was the alternative and there is no honest way to
+ * do it: "is the flat answer good enough here" is a question about a whole
+ * subtree, which is what the kind is.
  */
 import type { Frame } from "./geometry.ts";
 import { pathData, scalePoints } from "./geometry.ts";
@@ -60,13 +85,25 @@ import {
 	lineHeightEmu,
 } from "./measure.ts";
 import {
-	initialState,
+	blendWeights,
+	findState,
+	keyEasing,
+	layerOf,
+	layerInitial,
+	layerStates,
 	machineForNode,
+	machineLayers,
 	machineTable,
+	solvedKeys,
 	stateName,
 	statePart,
 	statePropVar,
+	statePlays,
 	shownState,
+	shownStates,
+	timelineLength,
+	trackTerm,
+	transitionExit,
 } from "./machines.ts";
 import type { ModelNode, ModelScene, ModelState } from "./model.ts";
 import {
@@ -88,6 +125,7 @@ import {
 import {
 	DEFAULT_EASING,
 	type Dimension,
+	type Easing,
 	DIMENSIONS,
 	EASINGS,
 	FRAME_DIMS,
@@ -96,6 +134,7 @@ import {
 	KINDS,
 	LAYOUT_PROPS,
 	type LayoutProp,
+	type LoopMode,
 	type Machine,
 	type MachineState,
 	type NodeKind,
@@ -104,10 +143,16 @@ import {
 	type PropName,
 	type Scene,
 	type SceneNode,
+	type Spatial,
 	type StatePart,
 	type Style,
 	TRIGGERS,
+	TURNS,
+	TURN_NAMES,
+	type Timeline,
+	type Track,
 	type Transition,
+	type Turn,
 	drawsWords,
 	findStyle,
 	frameOf,
@@ -133,12 +178,15 @@ import {
 	frameVar,
 	guideAtIn,
 	isLengthType,
+	keyValueVar,
 	layoutVar,
 	luminance,
+	mdegOf,
 	parseVariable,
 	propVar,
 	resolveValue,
 	tokenVar,
+	writeAngle,
 } from "./values.ts";
 
 /* ------------------------------------------------------------------ */
@@ -195,6 +243,17 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 			// sentence about every machine in the document. One sentence about the
 			// format beats N about the documents it cannot hold.
 			"Behaviour. An SVG has no states: what is here is the one state each instance is drawn in, and the transitions, the triggers and the other states are not in the file.",
+			// The second half of the same asymmetry, and it is the ladder's. HTML
+			// carries an input as a value in a script and a timeline as `@keyframes`;
+			// an SVG has neither a host to be handed a value by nor a clock to play
+			// against, so it loses all three of them at once and says so once.
+			"Inputs, guards and timelines. An SVG has no clock and no host to set a value from.",
+			// And the third: the flat target meeting the third axis. Unconditional
+			// like its neighbours, because what it loses about one turned box it
+			// loses about every one, and because the sentence has to be true of a
+			// document with no z in it at all — where it is, vacuously, and costs a
+			// reader one line.
+			"Three dimensions. An SVG is flat: a node with a z or a turn is drawn in the place its untransformed box occupies, and a 3D view is drawn as its own rectangle.",
 		],
 	},
 };
@@ -249,6 +308,71 @@ function isRuled(scene: Scene): boolean {
 	);
 }
 
+/**
+ * What a page cannot say about a 3D view, per view, in {@link GRID_LOST}'s
+ * manner.
+ *
+ * Conditional and per viewport rather than one sentence about the format,
+ * unlike the SVG target's, and the asymmetry is the same one the machine losses
+ * already draw: HTML *can* carry a rotated flat box — it does, exactly, in
+ * {@link transformOf} — so what it cannot carry is this particular view, with
+ * this many objects in it, and a reader is owed the number. A document with no
+ * viewport says none of this and pays nothing.
+ *
+ * The second half is the important one and it is why the sentence names glTF.
+ * Every other entry in the list is a loss with no way out: the space is gone,
+ * the rules are gone, the layout is literal pixels. This one has an answer that
+ * is not a consolation — a glTF *is* the scene, with the geometry, the camera,
+ * the lights and the materials in it — so leaving it unnamed would be telling a
+ * designer their 3D work does not export when what is true is that it does not
+ * export *here*.
+ *
+ * **It names the panel and not the format, and the difference is the one thing
+ * about this sentence worth checking before changing it.** `ExportTarget` is
+ * `"html" | "svg"`, and it stays that way: a glTF writer needs three.js's
+ * geometry constructors to tessellate a sphere, which is a dependency this
+ * package does not take. The writer lives in `canvas-3d` and the *export panel*
+ * offers it as a third format on any document with a view in it. So the way out
+ * is real and reachable, and the sentence says where — which is what it must
+ * do, because a loss list that points at a feature the tool has not got is the
+ * one place in a whole export where the product lies to the person reading it.
+ *
+ * The brace is the poster clause. A poster is a photograph rather than a scene,
+ * and the sentence says so in the same breath as saying it is there, because a
+ * page that looks right and cannot be lit or turned is exactly the artefact a
+ * person would otherwise mistake for a working one.
+ */
+function viewportLost(index: DocIndex, node: ModelNode, inside: number, poster: boolean): string {
+	const objects =
+		inside === 0
+			? "nothing is inside it yet"
+			: `the ${inside} object${inside === 1 ? "" : "s"} inside this view ${inside === 1 ? "is" : "are"} not in it`;
+	return (
+		`The ${nodeLabel(index, node.id)}. HTML and CSS can position and turn a flat box, and this file does — but they have no word for geometry, a camera, a light or a material, so ${objects}. ` +
+		`What is here is the view's own box${poster ? ", with the frame the canvas last drew as its background" : ""}. ` +
+		"Choose glTF in this panel to write the scene itself — the geometry, the camera, the lights and the materials, as a file another 3D tool can open."
+	);
+}
+
+/**
+ * The one thing a `transform` costs, said once for the whole document.
+ *
+ * Not a loss of information — the transform is exact, and this is the one place
+ * in the 3D work where the flat target loses *nothing* — but a loss of
+ * behaviour, and it is the browser's rather than this file's: a turned box is
+ * painted through its transform and hit-tested through it too, but the *layout*
+ * box it displaces is still the untransformed rectangle, so a click near the
+ * corner of a card leaned 30° away lands where nothing is drawn.
+ *
+ * Said because it is true on the canvas as well, and a designer who meets it in
+ * the exported page and not in the studio would reasonably think the export
+ * broke it. It is one sentence for the document rather than one per node: the
+ * fact is about what a transform *is*, and repeating it per card would be a list
+ * nobody finishes.
+ */
+const TURNED_LOST =
+	"A turned box is drawn by the browser through its transform and laid out by its untransformed rectangle, here and on the canvas both — so a click near a corner of something leaned away may land on it where there is nothing drawn.";
+
 export interface ExportResult {
 	target: ExportTarget;
 	filename: string;
@@ -273,6 +397,21 @@ export interface ExportOptions {
 	tokens?: boolean;
 	/** Names the document in the output. */
 	title?: string;
+	/**
+	 * The last frame each viewport rendered, as a data URL, by viewport node id.
+	 *
+	 * HTML and CSS cannot draw a scene — see {@link VIEWPORT_LOST} — so the box a
+	 * viewport exports as is a coloured rectangle unless somebody hands this file
+	 * a picture of what was inside it. The canvas can, because it has a WebGL
+	 * context and a `preserveDrawingBuffer`; design-core cannot, and it must not
+	 * try: a renderer in here is the one dependency this package does not take.
+	 *
+	 * So it arrives as an option rather than being read off anything, and its
+	 * absence is not a failure — a poster is a *photograph* of one moment of one
+	 * camera, and a file with none of them is exactly as honest, just less
+	 * pretty. The loss sentence says which of the two happened.
+	 */
+	posters?: Record<string, string>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -539,15 +678,96 @@ interface Slot {
 	depth: number;
 }
 
-/** Pre-order over the model, which is also paint order. */
+/**
+ * Where every emitter in this file stops walking, and the one condition the 3D
+ * half of the export costs the 2D half.
+ *
+ * True for exactly one kind, `viewport`, and read off `KINDS` rather than named
+ * here so that it stays the same question `hitTestTree` and the canvas ask. A
+ * viewport's children are meshes, cameras and lights: geometry projected through
+ * a camera, which HTML has no word for and SVG has no word for either. **A
+ * subtree of empty divs with `preserve-3d` on them is not a partial answer to a
+ * scene, it is a wrong one** — the boxes would be the meshes' axis-aligned
+ * bounding rectangles, in the document's own coordinates, with no camera and no
+ * projection anywhere near them, and they would look like a design somebody made
+ * rather than like a picture that is missing.
+ *
+ * So the walk stops at the box, the box is drawn — it is a real rectangle with a
+ * real fill, radius, stroke and opacity, and it is exactly what shows behind a
+ * transparent scene — and {@link VIEWPORT_LOST} says what is not in the file and
+ * how to get it. That is the whole of the decision, and it is one condition in
+ * four walks rather than a judgement made per node, which is the second reason
+ * the `viewport` kind earns its place: there is no honest way to decide "is the
+ * flat answer good enough here" one mesh at a time.
+ */
+const stopsHere = (kind: NodeKind): boolean => KINDS[kind].opaque;
+
+/** Pre-order over the model, which is also paint order — down to a viewport. */
 function slotsOf(model: ModelScene): Slot[] {
 	const out: Slot[] = [];
 	const walk = (node: ModelNode, depth: number): void => {
 		out.push({ id: node.id, className: `n${out.length}`, kind: node.kind, depth });
+		if (stopsHere(node.kind)) return;
 		for (const child of node.children) walk(child, depth + 1);
 	};
 	for (const root of model.roots) walk(root, 0);
 	return out;
+}
+
+/**
+ * Every viewport the picture draws, in paint order, with how much is inside it.
+ *
+ * The count is off the *model* rather than off the document, and that is the
+ * difference between a true sentence and a plausible one: a rule can mint a mesh,
+ * a state can hide one, an instance can place a whole scene twice, and what the
+ * loss has to say is how many objects this universe put in this view.
+ *
+ * Counted down the whole subtree rather than one level, because "the 24 objects
+ * inside this view" is what a designer sees in the layer list, and a pivot's
+ * children are objects in the view exactly as its siblings are.
+ */
+function viewportsIn(model: ModelScene): Array<{ node: ModelNode; inside: number }> {
+	const out: Array<{ node: ModelNode; inside: number }> = [];
+	const count = (node: ModelNode): number =>
+		node.children.reduce((n, child) => n + 1 + count(child), 0);
+	const walk = (node: ModelNode): void => {
+		if (stopsHere(node.kind)) {
+			out.push({ node, inside: count(node) });
+			return;
+		}
+		for (const child of node.children) walk(child);
+	};
+	for (const root of model.roots) walk(root);
+	return out;
+}
+
+/**
+ * The picture of a scene a caller handed us, as a background on the box.
+ *
+ * `background-image` rather than an `<img>`, and over the box's own fill rather
+ * than replacing it, because a poster is a *photograph of a moment* and the box
+ * is a real rectangle with real properties: a scene rendered against a
+ * transparent background wants the fill showing through it, and the radius, the
+ * stroke and the opacity all still apply to the element they are declared on.
+ * `cover` for the reason a poster is not guaranteed to have been captured at the
+ * box's own aspect ratio — the canvas's viewport is scaled by the infinite
+ * canvas's zoom, and cropping is a better answer than stretching.
+ *
+ * Only for a kind the walk stops at, so a poster keyed to a node that is not a
+ * viewport is quietly nothing rather than a background on a rectangle. The
+ * quotes are escaped because a data URL is a string somebody else produced, and
+ * an unescaped `"` inside `url("...")` would end the value early and take the
+ * rest of the rule with it.
+ */
+function posterFor(options: ExportOptions, node: ModelNode): Declarations {
+	if (!stopsHere(node.kind)) return {};
+	const url = options.posters?.[node.id];
+	if (url === undefined || url === "") return {};
+	return {
+		backgroundImage: `url("${url.replace(/["\\]/g, "\\$&")}")`,
+		backgroundSize: "cover",
+		backgroundPosition: "center",
+	};
 }
 
 /**
@@ -607,6 +827,151 @@ const framePx = (frame: Frame): Frame => ({
 	width: cssPxFromEmu(frame.width),
 	height: cssPxFromEmu(frame.height),
 });
+
+/* ------------------------------------------------------------------ */
+/* The third axis, where CSS is a complete answer                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A place and a rotation, as one `transform`.
+ *
+ * **This is the half of the third axis the flat targets get exactly right, and
+ * it is worth being clear that it is exact rather than approximate.** A `rect`
+ * with a `z` and a `rotateY` is a flat box in space, and `translate3d` plus the
+ * three rotation functions is precisely what a flat box in space is in CSS —
+ * same origin, same order, same numbers. Nothing is dropped, nothing is
+ * projected by hand, and the browser's compositor does the projection the canvas
+ * does. What CSS has no word for is *geometry*, which is why the line falls at
+ * the `viewport` kind and nowhere else — see {@link stopsHere}.
+ *
+ * **The order is `rotateX rotateY rotateZ`, and it is not §10.4's example.** The
+ * frozen spec's §2.3 fixes the order of *application* as rotateZ, then rotateY,
+ * then rotateX, and says in the same paragraph that this is "CSS's own order for
+ * `rotateX(..) rotateY(..) rotateZ(..)` read left to right" — because CSS
+ * composes a transform list left to right and so applies the **rightmost**
+ * function to the point first. `spatial.ts`'s {@link rotationMatrix} is `Rx · Ry
+ * · Rz` for the same reason and says so. §10.4's illustration writes the three in
+ * the other order, which contradicts both, and following the illustration would
+ * have exported a rotation the canvas and the solver do not agree with. So the
+ * normative sentence wins and the example is treated as the typo it is; this is
+ * called out in the step's return value rather than quietly reversed.
+ *
+ * A zero term is omitted rather than written as `rotateX(0deg)`. It is the
+ * identity, so the picture is the same either way, and the reason to leave it
+ * out is that this string is also what a *state* rule writes — a whole `transform`
+ * replaces a whole `transform`, so every rule that writes one writes the complete
+ * pose — and a file where every card carries three rotations it does not have is
+ * a file nobody reads. Where the pose is entirely flat and unmoved this answers
+ * `undefined`, and the document that has never heard of the third axis gets the
+ * bytes it got before, which is invariant 4 in one line.
+ *
+ * The translation is `translate3d` only where there is a z, and plain
+ * `translate` otherwise, for that same reason: a 2D document's state move has
+ * always come out as `translate(12px, 0px)` and still does.
+ */
+function transformOf(
+	dx: Emu,
+	dy: Emu,
+	z: Emu,
+	turn: Readonly<Record<Turn, number>> | undefined,
+): string | undefined {
+	const parts: string[] = [];
+	if (z !== 0) parts.push(`translate3d(${cssPx(dx)}px, ${cssPx(dy)}px, ${cssPx(z)}px)`);
+	else if (dx !== 0 || dy !== 0) parts.push(`translate(${cssPx(dx)}px, ${cssPx(dy)}px)`);
+	for (const name of TURN_NAMES) {
+		const mdeg = turn?.[name] ?? 0;
+		if (mdeg !== 0) parts.push(`${TURNS[name].css}(${writeAngle(mdeg)})`);
+	}
+	return parts.length === 0 ? undefined : parts.join(" ");
+}
+
+/** A pose, as the two callers that have one hold it. */
+interface Posed {
+	spatial?: Readonly<Record<Spatial, number>>;
+	turn?: Readonly<Record<Turn, number>>;
+}
+
+/** How far forward something is, with "the answer set said nothing" read as zero. */
+const liftOf = (posed: Posed): Emu => posed.spatial?.z ?? 0;
+
+/**
+ * True where a pose needs a 3D rendering context around it rather than just a
+ * transform on it.
+ *
+ * A `rotateZ` is a rotation *in the plane*: it needs no `perspective` and no
+ * `preserve-3d`, it has worked in every browser since before either existed, and
+ * putting a perspective on its parent would change nothing about it. A `z` or a
+ * lean about x or y is the other thing, and without the context above it the
+ * browser flattens it — which is a picture that is silently, subtly wrong rather
+ * than obviously missing, and is the failure this test exists to prevent.
+ */
+const needsDepth = (posed: Posed): boolean =>
+	liftOf(posed) !== 0 ||
+	(posed.turn?.rotateX ?? 0) !== 0 ||
+	(posed.turn?.rotateY ?? 0) !== 0;
+
+/**
+ * Which elements have to be told the scene is three dimensional, and where the
+ * eye stands.
+ *
+ * Two declarations, and neither of them belongs to the node that is actually
+ * turned: `perspective` goes on the surface the turned things sit *on*, because
+ * that is the choice of where the viewer is and it is one choice for everything
+ * standing on that surface; `transform-style: preserve-3d` goes on every element
+ * between the two, because the default is `flat` and a flat ancestor collapses
+ * its whole subtree back into the plane before the perspective ever sees it.
+ *
+ * The nearest {@link KindSpec.surface} ancestor is the perspective root, which is
+ * `PROPS.perspective`'s own claim — it is offered on `frame` and on nothing else
+ * — and a turned node with no surface above it puts the perspective on `.design`,
+ * the element this file wraps the whole document in. That is the honest answer
+ * rather than a refusal: the document *is* the surface then, and a card leaning
+ * off the top level with no perspective anywhere would be drawn flat.
+ *
+ * Nothing here is emitted for a `rotateZ` alone — see {@link needsDepth} — and
+ * nothing at all is emitted for a document with no third axis in it, which is
+ * every document that shipped before this. The walk stops at a viewport like
+ * every other walk here.
+ */
+interface Depth {
+	/** Node ids that need `transform-style: preserve-3d`. */
+	preserve: Set<string>;
+	/** Node id -> the `perspective` length its children are seen through. */
+	perspective: Map<string, string>;
+	/** The same, for the wrapper, where a turned node has no surface above it. */
+	onDocument?: string;
+	/** True where anything outside a viewport is turned at all — for the loss. */
+	turned: boolean;
+}
+
+function depthOf(model: ModelScene): Depth {
+	const out: Depth = { preserve: new Set(), perspective: new Map(), turned: false };
+	const eye = (node: ModelNode): string =>
+		cssLength(node.rendered.perspective ?? PROPS.perspective.fallback);
+	const walk = (node: ModelNode, chain: ModelNode[]): void => {
+		if (transformOf(0, 0, liftOf(node), node.turn) !== undefined) out.turned = true;
+		if (needsDepth(node)) {
+			// Outwards from the node's own parent until a surface answers. The
+			// surface takes the perspective and stops the walk; everything passed on
+			// the way there has to keep the subtree unflattened.
+			let seated = false;
+			for (let i = chain.length - 1; i >= 0; i--) {
+				const up = chain[i];
+				if (KINDS[up.kind].surface) {
+					out.perspective.set(up.id, eye(up));
+					seated = true;
+					break;
+				}
+				out.preserve.add(up.id);
+			}
+			if (!seated) out.onDocument = cssLength(PROPS.perspective.fallback);
+		}
+		if (stopsHere(node.kind)) return;
+		for (const child of node.children) walk(child, [...chain, node]);
+	};
+	for (const root of model.roots) walk(root, []);
+	return out;
+}
 
 /* ------------------------------------------------------------------ */
 /* A style, as a class                                                 */
@@ -821,7 +1186,80 @@ function geometry(
 			? `var(--${index.custom.get(parameterised.id)})`
 			: px(literal);
 	}
+	// The third axis and the rotation, beside the four numbers rather than
+	// instead of them: `left` and `top` are still where the box is, and the
+	// transform is what happens to it there. Written here, in the one function
+	// that already knows a node's geometry, which is what makes the machine half
+	// of this file compose with it for free — a state's `diff()` picks a
+	// `transform` up exactly as it picks a `background` up, and the `transition:`
+	// declaration names it exactly as it names any other property.
+	//
+	// `transform-origin` is only written where there is a transform, and it is
+	// written because the rotation the solver and the canvas agreed about is
+	// about the box's own centre. CSS's default already is `50% 50%`, so this is
+	// a statement rather than a correction — and stating it is what stops a
+	// stylesheet somebody pastes this into from silently re-hanging every card
+	// off its top-left corner.
+	const transform = transformOf(0, 0, liftOf(node), node.turn);
+	if (transform !== undefined) {
+		out.transform = transform;
+		out.transformOrigin = "center center";
+	}
 	return out;
+}
+
+/**
+ * The delta the *drawn* state states for one property of an instance's part, and
+ * the variable it is stored under.
+ *
+ * A hole this file had before layers and which layers walk straight into. A
+ * property's token name is read back out of the document, because the program
+ * interns literals — and the reading went to the definition's own stored value,
+ * which is the right answer exactly while the instance is drawn in a state that
+ * says nothing about that property. Where the drawn state *repaints* it, the
+ * answer set renders the state's colour and the document's value names a
+ * different token, so the file wrote `var(--accent)` beside a picture the solver
+ * said was green. Rare before — it needs a `SceneNode.state` pointing at a
+ * non-initial state — and ordinary now, because a layered instance is drawn in
+ * one state per layer and any of them may repaint.
+ *
+ * The **last** layer that states a value wins, walked in layer order, which is
+ * `mwriter/4`'s own rule and the same order {@link composeStates} composes in.
+ * Deliberately not `composeStates` itself: that answers with a merged
+ * {@link StatePart} and this needs to know *which state* stated it, because the
+ * variable key a value's alternatives are picked under is `sprop(I,S,N,P)` and a
+ * merged record has no S in it.
+ */
+function drawnStateValue(
+	index: DocIndex,
+	model: ModelScene,
+	nodeId: string,
+	prop: PropName,
+): { value: Value; variable: string } | undefined {
+	const part = parseInstancePart(nodeId);
+	if (!part) return undefined;
+	const use = index.byId.get(part.instance);
+	if (!use) return undefined;
+	const machine = machineForNode(index.scene, use);
+	if (!machine) return undefined;
+	const stack = machineLayers(machine);
+	const drawn = drawnStates(model, machine, use, stack[0].id);
+	let found: { value: Value; variable: string } | undefined;
+	for (const stratum of stack) {
+		const state = findState(machine, drawn[stratum.id]);
+		// A state has to be a state of *this* layer, for `composeStates`' reason: a
+		// record naming layer two's state under layer one would compose one layer's
+		// pose twice.
+		if (!state || layerOf(machine, state) !== stratum.id) continue;
+		const value = state.parts[part.node]?.props?.[prop];
+		if ((value?.length ?? 0) > 0) {
+			found = {
+				value: value as Value,
+				variable: statePropVar(use.id, state.id, part.node, prop),
+			};
+		}
+	}
+	return found;
 }
 
 /** Everything a node paints, with token links kept as `var(--name)`. */
@@ -849,9 +1287,16 @@ function declarationsFor(
 		if (value === undefined) continue;
 		const paint = paintFor(node.kind, prop);
 		if (!paint) continue;
-		const token = useTokens
-			? tokenNamed(index, layer.universe.pick, propVar(node.id, prop))
-			: undefined;
+		// Two front doors, exactly as `copyPaint` has two and for the same reason:
+		// a property the drawn state answers has its own variable and its own
+		// stored value, and a property it says nothing about is the instance's
+		// shared one. See {@link drawnStateValue}.
+		const said = useTokens ? drawnStateValue(index, layer.universe.model, node.id, prop) : undefined;
+		const token = !useTokens
+			? undefined
+			: said !== undefined
+				? valueNamed(index, layer.universe.pick, said.value, said.variable)
+				: tokenNamed(index, layer.universe.pick, propVar(node.id, prop));
 		if (token) {
 			used.add(token.id);
 			Object.assign(box, paint(`var(--${index.custom.get(token.id)})`));
@@ -984,8 +1429,13 @@ function htmlBody(
 		const names = worn === undefined ? slot.className : `${slot.className} ${worn}`;
 		const open = `${pad}<div class="${names}" data-node="${escapeAttr(node.id)}" data-kind="${node.kind}">`;
 		const content = htmlContent(index, layer, node);
-		const nested = !keepsWhitespace(node.kind) && node.children.length > 0;
-		const kids = node.children
+		// A viewport's box is markup and its contents are not — see `stopsHere`.
+		// The element is still emitted, still carries its id and its kind, and is
+		// still selectable and rule-able by anything the page is pasted into; what
+		// stops is the recursion.
+		const inside = stopsHere(node.kind) ? [] : node.children;
+		const nested = !keepsWhitespace(node.kind) && inside.length > 0;
+		const kids = inside
 			.map((child) => render(child, depth + 1, nested))
 			.filter((markup) => markup !== "");
 		if (!nested) return `${open}${content}${kids.join("")}</div>`;
@@ -1034,9 +1484,14 @@ function htmlExport(
 	const readLayer = (layer: Layer): Map<string, Declarations> => {
 		const out = new Map<string, Declarations>();
 		const origin = modelBounds(layer.universe.model);
+		// Per layer, not once, and that is not caution: a breakpoint layer really
+		// can lean a card the base does not, because a state and a universe are
+		// different questions and the second one re-reads every number.
+		const depth = depthOf(layer.universe.model);
 		out.set(".design", {
 			width: px(origin.width),
 			height: px(origin.height),
+			...(depth.onDocument === undefined ? {} : { perspective: depth.onDocument }),
 		});
 		// `:where()`, so a class weighs nothing at all.
 		//
@@ -1064,6 +1519,20 @@ function htmlExport(
 				const own: Declarations = {
 					...geometry(index, layer, node, root, origin, useTokens, used),
 					...declarationsFor(index, layer, node, useTokens, used),
+					// The two declarations a turned *descendant* needs from its
+					// ancestors — see `depthOf`. Merged after the node's own paint
+					// because `perspective` is a `PropName` this file writes itself:
+					// nothing in `PAINT` carries it, deliberately, since it means
+					// nothing on the canvas and nothing in the program.
+					...(depth.preserve.has(node.id) ? { transformStyle: "preserve-3d" } : {}),
+					...(depth.perspective.has(node.id)
+						? { perspective: depth.perspective.get(node.id) as string }
+						: {}),
+					// A viewport with a poster shows the frame the canvas last drew,
+					// over its own fill rather than instead of it — a poster with
+					// transparency is a scene with nothing behind it, and the box's fill
+					// is what was behind it on the canvas.
+					...posterFor(options, node),
 				};
 				// Whatever the class already says for a property this node takes
 				// from it. Decided by which property it is rather than by comparing
@@ -1072,6 +1541,7 @@ function htmlExport(
 				for (const key of shared.get(node.id) ?? []) delete own[key];
 				out.set(`.${slot.className}`, own);
 			}
+			if (stopsHere(node.kind)) return;
 			for (const child of node.children) walk(child, false);
 		};
 		for (const root of layer.universe.model.roots) walk(root, true);
@@ -1102,6 +1572,15 @@ function htmlExport(
 			// declarations in it would be one declaration: the later one.
 			if (!paced.has(`.${slot.className}`)) paced.set(`.${slot.className}`, declarations);
 		}
+	}
+	// The same treatment for a timeline the *drawn* state plays: it has to be
+	// running when the file opens, so it goes on the base rule rather than under a
+	// `data-state` no runtime has written yet.
+	for (const [id, declarations] of machines.playing) {
+		const slot = slotOf.get(id);
+		if (!slot) continue;
+		const selector = `.${slot.className}`;
+		paced.set(selector, { ...(paced.get(selector) ?? {}), ...declarations });
 	}
 
 	const css: string[] = [BASE_CSS];
@@ -1151,6 +1630,25 @@ function htmlExport(
 		css.push(blocks.join("\n"));
 	}
 
+	// After the rules, because a `@keyframes` block is not a rule and does not
+	// take part in the cascade at all — it is a named sequence the `animation`
+	// declarations above point at, and where it sits in the file changes nothing
+	// but where a reader finds it. At the end is where a reader looks for it.
+	for (const block of machines.keyframes) css.push(block);
+
+	// The one loss the 3D half of this file owes a document per view, and the one
+	// it owes the document once. Collected here rather than in `planMachines`
+	// because they are facts about the *picture* — how many objects this universe
+	// put in this view, whether anything outside one is turned — and the base
+	// layer's model is the picture.
+	const spatialLost: string[] = [];
+	for (const { node, inside } of viewportsIn(base.universe.model)) {
+		spatialLost.push(
+			viewportLost(index, node, inside, options.posters?.[node.id] !== undefined),
+		);
+	}
+	if (depthOf(base.universe.model).turned) spatialLost.push(TURNED_LOST);
+
 	const title = escapeText(options.title ?? "Design");
 	// At the end of the body, where a script that reads the document has to be:
 	// the runtime's first act is one `querySelectorAll("[data-node]")` pass, and in
@@ -1161,7 +1659,7 @@ function htmlExport(
 		machines.runtime === null ? "" : `\n<script>\n${machines.runtime}\n</script>`;
 	return {
 		classes,
-		lost: machines.lost,
+		lost: [...spatialLost, ...machines.lost],
 		text: `<!doctype html>
 <html lang="en">
 <head>
@@ -1221,6 +1719,11 @@ const SVG_PAINT: Partial<Record<PropName, (value: string) => Declarations>> = {
 const SVG_SHAPES: Partial<Record<NodeKind, (frame: Frame) => string>> = {
 	frame: (f) => `<rect width="${round(f.width)}" height="${round(f.height)}"/>`,
 	rect: (f) => `<rect width="${round(f.width)}" height="${round(f.height)}"/>`,
+	// A 3D view is a rectangle here and nothing else, which is the same answer
+	// the HTML target gives and for the same reason — see `stopsHere`. It is in
+	// this table rather than special-cased in `svgNode` because that is what the
+	// table is for: a kind whose whole appearance is its own box gets a row.
+	viewport: (f) => `<rect width="${round(f.width)}" height="${round(f.height)}"/>`,
 	ellipse: (f) =>
 		`<ellipse cx="${round(f.width / 2)}" cy="${round(f.height / 2)}" rx="${round(f.width / 2)}" ry="${round(f.height / 2)}"/>`,
 };
@@ -1239,9 +1742,23 @@ function svgPaint(
 		if (value === undefined) continue;
 		const paint = SVG_PAINT[prop];
 		if (!paint) continue;
-		const token = useTokens
-			? tokenNamed(index, layer.universe.pick, propVar(node.id, prop))
+		// The same two front doors {@link declarationsFor} has, and for the same
+		// reason — see {@link drawnStateValue}. This twin was left reading the
+		// definition's stored value when that hole was closed on the HTML side, so
+		// an instance drawn in a state that *repaints* a property named one token in
+		// the file and drew a different colour in the picture: `var(--muted)` beside
+		// a `#f43f5e` the answer set had already decided. The round-trip test is
+		// what catches it, because inlining the var is what makes the two readings
+		// comparable at all — and it needed a template whose drawn state repaints
+		// something before there was a document to catch it on.
+		const said = useTokens
+			? drawnStateValue(index, layer.universe.model, node.id, prop)
 			: undefined;
+		const token = !useTokens
+			? undefined
+			: said !== undefined
+				? valueNamed(index, layer.universe.pick, said.value, said.variable)
+				: tokenNamed(index, layer.universe.pick, propVar(node.id, prop));
 		if (token) used.add(token.id);
 		Object.assign(
 			box,
@@ -1350,7 +1867,9 @@ function svgNode(
 		clip = ` clip-path="url(#${id})"`;
 	}
 
-	const inside = node.children.map((child) =>
+	// The same stop the HTML target makes, in the flat target that has even less
+	// to say about a scene than a page does.
+	const inside = (stopsHere(node.kind) ? [] : node.children).map((child) =>
 		svgNode(index, layer, child, useTokens, used, depth + 1, clips),
 	);
 	const kids =
@@ -2120,8 +2639,25 @@ export interface StateLayer {
 	instance: string;
 	state: string;
 	/**
+	 * Which layer of the machine this state belongs to.
+	 *
+	 * A machine is in one state **per layer**, all at once, so an instance's
+	 * element carries one attribute per layer and a state's selector has to say
+	 * which one it is switching on. A machine the document gave no layers has
+	 * exactly one, called `base`, which {@link machineLayers} mints — so this
+	 * field is never empty and a one-layer document reads as the un-layered one
+	 * it is.
+	 */
+	layer: string;
+	/**
 	 * What is appended to the instance's own class selector: `":hover"`,
-	 * `":active"`, `":focus-visible"`, or `'[data-state="open"]'`.
+	 * `":active"`, `":focus-visible"`, `'[data-state="open"]'`, or
+	 * `'[data-state-glow="lit"]'` for a layer that is not the first.
+	 *
+	 * The first layer writes plain `data-state` and every further one writes
+	 * `data-state-<layer>`, which is exactly what the emitted runtime does — and
+	 * the asymmetry is the whole reason it does: a one-layer file is byte
+	 * identical to the one that shipped before layers existed.
 	 */
 	on: string;
 	/** Per node id, only what this state changes from the base. */
@@ -2133,6 +2669,27 @@ export interface StateLayer {
 
 export interface MachineExport {
 	layers: StateLayer[];
+	/**
+	 * The `@keyframes` blocks a timeline came out as, ready to be written into
+	 * the stylesheet — one per (instance, timeline, part).
+	 *
+	 * Beside {@link layers} rather than inside one, because a `@keyframes` block
+	 * is not a rule and has no selector: it is a *named* thing the `animation`
+	 * declaration on a state's rule points at, and it has to be written once at
+	 * the top level however many states or layers reference it.
+	 */
+	keyframes: string[];
+	/**
+	 * `animation:` for a node the *drawn* state animates, by node id.
+	 *
+	 * Beside {@link layers} for the reason {@link StateLayer.transitions} is: it
+	 * belongs on the node's own base rule, and merging it into the base
+	 * declarations before the collapse's `diff()` runs would have every theme and
+	 * every breakpoint say `animation: unset` — the machine and the collapse
+	 * eating each other, which is exactly the composition this file promises they
+	 * do not.
+	 */
+	playing: Map<string, Declarations>;
 	/** The `<script>` body, or null where every state is a pseudo-class. */
 	runtime: string | null;
 	/** What the file does not carry — appended to {@link ExportResult.lost}. */
@@ -2165,10 +2722,19 @@ export interface MachineExport {
  */
 function pseudoClassFor(
 	machine: Machine,
+	layer: string,
 	base: string,
 	state: string,
 ): string | null {
-	const enabled = machine.transitions.filter((t) => t.enabled);
+	// This layer's own edges, and only its own. A cross-layer edge is a thing the
+	// program reports (`mcrosslayer/2`) and the runtime table leaves out, so
+	// counting one here would refuse a collapse on the strength of an edge that
+	// cannot fire — and on a one-layer machine the filter is the identity, which
+	// is why every existing file is byte for byte what it was.
+	const own = layerStates(machine, layer).map((s) => s.id);
+	const enabled = machine.transitions.filter(
+		(t) => t.enabled && own.includes(t.from) && own.includes(t.to),
+	);
 	const into = enabled.filter((t) => t.to === state);
 	const outOf = enabled.filter((t) => t.from === state);
 	if (into.length !== 1 || outOf.length !== 1) return null;
@@ -2273,7 +2839,13 @@ function tweenedKeys(
 	only: readonly PropName[] | undefined,
 	changed: Declarations,
 ): string[] {
-	const keys = Object.keys(changed).filter((key) => key !== "display");
+	// `animation` is struck out beside `display` and for a sibling reason: it is
+	// not a value between two states, it is a *schedule*, and `transition:
+	// animation` is a declaration a browser ignores and a reader believes. What
+	// paces a timeline is the timeline.
+	const keys = Object.keys(changed).filter(
+		(key) => key !== "display" && key !== "animation",
+	);
 	if (only === undefined) return keys.map(cssName);
 	const allowed = new Set<string>();
 	for (const prop of only) {
@@ -2361,63 +2933,131 @@ function planMachines(
 ): MachineExport {
 	const model = base.universe.model;
 	const layers: StateLayer[] = [];
+	const played: Played = { keyframes: [], playing: new Map(), names: new Set() };
 	const lost: string[] = [];
 	const say = (line: string): void => {
 		if (!lost.includes(line)) lost.push(line);
 	};
 	let scripted = false;
+	const context = { tokens: index.scene.tokens, picks: base.universe.pick };
 
 	for (const node of instanceNodes(index.scene)) {
 		const machine = machineForNode(index.scene, node);
 		if (!machine || machine.states.length === 0) continue;
 		if (!model.byId[node.id]) continue;
-		const init = initialState(machine).id;
-		// The state the *picture* is in, which is the state this file's own rules
-		// are. §8.1 of the spec asks for the machine's initial state instead and
-		// re-seated base rules to get there; this does the nearer-correct thing and
-		// says so. Two reasons, and the second is the one that decided it. A file
-		// whose base is a state the runtime immediately writes over shows the wrong
-		// design until the script runs, which is a flash of the wrong colour on
-		// every load. And where the two differ the collapse to a pseudo-class is not
-		// available anyway — `:hover` can add a state to what is drawn, never
-		// subtract one — so re-seating would have bought a flash and nothing else.
-		// Where the instance is drawn in the initial state, which is every document
-		// that does not say otherwise, the two readings are the same reading.
-		const drawnIn = model.shown[node.id] ?? shownState(machine, node);
-		if (drawnIn !== init) {
-			say(
-				`“${node.name}” is drawn in ${stateName(machine, drawnIn)}, so that is the state this file's own rules are and the one it starts in. Every other state of “${machine.name}” — the machine's initial one included — is a data-state rule rather than a pseudo-class, because a selector can add to what is drawn and cannot subtract from it.`,
-			);
-		}
+		const stack = machineLayers(machine);
+		const drawn = drawnStates(model, machine, node, stack[0].id);
 
-		for (const state of machine.states) {
-			if (state.id === drawnIn) continue;
-			const layer = stateLayerFor(
-				index,
-				base,
-				machine,
-				node,
-				drawnIn,
-				state,
-				useTokens,
-				used,
-				say,
-			);
-			if (!layer) continue;
-			if (!layer.on.startsWith(":")) scripted = true;
-			layers.push(layer);
+		for (const [index_, stratum] of stack.entries()) {
+			const drawnIn = drawn[stratum.id];
+			// A layer with no states at all is a layer somebody has just added. There
+			// is nothing to draw it in and nothing to switch to, and `shownStates`
+			// says so by leaving it out rather than by naming nothing.
+			if (drawnIn === undefined) continue;
+			const first = index_ === 0;
+			const init = layerInitial(machine, stratum.id)?.id;
+			// The state the *picture* is in, which is the state this file's own rules
+			// are. §8.1 of the spec asks for the machine's initial state instead and
+			// re-seated base rules to get there; this does the nearer-correct thing and
+			// says so. Two reasons, and the second is the one that decided it. A file
+			// whose base is a state the runtime immediately writes over shows the wrong
+			// design until the script runs, which is a flash of the wrong colour on
+			// every load. And where the two differ the collapse to a pseudo-class is not
+			// available anyway — `:hover` can add a state to what is drawn, never
+			// subtract one — so re-seating would have bought a flash and nothing else.
+			// Where the instance is drawn in the initial state, which is every document
+			// that does not say otherwise, the two readings are the same reading.
+			if (init !== undefined && drawnIn !== init) {
+				say(
+					`“${node.name}” is drawn in ${stateName(machine, drawnIn)}, so that is the state this file's own rules are and the one it starts in. Every other state of “${machine.name}” — the machine's initial one included — is a data-state rule rather than a pseudo-class, because a selector can add to what is drawn and cannot subtract from it.`,
+				);
+			}
+
+			for (const state of layerStates(machine, stratum.id)) {
+				// The timeline first, because what it comes to is an `animation`
+				// declaration on the same elements the delta paints — so it is one more
+				// thing this state changes, and a state that changes *only* an
+				// animation is still a state the file has to be able to select.
+				const played_ = playTimelines(base, machine, node, state, context, played, say);
+				if (state.id === drawnIn) {
+					// The state the picture is in has no selector of its own — it is what
+					// the base rules are — so an animation it plays goes on the base rule
+					// and is running the moment the file opens.
+					for (const [id, declarations] of played_) {
+						played.playing.set(id, { ...(played.playing.get(id) ?? {}), ...declarations });
+					}
+					continue;
+				}
+				const layer = stateLayerFor(
+					index,
+					base,
+					machine,
+					node,
+					stratum.id,
+					first,
+					drawnIn,
+					state,
+					useTokens,
+					used,
+					say,
+					played_,
+				);
+				if (!layer) continue;
+				if (!layer.on.startsWith(":")) scripted = true;
+				layers.push(layer);
+			}
 		}
 	}
 
 	return {
 		layers,
+		keyframes: played.keyframes,
+		playing: played.playing,
 		// One script for the whole document, or none at all. The table already holds
 		// every machine, so a second data-state layer costs nothing; and a document
 		// whose states all collapsed to pseudo-classes gets no `<script>` tag,
 		// which is the case the pseudo-class rules exist to produce.
-		runtime: scripted ? runtimeScript(machineTable(index.scene)) : null,
+		//
+		// **The universe's own context**, and it is the same `context` the exit-time
+		// sentence a few lines up already reads with. Built without one, the table's
+		// only resolved number — an edge's exit time — silently became zero wherever
+		// a document paced its debounce with a `duration` token, so this file
+		// announced a wait in its losses and shipped a runtime that did not wait.
+		// One reading, one answer.
+		runtime: scripted ? runtimeScript(machineTable(index.scene, context)) : null,
 		lost,
 	};
+}
+
+/**
+ * Which state each layer of one instance is drawn in.
+ *
+ * Three sources, and the order is the whole of what makes a layered document and
+ * a document that has never heard of layers both come out right.
+ * `ModelScene.shownByLayer` is the answer set's own per-layer record and wins
+ * outright where it is there — it is what `mslayer/3` and `shown/2` came to
+ * together, and it is the only one of the three that can report a machine whose
+ * layers a *rule* moved. Where it is not — a caller holding a model it wrote out
+ * by hand, or one read before layers existed — the document's own
+ * {@link shownStates} stands in, with `ModelScene.shown` laid over the first
+ * layer because that is the field every reader written before layers is asking
+ * about and the one the alias rules actually folded into the picture.
+ *
+ * Deliberately not a merge of all three: a `shown` that disagreed with a
+ * `shownByLayer` would be one answer set contradicting itself, and picking
+ * through it here would hide that rather than let a reader see it.
+ */
+function drawnStates(
+	model: ModelScene,
+	machine: Machine,
+	node: SceneNode,
+	first: string,
+): Record<string, string> {
+	const byLayer = model.shownByLayer?.[node.id];
+	if (byLayer !== undefined && Object.keys(byLayer).length > 0) return byLayer;
+	const drawn = shownStates(machine, node);
+	const shown = model.shown[node.id] ?? shownState(machine, node);
+	return { ...drawn, [first]: shown };
 }
 
 /** One instance in one state, or nothing where the state changes nothing at all. */
@@ -2426,14 +3066,20 @@ function stateLayerFor(
 	base: Layer,
 	machine: Machine,
 	instance: SceneNode,
+	stratum: string,
+	first: boolean,
 	drawnIn: string,
 	state: MachineState,
 	useTokens: boolean,
 	used: Set<string>,
 	say: (line: string) => void,
+	/** The `animation:` this state's timeline turns on, by node id — see {@link playTimelines}. */
+	animations: ReadonlyMap<string, Declarations>,
 ): StateLayer | null {
 	const model = base.universe.model;
-	const changed = new Map<string, Declarations>();
+	const changed = new Map<string, Declarations>(
+		[...animations].map(([id, declarations]) => [id, { ...declarations }] as const),
+	);
 	const hiddenHere: string[] = [];
 
 	// Whatever the answer set holds a copy of, which is the materialisation
@@ -2531,6 +3177,14 @@ function stateLayerFor(
 		const declarations = diff(before, after);
 
 		const moved = DIMENSIONS.some((dim) => copy.frame[dim] !== from.frame[dim]);
+		// The box moving and the box turning are two questions, and only the first
+		// one is a problem for a kind that draws its own geometry: a `<line>`'s
+		// coordinates are a function of its box, so a rule that resized the box
+		// would slide the frame out from under a shape written once — but a
+		// rotation and a lift leave the box exactly where it was and are a
+		// `transform` on the element, which works on a line as well as on anything
+		// else. So the refusal below is keyed on `moved` alone, and a turned arrow
+		// falls through to the branch that writes the pose.
 		if (moved && drawsOwnGeometry(drawn.kind)) {
 			// The one geometry a class cannot carry, and it is named rather than
 			// approximated for the same reason `collapseSpace` refuses it: a line, an
@@ -2541,11 +3195,19 @@ function stateLayerFor(
 			say(
 				`${stateName(machine, state.id)} moves ${nodeLabel(index, nodeId)}, and a line, an arrow and a path draw their own geometry inside their box — that markup is written once, so this state is in the file as a class that cannot move it.`,
 			);
-		} else if (moved) {
+		} else {
+			// Unconditional, where it used to ask `moved` again: the box moving is
+			// no longer the only way a pose can differ — a state may lift a part in
+			// z or lean it without touching any of the four numbers — and
+			// `moveDeclarations` already answers with nothing where nothing changed.
 			Object.assign(declarations, moveDeclarations(from, copy));
 		}
 		if (Object.keys(declarations).length === 0) continue;
-		changed.set(nodeId, declarations);
+		// Merged rather than set, because the animation this state turns on is
+		// already in here and is a declaration about the same element. The delta
+		// wins where the two name one property, which is the right way round: a
+		// timeline is what happens on the way in, a delta is what it settles at.
+		changed.set(nodeId, { ...(changed.get(nodeId) ?? {}), ...declarations });
 	}
 
 	if (changed.size === 0) return null;
@@ -2555,12 +3217,21 @@ function stateLayerFor(
 		);
 	}
 
+	// The attribute the runtime actually writes, which is `data-state` for the
+	// first layer and `data-state-<layer>` for every other one — see
+	// `attributeOf` in `runtime.ts`, which is the other half of this and must not
+	// be able to disagree with it. A one-layer machine therefore emits exactly the
+	// selector it emitted before layers existed.
 	const on =
-		pseudoClassFor(machine, drawnIn, state.id) ?? `[data-state="${state.id}"]`;
+		pseudoClassFor(machine, stratum, drawnIn, state.id) ??
+		(first
+			? `[data-state="${state.id}"]`
+			: `[data-state-${stratum}="${state.id}"]`);
 	return {
 		machine: machine.id,
 		instance: instance.id,
 		state: state.id,
+		layer: stratum,
 		on,
 		changed,
 		transitions: transitionsFor(index, base, machine, drawnIn, state, changed, say),
@@ -2588,11 +3259,27 @@ function moveDeclarations(from: ModelState, to: ModelState): Declarations {
 	const out: Declarations = {};
 	const dx = to.frame.x - from.frame.x;
 	const dy = to.frame.y - from.frame.y;
-	if (dx !== 0 || dy !== 0) {
-		out.transform = `translate(${cssPx(dx)}px, ${cssPx(dy)}px)`;
+	// The three things a `transform` carries, asked separately, because whether to
+	// write one at all is a different question from what to write in it. A
+	// `transform` is one value: a state's rule does not *add* a rotation to the
+	// base's translation, it replaces the whole declaration — so a state that
+	// changes any part of the pose has to restate all of it, and a state that
+	// changes none of it must say nothing rather than say `none` and quietly
+	// un-turn a card that was leaning.
+	const lifted = liftOf(to) !== liftOf(from);
+	const turned = TURN_NAMES.some((name) => (to.turn?.[name] ?? 0) !== (from.turn?.[name] ?? 0));
+	if (dx !== 0 || dy !== 0 || lifted || turned) {
+		// `none` where the state's pose is the identity, which is what a state that
+		// puts a turned part back flat means and the only way to say it.
+		out.transform = transformOf(dx, dy, liftOf(to), to.turn) ?? "none";
 	}
 	if (to.frame.width !== from.frame.width) out.width = px(to.frame.width);
 	if (to.frame.height !== from.frame.height) out.height = px(to.frame.height);
+	// The depth is deliberately absent, and it is the one number of the six a flat
+	// element has no meaning for: a `div` has a `width`, a `height` and a place on
+	// the z axis, and no thickness. A state that changes only a rectangle's depth
+	// therefore changes nothing in this file — which is true rather than lossy,
+	// because it changes nothing on the canvas either.
 	return out;
 }
 
@@ -2653,6 +3340,24 @@ function transitionsFor(
 	const edge = entryEdge(machine, drawnIn, state.id);
 	if (!edge) return out;
 	const model = base.universe.model;
+	// The exit gate, said out loud, because it is the one rung of the ladder that
+	// is *entirely* invisible in the stylesheet. An input is visible — the state
+	// it opens is a rule in the file; a guard is visible for the same reason; a
+	// timeline is `@keyframes` a reader can read. An exit time is a comparison the
+	// script makes before it writes an attribute, and somebody reading only the
+	// CSS would conclude the button responds to every click, which it does not.
+	//
+	// The answer set's number first and the document's second, for `pacing`'s
+	// reason exactly: an exit time is a `duration` Value, so it may name a token
+	// whose alternatives the solver picked between.
+	const held =
+		model.machines[machine.id]?.exit[edge.id] ??
+		transitionExit(machine, edge, { tokens: index.scene.tokens, picks: base.universe.pick });
+	if (held > 0) {
+		say(
+			`The ${ms(held)} “${stateName(machine, state.id)}” has to be waited for. An exit time is a gate the script checks before it writes the attribute, so it is in the file and it works — but it is not in the CSS, and a reader of the stylesheet alone will not see it.`,
+		);
+	}
 	const { duration, delay, stagger, easing } = pacing(
 		model,
 		machine,
@@ -2688,6 +3393,400 @@ function transitionsFor(
 		});
 	});
 	return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* A timeline, as @keyframes                                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * **Why a timeline is CSS and a state is a selector, and why that is not two
+ * answers to one question.**
+ *
+ * A state is a *pose*: the machine settles in it and stays there, and what a
+ * stylesheet needs is a rule that says what the design looks like while it is
+ * there. A timeline is a *path*: a sequence of poses with times on them, played
+ * through. CSS has a word for each of those and they are different words, and
+ * the reason this file uses both rather than picking one is that the browser is
+ * a better animator than any script this file could ship. `@keyframes` runs on
+ * the compositor, it is interruptible, it retimes itself when the tab is
+ * backgrounded, and it costs the exported page no JavaScript at all — which is
+ * the same argument `runtime.ts` makes about not owning a clock, arriving from
+ * the other end.
+ *
+ * So the runtime switches `data-state`, the state's rule turns the animation on,
+ * and the compositor plays it. Nothing in the emitted script knows a timeline
+ * exists, and a grep for `mkat` or `@keyframes` in `MACHINE_RUNTIME` comes up
+ * empty on purpose.
+ *
+ * **What is exact, and what is resampled.** Every keyframe's *value* and *time*
+ * are answers this universe gave — `kval` and `kat`, both `#project`ed, so two
+ * alternatives really are two files — and a track that animates one property
+ * comes out with exactly the keyframes the designer wrote, at exactly the
+ * percentages they resolved to. The one place arithmetic happens is where two
+ * tracks about one part both write `transform`: `transform` is a single CSS
+ * value, so a stop that moved the box and a stop that turned it cannot be two
+ * declarations, and a stop at 40% has to say what the *rotation* is at 40% even
+ * though the rotation's own keys are at 0% and 100%. That is a linear sample
+ * between the two surrounding keys, it ignores the easing of the segment it
+ * samples inside, and it is named in the losses — but only where it actually
+ * happens, which is where two transform tracks of one part disagree about when
+ * their keyframes are.
+ */
+
+/** One track of one timeline, with what this universe put in each keyframe. */
+interface PlayedKey {
+	at: number;
+	/** The literal the value resolved to, or nothing where it resolved to nothing. */
+	value: string | undefined;
+	easing: Easing;
+}
+
+interface PlayedTrack {
+	track: Track;
+	keys: PlayedKey[];
+}
+
+/** Every track of one timeline, read against this universe's picks. */
+function playedTracks(
+	machine: Machine,
+	timeline: Timeline,
+	context: { tokens: readonly Token[]; picks: Picks },
+): PlayedTrack[] {
+	const out: PlayedTrack[] = [];
+	for (const track of timeline.tracks) {
+		const term = trackTerm(track);
+		if (term === undefined) continue;
+		const keys = solvedKeys(machine, timeline, track, context).map((solved) => ({
+			at: solved.at,
+			value: resolveValue(
+				context,
+				solved.key.value,
+				keyValueVar(machine.id, timeline.id, term, solved.index),
+			),
+			easing: keyEasing(solved.key),
+		}));
+		if (keys.length > 0) out.push({ track, keys });
+	}
+	return out;
+}
+
+/**
+ * One track's number at one moment, linearly.
+ *
+ * Only ever asked about a track whose values are a *quantity* — a length or an
+ * angle — and only ever at a moment some other track of the same part has a
+ * keyframe at. Before the first key and after the last it holds flat, which is
+ * what `animation-fill-mode: both` does at the ends of the animation itself and
+ * is the only answer that does not invent a value out of nothing.
+ */
+function sampleAt(keys: readonly PlayedKey[], read: (text: string) => number | undefined, at: number): number | undefined {
+	const known = keys
+		.map((key) => ({ at: key.at, n: key.value === undefined ? undefined : read(key.value) }))
+		.filter((k): k is { at: number; n: number } => k.n !== undefined);
+	if (known.length === 0) return undefined;
+	if (at <= known[0].at) return known[0].n;
+	const last = known[known.length - 1];
+	if (at >= last.at) return last.n;
+	for (let i = 0; i + 1 < known.length; i++) {
+		const lo = known[i];
+		const hi = known[i + 1];
+		if (at < lo.at || at > hi.at) continue;
+		const span = hi.at - lo.at;
+		return span <= 0 ? lo.n : lo.n + ((hi.n - lo.n) * (at - lo.at)) / span;
+	}
+	return last.n;
+}
+
+/** True where this track writes into the one `transform` declaration. */
+const movesTransform = (track: Track): boolean =>
+	track.turn !== undefined || track.dim === "x" || track.dim === "y" || track.dim === "z";
+
+/** A `@keyframes` name no other block in this file has taken. */
+function keyframeName(taken: Set<string>, parts: readonly string[]): string {
+	const stem = `k-${parts.map(slug).join("-")}`;
+	let name = stem;
+	for (let n = 2; taken.has(name); n++) name = `${stem}-${n}`;
+	taken.add(name);
+	return name;
+}
+
+/**
+ * How a timeline's loop mode reaches the `animation` shorthand.
+ *
+ * `pingPong` is `alternate` over an infinite count, which is what the word means
+ * and what {@link timelinePosition} does on the canvas — the two have to agree or
+ * scrubbing in the studio and watching the exported page are two animations.
+ * `none` runs once and `both` holds the last frame, which is what makes the
+ * settled pose the state's rule states and the last keyframe of the timeline the
+ * same picture rather than a snap between them.
+ */
+const LOOPING: Record<LoopMode, { count: string; direction: string }> = {
+	none: { count: "1", direction: "normal" },
+	loop: { count: "infinite", direction: "normal" },
+	pingPong: { count: "infinite", direction: "alternate" },
+};
+
+/**
+ * The timelines one state plays, as `@keyframes` blocks and an `animation`.
+ *
+ * One block per (instance, timeline, **part**), not per timeline: a `@keyframes`
+ * block is applied to an element, and a timeline that moves a panel and fades a
+ * label is two elements' worth of animation. Splitting per part is what makes
+ * each block a sequence of declarations one element can actually take.
+ *
+ * The animation lands on the state's own rule where the state is one the file can
+ * select — which is every state but the one the picture is drawn in — and on the
+ * drawn state's *base* rule otherwise, through {@link MachineExport.playing},
+ * which `htmlExport` merges the way it merges the `transition:` declarations. A
+ * timeline that plays in the state the file opens in has to be running when the
+ * file opens, and a rule that only exists under a `data-state` the runtime has
+ * not written yet would start it late or not at all.
+ */
+function playTimelines(
+	base: Layer,
+	machine: Machine,
+	instance: SceneNode,
+	state: MachineState,
+	context: { tokens: readonly Token[]; picks: Picks },
+	out: Played,
+	say: (line: string) => void,
+): Map<string, Declarations> {
+	const model = base.universe.model;
+	const animations = new Map<string, Declarations>();
+	let timelines = statePlays(machine, state);
+	const named = timelines.length;
+	if (named === 0) return animations;
+	if (state.blend !== undefined) {
+		// **One stop, and it is scaffolding rather than a feature.** CSS has no way
+		// to mix two keyframe animations by a number: `animation` takes a list, but
+		// two animations writing one property is the last one winning, not a blend.
+		// So the file carries the stop the blend is *at* when the page opens — which
+		// is `blendWeights` asked with no host values, so it falls back to every
+		// input's declared initial, which is exactly the valuation the emitted
+		// runtime seeds its store with — and the loss says so. The studio canvas
+		// does the real mixing, off the same function.
+		const weights = blendWeights(machine, state.blend, {});
+		const heaviest = weights.reduce<(typeof weights)[number] | undefined>(
+			(best, w) => (best === undefined || w.weight > best.weight ? w : best),
+			undefined,
+		);
+		const chosen = timelines.find((t) => t.id === heaviest?.timeline);
+		timelines = chosen ? [chosen] : timelines.slice(0, 1);
+		// Counted against the timelines the blend *names*, not against the weights
+		// it came back with: a 1D blend sitting on one of its own stops answers with
+		// that stop alone, which is the common case and is exactly the case where a
+		// designer most needs telling that the rest of the axis is not in the file.
+		if (named > 1) {
+			say(
+				`The mix in ${stateName(machine, state.id)} of “${machine.name}”. A blend is arithmetic over a live number and CSS cannot mix two keyframe animations by one, so the file plays “${timelines[0].name}” — the stop the blend starts at — flat, and the other ${named - 1} ${named === 2 ? "is" : "are"} not in it.`,
+			);
+		}
+	}
+
+	for (const timeline of timelines) {
+		const length = timelineLength(machine, timeline, context);
+		if (length <= 0) {
+			say(
+				`“${timeline.name}” has no length in this design, so there is nothing between its keyframes to play. The pose ${stateName(machine, state.id)} settles in is in the file; the animation is not.`,
+			);
+			continue;
+		}
+		const tracks = playedTracks(machine, timeline, context);
+		const parts = [...new Set(tracks.map((t) => t.track.part))];
+		for (const part of parts) {
+			const nodeId = instancePart(instance.id, part);
+			const drawn = model.byId[nodeId];
+			if (!drawn) {
+				say(
+					`“${timeline.name}” animates “${part}” of “${instance.name}”, which this design is not drawing. A stylesheet can animate an element and cannot write one, so that track is not in the file.`,
+				);
+				continue;
+			}
+			const block = keyframeBlock(
+				timeline,
+				length,
+				tracks.filter((t) => t.track.part === part),
+				drawn,
+				say,
+			);
+			if (block === undefined) continue;
+			const name = keyframeName(out.names, [instance.id, timeline.id, part]);
+			out.keyframes.push(`@keyframes ${name} {\n${block}\n}`);
+			const loop = LOOPING[timeline.loop ?? "none"];
+			// `linear` in the shorthand on purpose: each stop carries its own
+			// `animation-timing-function`, which is what a per-keyframe easing means
+			// in CSS, and a curve in the shorthand would be applied *on top of* those
+			// rather than instead of them.
+			animations.set(nodeId, {
+				...(animations.get(nodeId) ?? {}),
+				animation: `${name} ${ms(length)} linear 0ms ${loop.count} ${loop.direction} both`,
+			});
+		}
+	}
+	return animations;
+}
+
+/** Where the timelines of one document accumulate while they are being read. */
+interface Played {
+	keyframes: string[];
+	/** `animation:` for a node whose state is the one the picture is drawn in. */
+	playing: Map<string, Declarations>;
+	/** Every `@keyframes` name taken so far, so two of them cannot collide. */
+	names: Set<string>;
+}
+
+/**
+ * One part's tracks, as the body of a `@keyframes` block.
+ *
+ * The percentages are integers, which is what `rive-ladder-spec.md` §9.4 froze
+ * and is coarser than it looks like it should be: 1% of a 200ms timeline is 2ms,
+ * which no eye resolves, and a fractional percentage in a `@keyframes` selector
+ * is legal but is a number nobody reading the file can check against the panel.
+ * Where the rounding is not exact the loss says so, and where two keyframes round
+ * onto one percentage the later one wins and the loss says that too — both are
+ * facts about *this* timeline rather than about the format, so neither is said
+ * about a document where they do not happen.
+ *
+ * `undefined` where the part's tracks come to no declarations at all, so the
+ * caller emits no block and no `animation` rather than an empty one.
+ */
+function keyframeBlock(
+	timeline: Timeline,
+	length: number,
+	tracks: readonly PlayedTrack[],
+	drawn: ModelNode,
+	say: (line: string) => void,
+): string | undefined {
+	const moving = tracks.filter((t) => movesTransform(t.track));
+	// Every moment any transform track has a key at, because one `transform`
+	// declaration has to answer for all of them at every stop it appears in.
+	const moments = [...new Set(moving.flatMap((t) => t.keys.map((k) => k.at)))].sort(
+		(a, b) => a - b,
+	);
+	if (
+		moving.length > 1 &&
+		moving.some((t) => t.keys.length !== moments.length)
+	) {
+		say(
+			`When the parts of the move in “${timeline.name}” happen. Two tracks of one part both write the browser's one transform, and their keyframes are at different times — so the file states the whole pose at every one of those times, taking the in-between values as straight lines. A curve on a segment that another track subdivides is flattened inside it.`,
+		);
+	}
+
+	/** Stop percentage -> what is declared there. */
+	const stops = new Map<number, Declarations>();
+	let rounded = false;
+	let collided = false;
+	let past = false;
+	const stopAt = (at: number): Declarations => {
+		if (at > length) past = true;
+		const exact = (100 * Math.min(at, length)) / length;
+		const percent = Math.round(exact);
+		if (percent !== exact) rounded = true;
+		const held = stops.get(percent);
+		if (held !== undefined) collided = true;
+		const made = held ?? {};
+		stops.set(percent, made);
+		return made;
+	};
+
+	for (const played of tracks) {
+		const { track } = played;
+		if (movesTransform(track)) continue;
+		for (const key of played.keys) {
+			if (key.value === undefined) continue;
+			const at = stopAt(key.at);
+			if (track.dim === "width" || track.dim === "height") {
+				at[track.dim] = cssLength(key.value);
+				continue;
+			}
+			if (track.dim === "depth") {
+				// A `div` has no thickness — see `moveDeclarations`, which says the same
+				// thing about the same number. Silently nothing rather than a loss:
+				// there is nothing on the canvas either.
+				continue;
+			}
+			if (track.prop !== undefined) {
+				const paint = paintFor(drawn.kind, track.prop);
+				if (paint) Object.assign(at, paint(cssValue(track.prop, key.value)));
+			}
+			Object.assign(at, easingAt(played, key));
+		}
+	}
+
+	for (const at of moments) {
+		const stop = stopAt(at);
+		// A translation is a **delta** from where the element already is, because
+		// `left` and `top` are absolute in the rule this animation runs on top of —
+		// the same basis `moveDeclarations` writes a state's move in, so a timeline
+		// and a state that both move a part agree about where zero is. A track that
+		// says nothing about an axis leaves that axis where the picture has it,
+		// which for x and y is a delta of nothing.
+		const placed = (dim: "x" | "y"): Emu => {
+			const sampled = sampleAt(keysOf(moving, dim), emuOf, at);
+			return sampled === undefined ? 0 : sampled - drawn.frame[dim];
+		};
+		const dx = placed("x");
+		const dy = placed("y");
+		const z = sampleAt(keysOf(moving, "z"), emuOf, at) ?? drawn.spatial?.z ?? 0;
+		const turn = { ...(drawn.turn ?? { rotateX: 0, rotateY: 0, rotateZ: 0 }) };
+		for (const name of TURN_NAMES) {
+			const sampled = sampleAt(turnKeys(moving, name), mdegOf, at);
+			if (sampled !== undefined) turn[name] = sampled;
+		}
+		stop.transform = transformOf(dx, dy, z, turn) ?? "none";
+		for (const played of moving) {
+			const key = played.keys.find((k) => k.at === at);
+			if (key) Object.assign(stop, easingAt(played, key));
+		}
+	}
+
+	if (stops.size === 0) return undefined;
+	if (rounded) {
+		say(
+			`Exactly when each keyframe of “${timeline.name}” lands. A CSS keyframe is a whole percentage of the animation, so a key that falls between two of them is written at the nearer one — at most half a percent of ${ms(length)} out.`,
+		);
+	}
+	if (collided) {
+		say(
+			`Two keyframes of “${timeline.name}” land on the same whole percentage of it, and a stylesheet has one stop there. The later one is what is in the file.`,
+		);
+	}
+	if (past) {
+		say(
+			`A keyframe of “${timeline.name}” is past the end of it — the timeline is ${ms(length)} long and says so — so the file holds that key at the end rather than beyond it, which is where the canvas holds it too.`,
+		);
+	}
+	return [...stops.entries()]
+		.sort((a, b) => a[0] - b[0])
+		.map(([percent, declarations]) => rule(`${percent}%`, declarations, "\t"))
+		.filter((text) => text !== "")
+		.join("\n");
+}
+
+/** The keys of the one track about a dimension, or none. */
+const keysOf = (tracks: readonly PlayedTrack[], dim: string): PlayedKey[] =>
+	tracks.find((t) => t.track.dim === dim)?.keys ?? [];
+
+/** The same, for a rotation. */
+const turnKeys = (tracks: readonly PlayedTrack[], turn: Turn): PlayedKey[] =>
+	tracks.find((t) => t.track.turn === turn)?.keys ?? [];
+
+/**
+ * The curve leaving one keyframe, as the declaration CSS reads it with.
+ *
+ * `animation-timing-function` inside a stop paces the segment *leaving* that
+ * stop, which is exactly what {@link Keyframe.easing} means and why the last
+ * keyframe's is read by nothing here as it is read by nothing anywhere else. The
+ * default is left out rather than written: `ease-out` on every stop of every
+ * block is the same animation and several hundred more bytes.
+ */
+function easingAt(played: PlayedTrack, key: PlayedKey): Declarations {
+	const last = played.keys[played.keys.length - 1];
+	if (key === last) return {};
+	return key.easing === DEFAULT_EASING
+		? {}
+		: { animationTimingFunction: EASINGS[key.easing].css };
 }
 
 /**

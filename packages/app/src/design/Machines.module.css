@@ -229,8 +229,143 @@
 	cursor: default;
 }
 
-/* The four checks. Reported always, forbidden only where somebody asks — so a
-   failing row is drawn as news rather than as an error. */
+/* What one state plays: a timeline, or a mixture of them. Beside the state strip
+   rather than inside the timeline editor, because "which timeline does this
+   play" is a fact about the state — a timeline is routinely played by two. */
+.plays {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+	padding: 0.2rem 0.25rem;
+	border-radius: 4px;
+	background: var(--dc-sunken);
+}
+
+.play {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.playLabel,
+.title {
+	flex: none;
+	font-size: 0.62rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.45;
+}
+
+.select {
+	min-width: 0;
+	padding: 0.05rem 0.2rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.blend {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin-left: 0.4rem;
+	padding-left: 0.4rem;
+	border-left: 2px solid var(--dc-line);
+}
+
+.blendHead,
+.stop {
+	display: flex;
+	align-items: center;
+	gap: 0.2rem;
+}
+
+.stopIndex {
+	flex: none;
+	min-width: 0.8rem;
+	font-size: 0.6rem;
+	text-align: right;
+	opacity: 0.35;
+	font-variant-numeric: tabular-nums;
+}
+
+/* Where a 1D stop sits on its input's axis. Same shape as the budget field
+   above and a different name, because a reader who found `.budget` on a blend
+   threshold would go looking for a duration. */
+.threshold {
+	width: 3.2rem;
+	padding: 0 0.15rem;
+	font: inherit;
+	font-size: 0.66rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	font-variant-numeric: tabular-nums;
+}
+
+/* A threshold where the input can never be, so the stop plays nothing. */
+.outside .stopIndex,
+.outside .threshold {
+	color: var(--dc-bad, #fca5a5);
+}
+
+/* Timelines. One editor open at a time: a timeline is tall, and three of them
+   expanded would push the delta rows off the bottom of the panel. */
+.timelines {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+}
+
+.timelineHead {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.2rem;
+}
+
+.tab {
+	flex: none;
+	padding: 0.05rem 0.35rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-sunken);
+	border: 1px solid transparent;
+	border-radius: 999px;
+	opacity: 0.6;
+	cursor: pointer;
+}
+
+.tab:hover {
+	opacity: 1;
+}
+
+.openTab {
+	opacity: 1;
+	border-color: color-mix(in srgb, var(--dc-accent) 55%, transparent);
+}
+
+/* The panel's own findings, as opposed to the checks' — a state with two
+   sources, a blend with a gap, a stop nothing can reach.
+   Named `trouble` and not `finding` deliberately: `.finding` below is the
+   checks' row, one module cannot hold two rules of one name without the later
+   one deciding for both, and a colour set here would have leaked onto every
+   check row that is passing. */
+.trouble {
+	margin: 0;
+	font-size: 0.62rem;
+	line-height: 1.4;
+	color: #b45309;
+}
+
+/* The four graph checks, the six the ladder added and the budget. Reported
+   always, forbidden only where somebody asks — so a failing row is drawn as news
+   rather than as an error. */
 .checks {
 	display: flex;
 	flex-direction: column;

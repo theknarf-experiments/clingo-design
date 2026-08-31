@@ -37,11 +37,14 @@ import {
 	type Machine,
 	type Scene,
 	type SceneNode,
+	EDGES,
+	EDGE_NAMES,
 	dimension,
 	emptyScene,
 	makeFrame,
+	makeSpatial,
 } from "./scene.ts";
-import { isSpatialScene } from "./spatial.ts";
+import { isSpatialScene, refusedEdge } from "./spatial.ts";
 import { TEMPLATES } from "./templates/index.ts";
 import { EMU_PER_PX } from "./units.ts";
 import { type Value, lit, rotateVar, single } from "./values.ts";
@@ -223,6 +226,14 @@ function summarise(template: (typeof TEMPLATES)[number], result: {
  * the commit says which universe moved and why, or the third axis has leaked
  * into a document that has none — which is the one failure this whole track
  * promised could not happen.
+ *
+ * Two ids were **added** later and neither is a regeneration: `deck` and
+ * `solids` are the templates written after the ladder and the third axis
+ * shipped, so they have no "before" to have moved away from. What they get out
+ * of being in here is the same thing every other id gets from tomorrow onwards —
+ * a count, a node set, a frame, a paint and both exports, pinned. Adding an id
+ * is an ordinary change; changing one that was already here is the thing this
+ * comment is about.
  */
 const GOLDENS = JSON.parse(
 	readFileSync(new URL("./spatialprogram.goldens.json", import.meta.url), "utf8"),
@@ -240,6 +251,17 @@ for (const template of TEMPLATES) {
 	});
 }
 
+/**
+ * The one template that is in three dimensions — the twin of
+ * `SPATIAL_TEMPLATES` in `spatial.test.ts`, named for the same reason.
+ *
+ * Every other template is a document written before the third axis existed, and
+ * the loop below is the promise that they still are: not "mostly flat", not
+ * "flat unless something opted in", but zero atoms of six predicates across
+ * twelve documents and every universe of each.
+ */
+const SPATIAL_TEMPLATES = new Set(["solids"]);
+
 test("no template's atoms hold one word of the third axis", async () => {
 	// The gate, asserted where a designer could actually observe it: not by
 	// reading the rules — they are emitted always, like the geometry and machine
@@ -247,6 +269,12 @@ test("no template's atoms hold one word of the third axis", async () => {
 	// predicates and nothing of them.
 	for (const template of TEMPLATES) {
 		const scene = template.create();
+		if (SPATIAL_TEMPLATES.has(template.id)) {
+			// The other end of the partition, so the exclusion above cannot be used
+			// to quieten a template that leaked into the third axis by accident.
+			assert.equal(isSpatialScene(scene), true, `${template.id} reads as flat`);
+			continue;
+		}
 		assert.equal(isSpatialScene(scene), false, `${template.id} reads as spatial`);
 		const atoms = await answer(
 			scene,
@@ -265,11 +293,24 @@ test("no template's atoms hold one word of the third axis", async () => {
 				`${template.id} has a frame on ${dim}`,
 			);
 		}
-		// And the program text, for the two the atoms cannot speak for: a fact
-		// that is never stated, and a vocabulary row that is never generated.
+		// And the program text, for what the atoms cannot speak for: the gate is
+		// never stated, and every third-axis vocabulary row is a *rule* behind it
+		// rather than a fact.
+		//
+		// This used to assert that `gedge(front` did not appear in the text at all,
+		// which was true only because `EDGES` had no z rows in it. Now that it has
+		// them, the row is generated always — like every other rule in this program
+		// — and what keeps the promise is the guard, so the guard is what is
+		// asserted. The atom scan above is the other half and the stronger one:
+		// generated or not, a flat document grounds none of it.
 		const { generated } = compile(scene);
 		assert.equal(generated.includes("\nspatial.\n"), false, template.id);
-		assert.equal(generated.includes("gedge(front"), false, template.id);
+		assert.ok(
+			generated.includes("gedge(front,z,pos) :- spatial."),
+			`${template.id} has no guarded front row`,
+		);
+		assert.equal(generated.includes("gedge(front,z,pos)."), false, template.id);
+		assert.equal(generated.includes("gplace(front,lead)."), false, template.id);
 		assert.equal(generated.includes("gaxis(z)."), false, template.id);
 	}
 });
@@ -595,6 +636,158 @@ test("a turned box keeps its centre and its size, exactly", async () => {
 	const held = await answer(twoMeshes("gap", "x", undefined, 24));
 	assert.equal(
 		(lpx(held, "lv(m2,x)") ?? 0) - ((lpx(held, "lv(m1,x)") ?? 0) + (lpx(held, "lsz(m1,width)") ?? 0)),
+		24,
+	);
+});
+
+test("refusedEdge and gnoedge/2 agree, edge by edge, on the same document", async () => {
+	// **The two-readers test, and the reason `refusedEdge` was allowed to exist.**
+	// The panel has to grey a row while there is no answer set at all, and the
+	// program has to refuse the quantity while there is — so there are two
+	// implementations of one rule, and two implementations of one rule are a thing
+	// that can disagree. This is the same arrangement `machineHealth` and
+	// `munreached/2` have, held the same way: not by spot-checking a sentence, but
+	// by asking both readers about every member and every edge of one document and
+	// comparing the two sets.
+	//
+	// The document turns one of two meshes, which is one of the two levers
+	// `gnoedge/2` has; the other is the third clause, a `z` edge on a node outside
+	// the third axis, and the loop below reaches it because both meshes are inside
+	// a viewport and every edge is asked. The partition is stated rather than
+	// assumed, so that a vocabulary that lost its z rows again would fail here
+	// instead of passing vacuously.
+	assert.deepEqual(
+		EDGE_NAMES.filter((e) => EDGES[e].axis === "z"),
+		["front", "centerZ", "back", "depth", "z"],
+		"all five third-axis quantities are in the vocabulary and therefore asked about",
+	);
+
+	const document = twoMeshes("align", "left", single("30deg"));
+	const atoms = await answer(document, "#show gnoedge/2.\n");
+	const refused = new Set(
+		of(atoms, "gnoedge").map(([node, edge]) => `${node}/${edge}`),
+	);
+	// Only the edges the program could have minted at all: `gnoedge/2` is ranged
+	// over this document's own members, so an edge of a node no rule names is not
+	// a disagreement, it is a question neither reader was asked.
+	const mine = new Set<string>();
+	for (const member of document.constraints[0].nodes) {
+		for (const edge of EDGE_NAMES) {
+			if (refusedEdge(document, member, edge) !== undefined) {
+				mine.add(`${member}/${edge}`);
+			}
+		}
+	}
+	assert.deepEqual(
+		[...mine].sort(),
+		[...refused].filter((k) => k.startsWith("m1/") || k.startsWith("m2/")).sort(),
+		"the reader and the program refuse exactly the same quantities",
+	);
+	assert.ok(mine.size > 0, "and they agree about something, not about nothing");
+
+	// **The third clause, which had nowhere to fire until `EDGES` grew its z
+	// rows.** A rule between a rectangle on the page and a mesh in a view, about a
+	// depth: the mesh has a front and the rectangle has not, so the quantity is
+	// never minted for it and the rule is satisfied by a box the document does not
+	// contain unless something refuses it. Both readers refuse it, and only for
+	// the member that is outside the third axis.
+	const across: Scene = {
+		...scened(
+			board("page", { x: 0, y: 0 }, [
+				at("card", "rect", { x: 40, y: 40, w: 120, h: 80 }),
+				at("view", "viewport", { x: 300, y: 0, w: 480, h: 320 }, {
+					children: [at("m1", "mesh", { x: 20, y: 20, w: 100, h: 60 })],
+				}),
+			]),
+		),
+		constraints: [geometric("k_deep", "align", ["card", "m1"], "centerZ")],
+	};
+	const deep = await answer(across, "#show gnoedge/2.\n");
+	const deepRefused = new Set(
+		of(deep, "gnoedge").map(([node, edge]) => `${node}/${edge}`),
+	);
+	const deepMine = new Set<string>();
+	for (const member of across.constraints[0].nodes) {
+		for (const edge of EDGE_NAMES) {
+			if (refusedEdge(across, member, edge) !== undefined) {
+				deepMine.add(`${member}/${edge}`);
+			}
+		}
+	}
+	// All five z quantities, and only for the member that has none of them. The
+	// program refuses the whole family at once — `gnoedge/2`'s third clause ranges
+	// over `gedge(E,z,_)` and not over the edge this rule happens to name — and the
+	// reader, asked one edge at a time, gives the same five.
+	assert.deepEqual(
+		[...deepMine].sort(),
+		["card/back", "card/centerZ", "card/depth", "card/front", "card/z"],
+	);
+	assert.deepEqual([...deepMine].sort(), [...deepRefused].sort());
+	assert.match(
+		refusedEdge(across, "card", "centerZ") ?? "",
+		/no front, no back and no depth/,
+	);
+	assert.equal(refusedEdge(across, "m1", "centerZ"), undefined, "the mesh keeps it");
+
+	// The other half of the partition: unturn it and both go silent together.
+	const flat = twoMeshes("align", "left", single("0deg"));
+	const none = await answer(flat, "#show gnoedge/2.\n");
+	assert.deepEqual(of(none, "gnoedge"), []);
+	for (const member of flat.constraints[0].nodes) {
+		for (const edge of EDGE_NAMES) {
+			assert.equal(refusedEdge(flat, member, edge), undefined, `${member}/${edge}`);
+		}
+	}
+});
+
+test("a rule about depth is an ordinary rule, and the vocabulary is what made it one", async () => {
+	// **The payoff of `EDGES` growing its five z rows**, and the thing that was
+	// impossible before them: a designer could write a rule about `left` from a
+	// menu and had to write one about `front` by hand, against `wv/2` and `lsz/2`,
+	// in the power panel. There was no menu entry, because there was no edge.
+	//
+	// Nothing in the program had to change for this. `gedge/3` and `gplace/2` were
+	// already emitted from the table behind the `spatial` gate, the geometry rules
+	// read the table rather than naming edges, and `gaxis(z)`/`gspan(depth)` have
+	// been there since the third axis landed. What was missing was the vocabulary
+	// row, which is the whole argument for `compile()` never naming an edge.
+	const stacked = (kind: Constraint["kind"], edge: Constraint["edge"], value?: number): Scene => ({
+		...scened(
+			board("page", { x: 0, y: 0 }, [
+				at("view", "viewport", { x: 0, y: 0, w: 480, h: 320 }, {
+					children: [
+						at("m1", "mesh", { x: 20, y: 20, w: 100, h: 60 }, {
+							spatial: makeSpatial({ z: px(40), depth: px(30) }),
+						}),
+						at("m2", "mesh", { x: 300, y: 150, w: 140, h: 60 }, {
+							spatial: makeSpatial({ z: px(200), depth: px(50) }),
+						}),
+					],
+				}),
+			]),
+		),
+		constraints: [geometric("k", kind, ["m1", "m2"], edge, value)],
+	});
+
+	// Front faces together: both sit at the same z, and the depths are untouched.
+	const front = await answer(stacked("align", "front"));
+	assert.equal(lpx(front, "lv(m1,z)"), lpx(front, "lv(m2,z)"));
+	assert.equal(lpx(front, "lsz(m1,depth)"), 30, "a place rule moves and does not resize");
+	assert.equal(lpx(front, "lsz(m2,depth)"), 50);
+
+	// Depth centres together, which is a different answer because the depths differ.
+	const centres = await answer(stacked("align", "centerZ"));
+	const middle = (id: string): number =>
+		(lpx(centres, `lv(${id},z)`) ?? 0) + (lpx(centres, `lsz(${id},depth)`) ?? 0) / 2;
+	assert.equal(middle("m1"), middle("m2"));
+	assert.notEqual(lpx(centres, "lv(m1,z)"), lpx(centres, "lv(m2,z)"));
+
+	// A depth is a span like a width, and a gap on z is measured face to face.
+	const same = await answer(stacked("equalSize", "depth"));
+	assert.equal(lpx(same, "lsz(m1,depth)"), lpx(same, "lsz(m2,depth)"));
+	const gap = await answer(stacked("gap", "z", 24));
+	assert.equal(
+		(lpx(gap, "lv(m2,z)") ?? 0) - ((lpx(gap, "lv(m1,z)") ?? 0) + (lpx(gap, "lsz(m1,depth)") ?? 0)),
 		24,
 	);
 });

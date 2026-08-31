@@ -1,0 +1,28 @@
+{
+	"name": "@clingo-design/canvas-3d",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"test": "node --test \"src/**/*.test.ts\""
+	},
+	"dependencies": {
+		"@clingo-design/design-core": "workspace:*",
+		"@react-three/fiber": "^9.7.0",
+		"three": "^0.185.1"
+	},
+	"devDependencies": {
+		"@types/node": "^26.2.0",
+		"@types/react": "^19.2.18",
+		"@types/three": "^0.185.4",
+		"typescript": "^7.0.2",
+		"vite": "^8.2.2"
+	},
+	"peerDependencies": {
+		"react": "^19.2.0"
+	}
+}

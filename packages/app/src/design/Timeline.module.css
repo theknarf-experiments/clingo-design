@@ -1,0 +1,226 @@
+.timeline {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	padding: 0.25rem;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.head {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+}
+
+.name {
+	flex: 1;
+	min-width: 0;
+	padding: 0.1rem 0.25rem;
+	font: inherit;
+	font-size: 0.74rem;
+	font-weight: 600;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+}
+
+.name:focus {
+	background: var(--dc-raised);
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+.select {
+	min-width: 0;
+	padding: 0.05rem 0.2rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.action {
+	flex: none;
+	padding: 0 0.2rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	background: transparent;
+	border: none;
+	border-radius: 4px;
+	opacity: 0.4;
+	cursor: pointer;
+}
+
+.action:hover {
+	opacity: 1;
+	color: #dc2626;
+}
+
+.add {
+	flex: none;
+	padding: 0.05rem 0.3rem;
+	font: inherit;
+	font-size: 0.66rem;
+	color: inherit;
+	background: transparent;
+	border: 1px dashed var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.add:hover {
+	background: var(--dc-raised);
+}
+
+.lengthRow {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.3rem;
+}
+
+.lengthRow > :first-child {
+	flex: 1;
+	min-width: 0;
+}
+
+/* What this universe made of the length — the number the export would write,
+   which is not the text the document stores whenever it names a token. */
+.resolved,
+.ms {
+	flex: none;
+	font-size: 0.64rem;
+	opacity: 0.5;
+	font-variant-numeric: tabular-nums;
+}
+
+/* The scrubber. No play button beside it, deliberately: what paces a timeline is
+   the compositor, in the studio exactly as in the exported file, and a clock here
+   would be a second animator arguing with it. */
+.scrub {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+}
+
+.slider {
+	flex: 1;
+	min-width: 0;
+	accent-color: var(--dc-accent);
+}
+
+.track {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 0.2rem;
+	background: var(--dc-raised);
+	border-radius: 4px;
+}
+
+.trackHead {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.trackName {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	font-size: 0.7rem;
+}
+
+.count,
+.type {
+	flex: none;
+	font-size: 0.6rem;
+	opacity: 0.4;
+	font-variant-numeric: tabular-nums;
+}
+
+.type {
+	align-self: flex-end;
+}
+
+.key {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-start;
+	gap: 0.2rem;
+	padding: 0.1rem 0;
+}
+
+/* This universe put it before the key in front of it. A property of an answer
+   rather than of the document, which is why it is marked here and reported as
+   news rather than refused by the editor. */
+.suspect {
+	background: color-mix(in srgb, #b45309 10%, transparent);
+	border-radius: 4px;
+}
+
+.at {
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0;
+	min-width: 2.6rem;
+	padding: 0.1rem 0.15rem;
+	font: inherit;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.at:hover:not(:disabled) {
+	border-color: var(--dc-line);
+}
+
+.at:disabled {
+	cursor: default;
+}
+
+.index {
+	font-size: 0.58rem;
+	opacity: 0.35;
+	font-variant-numeric: tabular-nums;
+}
+
+.fields {
+	flex: 1;
+	min-width: 8rem;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.empty {
+	margin: 0;
+	font-size: 0.66rem;
+	line-height: 1.45;
+	opacity: 0.45;
+}
+
+.finding {
+	flex-basis: 100%;
+	margin: 0;
+	font-size: 0.62rem;
+	line-height: 1.4;
+	color: #b45309;
+}
+
+.addTrack {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+}

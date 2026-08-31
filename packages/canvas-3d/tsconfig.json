@@ -1,0 +1,31 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"lib": ["ES2023", "DOM", "DOM.Iterable"],
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"moduleDetection": "force",
+		"jsx": "react-jsx",
+		"types": ["vite/client", "node"],
+
+		"strict": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noFallthroughCasesInSwitch": true,
+
+		"isolatedModules": true,
+		"verbatimModuleSyntax": true,
+		"erasableSyntaxOnly": true,
+		"skipLibCheck": true,
+
+		// Copied from `packages/canvas`, plus this one line. Local imports in this
+		// package carry their real extension — `./units3.ts`, `./SceneTree.tsx` —
+		// which is `design-core`'s rule and the rule the repo's own instructions
+		// state, and it is also what `packages/app`'s tsconfig already allows for
+		// the sources it pulls in across the workspace boundary. Without it this
+		// package would typecheck under one rule here and another there.
+		"allowImportingTsExtensions": true,
+		"noEmit": true
+	},
+	"include": ["src"]
+}

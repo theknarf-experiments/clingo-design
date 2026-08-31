@@ -27,6 +27,7 @@ import {
 	type Universe,
 	addConstraint,
 	addInstance,
+	addPivot,
 	defineComponent,
 	deleteNodes,
 	distributeNodes,
@@ -49,15 +50,20 @@ import {
 	variantLabel,
 	drawGuideAt,
 	flatten,
+	layerOf,
 	machineForNode,
+	machineLayers,
 	machineTable,
 	motionLabel,
+	parentOf,
 	parseStatePart,
 	parseVariable,
 	placedNodes,
 	reachableAlternatives,
 	sceneContext,
 	shownState,
+	shownStates,
+	keyframeCopyIds,
 	stateCopyIds,
 	stateLabel,
 	stateVarLabel,
@@ -105,7 +111,7 @@ import { layoutArtboards } from "./layout";
 import { measureScene } from "./measureText";
 import { useCulling } from "./useCulling";
 import { useExploration } from "./useExploration";
-import { useMachinePlayback } from "./useMachinePlayback";
+import { firstLayerOf, layerHolding, useMachinePlayback } from "./useMachinePlayback";
 import { canvasPx, canvasRect } from "./viewport";
 import styles from "./Studio.module.css";
 import tabStyles from "./tabs.module.css";
@@ -135,6 +141,12 @@ const TOOL_KEY: Record<string, string> = {
 	shape: "R",
 	path: "P",
 	text: "T",
+	// The 3D view has had a slot in this bar since `KINDS.viewport.tool` became
+	// true, and until now it had no key and no glyph — which is a button nobody
+	// can find and a shortcut that renders as an empty `<kbd>`. `3` rather than a
+	// letter because every initial worth having is taken and because it is what
+	// the thing is called.
+	viewport: "3",
 };
 
 const VIEWS = [
@@ -334,6 +346,16 @@ export function Studio({
 	 */
 	const [previewing, setPreviewing] = useState(false);
 	/**
+	 * Which layer of a machine the States panel's strips are showing.
+	 *
+	 * Editor state, held here rather than inside the panel because it outlives a
+	 * re-render of the panel and because the same answer will be wanted by the
+	 * canvas strip the day that one grows a layer selector. Undefined is "the
+	 * first", which is what a one-layer machine — every machine in every document
+	 * today — always means.
+	 */
+	const [machineLayer, setMachineLayer] = useState<string | undefined>(undefined);
+	/**
 	 * Which state each instance is being played in, and the four ways to change
 	 * it.
 	 *
@@ -345,6 +367,50 @@ export function Studio({
 	 * different verb with a different button, and the panels say so in words.
 	 */
 	const playback = useMachinePlayback(scene);
+	/**
+	 * The flattened machines, memoised, because four things below ask it
+	 * questions and it is a walk of the whole document.
+	 *
+	 * The same table the playback hook builds and the export ships, so the
+	 * studio's projections and the studio's steps cannot disagree about which
+	 * layer a state is in.
+	 */
+	const table = useMemo(() => machineTable(scene), [scene]);
+	/**
+	 * The played states as a flat record — instance to state — for the panels that
+	 * have not learned about layers.
+	 *
+	 * `Machines`, `StateStrip`, `Transitions` and `Inspector` all take
+	 * `Record<instance, state>` and `onPlay(instance, state | null)`, and all four
+	 * belong to steps this one may not edit (`docs/merged-plan.md` M20 and M23).
+	 * So the projection happens here, at the four call sites, rather than the hook
+	 * carrying a second shape for their benefit — and it is the *first* layer,
+	 * which is what `SceneNode.state` means, what `MachineTable.instances[].initial`
+	 * carries and what the export writes as plain `data-state`.
+	 *
+	 * When those steps land they take `playback.playing` directly and these two
+	 * bindings go.
+	 */
+	const playingFlat = useMemo(
+		() => firstLayerOf(table, playback.playing),
+		[table, playback.playing],
+	);
+	const playFlat = useCallback(
+		(instance: string, state: string | null) => {
+			if (state === null) {
+				// Handing back "the state" from a flat panel hands back the layer that
+				// flat answer came from, which is the first. A panel that can only see
+				// one layer must not be able to silently stop the other two.
+				const first = table.machines[table.instances[instance]?.machine ?? ""]
+					?.layers?.[0];
+				if (first) playback.play(instance, first.id, null);
+				return;
+			}
+			const layer = layerHolding(table, instance, state);
+			if (layer !== undefined) playback.play(instance, layer, state);
+		},
+		[table, playback],
+	);
 	/**
 	 * How the transition that fired most recently is paced, for the canvas.
 	 *
@@ -1158,8 +1224,57 @@ export function Studio({
 		setPanel("constraints");
 	}
 
+	/**
+	 * The one viewport every selected node is a **direct child** of, or nothing.
+	 *
+	 * Direct children because that is what `addPivot` re-parents: it rebases the
+	 * ones it takes by however far the pivot moved, and a node three levels down
+	 * is already rebased by its own ancestors. Nothing where the selection spans
+	 * two views or straddles the seam — a pivot is a transform inside one model
+	 * space, and there is no honest answer for a selection that is half on the
+	 * page.
+	 */
+	function sharedView(): string | undefined {
+		if (selection.size < 1) return undefined;
+		let view: string | undefined;
+		for (const id of selection) {
+			const parent = parentOf(scene.nodes, id);
+			if (parent?.kind !== "viewport") return undefined;
+			if (view !== undefined && view !== parent.id) return undefined;
+			view = parent.id;
+		}
+		return view;
+	}
+
+	/**
+	 * Group — and inside a 3D view that means a **pivot**, not a group.
+	 *
+	 * The same gesture for both because it is the same request, and the different
+	 * answer because a group is the wrong shape below the seam: `wrapsChildren` is
+	 * true of a group, so it re-fits to its children's 2D bounding box — and the
+	 * bounding box of rotated solids is exactly the trigonometry a linear solver
+	 * cannot do. A pivot is a place and a rotation with nothing to re-fit, which
+	 * is `KINDS.pivot`'s whole argument, and ⌘G is where a designer goes looking
+	 * for it.
+	 *
+	 * `addPivot` can refuse — a child whose x is driven by a token cannot be
+	 * rebased without unwiring the link, and it declines rather than doing that —
+	 * in which case the scene comes back unchanged and so does the selection,
+	 * which is the same silence every other refused edit in this studio gives.
+	 */
 	function group() {
 		if (selection.size === 0) return;
+		const view = sharedView();
+		if (view !== undefined) {
+			const before = new Set(flatten(scene.nodes).map((n) => n.id));
+			const next = addPivot(scene, view, [...selection], picks);
+			const made = flatten(next.nodes).find(
+				(n) => n.kind === "pivot" && !before.has(n.id),
+			);
+			onSceneChange(() => next);
+			if (made) setSelection(new Set([made.id]));
+			return;
+		}
 		let created: string | null = null;
 		onSceneChange((prev) => {
 			const result = groupNodes(prev, [...selection], "Group", picks);
@@ -1372,6 +1487,39 @@ export function Studio({
 	const stateMembers = useMemo(() => stateCopyIds(scene), [scene]);
 
 	/**
+	 * The last frame each 3D view drew, as a PNG data URL, by viewport node id.
+	 *
+	 * **Session state and deliberately not the document.** A poster is a
+	 * photograph of one moment of one camera in one universe: it is not something
+	 * the design says, it must not reach a solve or an undo entry, and a data URL
+	 * in the file would be a hundred kilobytes in every diff and every sync
+	 * message. It exists so that {@link ExportPanel} can hand `exportUniverse` a
+	 * picture of what was inside a view, because HTML has no word for geometry and
+	 * `design-core` has no renderer to take one with.
+	 *
+	 * Written once per mounted view, when the renderer hands the first frame back
+	 * — see `ViewportCanvas`'s `Poster`. Re-encoding a PNG every frame would cost
+	 * more than the rendering, and what an export wants is what the view looked
+	 * like rather than what it looks like this instant.
+	 */
+	const [posters, setPosters] = useState<Record<string, string>>({});
+	const keepPoster = useCallback((viewport: string, dataUrl: string) => {
+		setPosters((was) =>
+			was[viewport] === dataUrl ? was : { ...was, [viewport]: dataUrl },
+		);
+	}, []);
+
+	/**
+	 * Keyframe copies a rule may name, offered in the same picker.
+	 *
+	 * The twin of {@link stateMembers}, and the *only* way one of these terms
+	 * gets into a document: `compile()` mints `kfr(I,W,R,K)` where a rule already
+	 * names one and nowhere else, so a mechanism with no menu in front of it is a
+	 * mechanism nobody can start using.
+	 */
+	const keyMembers = useMemo(() => keyframeCopyIds(scene), [scene]);
+
+	/**
 	 * The edge a trigger takes at an instance right now, or nothing.
 	 *
 	 * A second reading of what `stepMachine` answers, and the duplication is
@@ -1391,17 +1539,27 @@ export function Studio({
 		if (!node) return undefined;
 		const machine = machineForNode(scene, node);
 		if (!machine) return undefined;
-		const from = playback.playing[instance] ?? shownState(machine, node);
+		// Where every layer is: what is being played, over what the document draws.
+		// Layers made "where the machine is" plural, so the edge that fired is the
+		// first one leaving *any* layer's current state — which is what
+		// `stepInstance` walks, in the same layer order, and the same reason this
+		// is a second reading rather than a second decision.
+		const at = { ...shownStates(machine, node), ...playback.playing[instance] };
 		const ids = new Set(machine.states.map((s) => s.id));
-		const transition = machine.transitions.find(
-			(t) =>
-				t.enabled &&
-				t.trigger === trigger &&
-				t.from === from &&
-				ids.has(t.from) &&
-				ids.has(t.to),
-		);
-		return transition ? { machine, transition } : undefined;
+		for (const layer of machineLayers(machine)) {
+			const from = at[layer.id];
+			if (from === undefined) continue;
+			const transition = machine.transitions.find(
+				(t) =>
+					t.enabled &&
+					t.trigger === trigger &&
+					t.from === from &&
+					ids.has(t.from) &&
+					ids.has(t.to),
+			);
+			if (transition) return { machine, transition };
+		}
+		return undefined;
 	}
 
 	/**
@@ -1453,11 +1611,32 @@ export function Studio({
 	useEffect(() => {
 		if (!previewing) return;
 		for (const instance of Object.keys(machineTable(scene).instances)) {
-			const seen = new Set<string>();
+			/**
+			 * Where each layer has already been, so a cycle stops *before* going
+			 * round rather than after.
+			 *
+			 * Per layer since the ladder, because the chain is per layer: the press
+			 * layer may settle in one step while the glow layer takes three, and a
+			 * single set of state ids would let one layer's arrival stop the other's
+			 * walk. The runtime's `settle` keeps its `seen` per layer for exactly
+			 * this reason, and the two must not differ about where a machine starts.
+			 */
+			const seen = new Map<string, Set<string>>();
 			for (;;) {
 				const at = playback.fire(instance, "load");
-				if (at === null || seen.has(at)) break;
-				seen.add(at);
+				if (at === null) break;
+				let fresh = false;
+				for (const [layer, state] of Object.entries(at)) {
+					const walked = seen.get(layer) ?? new Set<string>();
+					seen.set(layer, walked);
+					if (walked.has(state)) continue;
+					walked.add(state);
+					fresh = true;
+				}
+				// Every layer answered with somewhere it had already been, so the next
+				// pass would answer the same thing. That is the fixpoint, and it is
+				// also where a load cycle is caught.
+				if (!fresh) break;
 			}
 		}
 		// Keyed on the toggle and deliberately on nothing else, `scene` and
@@ -1511,11 +1690,21 @@ export function Studio({
 			drawn: shownState(machine, subject),
 			// Built here rather than inline in the render so each cell hands the
 			// artboard the *same object* on every render: `Artboard` is memoised,
-			// and a fresh `{ [id]: state }` per render would re-render every copy in
-			// the strip on every pointermove over the canvas.
+			// and a fresh `{ [id]: { [layer]: state } }` per render would re-render
+			// every copy in the strip on every pointermove over the canvas.
+			//
+			// One cell plays exactly one layer, and the layer is the state's own.
+			// Every other layer is left as the answer set drew it, which is what
+			// makes a cell a picture of *this state* rather than a picture of this
+			// state on top of whatever the other layers happen to be doing — the
+			// strip is where two states get compared, and a second variable in the
+			// comparison would ruin it.
 			cells: machine.states.map((state) => ({
 				state,
-				playing: { [subject.id]: state.id } as Readonly<Record<string, string>>,
+				layer: layerOf(machine, state),
+				playing: {
+					[subject.id]: { [layerOf(machine, state)]: state.id },
+				} as Readonly<Record<string, Readonly<Record<string, string>>>>,
 			})),
 		};
 	}, [selection, byId, scene, primary, context]);
@@ -1608,8 +1797,10 @@ export function Studio({
 											showGuides={showGuides}
 											previewing={previewing}
 											playing={playback.playing}
+											scrub={playback.scrub}
 											onTrigger={onTrigger}
 											motion={motion}
+											onPoster={keepPoster}
 											onContextMenu={(at) => {
 												const box = host.current?.getBoundingClientRect();
 												setMenu({
@@ -1715,8 +1906,9 @@ export function Studio({
 									{stateStrip.machine.name || stateStrip.machine.id} ·{" "}
 									{stateStrip.name}
 								</div>
-								{stateStrip.cells.map(({ state, playing }, at) => {
-									const live = playback.playing[stateStrip.instance] === state.id;
+								{stateStrip.cells.map(({ state, layer, playing }, at) => {
+									const live =
+										playback.playing[stateStrip.instance]?.[layer] === state.id;
 									return (
 										<div
 											key={state.id}
@@ -1777,6 +1969,7 @@ export function Studio({
 												onClick={() =>
 													playback.play(
 														stateStrip.instance,
+														layer,
 														live ? null : state.id,
 													)
 												}
@@ -2084,8 +2277,8 @@ export function Studio({
 								everywhere={everywhere}
 								variables={minted}
 								onSelectionChange={selectionIds}
-								playing={playback.playing}
-								onPlay={playback.play}
+								playing={playingFlat}
+								onPlay={playFlat}
 							/>
 						) : panel === "variables" ? (
 							<Variables
@@ -2127,6 +2320,13 @@ export function Studio({
 								onSelectionChange={selectionIds}
 								playing={playback.playing}
 								onPlay={playback.play}
+								inputs={playback.inputs}
+								onSetInput={playback.setInput}
+								onFireInput={playback.fireInput}
+								scrub={playback.scrub}
+								onScrub={playback.setScrub}
+								layer={machineLayer}
+								onLayerChange={setMachineLayer}
 								health={answer?.machines}
 								broken={broken}
 								conflict={blamed}
@@ -2145,6 +2345,8 @@ export function Studio({
 								onSelectionChange={selectionIds}
 									model={answer}
 								stateMembers={stateMembers}
+								keyMembers={keyMembers}
+								picks={primary?.pick}
 							/>
 						)}
 					</div>
@@ -2161,6 +2363,7 @@ export function Studio({
 					approximations={exploration?.approximations ?? []}
 					universes={universes}
 					projectName={projectName}
+					posters={posters}
 					status={
 						<StatusLine
 							exploration={exploration}

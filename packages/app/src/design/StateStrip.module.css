@@ -44,6 +44,20 @@
 	opacity: 0.45;
 }
 
+/* Reachable on paper and unreachable once the guards are read — `mgunreached/2`.
+   Dimmed harder than an ordinary unreachable state and struck through, because
+   it is a different piece of news with a different way out: the edge exists, and
+   no valuation of the inputs can take it. */
+.guarded {
+	opacity: 0.3;
+}
+
+.guarded .name,
+.guarded .label {
+	text-decoration: line-through;
+	text-decoration-thickness: 1px;
+}
+
 .name {
 	min-width: 3rem;
 	padding: 0.1rem 0.25rem;

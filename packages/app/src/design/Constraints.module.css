@@ -149,6 +149,16 @@
 	opacity: 0.5;
 }
 
+/* A rule that says nothing, because a quantity it names is one the program
+   refuses to mint. Neither red nor dashed: it is not a conflict — a document
+   full of these solves perfectly well — and it is not a preference doing its
+   job either. A rule with a bug in it gets its own mark, a solid rule down the
+   left edge, so that scanning the panel finds it without reading every row. */
+.inert {
+	border-left-width: 3px;
+	border-left-color: var(--dc-warn, #d9a441);
+}
+
 .ruleHead {
 	display: flex;
 	align-items: center;
@@ -259,6 +269,19 @@
 
 .note.bad {
 	opacity: 1;
+}
+
+/* The two sentences that explain a silence. Both are fully opaque, unlike the
+   note above them, because the note describes a rule and these describe a
+   *surprise* — the whole reason they exist is that nobody would go looking. The
+   inert one is warned; the crossing one is not, because that rule works. */
+.inertNote {
+	opacity: 1;
+	color: var(--dc-warn, #d9a441);
+}
+
+.crossNote {
+	opacity: 0.8;
 }
 
 .limit {

@@ -1,0 +1,138 @@
+.conditions {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 0.2rem;
+	border-left: 2px solid var(--dc-line);
+	border-radius: 0 4px 4px 0;
+}
+
+/* The whole guard can never be met. Marked on the container rather than on a
+   row, because that is where the claim is: it is a property of the conjunction,
+   and often no single row is the culprit. */
+.impossible {
+	border-left-color: var(--dc-bad, #fca5a5);
+	background: color-mix(in srgb, var(--dc-bad, #fca5a5) 8%, transparent);
+}
+
+.head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.4rem;
+}
+
+.title {
+	font-size: 0.62rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.45;
+}
+
+.add {
+	flex: none;
+	padding: 0.05rem 0.3rem;
+	font: inherit;
+	font-size: 0.66rem;
+	color: inherit;
+	background: transparent;
+	border: 1px dashed var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.add:hover:not(:disabled) {
+	background: var(--dc-raised);
+}
+
+.add:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+
+/* One conjunct. The rows read down as an `and`, with no operator drawn between
+   them: there is no `or` to distinguish it from. */
+.condition {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.2rem;
+}
+
+.index {
+	flex: none;
+	min-width: 0.9rem;
+	font-size: 0.6rem;
+	text-align: right;
+	opacity: 0.35;
+	font-variant-numeric: tabular-nums;
+}
+
+.select,
+.field {
+	min-width: 0;
+	padding: 0.05rem 0.2rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.field {
+	width: 3.2rem;
+	font-variant-numeric: tabular-nums;
+}
+
+/* An input or an operator the machine cannot answer. Kept, marked, and left
+   until somebody changes it on purpose. */
+.missing {
+	color: var(--dc-bad, #fca5a5);
+	border-color: color-mix(in srgb, var(--dc-bad, #fca5a5) 55%, transparent);
+}
+
+.broken .index {
+	color: var(--dc-bad, #fca5a5);
+	opacity: 0.8;
+}
+
+.fixed {
+	font-size: 0.66rem;
+	opacity: 0.3;
+}
+
+.action {
+	flex: none;
+	margin-left: auto;
+	padding: 0 0.2rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	background: transparent;
+	border: none;
+	border-radius: 4px;
+	opacity: 0.35;
+	cursor: pointer;
+}
+
+.action:hover {
+	opacity: 1;
+	color: #dc2626;
+}
+
+/* `mcbad/3`'s own sentence, on its own line under the row it is about — which is
+   where the designer is standing when they can fix it. */
+.why,
+.finding {
+	flex-basis: 100%;
+	margin: 0 0 0 0.9rem;
+	font-size: 0.62rem;
+	line-height: 1.4;
+	color: var(--dc-bad, #fca5a5);
+}
+
+.finding {
+	margin-left: 0.9rem;
+	opacity: 0.9;
+}

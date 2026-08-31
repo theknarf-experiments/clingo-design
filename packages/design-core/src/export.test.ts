@@ -27,10 +27,12 @@ import {
 	exportUniverse,
 } from "./export.ts";
 import { machineTable, stepMachine } from "./machines.ts";
+import type { ModelScene } from "./model.ts";
 import { evalRuntime } from "./runtime.ts";
 import { DOCUMENT_BASE, PAINT, cssName, paintOf } from "./paint.ts";
 import {
 	KINDS,
+	type LoopMode,
 	type Machine,
 	PROPS,
 	PROP_NAMES,
@@ -40,6 +42,7 @@ import {
 	type SceneNode,
 	type StatePart,
 	type Style,
+	type Track,
 	type Transition,
 	makeGuides,
 	makeLayout,
@@ -141,6 +144,35 @@ function inline(text: string): string {
 		);
 }
 
+/**
+ * Every node the export is expected to draw, in the order it must draw them.
+ *
+ * The model's own pre-order — a parent before its children, siblings back to
+ * front — with **one stop**, and the stop is stated here rather than tolerated
+ * in the assertion below. `KINDS[kind].opaque` is a viewport, whose box the file
+ * draws and whose contents it does not: a mesh is geometry, and the honest thing
+ * for a DOM exporter to do with a cylinder is to say it cannot carry one rather
+ * than to emit a `<div>` with the silhouette of its bounding box. So the walk
+ * that predicts the export makes the same single lookup the export makes, in
+ * `stopsHere` — one table consulted twice rather than two lists that can drift.
+ *
+ * Deliberately not "and skip whatever is missing". Written that way, a bug that
+ * dropped a rectangle from a flat page would pass here as easily as the seam
+ * does. Written this way, the seam is asserted to be in exactly the one place
+ * the kind table puts it.
+ */
+function drawnByExport(roots: ModelScene["roots"]): string[] {
+	const order: string[] = [];
+	const walk = (nodes: ModelScene["roots"]) => {
+		for (const node of nodes) {
+			order.push(node.id);
+			if (!KINDS[node.kind].opaque) walk(node.children);
+		}
+	};
+	walk(roots);
+	return order;
+}
+
 for (const template of TEMPLATES) {
 	test(`${template.id}: the export holds every node the answer set drew`, async () => {
 		const scene = template.create();
@@ -153,23 +185,26 @@ for (const template of TEMPLATES) {
 			const drawn = [...out.text.matchAll(/data-node="([^"]*)"/g)].map((m) =>
 				m[1].replace(/&quot;/g, '"').replace(/&amp;/g, "&"),
 			);
+			const order = drawnByExport(universe.model.roots);
 			assert.deepEqual(
 				drawn.slice().sort(),
-				Object.keys(universe.model.byId).sort(),
+				order.slice().sort(),
 				`${target}: the export and the model draw different nodes`,
 			);
-			// Paint order: a parent before its children, siblings back to front.
-			// The model's own pre-order is the order the canvas emits.
-			const order: string[] = [];
-			const walk = (nodes: typeof universe.model.roots) => {
-				for (const node of nodes) {
-					order.push(node.id);
-					walk(node.children);
-				}
-			};
-			walk(universe.model.roots);
 			assert.deepEqual(drawn, order, `${target}: painted out of order`);
 			assert.ok(out.lost.length > 0, "an export that loses nothing is a lie");
+
+			// And what it stopped at, it *said*. A subtree that goes missing with no
+			// sentence about it is indistinguishable from a subtree that was dropped
+			// by accident, which is the whole reason `lost` exists.
+			const held = new Set(order);
+			const inside = Object.keys(universe.model.byId).filter((id) => !held.has(id));
+			if (inside.length > 0) {
+				assert.ok(
+					out.lost.some((entry) => entry.includes("view")),
+					`${target}: ${inside.length} nodes went missing with nothing said`,
+				);
+			}
 		}
 	});
 
@@ -1717,4 +1752,757 @@ test("a pair CSS has no name for, or a state with a way out CSS cannot see, keep
 		assert.match(out.text, /\[data-state="hover"\]/);
 		assert.match(out.text, /<script>/);
 	}
+});
+
+/* ------------------------------------------------------------------ */
+/* The ladder: layers, timelines and blends                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The rungs above a plain two-state machine, and the one thing they must not
+ * cost.
+ *
+ * Everything below runs through the real solver for the reason the states above
+ * it do, and one more: a layer's composite is a *rule* — `mwriter/4` decides
+ * which layer owns a property when two of them paint it — so "the cascade
+ * resolves a fight the same way the program does" is a claim about two
+ * mechanisms neither of which this file implements. Asserting it against a
+ * hand-built model would assert what the exporter believes about the encoding.
+ *
+ * The load-bearing assertion is still the first one in this file: **a hover pair
+ * leaves as a stylesheet with no behaviour in it.** Nothing here may make a
+ * document that needed no script need one, and the last test in this block is
+ * that promise held against a document with a second layer in it.
+ */
+
+/** A machine with two layers, each a rest state and one that paints the root. */
+function layered(spec: {
+	second: Value;
+	first?: Value;
+	states?: Record<string, string>;
+}): Machine {
+	return {
+		id: "m3",
+		name: "Stack",
+		root: "btn",
+		layers: [
+			{ id: "press", name: "Press" },
+			{ id: "glow", name: "Glow" },
+		],
+		states: [
+			{ id: "rest", name: "Rest", parts: {}, layer: "press" },
+			{
+				id: "down",
+				name: "Down",
+				parts: { btn: { props: { fill: spec.first ?? single("#111111") } } },
+				layer: "press",
+			},
+			{ id: "dark", name: "Dark", parts: {}, layer: "glow" },
+			{
+				id: "lit",
+				name: "Lit",
+				parts: { btn: { props: { fill: spec.second } } },
+				layer: "glow",
+			},
+		],
+		transitions: [
+			// A click toggle rather than a press pair, deliberately: a pointerdown /
+			// pointerup pair collapses to `:active` and this test is about the
+			// attribute the *first* layer writes when it needs one.
+			edge({ id: "d1", from: "rest", to: "down", trigger: "click" }),
+			edge({ id: "d2", from: "down", to: "rest", trigger: "click" }),
+			edge({ id: "g1", from: "dark", to: "lit", trigger: "click" }),
+			edge({ id: "g2", from: "lit", to: "dark", trigger: "click" }),
+		],
+	};
+}
+
+test("a second layer switches on its own attribute, and the first still switches on data-state", async () => {
+	const scene = machined({ machines: [layered({ second: single("#22c55e") })] });
+	const { out } = await exported(scene);
+
+	const host = className(out.text, "b1");
+	const part = className(out.text, "inst(b1,btn)");
+	// The press layer is first, so it writes what a one-layer machine has always
+	// written; the glow layer writes its own attribute, which is exactly what
+	// `attributeOf` in the emitted runtime does.
+	assert.ok(
+		block(out.text, `.${host}[data-state="down"] .${part}`),
+		"the first layer keeps plain data-state",
+	);
+	assert.ok(
+		block(out.text, `.${host}[data-state-glow="lit"] .${part}`),
+		"a further layer writes data-state-<layer>",
+	);
+	// And the emitted runtime is the one that writes them.
+	assert.match(out.text, /data-state-/);
+	const script = out.text.slice(out.text.indexOf("<script>") + 8, out.text.indexOf("</script>"));
+	assert.ok(script.includes('"layers"'), "the layered table is in the script");
+});
+
+test("two layers that paint one part are resolved by the cascade the way mwriter resolves them", async () => {
+	// Drawn in both layers' painting states, so the answer set has to compose
+	// them: `inst(b1,btn)` carries one fill, decided by `mwriter/4`, which is the
+	// *last* layer that owns the property.
+	const drawn = machined({
+		machines: [layered({ first: single("#111111"), second: single("#22c55e") })],
+		uses: [{ id: "b1" }],
+	});
+	const use = findInTree(drawn.nodes, "b1");
+	assert.ok(use);
+	use.states = { press: "down", glow: "lit" };
+	const { out, universe } = await exported(drawn);
+	const composed = universe.model.byId["inst(b1,btn)"]?.rendered.fill;
+	assert.equal(composed, "#22c55e", "the later layer owns the fill in the answer set");
+	const base = block(out.text, `.${className(out.text, "inst(b1,btn)")}`);
+	assert.ok(base);
+	assert.match(base, /background: #22c55e;/, "and the file draws what the answer set said");
+
+	// The same fight as two selectors: both rules match when both layers are in
+	// their painting state, so the one that wins is the one written later — and
+	// the layers are written in document order, which is the order `mwriter`
+	// reads them in.
+	const rest = machined({
+		machines: [layered({ first: single("#111111"), second: single("#22c55e") })],
+	});
+	const plain = (await exported(rest)).out.text;
+	const host = className(plain, "b1");
+	const part = className(plain, "inst(b1,btn)");
+	const firstAt = plain.indexOf(`.${host}[data-state="down"] .${part}`);
+	const secondAt = plain.indexOf(`.${host}[data-state-glow="lit"] .${part}`);
+	assert.ok(firstAt !== -1 && secondAt !== -1);
+	assert.ok(secondAt > firstAt, "the later layer's rule is later in the file");
+});
+
+test("a second layer that is a clean hover pair still needs no script", async () => {
+	// The whole promise, held one rung up. Two layers, both of which CSS has a
+	// name for, is still a stylesheet and nothing else.
+	const scene = machined({
+		machines: [
+			{
+				id: "m4",
+				name: "Two",
+				root: "btn",
+				layers: [
+					{ id: "over", name: "Over" },
+					{ id: "focus", name: "Focus" },
+				],
+				states: [
+					{ id: "rest", name: "Rest", parts: {}, layer: "over" },
+					{
+						id: "hover",
+						name: "Hover",
+						parts: { btn: { props: { fill: single("#1d4ed8") } } },
+						layer: "over",
+					},
+					{ id: "blur", name: "Blur", parts: {}, layer: "focus" },
+					{
+						id: "ring",
+						name: "Ring",
+						parts: { btn: { props: { stroke: single("#f59e0b") } } },
+						layer: "focus",
+					},
+				],
+				transitions: [
+					edge({ id: "h1", from: "rest", to: "hover", trigger: "pointerenter" }),
+					edge({ id: "h2", from: "hover", to: "rest", trigger: "pointerleave" }),
+					edge({ id: "f1", from: "blur", to: "ring", trigger: "focus" }),
+					edge({ id: "f2", from: "ring", to: "blur", trigger: "blur" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const host = className(out.text, "b1");
+	const part = className(out.text, "inst(b1,btn)");
+	assert.ok(block(out.text, `.${host}:hover .${part}`));
+	assert.ok(block(out.text, `.${host}:focus-visible .${part}`));
+	assert.doesNotMatch(out.text, /<script/, "two pseudo-classes are still no behaviour");
+	assert.doesNotMatch(out.text, /data-state/, "and no attribute either");
+});
+
+/** A machine whose `spin` state plays a timeline over the panel. */
+function timelined(spec: {
+	tracks: Track[];
+	length?: Value;
+	loop?: LoopMode;
+	drawnIn?: string;
+	exit?: Value;
+}): Machine {
+	return {
+		id: "m5",
+		name: "Player",
+		root: "btn",
+		timelines: [
+			{
+				id: "w1",
+				name: "Sweep",
+				tracks: spec.tracks,
+				...(spec.length === undefined ? {} : { length: spec.length }),
+				...(spec.loop === undefined ? {} : { loop: spec.loop }),
+			},
+		],
+		states: [
+			{ id: "still", name: "Still", parts: {} },
+			{ id: "spin", name: "Spin", parts: {}, timeline: "w1" },
+		],
+		transitions: [
+			edge({
+				id: "go",
+				from: "still",
+				to: "spin",
+				trigger: "click",
+				...(spec.exit === undefined ? {} : { exit: spec.exit }),
+			}),
+			edge({ id: "stop", from: "spin", to: "still", trigger: "click" }),
+		],
+	};
+}
+
+test("a timeline comes out as @keyframes, and the state that plays it turns it on", async () => {
+	const scene = machined({
+		machines: [
+			timelined({
+				length: single("600ms"),
+				tracks: [
+					{
+						part: "panel",
+						prop: "opacity",
+						keys: [
+							{ at: single("0ms"), value: single("0.2") },
+							{ at: single("300ms"), value: single("1") },
+							{ at: single("600ms"), value: single("0.2") },
+						],
+					},
+				],
+			}),
+		],
+	});
+	const { out } = await exported(scene);
+	const host = className(out.text, "b1");
+	const panel = className(out.text, "inst(b1,panel)");
+
+	// One block, named after the instance, the timeline and the part, because a
+	// `@keyframes` block is applied to an element and a timeline may animate
+	// several.
+	const name = "k-b1-w1-panel";
+	assert.ok(out.text.includes(`@keyframes ${name} {`), "the block is in the file");
+	assert.match(out.text, /\n\t0% \{\n\t\topacity: 0.2;/);
+	assert.match(out.text, /\n\t50% \{\n\t\topacity: 1;/);
+	assert.match(out.text, /\n\t100% \{\n\t\topacity: 0.2;/);
+
+	// And the state that plays it is where the animation is switched on, since a
+	// timeline plays *in* a state and this file's rules are the other state.
+	const state = block(out.text, `.${host}[data-state="spin"] .${panel}`);
+	assert.ok(state, "expected a rule for the state that plays it");
+	assert.match(state, new RegExp(`animation: ${name} 600ms linear 0ms 1 normal both;`));
+});
+
+test("a loop and a ping-pong reach animation-iteration-count and animation-direction", async () => {
+	for (const [loop, expected] of [
+		["loop", "infinite normal"],
+		["pingPong", "infinite alternate"],
+	] as const) {
+		const scene = machined({
+			machines: [
+				timelined({
+					loop,
+					length: single("400ms"),
+					tracks: [
+						{
+							part: "panel",
+							prop: "opacity",
+							keys: [
+								{ at: single("0ms"), value: single("1") },
+								{ at: single("400ms"), value: single("0.4") },
+							],
+						},
+					],
+				}),
+			],
+		});
+		const { out } = await exported(scene);
+		assert.match(out.text, new RegExp(`animation: k-b1-w1-panel 400ms linear 0ms ${expected} both;`));
+	}
+});
+
+test("a timeline the picture is already in plays from the base rule, not from a selector", async () => {
+	const scene = machined({
+		machines: [
+			timelined({
+				length: single("500ms"),
+				tracks: [
+					{
+						part: "panel",
+						prop: "opacity",
+						keys: [
+							{ at: single("0ms"), value: single("1") },
+							{ at: single("500ms"), value: single("0.3") },
+						],
+					},
+				],
+			}),
+		],
+		uses: [{ id: "b1", state: "spin" }],
+	});
+	const { out } = await exported(scene);
+	const base = block(out.text, `.${className(out.text, "inst(b1,panel)")}`);
+	assert.ok(base, "expected the panel's own rule");
+	assert.match(
+		base,
+		/animation: k-b1-w1-panel 500ms linear 0ms 1 normal both;/,
+		"a timeline that is running when the file opens is on the base rule",
+	);
+});
+
+test("a track on a dimension and a track on a rotation share one transform", async () => {
+	const scene = machined({
+		machines: [
+			timelined({
+				length: single("400ms"),
+				tracks: [
+					{
+						part: "panel",
+						dim: "x",
+						keys: [
+							{ at: single("0ms"), value: single("0px") },
+							{ at: single("400ms"), value: single("40px") },
+						],
+					},
+					{
+						part: "panel",
+						turn: "rotateZ",
+						keys: [
+							{ at: single("0ms"), value: single("0deg") },
+							{ at: single("400ms"), value: single("90deg") },
+						],
+					},
+				],
+			}),
+		],
+	});
+	const { out } = await exported(scene);
+	// One declaration per stop, holding both halves — a `transform` is a single
+	// CSS value and two declarations would be one declaration.
+	assert.match(out.text, /\n\t100% \{\n\t\ttransform: translate\(40px, 0px\) rotateZ\(90deg\);/);
+	assert.doesNotMatch(
+		out.text,
+		/transform:[^;]*\n\t\ttransform:/,
+		"never two transforms in one stop",
+	);
+});
+
+test("a blend carries one stop and says which", async () => {
+	const scene = machined({
+		machines: [
+			{
+				id: "m6",
+				name: "Blender",
+				root: "btn",
+				inputs: [{ id: "mix", name: "Mix", kind: "number", initial: "0" }],
+				timelines: [
+					{
+						id: "low",
+						name: "Low",
+						tracks: [
+							{
+								part: "panel",
+								prop: "opacity",
+								keys: [
+									{ at: single("0ms"), value: single("0.2") },
+									{ at: single("200ms"), value: single("0.4") },
+								],
+							},
+						],
+					},
+					{
+						id: "high",
+						name: "High",
+						tracks: [
+							{
+								part: "panel",
+								prop: "opacity",
+								keys: [
+									{ at: single("0ms"), value: single("0.8") },
+									{ at: single("200ms"), value: single("1") },
+								],
+							},
+						],
+					},
+				],
+				states: [
+					{ id: "flat", name: "Flat", parts: {} },
+					{
+						id: "mixed",
+						name: "Mixed",
+						parts: {},
+						blend: {
+							kind: "oneD",
+							input: "mix",
+							stops: [
+								{ timeline: "low", at: "0" },
+								{ timeline: "high", at: "1000" },
+							],
+						},
+					},
+				],
+				transitions: [
+					edge({ id: "b1t", from: "flat", to: "mixed", trigger: "click" }),
+					edge({ id: "b2t", from: "mixed", to: "flat", trigger: "click" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	// The stop the blend is at when the page opens — the input's own initial —
+	// and only that one.
+	assert.ok(out.text.includes("@keyframes k-b1-low-panel {"), "the stop it starts at is in");
+	assert.ok(!out.text.includes("@keyframes k-b1-high-panel {"), "and the other one is not");
+	assert.ok(
+		out.lost.some((line) => line.includes("The mix in Mixed of “Blender”")),
+		`expected the blend loss, got ${JSON.stringify(out.lost)}`,
+	);
+});
+
+test("an exit time is in the script and says it is not in the CSS", async () => {
+	const scene = machined({
+		machines: [
+			timelined({
+				exit: single("300ms"),
+				length: single("200ms"),
+				tracks: [
+					{
+						part: "panel",
+						prop: "opacity",
+						keys: [
+							{ at: single("0ms"), value: single("1") },
+							{ at: single("200ms"), value: single("0.5") },
+						],
+					},
+				],
+			}),
+		],
+	});
+	const { out } = await exported(scene);
+	assert.ok(
+		out.lost.some((line) => line.includes("300ms") && line.includes("exit time")),
+		`expected the exit-time loss, got ${JSON.stringify(out.lost)}`,
+	);
+	// And it really is in the file, as a number the runtime gates on.
+	const script = out.text.slice(out.text.indexOf("<script>") + 8, out.text.indexOf("</script>"));
+	assert.ok(script.includes('"exit":300'), "the gate is in the emitted table");
+});
+
+/* ------------------------------------------------------------------ */
+/* The third axis: what CSS answers exactly, and what it cannot answer */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Two claims, and they are opposite claims about the same feature.
+ *
+ * A flat box with a z and a lean is something CSS draws **exactly** — same
+ * origin, same order, same numbers as the canvas and the solver — so the test
+ * for it is an equality against the document's own arithmetic rather than a
+ * "looks about right". A *scene* is something CSS cannot draw at all, so the
+ * test for that one is that the emitter stops, that the rest of the page still
+ * comes out, and that the file says where to go instead.
+ *
+ * Both run through the real solver, because a `frame(N,z,V)` and a `turn(N,R,V)`
+ * are things the *program* derives — a node is only in the third axis where the
+ * gate opened, which is a property of the document as a whole — and a
+ * hand-written model would be a test of what this file believes about that gate.
+ */
+
+/** A page with a leaning card outside a 3D view, and a mesh inside one. */
+function spatial(): Scene {
+	return {
+		styles: [],
+		machines: [],
+		tokens: starterTokens(),
+		constraints: [],
+		rules: RULES_HEADER,
+		nodes: [
+			frame(
+				"page",
+				"Page",
+				[0, 0, 600, 400],
+				{ fill: single("#ffffff"), perspective: single("900px") },
+				[
+					{
+						...frame("stack", "Stack", [10, 10, 300, 200], {}, [
+							{
+								...rect("card", "Card", [20, 20, 120, 80], { fill: single("#3b82f6") }),
+								spatial: { z: single("24px"), depth: single("0px") },
+								turn: { rotateZ: single("15deg"), rotateY: single("30deg") },
+							},
+						]),
+						kind: "group" as const,
+					},
+					{
+						...frame("view", "Hero", [200, 20, 320, 240], { fill: single("#0b1020") }, [
+							{
+								...makeNode("mesh", at([0, 0, 100, 100]), { id: "cube", name: "Cube" }),
+								props: { solid: single("box"), fill: single("#ef4444") },
+							},
+							{
+								...makeNode("light", at([0, 0, 10, 10]), { id: "sun", name: "Sun" }),
+								props: { lamp: single("directional") },
+							},
+						]),
+						kind: "viewport" as const,
+					},
+				],
+			),
+		],
+	};
+}
+
+test("a flat box with a z and a lean exports as a real CSS 3D transform", async () => {
+	const scene = spatial();
+	const { out } = await exported(scene);
+
+	const card = block(out.text, `.${className(out.text, "card")}`);
+	assert.ok(card, "expected the card's own rule");
+	// `rotateX rotateY rotateZ`, left to right, which is CSS's own spelling of
+	// "rotateZ, then rotateY, then rotateX" — the order §2.3 fixes and the order
+	// `spatial.ts`'s `rotationMatrix` is `Rx · Ry · Rz` for. A zero term is left
+	// out because it is the identity.
+	assert.match(
+		card,
+		/transform: translate3d\(0px, 0px, 24px\) rotateY\(30deg\) rotateZ\(15deg\);/,
+	);
+	assert.match(card, /transform-origin: center center;/);
+	// The box itself is still where it was: a transform is *beside* the four
+	// numbers, never instead of them.
+	assert.match(card, /left: 20px;/);
+	assert.match(card, /top: 20px;/);
+
+	// The two declarations that belong to the ancestors rather than to the card.
+	const surface = block(out.text, `.${className(out.text, "page")}`);
+	assert.ok(surface);
+	assert.match(surface, /perspective: 900px;/, "the nearest surface is where the eye is");
+	const between = block(out.text, `.${className(out.text, "stack")}`);
+	assert.ok(between);
+	assert.match(
+		between,
+		/transform-style: preserve-3d;/,
+		"a flat ancestor would collapse the subtree before the perspective saw it",
+	);
+	// And the sentence about what a transform costs, which is the browser's
+	// behaviour rather than this file's loss.
+	assert.ok(out.lost.some((line) => line.includes("laid out by its untransformed rectangle")));
+});
+
+test("a rotation in the plane needs no perspective and no preserve-3d", async () => {
+	const scene = spatial();
+	const card = findInTree(scene.nodes, "card");
+	assert.ok(card);
+	card.spatial = undefined;
+	card.turn = { rotateZ: single("15deg") };
+	const { out } = await exported(scene);
+
+	const rule = block(out.text, `.${className(out.text, "card")}`);
+	assert.ok(rule);
+	assert.match(rule, /transform: rotateZ\(15deg\);/, "still an exact transform");
+	assert.doesNotMatch(
+		block(out.text, `.${className(out.text, "stack")}`) ?? "",
+		/preserve-3d/,
+		"a rotation in the plane has worked since before preserve-3d existed",
+	);
+	assert.doesNotMatch(block(out.text, `.${className(out.text, "page")}`) ?? "", /perspective/);
+});
+
+test("a 3D view exports as its own box, and the page exports around it", async () => {
+	const scene = spatial();
+	const { out } = await exported(scene);
+
+	// The box is there, with its own fill, and it is selectable like anything else.
+	const view = className(out.text, "view");
+	assert.match(out.text, new RegExp(`<div class="${view}" data-node="view" data-kind="viewport">`));
+	assert.match(block(out.text, `.${view}`) ?? "", /background: #0b1020;/);
+	// And nothing inside it is markup, because a subtree of empty divs is not a
+	// partial answer to a scene.
+	assert.doesNotMatch(out.text, /data-node="cube"/);
+	assert.doesNotMatch(out.text, /data-node="sun"/);
+	// The rest of the page is unaffected — this is the "exports around it" half.
+	assert.match(out.text, /data-node="card"/);
+
+	const said = out.lost.find((line) => line.includes("3D view “Hero”"));
+	assert.ok(said, `expected a loss naming the view, got ${JSON.stringify(out.lost)}`);
+	assert.match(said, /the 2 objects inside this view are not in it/);
+	// And the way out is named, and it names *where*. This assertion is worth
+	// more than it looks: `ExportTarget` is "html" | "svg" and there is no glTF
+	// target in this package, so a sentence reading "export the viewport as glTF"
+	// pointed a designer at a menu entry the tool did not have. The writer lives
+	// in `canvas-3d` and the export panel offers it as a third format, which is
+	// what the sentence now says.
+	assert.match(said, /Choose glTF in this panel/);
+
+	// SVG says it once, about the format, and draws the same rectangle.
+	const flat = exportUniverse(scene, (await explore(scene, directSolver, { limit: 1 })).universes[0], {
+		target: "svg",
+		title: "s",
+	});
+	assert.match(flat.text, /data-node="view"/);
+	assert.doesNotMatch(flat.text, /data-node="cube"/);
+	assert.ok(flat.lost.some((line) => line.startsWith("Three dimensions.")));
+	assert.ok(flat.lost.some((line) => line.startsWith("Inputs, guards and timelines.")));
+});
+
+test("a poster puts the frame the canvas drew behind the view's own fill", async () => {
+	const scene = spatial();
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+	const url = "data:image/png;base64,iVBORw0KGgo=";
+	const out = exportUniverse(scene, universe, {
+		target: "html",
+		title: "p",
+		posters: { view: url },
+	});
+	const view = block(out.text, `.${className(out.text, "view")}`);
+	assert.ok(view);
+	// The shorthand first and the image after it, so the fill shows through a
+	// scene rendered against nothing.
+	assert.ok(view.indexOf("background: #0b1020;") < view.indexOf("background-image:"));
+	assert.match(view, /background-image: url\("data:image\/png;base64,iVBORw0KGgo="\);/);
+	assert.match(view, /background-size: cover;/);
+	assert.ok(
+		out.lost.some((line) => line.includes("with the frame the canvas last drew as its background")),
+		"the loss says a poster is a photograph rather than a scene",
+	);
+});
+
+test("a state that turns a card outside a view is an animated transform, with no new emitter", async () => {
+	// merged-plan §6.7's claim, held: the machine half diffs declarations and the
+	// third-axis half writes one more declaration, so a hover that leans a card
+	// composes out of the two with nothing in between.
+	const scene = machined({
+		machines: [
+			hoverMachine({
+				btn: {
+					turn: { rotateY: single("20deg") },
+					frame: { z: single("40px") },
+				},
+			}),
+		],
+	});
+	// A view somewhere else on the artboard, which is what opens the third axis
+	// for the *document* — see `isSpatialScene`. Without one the state's `z` is
+	// not in the program at all and only the rotation survives; that asymmetry is
+	// the compiler's gate rather than this file's, and it is asserted below.
+	const page = findInTree(scene.nodes, "page");
+	assert.ok(page);
+	page.children = [
+		...(page.children ?? []),
+		{
+			...makeNode("viewport", at([420, 260, 160, 120]), { id: "view", name: "Hero" }),
+		},
+	];
+	const { out } = await exported(scene);
+	const host = className(out.text, "b1");
+	const part = className(out.text, "inst(b1,btn)");
+	const state = block(out.text, `.${host}:hover .${part}`);
+	assert.ok(state, "expected a :hover rule");
+	assert.match(state, /transform: translate3d\(0px, 0px, 40px\) rotateY\(20deg\);/);
+	// And it is paced like any other property, by the same `transition:` line.
+	const base = block(out.text, `.${part}`);
+	assert.ok(base);
+	assert.match(base, /transition: transform 200ms ease-out 0ms;/);
+});
+
+test("a state that puts a leaning part back flat says so, rather than leaving it leaning", async () => {
+	// `transform` is one value, so a state's rule replaces the base's outright:
+	// a state whose pose is the identity has to say `none` or the base's lean
+	// survives into a state that was drawn without one.
+	const scene = machined({
+		machines: [
+			{
+				id: "m7",
+				name: "Flatten",
+				root: "btn",
+				states: [
+					{
+						id: "leaning",
+						name: "Leaning",
+						parts: { btn: { turn: { rotateY: single("25deg") } } },
+					},
+					{ id: "flat", name: "Flat", parts: {} },
+				],
+				transitions: [
+					edge({ id: "f1", from: "leaning", to: "flat", trigger: "pointerenter" }),
+					edge({ id: "f2", from: "flat", to: "leaning", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const host = className(out.text, "b1");
+	const part = className(out.text, "inst(b1,btn)");
+	assert.match(block(out.text, `.${part}`) ?? "", /transform: rotateY\(25deg\);/);
+	assert.match(block(out.text, `.${host}:hover .${part}`) ?? "", /transform: none;/);
+});
+
+test("a state's z opens the third axis for the part it lifts, and reaches the file", async () => {
+	// **This pinned an asymmetry and now pins its repair.** `isSpatialScene` —
+	// the TypeScript twin of the compiler's `spatial.` gate — used to count a
+	// `viewport` node and a `spatial` or `turn` on a *node* and to ignore both on
+	// a machine *state's* delta. So a state that leaned a part still leaned it,
+	// because `turn/3` is derived outside the gate, while a state that lifted one
+	// in z produced no `frame(stt,z,V)` at all: a designer could open the depth
+	// rows on a flat part, type a number, and get silence.
+	//
+	// `thirdAxisParts` is the repair, and it is a repair at the encoding rather
+	// than at the reading: a delta that names z, depth or a turn makes the *part*
+	// `zstated`, so the part has six numbers in every state, the copy inherits
+	// `s3` through `child/2`, and the state that says nothing about z falls to the
+	// default of 0 rather than to nothing at all. Both halves are asserted below,
+	// because the second is what makes the first a design and not an artefact.
+	const scene = machined({
+		machines: [
+			hoverMachine({
+				btn: { turn: { rotateY: single("20deg") }, frame: { z: single("40px") } },
+			}),
+		],
+	});
+	const { out, universe } = await exported(scene);
+	assert.deepEqual(
+		universe.model.states["stt(b1,hover,btn)"]?.spatial,
+		{ z: 40 * EMU_PER_PX, depth: 0 },
+		"the copy is lifted, and has a depth rather than no third axis at all",
+	);
+	const state = block(out.text, `.${className(out.text, "b1")}:hover .${className(out.text, "inst(b1,btn)")}`);
+	assert.ok(state);
+	assert.match(state, /rotateY\(20deg\)/);
+	assert.match(state, /translate3d\([^)]*40px\)/);
+});
+
+test("a keyframe past the end of its timeline is held at the end, and the file says so", async () => {
+	const scene = machined({
+		machines: [
+			timelined({
+				// Stated, and shorter than the last key — which is legal and means what
+				// it says: the tail is not played.
+				length: single("200ms"),
+				tracks: [
+					{
+						part: "panel",
+						prop: "opacity",
+						keys: [
+							{ at: single("0ms"), value: single("1") },
+							{ at: single("200ms"), value: single("0.5") },
+							{ at: single("900ms"), value: single("0") },
+						],
+					},
+				],
+			}),
+		],
+	});
+	const { out } = await exported(scene);
+	// The key past the end lands on the same stop as the one at the end, and the
+	// later one wins — which is what the canvas draws too.
+	assert.match(out.text, /\n\t100% \{\n\t\topacity: 0;/);
+	assert.ok(
+		out.lost.some((line) => line.includes("is past the end of it")),
+		`expected the past-the-end loss, got ${JSON.stringify(out.lost)}`,
+	);
+	assert.ok(out.lost.some((line) => line.includes("land on the same whole percentage")));
 });

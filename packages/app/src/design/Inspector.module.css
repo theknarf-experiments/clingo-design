@@ -158,6 +158,27 @@
 	opacity: 1;
 }
 
+.follow:disabled {
+	cursor: default;
+	opacity: 0.3;
+}
+
+/* What goes inside a 3D view, on one line. The `.follow` buttons in it lose
+   their `margin-left: auto` — that rule exists so a lone "follow the container"
+   button hugs the right edge, and four controls in a row want to read left to
+   right like the label that starts them. */
+.addRow {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.25rem;
+	margin-top: 0.35rem;
+}
+
+.addRow .follow {
+	margin: 0;
+}
+
 /* A derived node's name is an ASP term the solver produced, not a name anyone
    typed, so it is shown rather than offered for editing. */
 .derivedName {
@@ -322,6 +343,29 @@
 
 .styledFoot .follow {
 	margin: 0 0 0 auto;
+}
+
+/* ------------------------------------------------------------------ */
+/* The third axis                                                      */
+/* ------------------------------------------------------------------ */
+
+/* A rule that says nothing, and never says so on its own.
+   Deliberately *not* a `.note`: a note is a 50%-opacity aside that a person is
+   free to skip, and this is a rule the designer wrote, that is in the document,
+   that is switched on, and that has no effect whatsoever. It reads at full
+   contrast with a warning rule down the side for the reason the state banner
+   does — the cost of it going unnoticed is somebody spending ten minutes
+   wondering why a card will not move.
+   Amber rather than the error colour, because nothing is broken: the design is
+   legal, it solves, and it exports. It just is not what was asked for. */
+.refused {
+	margin: 0.25rem 0 0;
+	padding: 0.35rem 0.5rem;
+	font-size: 0.72rem;
+	line-height: 1.45;
+	border-radius: 5px;
+	border-left: 3px solid var(--dc-warn, #d97706);
+	background: color-mix(in srgb, var(--dc-warn, #d97706) 10%, transparent);
 }
 
 /* ------------------------------------------------------------------ */

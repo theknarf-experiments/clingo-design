@@ -112,7 +112,7 @@ import {
 	weightOf,
 	wornProps,
 } from "./scene.ts";
-import { isSpatialScene } from "./spatial.ts";
+import { isSpatialScene, thirdAxisParts } from "./spatial.ts";
 import {
 	DERIVATIONS,
 	type Derivation,
@@ -1399,6 +1399,45 @@ const MACHINE_RULES = [
 	"% said, and the base is what the definition was drawn at.",
 	"msasked(I,S,N,D) :- mcopy(I,S,N), lask(stt(I,S,N),D,_).",
 	"frame(stt(I,S,N),D,V) :- mcopy(I,S,N), lask(stt(I,S,N),D,V), not msfval(I,S,N,D).",
+	"% ...and the measurement is a SHADOW like any other, which is the half of this",
+	"% source that was missing and the reason it was worth finding rather than",
+	"% arguing about.",
+	"%",
+	"% `mfshadow/3` and `mlfshadow/4` are the two tables that say \"this dimension is",
+	"% no longer the instance's own\", and both are written in TypeScript from the",
+	"% delta's `frame` keys — from what the designer *typed*. A state that rewords a",
+	"% hugging label types nothing about its width and changes it anyway, so the",
+	"% width was in neither table, and both rules that read them then fired beside",
+	"% the copy that had actually moved:",
+	"%",
+	"%   - `frame(inst(I,N),D,V) :- mbase(I,N,D,V), not mfshadow(I,N,D)` derived the",
+	"%     definition's box *as well as* the measured one, on a one-layer document,",
+	"%     which is where this has been since state machines shipped. Two frame/3",
+	"%     atoms for one (node, dimension) is not two designs — frame/3 is a",
+	"%     relation — it is one arbitrary answer, silently, and it is the exact",
+	"%     disease the mshadow/2 guard on rendered/3 was written to cure.",
+	"%   - the unowned half of the alias below fired once per SHOWN STATE, which on",
+	"%     a one-layer machine is once and on a two-layer machine is twice: the",
+	"%     measured copy in one layer and the unmeasured copy in the other, both",
+	"%     aliased, both about the same width.",
+	"%",
+	"% So the measurement joins the tables rather than the rules learning about it,",
+	"% and it joins them through msasked/4 rather than through lask/3 a second time,",
+	"% so the two cannot drift: whatever counts as measured for the copy's own frame",
+	"% counts as owned for the instance's. `mslayer/3` is what says which layer did",
+	"% the measuring — the layer of the state that reworded — so mfwriter/4 arbitrates",
+	"% a measured width exactly as it arbitrates a typed one, and two layers that",
+	"% both reword one hugging part are an mffight/5 with both their names in it.",
+	"%",
+	"% Atom-identical wherever there is no measurement at all, which is every",
+	"% headless solve and every first render: emitStateAsked states no lask/3 for a",
+	"% copy without one, so neither rule grounds and the pair below is the pair that",
+	"% shipped. Atom-identical on a one-layer document that *does* have one, too, and",
+	"% that is the part worth checking rather than believing: mfowned/3 turns the",
+	"% unowned clause off and mfwriter/4 turns the owning one on for the same shown",
+	"% copy, which derives the same atom by the other road.",
+	"mfshadow(I,N,D) :- msasked(I,S,N,D).",
+	"mlfshadow(M,L,N,D) :- minstance(I,M), msasked(I,S,N,D), mslayer(M,S,L).",
 	"",
 	"% A state copy is not a node/1, so the scene defaults do not reach it. Its",
 	"% own, in the same shape and for the same reason: written so it cannot unsay",
@@ -1882,19 +1921,46 @@ const MACHINE_RULES = [
 	"% the state's own copy where it does not — the same absent-is-inherit every",
 	"% other copy in this program uses. **Never a node/1**, for stt/3's reasons.",
 	"mkcopy(I,W,R,K) :- minstance(I,M), mkey(M,W,R,K), mtrackof(M,W,R,N), mkpart(M,W,N).",
+	"% ...and WHOSE copy it inherits from, which the three rules below read and which",
+	"% mtplays/3 does not answer. A timeline may be played by more than one state —",
+	"% two states of one layer that share an animation, or a blend state whose stops",
+	"% name a timeline some other state also plays — and mtplays/3 says nothing about",
+	"% which of them is on screen, deliberately: it is a fact about the machine and",
+	"% not about this universe. Left as the join, each of the three inherit rules",
+	"% fired once per playing state, so a timeline played by two states whose deltas",
+	"% disagree about the part it animates derived two frame/3 atoms for one",
+	"% (copy, dimension) — which is not two poses, it is one arbitrary answer,",
+	"% silently, exactly as it is for a node.",
+	"%",
+	"% The first playing state wins, and the tie-break is `mindex/3` for the reason",
+	"% every other tie-break in this file is document order: THE ORDER IS THE ANSWER.",
+	"% There is no `primary` flag on a timeline to disagree with the state list, the",
+	"% same way there is no `initial` flag and no `priority` on a layer, and the state",
+	"% a designer wrote first is the one whose pose a reader would have guessed.",
+	"%",
+	"% Not `shown/2`, which was the other candidate and is worse twice over: a",
+	"% keyframe copy would then lose its inherited geometry entirely whenever no",
+	"% playing state happened to be drawn — a copy with no box at all, which a",
+	"% geometric rule reads as an unknown nothing bounds — and two layers whose shown",
+	"% states both play the timeline would put the multiplicity straight back.",
+	"%",
+	"% Atom-identical wherever exactly one state plays a timeline, which is every",
+	"% document that has not written the exotic shape above.",
+	"mkbase(M,W,S) :- mtplays(M,S,W), K = #min{ J : mtplays(M,S2,W), mindex(M,S2,J) },",
+	"                 mindex(M,S,K).",
 	"frame(kfr(I,W,R,K),D,V) :- mkcopy(I,W,R,K), R = trkd(_,D), minstance(I,M),",
 	"                           resolved(kval(M,W,R,K),L), numeral(L,V).",
 	"mkeydim(I,W,R,K,D) :- mkcopy(I,W,R,K), R = trkd(_,D), minstance(I,M),",
 	"                      resolved(kval(M,W,R,K),L), numeral(L,_).",
 	"frame(kfr(I,W,R,K),D,V) :- mkcopy(I,W,R,K), mtrackof(M,W,R,N), minstance(I,M),",
-	"                           mtplays(M,S,W), frame(stt(I,S,N),D,V),",
+	"                           mkbase(M,W,S), frame(stt(I,S,N),D,V),",
 	"                           not mkeydim(I,W,R,K,D).",
 	"rendered(kfr(I,W,R,K),P,L) :- mkcopy(I,W,R,K), R = trkp(_,P), minstance(I,M),",
 	"                              resolved(kval(M,W,R,K),L).",
 	"mkeyprop(I,W,R,K,P) :- mkcopy(I,W,R,K), R = trkp(_,P), minstance(I,M),",
 	"                       resolved(kval(M,W,R,K),_).",
 	"rendered(kfr(I,W,R,K),P,L) :- mkcopy(I,W,R,K), mtrackof(M,W,R,N), minstance(I,M),",
-	"                              mtplays(M,S,W), rendered(stt(I,S,N),P,L),",
+	"                              mkbase(M,W,S), rendered(stt(I,S,N),P,L),",
 	"                              not mkeyprop(I,W,R,K,P).",
 	"% A rotation track, in the shape of the dimension pair. The merge widened Track",
 	"% with a `turn` field and specified \"the same rules one quantity over\" without",
@@ -1906,7 +1972,7 @@ const MACHINE_RULES = [
 	"mkeyturn(I,W,R,K,Rot) :- mkcopy(I,W,R,K), R = trkr(_,Rot), minstance(I,M),",
 	"                         resolved(kval(M,W,R,K),L), mdeg(L,_).",
 	"turn(kfr(I,W,R,K),Rot,V) :- mkcopy(I,W,R,K), mtrackof(M,W,R,N), minstance(I,M),",
-	"                            mtplays(M,S,W), turn(stt(I,S,N),Rot,V),",
+	"                            mkbase(M,W,S), turn(stt(I,S,N),Rot,V),",
 	"                            not mkeyturn(I,W,R,K,Rot).",
 	"% Parented where its part is, for gworld/2's chain — the same rule shape a state",
 	"% copy gets and for the same reason. A keyframe copy hangs off the *instance*",
@@ -2025,22 +2091,21 @@ const STYLE_RULES = [
  * checkable by grep: no `gedge(front` in a program for a document with no
  * viewport in it.
  *
- * **There are no z rows in {@link EDGES} yet**, so this branch is generated and
- * grounds nothing, and that is a finding rather than an oversight. `EdgeSpec.axis`
- * cannot widen to `"x" | "y" | "z"` without deciding what the canvas overlay
- * *draws* for a rule about `centerZ` — `annotate.ts` hands the axis straight to
- * two helpers that take the planar pair — and that is a design decision about
- * the overlay rather than a type to widen. Written now rather than later because
- * the guard is the whole of what this file has to say about those rows: the day
- * the table grows them, the facts appear behind `spatial` with no edit here.
+ * **The five z rows are in {@link EDGES} and this is the guard that keeps them
+ * from costing a flat document anything.** They arrived after this branch was
+ * written, which is the intended order: the whole of what this file had to say
+ * about them was the guard, so the day the table grew them the rows appeared
+ * behind `spatial` with no edit here at all. What had been blocking the table was
+ * a decision about the *overlay* — what `annotate.ts` draws for a rule about
+ * `centerZ`, which is nothing — and never anything about the program.
  */
 const EDGE_FACTS = EDGE_NAMES.flatMap((edge) => {
 	const spec = EDGES[edge]
 	// A trailing `.` for a fact, a `:- spatial.` for a rule that is one only in a
-	// document with a third axis. The widening to `string` is what says the row
-	// cannot exist yet: `EdgeSpec.axis` is still the planar pair, so TypeScript is
-	// right that the comparison never holds and wrong that it is unintentional.
-	const guard = (spec.axis as string) === "z" ? " :- spatial." : "."
+	// document with a third axis. `spatialprogram.test.ts` asserts both halves for
+	// every template: the guarded row is in the text, the bare fact is not, and
+	// the flat document grounds none of it.
+	const guard = spec.axis === "z" ? " :- spatial." : "."
 	const say = (name: string, ...args: Array<string | number>): string =>
 		`${name}(${args.join(",")})${guard}`
 	return [
@@ -2660,7 +2725,10 @@ export const CONTRACT = `% Predicates you can rely on:
 %   shown(I, S)                    which state instance I is drawn in. A fact,
 %                                  never a choice: it decides rendered/3, which
 %                                  is projected, so a choice over it would
-%                                  multiply the universes by the state count
+%                                  multiply the universes by the state count.
+%                                  ONE PER LAYER, so a multi-layer machine has
+%                                  several of them at once and mtwoshown/1 only
+%                                  reports two of the SAME layer
 %
 % The copies, and the view the rest of the program sees:
 %
@@ -2676,10 +2744,18 @@ export const CONTRACT = `% Predicates you can rely on:
 %                                  state has an opinion
 %   frame(inst(I,N),D,V) :- frame(stt(I,S,N),D,V), shown(I,S).
 %   rendered(inst(I,N),P,L) :- rendered(stt(I,S,N),P,L), shown(I,S).
+%   turn(inst(I,N),R,V) :- turn(stt(I,S,N),R,V), shown(I,S).
 %   hidden(inst(I,N)) :- mhidden(I,S,N), shown(I,S).
 %                                  inst(I,N) is a *view* of the shown state, so
-%                                  frame/3 and rendered/3 stay untimed and
-%                                  everything downstream is unchanged
+%                                  frame/3, rendered/3 and turn/3 stay untimed
+%                                  and everything downstream is unchanged. Each
+%                                  of the first three is really TWO rules: where
+%                                  some layer owns the field only the layer that
+%                                  writes it aliases back — see mwriter/4 — and
+%                                  where none does, every shown copy aliases,
+%                                  which is the single rule above. Hiding needs
+%                                  no writer, because two layers that both hide
+%                                  agree
 %
 % The alias has a second half that is not written here and cannot be. Where a
 % geometric constraint places a copy, the answer arrives as a theory atom —
@@ -2703,7 +2779,8 @@ export const CONTRACT = `% Predicates you can rely on:
 %                                  property; a value like any other, so it may
 %                                  name a token or hold alternatives, and where
 %                                  it holds two that really is two designs
-%   sfval(I, S, N, D)              the same for one of the four dimensions
+%   sfval(I, S, N, D)              the same for one of the six dimensions
+%   srval(I, S, N, R)              and for one of the three rotations
 %   mshadow(inst(I,N), P)          some state owns this property, so the
 %                                  instance does not draw it from its own
 %                                  variable — the shown copy does
@@ -2753,6 +2830,238 @@ export const CONTRACT = `% Predicates you can rely on:
 %   c_node(no_jump, stt(b1,rest,label)).
 %   c_node(no_jump, stt(b1,hover,label)).
 %   c_edge(no_jump, centerY).
+%
+% Inputs. What a host hands a machine from outside: a boolean, a number or a
+% momentary trigger. These are RUNTIME values and they are not in the design
+% space — no atom below is ever an alt/2, nothing here gets a pick/2, and a
+% document with an input has exactly the universe count of one without. Nothing
+% projected depends on an input at all: shown/2 is a fact the document emits, so
+% which state is *drawn* never consults one. What an input decides is which
+% transitions a runtime may take, and — through the guards below — which of them
+% are possible at all, which is a claim about the document rather than a picture.
+%
+%   minput(M, X)                   X is an input of machine M
+%   minkind(M, X, boolean|number|trigger)
+%   minbool(M, X, true|false)      a boolean input's starting value
+%   minnum(M, X, N)                a number input's, in THOUSANDTHS
+%   minlow(M, X, N)  minhigh(M, X, N)
+%                                  the closed ends of a number input's range.
+%                                  Absent is OPEN, not zero: a designer who has
+%                                  not said how far the drawer opens has not said
+%                                  that it does not open
+%   minbounded(M, X)               derived: whether it declared an end at all
+%
+%   permille(Lit, N)               the fifth literal bridge, after numeral/2,
+%                                  tally/2, word/2 and millis/2: the RATIO a
+%                                  literal reads as, in thousandths. "0.5" is 500
+%                                  and "12" is 12000. Exact or absent, like the
+%                                  other four — "0.0005" is not a whole
+%                                  thousandth and emits nothing. A percentage is
+%                                  refused rather than divided: declare the range
+%                                  0..100 and every number in the machine is in
+%                                  one unit
+%
+% Guards. A transition fires when its trigger happens AND every one of its
+% conditions holds. There is no \`or\`; two guards that are alternatives are two
+% transitions, which is one more id a violation can name. Every comparison here
+% is between two CONSTANTS — the range the input declared and the literal the
+% condition named — so nothing in this block ever evaluates a runtime value:
+%
+%   mcond(M, T, K)                 T's Kth condition, 1-based, document order
+%   mcondin(M, T, K, X)            about input X
+%   mcondop(M, T, K, eq|ne|gt|lt|ge|le|fired)
+%   mcrange(M, T, K, X, Lo, Hi)    a numeric condition as a CLOSED window in
+%                                  thousandths. \`x > v\` is [v+1, ..] and that is
+%                                  exact rather than approximate, because a
+%                                  thousandth is a whole number of something
+%   mcnot(M, T, K, X, N)           a numeric \`ne\`: the one value it excludes. Not
+%                                  a window, because a hole is not an interval
+%   mcis / mcisnot(M, T, K, X, B)  a boolean condition
+%   mcfired(M, T, K, X)            a trigger condition
+%   mcbad(M, T, K)                 a condition that is not one: an input the
+%                                  machine has not got, an operator its kind does
+%                                  not take, a comparand that reads as nothing.
+%                                  Kept rather than dropped, because dropping it
+%                                  would leave the edge reading as unguarded
+%   mguarded(M, T)                 derived: T has a guard at all
+%   mclash(M, T1, T2)              derived: some condition of each cannot both
+%                                  hold. Asked of one transition against itself
+%                                  it is an impossible guard
+%   mdisjoint(M, T1, T2)           derived: the clash, both ways round, so that
+%                                  one L1 > H2 answers every pair
+%   moverlap(M, T1, T2)            derived: NOT provably disjoint. Two unguarded
+%                                  edges overlap, which is what keeps
+%                                  mnondet/3 the rule it was — and a sound
+%                                  refusal to guess rather than a claim that
+%                                  some valuation exists
+%   mguardnever(M, T)              derived: this guard can never be met
+%   mfeasible(M, T)                derived: and the ones that can
+%   mgreach / mgunreached(M, S)    derived: reachability once the guards are
+%                                  taken into account. A subset of mreach/2's
+%                                  edges, so this is STRICTLY STRONGER than the
+%                                  check that shipped rather than merely
+%                                  different — and deliberately incomplete the
+%                                  other way, because tracking which valuations
+%                                  survive each hop is tracking (state x
+%                                  valuation)
+%   mval(M, T, exit)  mexit(M, T, Ms)
+%                                  the fourth motion setting: how long T's \`from\`
+%                                  state must have been held before T may be
+%                                  taken. A trigger arriving early is DROPPED,
+%                                  not deferred — there is no timer in the
+%                                  exported runtime and there is not going to be
+%   mexitpast(M, T)                derived: an exit time longer than the \`from\`
+%                                  state's own timeline, which makes the edge
+%                                  unreachable rather than merely odd
+%
+% Entry, Exit and Any. Three reserved ids, legal only as a transition's end and
+% never as a state — a state is a delta over the definition's parts, and these
+% three have no appearance to have a delta of:
+%
+%   mreserved(entry) mreserved(exit) mreserved(any)
+%   mefrom(M, T, S)                derived: what an edge may be taken FROM. An
+%                                  ordinary edge from S; an entry edge from the
+%                                  initial state (entry is sugar over \`load\`,
+%                                  which this program already had); an any edge
+%                                  from every state of its own layer
+%   manyfrom(M, T)  mstops(M, T)   derived: an Any edge; an edge that stops a
+%                                  layer
+%   mrank(M, T, 1|2)               derived: specific beats Any, which is Rive's
+%                                  rule and the only one that makes a fallback a
+%                                  fallback
+%   mmisplaced(M, T)               derived: a reserved id in the wrong position.
+%                                  Not mdangling/2, because "this edge names a
+%                                  state you deleted" and "this edge tries to
+%                                  leave Exit" are two mistakes a designer fixes
+%                                  two different ways
+%
+% Layers. A machine has one or more, they all run at once, and each is in
+% exactly one state at a time. This is where copies pay for themselves: two
+% layers are two shown/2 facts in ONE answer set, where a choice rule would have
+% been a product of universes and the question "does the glow line up when the
+% button is also pressed" would have had nowhere to be asked. A machine that says
+% nothing about layers gets one called \`base\` holding every state, so every rule
+% here is the rule that shipped on every document written before layers existed.
+%
+%   mlayer(M, L)   mlindex(M, L, K)
+%                                  L is M's Kth layer. THE ORDER IS THE
+%                                  PRIORITY — no priority field to disagree with
+%                                  the list, the way order/2 has no onTop flag
+%   mslayer(M, S, L)               state S belongs to layer L. State ids stay
+%                                  unique per MACHINE, so stt(I,S,N) is unchanged
+%                                  and every rule a designer has already written
+%                                  about a state copy still says what it said
+%   mlfirst / mlinitial(M, L, S)   the state a layer starts in
+%   mtlayer(M, T, L)               derived: the layer a transition belongs to
+%   mcrosslayer(M, T)              derived: and the edges that leave it
+%   mlshadow(M, L, N, P)           some state of L owns property P of part N
+%   mlfshadow(M, L, N, D)          ...dimension D of it. Also where some state of
+%                                  L rewords a part that hugs its own words: a
+%                                  measured box is a third source for a dimension
+%                                  and it is owned by whoever measured it
+%   mlrshadow(M, L, N, R)          ...its rotation about axis R
+%   mwriter / mfwriter / mrwriter(M, L, N, ...)
+%                                  derived: the layer that actually decides it —
+%                                  the LAST one that owns it. That is Rive's
+%                                  resolution and it is here because the program
+%                                  must draw a picture: two literals for one
+%                                  rendered/3 is not two designs, it is one
+%                                  arbitrary answer, silently
+%   mowned / mfowned / mrowned(M, N, ...)
+%                                  derived: whether ANY layer owns the field,
+%                                  which is what the unowned half of each alias
+%                                  reads
+%   mfight / mffight / mrfight(M, L1, L2, N, ...)
+%                                  derived: and the fact that there was a
+%                                  decision to make. THIS is the thing Rive
+%                                  cannot do — the two layers, by name, in a
+%                                  core, with a switch and a why. STATIC: it
+%                                  fires when two layers *could* both write the
+%                                  field, whether or not both states are on
+%                                  screen, because a machine is a claim about all
+%                                  of its runs
+%   mfightat(I, L1, L2, N, P)      derived: the same fight on this instance as
+%                                  drawn, for a panel answering "why is this
+%                                  pixel this colour" rather than "is this
+%                                  machine sound"
+%
+%   viol(machine_layers_agree) :- mfight(_,_,_,_,_).
+%
+% Timelines. Keyframes over time, per property, per part. THE SOLVER DECIDES
+% KEYFRAMES AND NEVER FRAMES: grounding scales with how many keyframes a document
+% holds and with nothing else, and there is no frame rate in this program, this
+% model or this export. What happens between two keyframes is interpolated by
+% the compositor in the file and by the canvas in the studio, and costs no solve
+% in either.
+%
+%   mtimeline(M, W)   mtplays(M, S, W)   mloop(M, W, none|loop|pingPong)
+%   trkp(N, P)  trkd(N, D)  trkr(N, R)
+%                                  a track: part N's property, its dimension, or
+%                                  its rotation. A track names exactly one
+%   mtrack(M, W, R)  mtrackof(M, W, R, N)
+%   mkey(M, W, R, K)               R's Kth keyframe, 1-based, in DOCUMENT order.
+%                                  Not the order the resolved times put it in: K
+%                                  names the variable, so a K that depended on
+%                                  the answer would be a variable whose name
+%                                  depended on its own value
+%   mkeasing(M, W, R, K, E)        the curve out of that keyframe
+%   kat(M, W, R, K)                the variable its TIME is — a duration Value,
+%                                  so a keyframe can name the same motion scale
+%                                  everything else does
+%   kval(M, W, R, K)               the variable its VALUE is — an ordinary Value,
+%                                  so a keyframe colour may name a token and two
+%                                  alternatives in one really are two designs
+%   tlen(M, W)                     the variable a stated length is. Absent, the
+%                                  length is the last keyframe's time, DERIVED so
+%                                  a timeline cannot disagree with its contents
+%   mkat(M, W, R, K, Ms)  mtlen(M, W, Ms)
+%                                  derived: what this universe made of them
+%   mknext(M, W, R, K1, K2)  mkpast(M, W, R, K)
+%                                  derived: consecutive keyframes; one past the
+%                                  timeline's own end, which is legal and means
+%                                  the tail is not played
+%   mkbackwards(M, W, R, K)        derived: a keyframe that resolved BEFORE its
+%                                  predecessor. Not a thing a linter over the
+%                                  document could catch, because it is a
+%                                  universe's answer rather than a document's
+%   mkbase(M, W, S)                derived: which state's copy a keyframe copy
+%                                  inherits from where its track says nothing —
+%                                  the FIRST state that plays W, because several
+%                                  may and two poses for one dimension is one
+%                                  arbitrary answer rather than two designs
+%   mkpart(M, W, N)                the parts a copy is minted for, seeded only
+%                                  from the geometric rules that name one
+%   kfr(I, W, R, K)                a keyframe copy: instance I's pose of that
+%                                  track at that keyframe. **Never a node/1**,
+%                                  for stt/3's reasons, and minted ONLY where a
+%                                  rule names one — a timeline on its own costs
+%                                  two variables per keyframe and no copies at
+%                                  all
+%
+% Blend states. Several timelines mixed by a number input. The mixing is
+% arithmetic over a runtime value, so NONE of it is solved and none of it can be:
+% the input is not in the program. What IS solved is everything the stops are
+% made of, and what the checks need.
+%
+%   mblend(M, S, oneD|direct)      \`oneD\` and not \`1d\`: a kind reaches the
+%                                  program as itself and an ASP constant may not
+%                                  begin with a digit
+%   mblendin(M, S, X)
+%   mstop(M, S, J, W)  mstopat(M, S, J, N)  mstopby(M, S, J, X)
+%                                  the Jth stop: which timeline, at what
+%                                  threshold in THOUSANDTHS, or driven by which
+%                                  input
+%   mstopout(M, S, J)              derived: a stop outside its input's own range
+%                                  — an animation that is in the file and can
+%                                  never play
+%   mstopgap(M, S)                 derived: the range extends past the outermost
+%                                  stop, so part of the axis plays one timeline
+%                                  flat. Legal, sometimes meant, derived anyway
+%   mtwosource(M, S)               derived: a state holding both a timeline and a
+%                                  blend. Reported rather than repaired, because
+%                                  a state with two sources is a mistake a person
+%                                  should see rather than one a reader should
+%                                  quietly pick a side in
 %
 % A machine changes appearance, geometry and presence. It does not change
 % structure: no node appears, moves in the tree or changes kind, and hiding is
@@ -3581,6 +3890,10 @@ export function compile(
 		});
 	};
 	rank(scene.nodes);
+	// Which definition parts a machine has put in the third axis, once for the
+	// document rather than once per node — see `thirdAxisParts`, which is also
+	// what `isSpatialScene` opens the gate with.
+	const thirdAxis = thirdAxisParts(scene);
 	for (const node of flatten(scene.nodes)) {
 		nodeLines.push(atom("node", node.id));
 		nodeLines.push(atom("kind", node.id, node.kind));
@@ -3648,6 +3961,36 @@ export function compile(
 			zstated = true;
 			emitValue(rotateVar(node.id, turn), value);
 		}
+		/**
+		 * The fourth way into the third axis, and the one that is not on the node
+		 * at all: a **machine state or a timeline track** that gives this part a
+		 * `z`, a `depth` or a turn.
+		 *
+		 * `StatePart.frame` is keyed over six axes and `Track.dim` spans six
+		 * precisely so a state may lift a mesh and a timeline may animate it. With
+		 * this line missing, `isSpatialScene` was false, `stateDimensions` handed
+		 * the machine section the planar four, no `sfval(I,S,N,z)` was ever minted,
+		 * and a designer who opened the depth rows on a flat part and typed a
+		 * number got no atom, no picture and no warning.
+		 *
+		 * Stated on the **part**, not only on its copies, which is the difference
+		 * between a fix and an artefact. The narrower repair — open the gate, leave
+		 * `zstated/1` alone — derives `frame(stt(I,S,N),z,V)` from `sfval` because
+		 * that rule leaves the dimension unbound, while `s3(stt(I,S,N))` stays
+		 * false: the copy would have a z in the state that sets one and none at all
+		 * in the state beside it, the instance would have a z only while that state
+		 * is shown, and nothing anywhere would have a `depth`. A part that is
+		 * somewhere on an axis in one state and nowhere on it in the next is not a
+		 * design. Said here, the part gets the same six numbers a node the document
+		 * lifted by hand has, the state-copy defaults at MACHINE_RULES fill the
+		 * states that say nothing, and `s3(inst(I,N))` carries it to every use.
+		 *
+		 * Read off `thirdAxisParts` rather than asked again here, for
+		 * `isSpatialScene`'s reason: the reader and the compiler disagreeing about
+		 * what "spatial" means is the one way the no-regression promise breaks
+		 * quietly.
+		 */
+		if (thirdAxis.has(node.id)) zstated = true;
 		// The claim about the document that `s3/1` is seeded from — see
 		// SPATIAL_RULES for why it is stated here rather than read back out of
 		// `frame/3`, which would close a loop through a negation.
@@ -4667,6 +5010,19 @@ export function compile(
 			"#show mfight(M,L1,L2,N,P) : mfight(M,L1,L2,N,P), scenery.",
 			"#show mffight(M,L1,L2,N,D) : mffight(M,L1,L2,N,D), scenery.",
 			"#show mrfight(M,L1,L2,N,R) : mrfight(M,L1,L2,N,R), scenery.",
+			// And the same fight *as drawn*, which is the one line the frozen spec's
+			// own #show list leaves out while its §4.4 says in so many words that
+			// `mfightat/5` "is there for the panel". A predicate that is derived, read
+			// by no rule and carried by no atom is dead code however good the reason
+			// for it was — and the panel it is for reads the model, which reads the
+			// answer set, which is this list. Shown rather than deleted, because the
+			// reason is right: mfight/5 is static and answers "these two layers, in
+			// principle", and a panel asking "why is this pixel this colour" needs the
+			// one that is about the instance in front of it.
+			//
+			// Costs nothing where nothing fights: two layers have to own one property
+			// of one part and both have to be on screen before a single atom appears.
+			"#show mfightat(I,L1,L2,N,P) : mfightat(I,L1,L2,N,P), scenery.",
 			"#show mstopout(M,S,J) : mstopout(M,S,J), scenery.",
 			"#show mstopgap(M,S) : mstopgap(M,S), scenery.",
 			"#show mtwosource(M,S) : mtwosource(M,S), scenery.",

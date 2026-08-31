@@ -1673,12 +1673,31 @@ test("a document with the whole ladder in it is read once, however many times it
 /* No regression: every existing document reads back as it always did  */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The templates written *after* the third axis and the ladder, which hold their
+ * fields on purpose.
+ *
+ * Named rather than detected, for the reason `SPATIAL_TEMPLATES` in
+ * `spatial.test.ts` is: a loop that skipped whatever happened to hold a new
+ * field would excuse exactly the regression it exists to catch. Both directions
+ * are asserted below, so a template cannot be parked in here to quieten it —
+ * being in this set is a claim that the document really does exercise the new
+ * fields, and it fails if it does not.
+ */
+const MODERN_TEMPLATES = new Set(["deck", "solids"]);
+
 test("no template gains a single field the third axis or the ladder added", () => {
-	// The invariant, asserted rather than assumed. Every field this step added is
-	// optional and absence means what it always meant, so a document written
+	// The invariant, asserted rather than assumed. Every field these steps added
+	// is optional and absence means what it always meant, so a document written
 	// before any of it existed has to come back holding none of it — otherwise
 	// the compiler's `spatial.` gate opens on a file that never asked for it, and
 	// a viewport on page four puts the whole document into three dimensions.
+	//
+	// The two templates that *do* ask for it are held to the opposite claim, in
+	// the same walk: they must come back holding what they were written with, and
+	// they must round-trip identically doing it. A field that survived one read
+	// and vanished on the second would be a document that changed the first time
+	// somebody saved it.
 	for (const template of TEMPLATES) {
 		const raw = JSON.parse(JSON.stringify(template.create()));
 		const once = normalizeScene(raw);
@@ -1718,6 +1737,13 @@ test("no template gains a single field the third axis or the ladder added", () =
 					if (Object.hasOwn(transition, key)) seen.push(`${transition.id}.${key}`);
 				}
 			}
+		}
+		if (MODERN_TEMPLATES.has(template.id)) {
+			assert.ok(
+				seen.length > 0,
+				`${template.id} is listed as modern and holds none of the new fields`,
+			);
+			continue;
 		}
 		assert.deepEqual(seen, [], `${template.id} gained ${seen.join(", ")}`);
 	}

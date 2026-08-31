@@ -2,8 +2,26 @@ import { EDGES, type Edge, EDGE_NAMES } from "@clingo-design/design-core";
 
 import styles from "./AlignTools.module.css";
 
-/** The six a click can mean: a node's own places, not its sizes or the axes. */
-const PLACES = EDGE_NAMES.filter((e) => EDGES[e].role === "pos");
+/**
+ * The six a click can mean: a node's own places, on the page.
+ *
+ * Not the sizes and not the axes, which have never been here — and **not the
+ * three on the third axis** either, which is the one filter worth explaining.
+ * `EDGES` holds `front`, `centerZ` and `back` since depth rules landed, and they
+ * are perfectly good quantities for a rule to be about; what they have not got
+ * is a *glyph*. Every icon below is a line ruled across a 16×16 square with two
+ * bars meeting it, which is a picture of a page, and a depth alignment drawn
+ * that way would be indistinguishable from the horizontal one beside it — three
+ * more buttons on a floating bar, identical to three that are already there, in
+ * every flat document ever opened.
+ *
+ * A depth rule is written where its members can be seen to have a depth: the
+ * Rules panel, whose edge menu is narrowed by `edgeOptions` and offers the third
+ * axis exactly when every member is in it.
+ */
+const PLACES = EDGE_NAMES.filter(
+	(e) => EDGES[e].role === "pos" && EDGES[e].axis !== "z",
+);
 
 export interface AlignToolsProps {
 	/** How many layers a click would be about. */
@@ -73,6 +91,8 @@ const THICK = 3.4;
  */
 function AlignIcon({ edge }: { edge: Edge }) {
 	const { axis, place = "lead" } = EDGES[edge];
+	// `PLACES` never hands this a `z` row — see the note there — so the two-way
+	// flip below is a complete answer rather than a fallthrough.
 	const rule = RULE[place];
 	const flip = axis === "y";
 	const line = flip

@@ -2495,11 +2495,26 @@ export type Edge =
 	| "width"
 	| "height"
 	| "x"
-	| "y";
+	| "y"
+	| "front"
+	| "centerZ"
+	| "back"
+	| "depth"
+	| "z";
 
 export interface EdgeSpec {
 	label: string;
-	axis: "x" | "y";
+	/**
+	 * Which of the three the quantity is measured along.
+	 *
+	 * Three since the third axis landed, and the widening is the *only* thing
+	 * that ever stood between `EDGES` and its `z` rows — see the note on the
+	 * table. Everything that reads this and can only draw in two dimensions
+	 * skips a `z` row rather than narrowing the type back: `annotate.ts` is the
+	 * one such reader, and what it draws for a rule about `centerZ` is nothing,
+	 * which is the answer its own comment predicted.
+	 */
+	axis: "x" | "y" | "z";
 	/** A place on a node, a size of one, or the axis itself. */
 	role: "pos" | "span" | "axis";
 	/**
@@ -2516,24 +2531,31 @@ export interface EdgeSpec {
  * `compile()` emits this table as facts and the rules read it, so an edge is
  * never named in a rule: adding one is an entry here.
  *
- * **The third axis's five rows — `front`, `centerZ`, `back`, `depth` and `z` —
- * are not here yet, and their absence is a finding rather than an omission.**
- * They need {@link EdgeSpec.axis} to widen from `"x" | "y"` to `"x" | "y" |
- * "z"`, and that widening does not typecheck: `annotate.ts` reads
- * `EDGES[edge].axis` and hands it straight to two module-private helpers that
- * take the planar pair, and its own exported `Annotation.axis` is the planar
- * pair as well, so a third axis costs twenty-three errors there and five more in
- * `edits.ts`. Both files are outside this step's ownership, and `annotate.ts` is
- * outside every step's — which means somebody has to decide what the canvas
- * overlay *draws* for a rule about `centerZ` (nothing, almost certainly) before
- * the vocabulary can grow. That is a design decision about the overlay, not a
- * type to widen, and inventing it here would be exactly the silent redesign this
- * work is not allowed to do.
+ * **The third axis's five rows are here**, and the decision that was blocking
+ * them is recorded because it is the interesting part. Widening
+ * {@link EdgeSpec.axis} from `"x" | "y"` costs `annotate.ts` twenty-eight
+ * errors, all of one shape: it hands the axis straight to two module-private
+ * helpers that measure a rectangle, and its exported `Annotation.axis` is the
+ * planar pair. Somebody had to decide what the canvas overlay *draws* for a rule
+ * about `centerZ`, and the answer is **nothing** — a depth is not a distance on
+ * the page, there is no line to rule across it and no place to hang a label, and
+ * a mark that projected one onto the plane would be a mark about a number the
+ * page does not contain. So `annotate.ts` skips a `z` row and keeps its own
+ * type; it is the same refusal `axisBounds` makes about a turned node, in the
+ * one other file that draws.
  *
- * Everything downstream is written so that the five rows drop in with no further
- * edit: {@link edgeOptions} filters by axis through a `Set<string>`,
+ * Everything else took the rows with no edit at all, which is what the previous
+ * note predicted: {@link edgeOptions} filters by axis through a `Set<string>`,
  * {@link PLACES}/{@link SPANS}/{@link AXES} are role filters, and
- * `CONSTRAINT_KINDS[k].edges` widens with them.
+ * `CONSTRAINT_KINDS[k].edges` widened with them. `compile.ts`'s `EDGE_FACTS`
+ * already emitted a `z` row behind `:- spatial.` for the day this landed, so a
+ * flat document grounds not one of them and `gedge(front` is still absent from
+ * its program.
+ *
+ * **`front` is the lead and `back` is the trail**, because +z points *away* from
+ * the viewer — the same convention `SPATIALS` states and the same one that makes
+ * a camera sit at negative z. Getting this backwards would put `gplace(front,
+ * trail)` in the program and quietly invert every depth rule in the document.
  */
 export const EDGES: Record<Edge, EdgeSpec> = {
 	left: { label: "Left edge", axis: "x", role: "pos", place: "lead" },
@@ -2546,13 +2568,18 @@ export const EDGES: Record<Edge, EdgeSpec> = {
 	height: { label: "Height", axis: "y", role: "span" },
 	x: { label: "Horizontally", axis: "x", role: "axis" },
 	y: { label: "Vertically", axis: "y", role: "axis" },
+	front: { label: "Front face", axis: "z", role: "pos", place: "lead" },
+	centerZ: { label: "Depth centre", axis: "z", role: "pos", place: "mid" },
+	back: { label: "Back face", axis: "z", role: "pos", place: "trail" },
+	depth: { label: "Depth", axis: "z", role: "span" },
+	z: { label: "In depth", axis: "z", role: "axis" },
 };
 
 export const EDGE_NAMES = Object.keys(EDGES) as Edge[];
 
 /** The positional edge at one end (or the middle) of an axis. */
 export const edgeOn = (
-	axis: "x" | "y",
+	axis: "x" | "y" | "z",
 	place: "lead" | "mid" | "trail",
 ): Edge =>
 	EDGE_NAMES.find(
@@ -2868,9 +2895,9 @@ export function edgeOptions(
 ): Edge[] {
 	const offered = CONSTRAINT_KINDS[kind].edges;
 	if (members.length === 0) return [...offered];
-	// A set of strings rather than of the axis union, so that this reads the same
-	// the day the third axis's edges land in `EDGES` — see the note in
-	// {@link EDGES} about why they have not yet.
+	// The planar pair always, and the third only where every member has a
+	// quantity on it. A `Set<string>` rather than of the axis union because it is
+	// a filter and not a claim about the vocabulary.
 	const axes = new Set<string>(["x", "y"]);
 	if (members.every((member) => inThirdAxis(scene, member))) axes.add("z");
 	return offered.filter((edge) => axes.has(EDGES[edge].axis));
@@ -3346,6 +3373,12 @@ export function datumLabel(scene: Scene, term: string): string | undefined {
 	});
 	if (datum.kind === "line") return `Guide ${datum.guide} — ${surface}`;
 	const spec = EDGES[datum.edge];
+	// A grid rules a *page*, which is a rectangle: there are columns and there
+	// are rows and there is no third family of them, so `TRACK_WORDS` has two
+	// axes and a datum on the third is a term nothing in this codebase mints.
+	// Answered with nothing rather than with an invented word, which is what this
+	// function already does for a term that is not a datum at all.
+	if (spec.axis === "z") return undefined;
 	const words = TRACK_WORDS[spec.axis];
 	return `${words.track} ${datum.index} ${words[spec.place ?? "lead"]} — ${surface}`;
 }

@@ -14,6 +14,7 @@ import {
 	type Relaxation,
 	STRENGTHS,
 	STRENGTH_NAMES,
+	type Picks,
 	type Scene,
 	type Strength,
 	UNITS,
@@ -24,12 +25,16 @@ import {
 	constrainsProp,
 	constraintTermError,
 	constraintValue,
+	crossesViewport,
 	datumLabel,
 	deadlock,
 	deleteConstraint,
+	edgeOptions,
 	findInTree,
 	formatLength,
 	groupProps,
+	inertMembers,
+	keyCopyLabel,
 	rangesOverGroup,
 	ref,
 	renameConstraint,
@@ -103,6 +108,32 @@ export interface ConstraintsProps {
 	 * walk twice, with two chances to disagree.
 	 */
 	stateMembers?: readonly string[];
+	/**
+	 * Keyframe copies a rule may name, as `keyframeCopyIds` lists them — offered
+	 * in the same menu the state copies are, and for the same reason.
+	 *
+	 * **The menu is the front door and there is no other one.** `compile()` mints
+	 * `kfr(I,W,R,K)` only where a rule already names one — `keyframeParts` is
+	 * seeded from `scene.constraints` and from nothing else — so without this list
+	 * the whole mechanism is a term nobody can type: a designer would have to know
+	 * the spelling, the track term's own bracket syntax and the 1-based index, and
+	 * get all three right before anything appeared. That is why this list, unlike
+	 * the state copies', is *not* filtered by the materialisation analysis: it
+	 * would then offer only the terms somebody had already used, and there would
+	 * be no first rule.
+	 */
+	keyMembers?: readonly string[];
+	/**
+	 * The universe on screen, for the readers that answer differently in
+	 * different designs.
+	 *
+	 * One reader needs it and it is {@link inertMembers}: an `angle` token holding
+	 * `[0deg, 30deg]` is a rule that holds in one design and says nothing in the
+	 * next, and marking it inert in the flat one would be a warning with nothing
+	 * behind it. Absent is the first alternative of everything, which is what an
+	 * unsolved panel shows anyway — the same default `Dimension` above takes.
+	 */
+	picks?: Picks;
 }
 
 /**
@@ -236,6 +267,8 @@ export function Constraints({
 	onSelectionChange,
 	model,
 	stateMembers,
+	keyMembers,
+	picks,
 }: ConstraintsProps) {
 	const selected = [...selection];
 	const groups = Object.keys(model?.groups ?? {}).sort();
@@ -329,10 +362,17 @@ export function Constraints({
 		findInTree(scene.nodes, id)?.name ??
 		datumLabel(scene, id) ??
 		stateLabel(scene, id) ??
+		keyCopyLabel(scene, id) ??
 		id;
 
 	/**
-	 * State copies this rule could still take, in the order the panel lists them.
+	 * Copies this rule could still take, in the order the panel lists them.
+	 *
+	 * The state copies and the keyframe copies in one menu, because they are one
+	 * kind of thing to the rule that names them: a member that is not a node, that
+	 * `c_node/2` takes exactly where it takes a node id, and that no selection on
+	 * the canvas can ever supply. Two menus would be two controls asking the same
+	 * question in a 260px panel.
 	 *
 	 * Filtered against what the rule already names, and against the kind's
 	 * `maxNodes`, because `shapeFor` slices extra members off the end: offering a
@@ -342,12 +382,55 @@ export function Constraints({
 	 * two answers to one question.
 	 */
 	const spareStates = (c: Constraint): readonly string[] => {
-		if (stateMembers === undefined || stateMembers.length === 0) return [];
+		const all = [...(stateMembers ?? []), ...(keyMembers ?? [])];
+		if (all.length === 0) return [];
 		if (c.group !== undefined) return [];
 		const held = new Set(c.nodes);
 		return c.nodes.length >= CONSTRAINT_KINDS[c.kind].maxNodes
 			? []
-			: stateMembers.filter((term) => !held.has(term));
+			: all.filter((term) => !held.has(term));
+	};
+
+	/**
+	 * What this rule cannot say, and what it says about somewhere other than the
+	 * screen — the two readers `spatial.ts` keeps, asked per row.
+	 *
+	 * **Silence is the failure this answers.** A rule about a turned node's left
+	 * edge is refused by `gnoedge/2`: the quantity is never minted, the relation
+	 * goes unstated, and the rule sits in this panel looking exactly like a rule
+	 * that holds. A rule between a node inside a 3D view and one outside it is
+	 * worse in the other direction — it *does* hold, exactly, about model space,
+	 * while a camera moves the pixels it appears to be about. Neither is an error
+	 * and neither can be found by looking at the design, so both are said here,
+	 * where the rule is.
+	 *
+	 * Asked per row rather than by filtering one `inertConstraints` walk, which is
+	 * what the exported function is for: on a page of forty rules, filtering would
+	 * be forty walks of forty rules to draw one mark.
+	 */
+	/**
+	 * The quantities this rule may be about, given who its members are.
+	 *
+	 * Plus whatever it is about *already*, which is the case that makes this a
+	 * function rather than one call: a rule written on a mesh and then dragged out
+	 * of the view still names `centerZ`, and a menu that dropped the current value
+	 * would render as the first option and silently retarget the rule the next
+	 * time anybody touched it. The row shows what the rule says; the menu says
+	 * what it could say instead.
+	 */
+	const edgesFor = (c: Constraint): readonly Edge[] => {
+		const members = c.group === undefined ? c.nodes : membersOf(c.group);
+		const offered = edgeOptions(scene, c.kind, members);
+		const at = c.edge;
+		return at !== undefined && !offered.includes(at) ? [at, ...offered] : offered;
+	};
+
+	const inertOf = (c: Constraint) =>
+		c.enabled ? inertMembers(scene, c, picks) : [];
+	const crossingOf = (c: Constraint): string | undefined => {
+		if (!c.enabled || !CONSTRAINT_KINDS[c.kind].geometric) return undefined;
+		const over = c.group === undefined ? c.nodes : membersOf(c.group);
+		return over.length < 2 ? undefined : crossesViewport(scene, over);
 	};
 
 	/** The "what it ranges over" control, for the head and for each rule. */
@@ -567,6 +650,11 @@ export function Constraints({
 				// zero says "nothing here names it", not "this is broken".
 				const refs = violRefs(scene.rules, c.id);
 				const stub = `viol(${c.id}) :- `;
+				// What the program will not create for this rule, and what it will
+				// create somewhere the screen is not. Neither is an error and both are
+				// invisible without this.
+				const inert = inertOf(c);
+				const crossing = crossingOf(c);
 				return (
 					<div
 						key={c.id}
@@ -574,6 +662,7 @@ export function Constraints({
 							styles.rule,
 							conflict.has(c.id) && styles.blamed,
 							broken.has(c.id) && styles.broken,
+							inert.length > 0 && styles.inert,
 							!c.enabled && styles.off,
 						)}
 						data-constraint={c.id}
@@ -581,6 +670,12 @@ export function Constraints({
 						// A preference this design gave up. Marked, not flagged: it is
 						// what the rule is *for*, and the design is legal.
 						data-broken={broken.has(c.id) ? "" : undefined}
+						// A rule that says nothing at all, because a quantity it names is
+						// one the program refuses to mint. Not a conflict — a document
+						// full of these solves perfectly well — and not a preference
+						// either; it is a rule with a bug in it, and the row has to say so
+						// or nobody will ever find out.
+						data-role={inert.length > 0 ? "inert-rule" : undefined}
 					>
 						{/* Two lines, because the panel is 260px and five controls across
 						    it collapse each other to nothing. The first says how firmly the
@@ -709,7 +804,16 @@ export function Constraints({
 										)
 									}
 								>
-									{spec.edges.map((edge) => (
+									{/* Narrowed by what the members actually have. `EDGES` holds
+									    all fifteen quantities and a flat rectangle has ten of
+									    them, so an unfiltered menu would offer a card a front
+									    face — a rule the program refuses through `gnoedge/2`,
+									    which means a rule that quietly does nothing. Offering
+									    it and then explaining the silence is worse than not
+									    offering it: `edgeOptions` is the filter and
+									    `refusedEdge` is the explanation for the rules that
+									    already exist. */}
+									{edgesFor(c).map((edge) => (
 										<option key={edge} value={edge}>
 											{EDGES[edge].label}
 										</option>
@@ -890,6 +994,36 @@ export function Constraints({
 										: `named ${refs === 1 ? "once" : `${refs} times`} in your rules`)}
 							</p>
 						)}
+
+						{/* Why this rule says nothing. One sentence per refused member,
+						    because two members turned two different ways are two different
+						    reasons and a single line would have to pick one. Each names the
+						    member whose rotation took the quantity away, which is the part
+						    that makes it worth reading: the node that fails to move is
+						    usually not the node somebody turned. */}
+						{inert.map((found) => (
+							<p
+								key={`${found.member}/${found.edge}`}
+								className={cx(styles.note, styles.inertNote)}
+								data-role="inert-reason"
+								data-member={found.member}
+							>
+								{found.why}
+							</p>
+						))}
+
+						{/* And the opposite failure: a rule that holds exactly, about a
+						    place the camera is between you and. Softer markup than the
+						    inert rows on purpose — this rule works, and the design may
+						    well be what its author meant. */}
+						{crossing ? (
+							<p
+								className={cx(styles.note, styles.crossNote)}
+								data-role="cross-viewport"
+							>
+								{crossing}
+							</p>
+						) : null}
 					</div>
 				);
 			})}

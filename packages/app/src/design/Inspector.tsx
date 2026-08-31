@@ -31,12 +31,13 @@ import {
 	type Token,
 	type Value,
 	type ValueType,
+	VALUE_TYPES,
+	writeAngle,
 	type Freedom,
 	defaultValue,
 	findInTree,
 	flatten,
 	frameFrozen,
-	frameOf,
 	frameVar,
 	guideValueOf,
 	guideVar,
@@ -111,6 +112,30 @@ import {
 	shownState,
 	stateName,
 	stateTouches,
+	type Spatial,
+	type Turn,
+	SPATIALS,
+	SPATIAL_DIMS,
+	TURNS,
+	TURN_NAMES,
+	addCamera,
+	addLight,
+	addMesh,
+	boxOf,
+	camerasIn,
+	cameraOf,
+	clearSpatial,
+	clearTurn,
+	constraintMemberNode,
+	inertConstraints,
+	isSpatialNode,
+	rotateVar,
+	setSpatialValue,
+	setStateTurn,
+	setTurnValue,
+	setViewportCamera,
+	spatialFrozen,
+	turnOf,
 } from "@clingo-design/design-core";
 
 import { NOTHING } from "./Styles";
@@ -188,6 +213,20 @@ export interface InspectorProps {
 }
 
 const SIZINGS: Sizing[] = ["hug", "fixed"];
+
+/**
+ * The appearance rows the frozen DOM contract addresses by a `data-role` of
+ * their own — see {@link Inspector}'s `appearanceRow`.
+ *
+ * A partial table rather than a role per property, because the other nineteen
+ * are already addressable by `data-prop` and giving them roles now would be
+ * inventing a contract nobody is coding against. These two are named in
+ * `docs/three-d-spec.md` §14, so they are the two that exist.
+ */
+const PROP_ROLES: Partial<Record<PropName, string>> = {
+	solid: "solid-picker",
+	lamp: "lamp-picker",
+};
 
 /**
  * How many tracks an axis is cut into.
@@ -274,14 +313,25 @@ function CountField({
  */
 function LengthField({
 	label,
+	role,
 	value,
 	unit,
 	onCommit,
 	onSplit,
+	onClear,
 	disabled,
 	pinned,
+	title,
 }: {
 	label: string;
+	/**
+	 * `data-role` on the input, for the fields the frozen DOM contract names by
+	 * one — `spatial-z`, `spatial-depth`. The planar four are addressed by
+	 * `data-field` and pass nothing, which is not an inconsistency: `x` is a
+	 * `data-field` on a hundred documents' worth of existing queries and the
+	 * third axis has no such history to keep.
+	 */
+	role?: string;
 	/** The stored literal for this dimension. */
 	value: string;
 	unit: Unit;
@@ -292,19 +342,30 @@ function LengthField({
 	 * position into a design decision. Absent where there is nothing to split.
 	 */
 	onSplit?: () => void;
+	/**
+	 * Take the dimension out of the document entirely — offered only where
+	 * absence is a *different statement* from zero, which on the planar four it
+	 * never is and on the third axis always is. A frame has four dimensions
+	 * whatever anybody does, so there is nothing there to clear; `spatial` is
+	 * sparse, and a node holding `z: 0` states that it is in the third axis while
+	 * a node holding nothing states that it is not. See `clearSpatial`.
+	 */
+	onClear?: () => void;
 	disabled?: boolean;
 	/** The rules leave this coordinate one legal value; there is no choice. */
 	pinned?: boolean;
+	title?: string;
 }) {
 	return (
 		<label
 			className={pinned ? `${styles.field} ${styles.pinned}` : styles.field}
 			data-pinned={pinned ? "" : undefined}
-			title={pinned ? "The rules leave this one value" : undefined}
+			title={pinned ? "The rules leave this one value" : title}
 		>
 			<span className={styles.fieldLabel}>{label}</span>
 			<LengthInput
 				className={styles.number}
+				role={role}
 				field={label}
 				value={value}
 				unit={unit}
@@ -323,6 +384,20 @@ function LengthField({
 					}}
 				>
 					+
+				</button>
+			) : null}
+			{onClear ? (
+				<button
+					type="button"
+					className={styles.split}
+					data-role={`clear-${label}`}
+					title={`Say nothing about ${label} at all, which is not the same as saying zero`}
+					onClick={(e) => {
+						e.preventDefault();
+						onClear();
+					}}
+				>
+					×
 				</button>
 			) : null}
 		</label>
@@ -869,6 +944,70 @@ function machineForPart(
 	return undefined;
 }
 
+/* ------------------------------------------------------------------ */
+/* What a rotation costs a rule                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Every enabled rule that names this node and has been left saying nothing.
+ *
+ * **This used to be a stand-in and is no longer one**, and the difference is
+ * worth a paragraph because the stand-in was right to announce itself. It
+ * re-derived `gnoedge/2` here, in a panel, against a program it could not see:
+ * two readers of one refusal, one of them checked by nothing, free to drift the
+ * day somebody added a rule to `SPATIAL_RULES`. `spatial.ts` now owns the real
+ * pair — `refusedEdge` is the twin of `gnoedge/2` and `inertConstraints` walks
+ * the document with it — so what is left here is a filter and a shape, which is
+ * all a panel ever had any business holding.
+ *
+ * **Every member, not only the selection**, which is the case a designer
+ * actually meets and the reason this block exists at all: `align [card, panel]
+ * on left` where *panel* is the turned one leaves `card` exactly as free as it
+ * was, so the thing that does not move is the thing nobody touched. A reader
+ * that only asked whether the selected node was turned would be silent in
+ * precisely that situation.
+ *
+ * The universe matters and is why this takes picks. An `angle` token holding
+ * `[0deg, 30deg]` is a rule that holds in one design and is inert in the next,
+ * and marking it inert in the flat one would be a warning with nothing behind
+ * it.
+ */
+interface InertRule {
+	/** The constraint's own term — what an unsat core would blame. */
+	constraint: string;
+	/** The member whose rotation is what took the quantity away. */
+	culprit: string;
+	why: string;
+}
+
+function inertRules(
+	scene: Scene,
+	node: SceneNode,
+	picks: Picks,
+): InertRule[] {
+	const out: InertRule[] = [];
+	const seen = new Set<string>();
+	for (const found of inertConstraints(scene, picks)) {
+		if (seen.has(found.constraint)) continue;
+		const constraint = scene.constraints.find((c) => c.id === found.constraint);
+		// Is this node one of the ones the rule is about? Through the same
+		// reduction `spatial.ts` uses, rather than a fourth copy of it here: a rule
+		// may name the part, the instance's copy, a state's copy or a keyframe's,
+		// and all four are this node as far as simplex is concerned.
+		const names = (constraint?.nodes ?? []).some(
+			(member) => constraintMemberNode(scene, member)?.id === node.id,
+		);
+		if (!names) continue;
+		seen.add(found.constraint);
+		out.push({
+			constraint: found.constraint,
+			culprit: constraintMemberNode(scene, found.member)?.id ?? found.member,
+			why: found.why,
+		});
+	}
+	return out;
+}
+
 /**
  * What a value says, in one line, for the row that is showing what a state is
  * overriding.
@@ -1113,6 +1252,7 @@ function StateDeltaSection({
 	state,
 	picks,
 	unit,
+	inDepth,
 	playing,
 	onEdit,
 	onPlay,
@@ -1127,6 +1267,18 @@ function StateDeltaSection({
 	state: MachineState | undefined;
 	picks: Picks;
 	unit: Unit;
+	/**
+	 * Whether the panel is showing the third axis for this part at all — the same
+	 * answer the Depth and Rotation sections below are drawn from, handed down
+	 * rather than recomputed.
+	 *
+	 * Recomputing it here would let the two disagree, and the way they would
+	 * disagree is the bad one: a designer who has opened the third axis on a flat
+	 * card to lean it on hover would find the definition's own rotation rows on
+	 * screen and the state's missing, with nothing saying why. One answer, decided
+	 * once, in the component that owns the disclosure.
+	 */
+	inDepth: boolean;
 	/** What the canvas is drawing each instance in — see `InspectorProps`. */
 	playing?: Readonly<Record<string, string>>;
 	/** Choose a state to author, or null to go back to the definition. */
@@ -1136,7 +1288,11 @@ function StateDeltaSection({
 }) {
 	const names = nodeNames(scene.nodes);
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
-	const box = frameOf(node, context);
+	// Six numbers rather than four: `boxOf` is `frameOf` with the third axis
+	// beside it and answers zero where the document says nothing, so a flat part
+	// reads exactly what `frameOf` gave it and a lifted one has somewhere for a
+	// new alternative to start from.
+	const box = boxOf(node, context);
 	const delta: StatePart = (state && state.parts[node.id]) || {};
 	/** The initial state is what the definition on the canvas already is. */
 	const initial = machine.states[0]?.id;
@@ -1465,6 +1621,76 @@ function StateDeltaSection({
 						)}
 					</div>
 
+					{/* And the other two, which are the same row and a different table.
+					    A state that lifts a mesh 40px forward is the claim a state that
+					    moves a button two pixels down is — `sfval(I,S,N,D)` takes any of
+					    the six and `setStateFrame` was widened to `Axis3` for exactly
+					    this — so it is `deltaRow` again with `SPATIAL_DIMS` where
+					    `FRAME_DIMS` was, and no new machinery anywhere.
+
+					    Behind the same disclosure the definition's own rows are behind,
+					    and that is the whole of why this is not noise on a flat document:
+					    a hover that changes a button's `depth` is not a thing anybody
+					    means, and three empty rows per state per part would bury the two
+					    that matter. */}
+					{inDepth ? (
+						<div className={styles.props} data-role="delta-spatial">
+							{SPATIALS.map((dim) =>
+								deltaRow({
+									key: dim,
+									label: SPATIAL_DIMS[dim].label,
+									type: SPATIAL_DIMS[dim].type,
+									base: node.spatial?.[dim] ?? [lit(SPATIAL_DIMS[dim].fallback)],
+									override: delta.frame?.[dim],
+									tokens: tokensOfType(scene, SPATIAL_DIMS[dim].type),
+									fallback: formatLength(box[dim], unit),
+									variable: frameVar(node.id, dim),
+									onWrite: (next) =>
+										onSceneChange(
+											(prev) =>
+												setStateFrame(prev, machine.id, state.id, node.id, dim, next),
+											`delta-${machine.id}-${state.id}-${node.id}-${dim}`,
+										),
+								}),
+							)}
+						</div>
+					) : null}
+
+					{/* Rotation, which is the one delta with no row above it in the
+					    definition's own grid: a turn is always a full value row, never a
+					    compact field, because an `angle` token holding two alternatives is
+					    "the whole rack tilts, or it does not" and that is a design
+					    decision rather than a number. The state's copy is the same shape,
+					    written through `setStateTurn` into `srval(I,S,N,R)`.
+
+					    What a fresh delta starts at is the angle the part is *already*
+					    turned by, spelled in degrees — `writeAngle` rather than the stored
+					    literal, because the base may be a token and a delta seeded with a
+					    link would follow the definition rather than differ from it, which
+					    is the one thing a delta is for. */}
+					{inDepth ? (
+						<div className={styles.props} data-role="delta-turn">
+							{TURN_NAMES.map((turn) =>
+								deltaRow({
+									key: turn,
+									label: TURNS[turn].label,
+									type: "angle",
+									base: node.turn?.[turn] ?? [lit(VALUE_TYPES.angle.fallback)],
+									override: delta.turn?.[turn],
+									tokens: tokensOfType(scene, "angle"),
+									fallback: writeAngle(turnOf(node, context)[turn]),
+									variable: rotateVar(node.id, turn),
+									onWrite: (next) =>
+										onSceneChange(
+											(prev) =>
+												setStateTurn(prev, machine.id, state.id, node.id, turn, next),
+											`delta-${machine.id}-${state.id}-${node.id}-${turn}`,
+										),
+								}),
+							)}
+						</div>
+					) : null}
+
 					<div className={styles.props} data-role="delta-props">
 						{KINDS[node.kind].props.map((prop) =>
 							deltaRow({
@@ -1674,6 +1900,30 @@ export function Inspector({
 	 * it. The two agreeing would need one of them to be lying.
 	 */
 	const [authoring, setAuthoring] = useState<string | null>(null);
+	/**
+	 * Whether the third axis is on screen for a selection that is not already in
+	 * it.
+	 *
+	 * Panel state, and it writes nothing — which is the point, and it is worth
+	 * defending because the obvious alternative is a button that writes `z: 0`.
+	 * Stating a `z` is not a display setting: `zstated/1` is emitted from it,
+	 * `s3/1` follows, `isSpatialScene` turns true, and the whole third axis
+	 * grounds for a document whose author wanted to *look* at two number fields.
+	 * The no-regression promise is that a flat document costs nothing, and a
+	 * disclosure that quietly spent it would be the worst possible way to break
+	 * that promise — invisibly, from a click that looked like scrolling.
+	 *
+	 * So the rows appear, the document is untouched, and the first number typed
+	 * into one of them is what puts the node in the third axis. `clearSpatial`
+	 * and `clearTurn` take it back out again, and the × beside each field is
+	 * there so that taking it back out is as reachable as putting it in.
+	 *
+	 * It survives moving the selection, for {@link authoring}'s reason: "lean the
+	 * card, then lean the badge on it" is one job with two selections in it, and
+	 * a disclosure that shut on every click would make that job a click longer
+	 * every time. A node already in the third axis ignores it entirely.
+	 */
+	const [depthOpen, setDepthOpen] = useState(false);
 	const selected = [...selection]
 		.map((id) => findInTree(scene.nodes, id))
 		.filter((n): n is SceneNode => n !== undefined);
@@ -1794,8 +2044,46 @@ export function Inspector({
 	const authored = partOf ? findState(partOf.machine, authoring ?? undefined) : undefined;
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
 	const names = nodeNames(scene.nodes);
-	/** Where the node actually is, in the universe on screen. */
-	const box = frameOf(node, context);
+	/**
+	 * Where the node actually is, in the universe on screen — all six numbers.
+	 *
+	 * `boxOf` rather than `frameOf`, and it changes nothing about the four rows
+	 * that were already here: it *is* `frameOf` with `spatialDim` beside it, and
+	 * both answer zero where the document says nothing. What it buys is a place
+	 * for a `z` field's fallback to come from that is the same place the `x`
+	 * field's comes from, rather than a second reader with a second idea of what
+	 * silence means.
+	 */
+	const box = boxOf(node, context);
+	/**
+	 * Whether this node is in the third axis at all — `isSpatialNode`, which is
+	 * the TypeScript twin of the program's `s3/1` and asks the *document*
+	 * rather than a universe, exactly as `zstated/1` is emitted from the document.
+	 *
+	 * Or its kind is: a `mesh` dragged out of a viewport in the layer list is a
+	 * node the document holds, that nothing renders and nothing measures, and
+	 * `isSpatialNode` deliberately does not count it — see its comment. The panel
+	 * has to, because that node's place in the third axis is exactly what a
+	 * person has to be able to fix, and a `mesh` whose inspector offers four
+	 * numbers is a mesh nobody can put back.
+	 */
+	const spatialHere = isSpatialNode(scene, node) || KINDS[node.kind].spatial;
+	const inDepth = spatialHere || depthOpen;
+	/** Rules that name this node and have been left saying nothing. */
+	const inert = inertRules(scene, node, picks);
+	/**
+	 * The cameras a view could look through, and the one it does.
+	 *
+	 * Both asked of `scene` rather than of the node in hand, which is what
+	 * `camerasIn`'s otherwise redundant first argument is for: the panel holds the
+	 * node it last rendered from, the document may have moved on underneath it,
+	 * and a menu built from a stale subtree offers cameras that are no longer
+	 * there. `cameraOf` keeps `vcam/2`'s three conditions exactly — it exists, it
+	 * is a camera, it is in this view — so a name that fails any of them reads as
+	 * "not looking through anything", which is what the program says too.
+	 */
+	const cameras = node.kind === "viewport" ? camerasIn(scene, node) : [];
+	const looksThrough = node.kind === "viewport" ? cameraOf(scene, node) : undefined;
 
 	/**
 	 * A dimension with one number in it, which is what a number field can edit.
@@ -1866,6 +2154,168 @@ export function Inspector({
 		if (probed) return isPinned(probed);
 		if (managed && FRAME_DIMS[dim].role === "pos") return true;
 		return dim === "width" ? sizedBySolver.width : dim === "height" ? sizedBySolver.height : false;
+	}
+
+	/* -------------------------------------------------------------- */
+	/* The third axis                                                  */
+	/* -------------------------------------------------------------- */
+
+	/**
+	 * {@link plainDimension} one axis over, with one difference that is the whole
+	 * of what makes the third axis sparse: **absence is plain**.
+	 *
+	 * A frame always has four dimensions, so `node.frame[dim]` is a list with
+	 * something in it and "does it vary" is the only question. `node.spatial` is
+	 * optional, and a node that has never been lifted holds nothing at all — which
+	 * is not a choice, not a link, and exactly what a number field should be able
+	 * to write into. `varies(undefined)` is already false and `spatialFrozen`
+	 * already answers false for a dimension the node does not hold, so the two
+	 * readers agree with no case here; this comment exists because the agreement
+	 * looks accidental and is not.
+	 */
+	function plainSpatial(dim: Spatial): boolean {
+		return (
+			!varies(node.spatial?.[dim]) && !spatialFrozen(node, dim, context)
+		);
+	}
+
+	/** The literal one spatial dimension holds — the twin of {@link storedLength}. */
+	function storedSpatial(dim: Spatial): string {
+		const term = node.spatial?.[dim]?.[0];
+		return term?.kind === "literal" ? term.value : formatLength(box[dim], unit);
+	}
+
+	/**
+	 * Typing a `z` or a `depth`, which is a statement like typing an `x` is — and
+	 * on a node that held nothing, it is *also* the moment the node joins the
+	 * third axis.
+	 *
+	 * That is not a hidden side effect; it is the only way to say it. `zstated/1`
+	 * is emitted from the document rather than read back out of `frame/3`, so
+	 * there is no state between "flat" and "in the third axis" for a field to
+	 * write, and `setSpatialValue`'s own comment says the same about which kinds
+	 * may be lifted: every one of them, because the document decides and not the
+	 * kind. The × beside the field is the way back out, and `clearSpatial` removes
+	 * the record rather than zeroing it so that "not lifted" keeps one spelling.
+	 */
+	function stateSpatial(dim: Spatial, text: string) {
+		onSceneChange(
+			(prev) => setSpatialValue(prev, node.id, dim, [lit(text)]),
+			`spatial-${node.id}-${dim}`,
+		);
+	}
+
+	/**
+	 * One spatial dimension that has stopped being one number — it names a
+	 * `length` token, or holds two alternatives — as the row every other value
+	 * gets.
+	 *
+	 * The twin of the frame's own alternatives row below, down to the variable:
+	 * `spatialDim` resolves through `frameVar(id, "z")`, so `z` really is a
+	 * seventh dimension of one family as far as picking, pinning and asking why
+	 * are concerned, and only the *storage* is separate. That is why this row can
+	 * hand `picks`, `reach`, `pins` and `why` straight through with no
+	 * translation: the solver has one name for it and so does the panel.
+	 */
+	function spatialRow(dim: Spatial) {
+		const spec = SPATIAL_DIMS[dim];
+		const variable = frameVar(node.id, dim);
+		return (
+			<ValueEditor
+				key={dim}
+				testId={`spatial-${dim}`}
+				label={spec.label}
+				type={spec.type}
+				value={node.spatial?.[dim] ?? [lit(spec.fallback)]}
+				tokens={tokensOfType(scene, spec.type)}
+				unit={unit}
+				fallback={formatLength(box[dim], unit)}
+				names={names}
+				active={picks[variable]}
+				varying={varying.has(variable)}
+				reachable={reach?.[variable]}
+				pinned={pins[variable]}
+				onPin={(index) => onPin(variable, index)}
+				why={why?.(variable)}
+				preview={(term: Term) => resolveValue(context, [term], variable)}
+				onChange={(next) =>
+					onSceneChange(
+						(prev) => setSpatialValue(prev, node.id, dim, next),
+						`spatial-${node.id}-${dim}`,
+					)
+				}
+			/>
+		);
+	}
+
+	/**
+	 * One rotation, always as a full value row and never as a compact field.
+	 *
+	 * The asymmetry with the six dimensions is deliberate and it is the same one
+	 * the compiler makes: a frame dimension holding a single literal is emitted as
+	 * a *fact*, because paying for a `pick` on four dimensions of every rectangle
+	 * in a document would multiply the program for nothing, while a rotation is
+	 * emitted as a variable **always** — rotations are held by the handful of
+	 * nodes that are turned at all, and every one of them wants to be able to name
+	 * an `angle` token. "The whole rack tilts, or it does not" is one token and two
+	 * designs, and a compact number field is the one control that cannot say it.
+	 *
+	 * So the panel spends the space the program spends, in the same place, for the
+	 * same reason. The row is `angle`-typed, which is what routes it through
+	 * `AngleInput` — see that field for why a plain input would snap a turned card
+	 * flat once per keystroke.
+	 */
+	function turnRow(turn: Turn) {
+		const variable = rotateVar(node.id, turn);
+		const held = node.turn?.[turn];
+		return (
+			<div key={turn} data-role={`turn-${TURNS[turn].axis}`}>
+				<ValueEditor
+					testId={turn}
+					label={TURNS[turn].label}
+					type="angle"
+					value={held ?? [lit(VALUE_TYPES.angle.fallback)]}
+					tokens={tokensOfType(scene, "angle")}
+					unit={unit}
+					fallback={writeAngle(turnOf(node, context)[turn])}
+					names={names}
+					active={picks[variable]}
+					varying={varying.has(variable)}
+					reachable={reach?.[variable]}
+					pinned={pins[variable]}
+					onPin={(index) => onPin(variable, index)}
+					why={why?.(variable)}
+					preview={(term: Term) => resolveValue(context, [term], variable)}
+					onChange={(next) =>
+						onSceneChange(
+							(prev) => setTurnValue(prev, node.id, turn, next),
+							`turn-${node.id}-${turn}`,
+						)
+					}
+				/>
+				{held ? (
+					<div className={styles.styledFoot}>
+						<span className={styles.styledBy}>
+							{/* Not decoration: a node with a rotation in the document is a
+							    node whose faces no rule may be about, whether or not the
+							    angle is zero in this universe. */}
+							turned in the document
+						</span>
+						<button
+							type="button"
+							className={styles.follow}
+							data-role={`clear-${turn}`}
+							title="Say nothing about this rotation at all. A node that says nothing about all three keeps its faces, and a rule may be about them again."
+							onClick={() =>
+								onSceneChange((prev) => clearTurn(prev, node.id, turn))
+							}
+						>
+							Not turned
+						</button>
+					</div>
+				) : null}
+			</div>
+		);
 	}
 
 	/**
@@ -2042,11 +2492,24 @@ export function Inspector({
 	function appearanceRow(prop: PropName) {
 		const spec = PROPS[prop];
 		const variable = propVar(node.id, prop);
+		/**
+		 * The two appearance rows the frozen DOM contract names by a role of their
+		 * own — which primitive a mesh is, and which lamp a light is.
+		 *
+		 * They are otherwise entirely ordinary rows and get no special code: both
+		 * are `Value`s over a closed menu, exactly as a `direction` is, so
+		 * `ValueEditor` renders each as a `<select>` off `VALUE_TYPES[type].options`
+		 * and `[box, sphere]` is two designs of one document with no help from
+		 * here. The role is a handle for a query, not a behaviour — which is why it
+		 * is a lookup rather than a branch, and why it goes on all three wrappers
+		 * below: a mesh wearing a style still has a solid picker.
+		 */
+		const role = PROP_ROLES[prop];
 		if (wears && taken.includes(prop)) {
 			const svar = styleVar(wears.id);
 			const at = picks[svar] ?? 0;
 			return (
-				<div key={prop} className={styles.styled} data-styled={prop}>
+				<div key={prop} className={styles.styled} data-styled={prop} data-role={role}>
 					<ValueEditor
 						testId={prop}
 						label={spec.label}
@@ -2115,9 +2578,15 @@ export function Inspector({
 				}
 			/>
 		);
-		if (!wears || !offered.includes(prop)) return <div key={prop}>{own}</div>;
+		if (!wears || !offered.includes(prop)) {
+			return (
+				<div key={prop} data-role={role}>
+					{own}
+				</div>
+			);
+		}
 		return (
-			<div key={prop} className={styles.overriding} data-overriding={prop}>
+			<div key={prop} className={styles.overriding} data-overriding={prop} data-role={role}>
 				{own}
 				<div className={styles.styledFoot}>
 					<span className={styles.styledBy}>overriding {wears.name}</span>
@@ -2186,6 +2655,7 @@ export function Inspector({
 					state={authored}
 					picks={picks}
 					unit={unit}
+					inDepth={inDepth}
 					playing={playing}
 					onEdit={setAuthoring}
 					onPlay={onPlay}
@@ -2295,6 +2765,288 @@ export function Inspector({
 					/>
 				);
 			})}
+
+			{/* ---------------------------------------------------------------
+			    The third axis. Everything from here to the end of the rotation
+			    block is behind `inDepth`, and a document that has never heard of
+			    three dimensions sees one quiet button where all of it would be —
+			    which is the panel's half of the promise the whole feature is built
+			    on. A viewport on page four puts *its own subtree* into three
+			    dimensions, not the file, and not the inspector either.
+			    --------------------------------------------------------------- */}
+			{inDepth ? (
+				<>
+					<h3>Depth</h3>
+					{spatialHere ? null : (
+						<p className={styles.note} data-role="depth-note">
+							{node.name} is flat: the document says nothing about where it sits
+							in depth, and nothing here has changed that yet. Type a number and
+							it joins the third axis — which is a real change, because from
+							then on the file has a third axis in it.
+						</p>
+					)}
+					<div className={styles.grid} data-role="spatial-fields">
+						{SPATIALS.filter(plainSpatial).map((dim) => (
+							<LengthField
+								key={dim}
+								label={SPATIAL_DIMS[dim].label}
+								role={`spatial-${dim}`}
+								value={storedSpatial(dim)}
+								unit={unit}
+								title={
+									dim === "z"
+										? "Where the node sits along the third axis. Positive is away from the viewer, matching the page's y-down."
+										: "How deep the node is. A plane is a real solid with a depth of zero, so this is not clamped the way width and height are."
+								}
+								// A silence counts as the one alternative it draws as, so `+`
+								// on a dimension the node does not hold yields *two* and not
+								// one. Without that the first press on a flat node would look
+								// like a button that did nothing: it would state a `z` of
+								// zero — a real change to the document and no change to the
+								// picture — and the row would still be a single number.
+								onSplit={() =>
+									onSceneChange((prev) =>
+										setSpatialValue(prev, node.id, dim, [
+											...(node.spatial?.[dim] ?? [lit(storedSpatial(dim))]),
+											lit(storedSpatial(dim)),
+										]),
+									)
+								}
+								// Offered only where there is something to clear, so a node
+								// that says nothing is not offered a way to say nothing.
+								onClear={
+									node.spatial?.[dim] === undefined
+										? undefined
+										: () =>
+												onSceneChange((prev) => clearSpatial(prev, node.id, dim))
+								}
+								onCommit={(text) => stateSpatial(dim, text)}
+							/>
+						))}
+					</div>
+					{SPATIALS.filter((dim) => !plainSpatial(dim)).map(spatialRow)}
+
+					<h3>Rotation</h3>
+					<p className={styles.note} data-role="rotation-note">
+						About the node’s own centre, in the fixed order Z then Y then X —
+						which is both CSS’s and three.js’s, so the canvas and the exported
+						file agree with no conversion. Turning about the centre is what keeps
+						the centres exact: a rule may still be about {node.name}’s centre and
+						its size, and may not be about its faces.
+					</p>
+					<div className={styles.props} data-role="turn-fields">
+						{TURN_NAMES.map(turnRow)}
+					</div>
+				</>
+			) : (
+				<button
+					type="button"
+					className={styles.follow}
+					data-role="show-depth"
+					title="Show where this sits in depth and how it is turned. It writes nothing — a document with no third axis in it stays a document with no third axis in it until a number is typed."
+					onClick={() => setDepthOpen(true)}
+				>
+					Depth and rotation…
+				</button>
+			)}
+
+			{/* What a view looks through, which is the one setting a viewport has
+			    that no other kind does — and it is a *fact* rather than a value,
+			    the same call `gline/3`'s axis makes: which camera a view uses is
+			    structure, not a design decision, so it is a select with one answer
+			    and not a row with alternatives.
+
+			    A dangling name is silence rather than repair, exactly as `vcam/2`
+			    has it: the renderer frames the subtree itself and the panel says
+			    so. That is what makes deleting a camera leave a legal document. */}
+			{node.kind === "viewport" ? (
+				<div data-role="viewport-section">
+					<h3>View</h3>
+					{cameras.length === 0 ? (
+						<p className={styles.note} data-role="no-cameras">
+							Nothing in this view is a camera, so the renderer frames whatever
+							is inside it. Add a camera and this becomes a choice.
+						</p>
+					) : (
+						<label
+							className={cx(styles.field, styles.wide)}
+							title="Which camera this view looks through. Hiding that camera stops drawing its marker and does not stop it looking — a layer that hid a camera must not blind the view it is the eye of."
+						>
+							<span className={styles.fieldLabel}>looks through</span>
+							<select
+								className={styles.number}
+								data-role="look-through"
+								value={node.camera ?? ""}
+								onChange={(e) =>
+									onSceneChange((prev) =>
+										setViewportCamera(prev, node.id, e.target.value || null),
+									)
+								}
+							>
+								<option value="">Frame everything inside</option>
+								{cameras.map((cam) => (
+									<option key={cam.id} value={cam.id}>
+										{cam.name}
+									</option>
+								))}
+							</select>
+						</label>
+					)}
+					{node.camera !== undefined && !looksThrough ? (
+						<p className={styles.note} data-role="dangling-camera">
+							It names “{node.camera}”, which is not a camera inside this view
+							any more. Nothing is refused and nothing fails — the renderer
+							frames the subtree itself, which is what deleting a camera is
+							supposed to leave behind.
+						</p>
+					) : null}
+
+					{/* What goes *in* a view, and it is here rather than in the toolbar
+					    for the reason a viewport is drawn there and its contents are
+					    not: the toolbar draws a rectangle on the page, and everything
+					    below the seam is placed in the view's own space, in front of
+					    its camera, by a verb that knows where that is. A pointer that
+					    dragged a cube out on the page would be a pointer answering a
+					    question — where in three dimensions? — that a 2D drag cannot
+					    ask.
+
+					    So they are buttons on the view, not tools, and each one is the
+					    `edits.ts` verb of the same name: a solid lands on the origin
+					    plane in shot, a camera becomes the one being looked through
+					    when there is not one already, a lamp goes up and to the left
+					    like a key light. Every one of them makes an ordinary node —
+					    it is in the layer list, a rule can name it, it can be hidden,
+					    and it takes part in the multiverse. */}
+					<div className={styles.addRow} data-role="viewport-add">
+						<span className={styles.fieldLabel}>add</span>
+						<select
+							className={styles.number}
+							data-role="add-solid"
+							aria-label="Add a solid"
+							title="Put one of the six primitives in this view, on the origin plane and in front of the camera. Which primitive is a property with a value, so it can hold two alternatives like any other."
+							value=""
+							onChange={(e) => {
+								const solid = e.target.value;
+								if (!solid) return;
+								onSceneChange((prev) => addMesh(prev, node.id, solid));
+							}}
+						>
+							<option value="">Solid…</option>
+							{(VALUE_TYPES.solid.options ?? []).map((option) => (
+								<option key={option.value} value={option.value}>
+									{option.label}
+								</option>
+							))}
+						</select>
+						<select
+							className={styles.number}
+							data-role="add-light"
+							aria-label="Add a light"
+							title="Put a lamp in this view. Its colour is ink — the colour the thing itself is — so a brand palette lights the scene with nothing wired up."
+							value=""
+							onChange={(e) => {
+								const lamp = e.target.value;
+								if (!lamp) return;
+								onSceneChange((prev) => addLight(prev, node.id, lamp));
+							}}
+						>
+							<option value="">Light…</option>
+							{(VALUE_TYPES.lamp.options ?? []).map((option) => (
+								<option key={option.value} value={option.value}>
+									{option.label}
+								</option>
+							))}
+						</select>
+						<button
+							type="button"
+							className={styles.follow}
+							data-role="add-camera"
+							title="Another eye, where the first one is. It becomes the camera this view looks through only if the view has not got one — the first camera you add is obviously the one to look through, and the third obviously is not."
+							onClick={() => onSceneChange((prev) => addCamera(prev, node.id))}
+						>
+							Camera
+						</button>
+					</div>
+					{/* A pivot is not here, and its absence is a decision. `addPivot`
+					    takes the objects to group, so it belongs on a *selection of
+					    them* and not on the view — and the gesture a designer already
+					    has for "put these together" is ⌘G. `Studio.tsx`'s `group()`
+					    routes it: a selection of direct children of one viewport makes
+					    a pivot, everything else makes a group, and the difference is
+					    that a group re-fits to its children's box while the box of
+					    rotated solids is exactly the trigonometry a linear solver
+					    cannot do. */}
+				</div>
+			) : null}
+
+			{/* Imported geometry, read out rather than edited. The vertices are not
+			    in the document — a glTF is megabytes, the document is edited by two
+			    people at once, and a blob here would be a blob in every diff, every
+			    undo entry and every sync message — so what the node holds is the
+			    hash, the box and the counts, and this shows exactly those.
+
+			    **The relink affordance is not here, and that is a gap rather than a
+			    decision.** `docs/merged-plan.md` M4's `AssetStore` does not exist in
+			    the tree and neither does the app's implementation of it, so there is
+			    nothing to relink *through*; a button that opened a file picker and
+			    dropped the bytes on the floor would be worse than no button. The
+			    triangle count is here because the budget rule reads it and a person
+			    about to trip that rule should be able to see the number. */}
+			{node.kind === "model" ? (
+				<div data-role="model-section">
+					<h3>Model</h3>
+					{node.mesh ? (
+						<>
+							<p className={styles.note} data-role="mesh-ref">
+								{node.mesh.source ?? "An imported mesh"} ·{" "}
+								{node.mesh.format.toUpperCase()} ·{" "}
+								{node.mesh.triangles.toLocaleString()} triangles. Its vertices
+								live in the asset store, keyed by content hash, and never enter
+								the document or the program — what a rule can be about is this
+								node’s box and this count.
+							</p>
+							<div className={styles.resolved} data-resolved="asset">
+								<span className={styles.fieldLabel}>asset</span>
+								<span className={styles.resolvedValue}>{node.mesh.asset}</span>
+							</div>
+						</>
+					) : (
+						<p className={styles.note} data-role="no-mesh">
+							Nothing imported yet, so this draws as its own box. The importer is
+							not built — there is no asset store behind it — and until there is,
+							a model is a placeholder with a real frame that rules can hold.
+						</p>
+					)}
+				</div>
+			) : null}
+
+			{/* The refusal, said where the wondering happens. A rule that names a
+			    turned node's face is not broken and does not fail: the quantity is
+			    never minted, the relation is never stated, and the design comes back
+			    looking exactly as if the rule were not there. Silence in ASP is
+			    invisible, so this is the panel's half of `gnoedge/2` — read off
+			    `spatial.ts`'s `inertConstraints`, which is the twin the program is
+			    held equal to, and shown here as well as in the Rules panel because
+			    the two answer different questions: that one is "which rules are
+			    inert", this one is "why is nothing happening to the thing I have
+			    selected". */}
+			{inert.length > 0 ? (
+				<div data-role="inert-rules">
+					<h3>Rules that say nothing</h3>
+					{inert.map((rule) => (
+						<p
+							key={rule.constraint}
+							className={styles.refused}
+							data-role="inert-rule"
+							data-constraint={rule.constraint}
+							data-culprit={rule.culprit}
+						>
+							<strong>{rule.constraint}</strong>{" "}
+							<span data-role="refused-edge">{rule.why}</span>
+						</p>
+					))}
+				</div>
+			) : null}
 
 			{isMeasured(node) ? (
 				<div className={styles.grid}>

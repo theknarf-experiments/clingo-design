@@ -58,10 +58,72 @@
  * the other is a switch that does nothing or a rule nothing guards — and the one
  * check that cannot be a constant at all because it takes a number.
  *
+ * ## The eleven, and why they arrive in two arrays
+ *
+ * The ladder — guards, layers, timelines and blend states — brought six more
+ * findings that the generated program derives and has no opinion about, and each
+ * of them is one more line of ASP under one more name. They live in
+ * {@link LADDER_CHECKS} rather than at the end of {@link MACHINE_CHECKS}, and
+ * `machines.ts` documents that split as temporary with a trigger: the six bodies
+ * name predicates that arrived with the ladder's compile step, so offering them
+ * before that step landed would have written rules into `scene.rules` that clingo
+ * remarks on once per undefined predicate — a diagnostic the studio shows to the
+ * designer as a problem with *their* document.
+ *
+ * That step has landed, and this is the single call site the split was always
+ * going to be closed at. It is closed here, by a spread, rather than by deleting
+ * one array into the other, and the difference is one of ownership rather than
+ * taste: this file is the only reader of either array, `machineChecks()` is the
+ * only function that returns a list of checks, and a spread at the one place
+ * they are read is the same eleven with no edit to a file that has its own
+ * tests holding its own contents. The comment on {@link LADDER_CHECKS} asks for
+ * the paste; the paste and the spread produce the identical array, and whoever
+ * makes it need change nothing here.
+ *
+ * The order is §7.6 of the ladder spec's, and it is an argument rather than a
+ * list. The four graph checks first, because they are about whether the machine
+ * is a machine at all — a state nothing reaches is broken however the guards
+ * read. The six structural ones next, in the order the rungs were built, because
+ * each of them is about a thing the document says on top of the graph. The budget
+ * last, because it is the only one about taste.
+ *
+ * ## What the six new ones buy that a linter could not
+ *
+ * The same thing the budget buys and for the same reason — but it is worth being
+ * exact about which of the six it is true of, rather than claiming it for all six
+ * and being wrong about four of them.
+ *
+ * **Two of the six read numbers this universe resolved**, not numbers the
+ * document stores. An exit time is `mexit/3`, which followed a `duration` Value
+ * through `resolved/2` and which the program `#project`s, so a debounce scale
+ * with a brisk end and a slow one really is two designs. A timeline's length is
+ * `mtlen/3`, a `#max` over keyframe times that are themselves `Value`s, so an
+ * animation can be short in one design and long in another and a transition can
+ * outlast it in one and not the other. Both are checked at *both* ends, and the
+ * design that breaks the rule is the thing that goes — not the rule, and not an
+ * average of the two. A pass over `scene.machines` could not do that, because
+ * there is no single document to make the pass over: there are as many as the
+ * tokens multiply out to, and 600ms is perfectly fine in one of them.
+ * `machinecheck.test.ts` proves both by solving rather than by asserting it here.
+ *
+ * **The other four read things the document fixes.** A guard's comparand
+ * (`Condition.value`), an input's declared range (`MachineInput.min`/`max`) and a
+ * blend stop's threshold (`BlendStop.at`) are all plain strings in the scene, and
+ * a fight is a fact about which layer a state belongs to. A linter genuinely
+ * could have found those four, and pretending otherwise would be selling the rung
+ * on a property it has not got. What being a constraint buys *them* is the other
+ * half of the feature, which is the half a linter has never had: a name in an
+ * unsat core, a switch, a strength that can be softened, and `why.ts` and
+ * `relax.ts` for nothing. And it buys it under one mechanism for all six rather
+ * than two mechanisms for two groups — so the day a comparand becomes a `Value`,
+ * which is the obvious next thing to want, those four join the first two and not
+ * one character of this file changes.
+ *
  * ## The budget, and where its number lives
  *
- * The first four checks are claims about the shape of a graph and have no
- * parameter: a state is reachable or it is not. "No transition takes longer
+ * The first ten checks are claims about the shape of a graph, a guard, a layer,
+ * a blend or a clock, and none of them has a parameter: a state is reachable or
+ * it is not, a guard can be met or it cannot. "No transition takes longer
  * than 400ms" is not that. It is a house rule with a number in it, and the
  * number belongs to the document rather than to this file.
  *
@@ -93,8 +155,20 @@
  * behind them.
  */
 import { addCustomConstraint, deleteConstraint, violRefs } from "./edits.ts";
-import { MACHINE_CHECKS, writeDuration } from "./machines.ts";
-import { type Scene, isConstraintTerm } from "./scene.ts";
+import {
+	LADDER_CHECKS,
+	MACHINE_CHECKS,
+	type MachineHealth,
+	findState,
+	machineHealth,
+	machineLayers,
+	stateName,
+	statePlays,
+	timelineLength,
+	transitionExit,
+	writeDuration,
+} from "./machines.ts";
+import { type Machine, type Scene, isConstraintTerm, motionMs } from "./scene.ts";
 import { MAX_MS } from "./values.ts";
 
 /**
@@ -185,14 +259,24 @@ export function durationBudgetCheck(
  * Every check the Machines panel offers, in the order it offers them.
  *
  * The four graph checks first, because they are about whether the machine is a
- * machine at all, and the budget last, because it is about taste. A document can
- * hold any subset of them: each is an independent constraint with its own
- * switch, and none of them reads any of the others.
+ * machine at all; the six the ladder added next, in the order the rungs were
+ * built; the budget last, because it is about taste. See the file comment for
+ * why the first ten arrive in two arrays and why they are joined here.
+ *
+ * A document can hold any subset of them: each is an independent constraint with
+ * its own switch, and none of them reads any of the others. **They are not
+ * independent about what they fire on**, though, and that is a property of the
+ * findings rather than of this list — `machine_states_live` is strictly stronger
+ * than `machine_reachable`, so a document with a state nothing reaches breaks
+ * both, and the way out `relax.ts` offers is to let go of both. That is the
+ * honest answer and not a wart: a designer who switched two rules on that say
+ * overlapping things has to switch two rules off to be rid of the overlap, and a
+ * search that hid one of them would be offering a way out that does not work.
  */
 export function machineChecks(
 	budget: number = DEFAULT_DURATION_BUDGET_MS,
 ): MachineCheck[] {
-	return [...MACHINE_CHECKS, durationBudgetCheck(budget)];
+	return [...MACHINE_CHECKS, ...LADDER_CHECKS, durationBudgetCheck(budget)];
 }
 
 /**
@@ -314,4 +398,184 @@ export function removeMachineCheck(scene: Scene, check: MachineCheck): Scene {
 		.filter((line) => !pattern.test(line.trim()))
 		.join("\n");
 	return { ...deleteConstraint(scene, check.id), rules };
+}
+
+/* ------------------------------------------------------------------ */
+/* What the panel says a check has found                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * "a, b and c" — an English list, because these are read as a sentence rather
+ * than scanned as a column. `why.ts` has the same three lines and they are not
+ * shared: exporting a comma from one file into another is a dependency between
+ * two things that have nothing to do with each other, and the day one of them
+ * wants an Oxford comma is the day it should be free to have one.
+ */
+function series(parts: readonly string[]): string {
+	if (parts.length <= 1) return parts[0] ?? "";
+	return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+}
+
+/**
+ * What the six ladder checks have found in one machine, as the sentence beside
+ * the checkbox — or nothing, when they have found nothing.
+ *
+ * ## Why the panel *reports* what it does not *forbid*
+ *
+ * This is the half of the feature that is not a constraint, and it is the half
+ * that makes the constraint bearable. A tick box that forbade something without
+ * first saying whether it was happening would be a switch a designer flips to
+ * find out, and finding out would cost them their canvas: `machine_layers_agree`
+ * on a document where two layers really do both animate `opacity` is an empty
+ * screen and an unsat core. So the finding is always visible and the ban is
+ * always optional, and a fight — the one Rive resolves silently and never
+ * mentions — is a sentence in a panel whether or not anybody has forbidden it.
+ *
+ * ## Why this wording lives in `design-core` and not in the panel
+ *
+ * `describeExplanation` in `why.ts` for exactly the same reason: there is one
+ * right answer, and two readers would eventually disagree about it. A fight in
+ * particular has an ordering in it — *which* layer wins — and that ordering is
+ * the position of a layer in {@link Machine.layers}, which a panel would have to
+ * re-derive and could re-derive backwards. Getting it backwards would name the
+ * wrong layer as the winner while the canvas drew the other one, which is worse
+ * than saying nothing.
+ *
+ * ## Six and not eleven
+ *
+ * Only the six the ladder added. The four graph checks already have a sentence in
+ * the Machines panel, written when they shipped, and a second spelling of "Ghost
+ * cannot be reached" here would be a second spelling that drifts. The budget is
+ * not answerable from a document at all: what a transition takes is `mdur/3` in
+ * an answer set, which is why the panel is handed a `Timing` table and this
+ * function is not. So the contract is precise — *the six the ladder added, and
+ * `null` for everything else, including a check id this file has never heard of*
+ * — and a caller spells it as a fallback after its own cases.
+ *
+ * ## The document's reading, not the answer set's
+ *
+ * Everything here comes off {@link machineHealth} and its neighbours, which read
+ * `scene.machines` with no `ResolveContext` — the same two-readers arrangement
+ * `machines.ts` documents at length, and it is deliberate here for one reason
+ * beyond consistency: **a finding must be showable before there is an answer
+ * set.** The panel draws while the solver is unsatisfiable, which is precisely
+ * when a check has fired and a designer most wants the sentence. Where a duration
+ * or a threshold names a token with two alternatives the two readings can differ,
+ * and the check is the one that is authoritative — it saw every universe and this
+ * saw the document's own first reading. That is the same gap `machineHealth` has
+ * carried since it shipped and the same one `machines.test.ts` pins.
+ */
+export function machineCheckFinding(
+	check: string,
+	machine: Machine,
+	health: MachineHealth = machineHealth(machine),
+): string | null {
+	const names = (ids: readonly string[]) =>
+		series(ids.map((id) => stateName(machine, id)));
+
+	switch (check) {
+		case "machine_guards_possible": {
+			if (health.impossible.length === 0) return null;
+			// Transition ids raw, the way `machine_wired` already reports a dangling
+			// edge: a transition has no name field, and inventing "the edge from Rest
+			// to Hover" would be a second name for a thing the row above calls `over`.
+			return `${series(health.impossible)} can never be taken`;
+		}
+
+		case "machine_states_live": {
+			if (health.unreachableWithGuards.length === 0) return null;
+			// Deliberately **not** the difference against `unreachable`. Subtracting
+			// what the reachability row already said would read better and would lie
+			// in the one case that matters: a document whose only unreachable states
+			// are unreachable both ways would leave this row saying "holds" while its
+			// rule was making the document unsatisfiable.
+			return `${names(health.unreachableWithGuards)} cannot be reached once the guards are read`;
+		}
+
+		case "machine_layers_agree": {
+			const layers = machineLayers(machine);
+			const rank = (id: string) => layers.findIndex((layer) => layer.id === id);
+			const label = (id: string) =>
+				layers.find((layer) => layer.id === id)?.name ?? id;
+			// The three fight families in one sentence, because they are one finding:
+			// a designer who is told two layers fight over `fill` and not that they
+			// also fight over `x` fixes half of it and comes back.
+			const all = [...health.fights, ...health.frameFights, ...health.turnFights];
+			if (all.length === 0) return null;
+			return series(
+				all.map(([first, second, part, field]) => {
+					// `mfight/5` states its pair in TERM order — `L1 < L2` is there to
+					// state a fight once rather than twice — so the winner is read from
+					// the layer list and never from the argument positions. Getting this
+					// backwards would name the loser as the winner while the canvas drew
+					// the winner.
+					const winner = rank(first) >= rank(second) ? first : second;
+					const loser = winner === first ? second : first;
+					return `${label(winner)} beats ${label(loser)} over ${part}'s ${field}`;
+				}),
+			);
+		}
+
+		case "machine_blend_in_range": {
+			if (health.stopsOutOfRange.length === 0) return null;
+			return series(
+				health.stopsOutOfRange.map(
+					// `+ 1` because `mstopat/4` and `mstopout/3` number a blend's stops
+					// from one and `MachineHealth` records the array index. The two
+					// disagree, `machines.ts` owns that, and a panel that echoed the
+					// index would send a designer to the wrong row of a list they can
+					// see — so the number shown is the program's.
+					([state, index]) =>
+						`stop ${index + 1} of ${stateName(machine, state)} is outside its input's range`,
+				),
+			);
+		}
+
+		case "machine_exit_within_duration": {
+			const late = machine.transitions.filter((transition) => {
+				if (!transition.enabled) return false;
+				return (
+					transitionExit(machine, transition) >
+					motionMs(machine, transition, "duration")
+				);
+			});
+			if (late.length === 0) return null;
+			return series(
+				late.map(
+					(transition) =>
+						`${transition.id} waits ${writeDuration(transitionExit(machine, transition))} to run for ${writeDuration(motionMs(machine, transition, "duration"))}`,
+				),
+			);
+		}
+
+		case "machine_exit_before_end": {
+			const stranded: string[] = [];
+			for (const transition of machine.transitions) {
+				if (!transition.enabled) continue;
+				const exit = transitionExit(machine, transition);
+				if (exit === 0) continue;
+				const from = findState(machine, transition.from);
+				if (!from) continue;
+				for (const timeline of statePlays(machine, from)) {
+					// A looping timeline never ends, so no exit time is past it —
+					// `mloop(M,W,none)` is in the rule's body for the same reason.
+					// Reporting one would be reporting a bug against a design that works.
+					if ((timeline.loop ?? "none") !== "none") continue;
+					const length = timelineLength(machine, timeline);
+					if (exit <= length) continue;
+					stranded.push(
+						`${transition.id} waits ${writeDuration(exit)}, but ${stateName(machine, from.id)} is over in ${writeDuration(length)}`,
+					);
+					// One sentence per transition, not one per timeline it could have
+					// waited past: a blend state plays several and a designer fixes the
+					// one number in the one field either way.
+					break;
+				}
+			}
+			return stranded.length === 0 ? null : series(stranded);
+		}
+
+		default:
+			return null;
+	}
 }

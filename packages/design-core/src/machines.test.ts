@@ -57,6 +57,7 @@ import {
 	machineForRoot,
 	machineHealth,
 	machineLayers,
+	type MachineTable,
 	machineTable,
 	materializedParts,
 	motionLabel,
@@ -118,6 +119,7 @@ import {
 	lit,
 	motionVar,
 	msOf,
+	ref,
 	single,
 	timelineLenVar,
 } from "./values.ts";
@@ -2010,6 +2012,67 @@ test("the shipped stepMachine still answers the shipped question", () => {
 	const table = machineTable(scene);
 	assert.equal(stepMachine(table, "c1", "rest", "pointerenter"), "hover");
 	assert.equal(stepMachine(table, "c1", "hover", "pointerenter"), undefined);
+});
+
+test("a debounce paced by a token reaches the table, and needs the universe to do it", () => {
+	// The one number in this table that is a `Value` rather than a fact, and
+	// therefore the one that can be a token. An exit time is *pacing*: it belongs
+	// with `duration`, `delay` and `stagger`, it wants to name the same motion
+	// scale they do, and a motion scale that paced the whole design and left one
+	// debounce behind would be a motion scale with a hole in it.
+	//
+	// This is a regression guard for a defect that was live and silent.
+	// `machineTable` took no context at all, so `transitionExit` resolved a
+	// token-named exit against nothing, got nothing, and fell back to its zero
+	// default — and a zero exit time is *omitted* from the row, because zero means
+	// "any time". So the edge shipped with no debounce, while `export.ts`'s own
+	// loss sentence read the same edge with a context and announced the wait. Two
+	// readings of one document, in one file, disagreeing.
+	const scene = laddered(
+		[state("rest", "Rest"), state("hover", "Hover")],
+		{
+			transitions: [
+				edge("in", "rest", "hover", "pointerenter", { exit: [ref("beat")] }),
+				// A literal beside it, which never needed a context and must go on
+				// not needing one — that is what says the parameter fixed the token
+				// case rather than changing what resolution means.
+				edge("out", "hover", "rest", "pointerleave", { exit: single("40ms") }),
+			],
+		},
+	);
+	const tokens = [
+		...scene.tokens,
+		{ id: "beat", name: "beat", type: "duration" as const, value: single("250ms") },
+	];
+	const withBeat = { ...scene, tokens };
+
+	/**
+	 * One edge's exit time, asserting on the way through that the row is really
+	 * there — a missing row and a row with no exit time are the same `undefined`
+	 * otherwise, and they are very different bugs.
+	 */
+	const exitOf = (table: MachineTable, from: string, trigger: Trigger) => {
+		const rows = table.machines.m1.layers?.[0].edges[from]?.[trigger];
+		assert.ok(rows && rows.length === 1, `no single edge from ${from} on ${trigger}`);
+		return rows[0].exit;
+	};
+
+	const blind = machineTable(withBeat);
+	assert.equal(exitOf(blind, "rest", "pointerenter"), undefined, "no universe, no token");
+	assert.equal(exitOf(blind, "hover", "pointerleave"), 40, "a literal never needed one");
+
+	const seeing = machineTable(withBeat, { tokens, picks: {} });
+	assert.equal(exitOf(seeing, "rest", "pointerenter"), 250, "the debounce follows the scale");
+	assert.equal(exitOf(seeing, "hover", "pointerleave"), 40, "and the literal is untouched");
+
+	// And a document with no exit time anywhere is byte-identical either way,
+	// which is why every caller that has no universe to hand may go on not
+	// passing one.
+	const plain = laddered(
+		[state("rest", "Rest"), state("hover", "Hover")],
+		{ transitions: [edge("in", "rest", "hover", "pointerenter")] },
+	);
+	assert.deepEqual(machineTable(plain), machineTable(plain, { tokens: plain.tokens, picks: {} }));
 });
 
 /* ------------------------------------------------------------------ */

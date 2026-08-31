@@ -59,11 +59,14 @@ import {
 	type Point,
 	type ResolveContext,
 	type RuledLine,
+	type Picks,
 	type Scene,
 	type SnapGuide,
 	type Trigger,
 	type Universe,
 	addNodeTo,
+	addViewport,
+	flatten,
 	annotate,
 	boundsOf,
 	clampTo,
@@ -114,6 +117,8 @@ import {
 	setFrames,
 	snapFrame,
 	travelFrom,
+	viewportOf,
+	viewports,
 	wrapsChildren,
 } from "@clingo-design/design-core";
 
@@ -121,6 +126,8 @@ import { Annotations } from "./Annotations";
 import { Artboard } from "./Artboard";
 import { cx } from "./cx";
 import { Guides } from "./Guides";
+import type { GizmoMode, SpatialEdit } from "@clingo-design/canvas-3d";
+
 import styles from "./Editor.module.css";
 import {
 	canvasPoint,
@@ -228,6 +235,16 @@ export interface EditorProps {
 	onSelectionChange: (ids: string[]) => void;
 	/** `coalesce` groups a gesture's updates into one undo entry. */
 	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
+	/**
+	 * The first frame each live 3D view draws, as a PNG data URL, by viewport id.
+	 *
+	 * Passed straight through to {@link Artboard} — the editor has no use for a
+	 * poster and never looks at one. It is here because the editable copy is the
+	 * only `Artboard` in the studio that mounts a live view somebody is looking
+	 * at, and the export panel is where the picture ends up. Absent means no
+	 * poster and no preserved drawing buffer.
+	 */
+	onPoster?: (viewport: string, dataUrl: string) => void;
 	tool: Tool;
 	onToolChange: (tool: Tool) => void;
 	/** Camera scale, so a screen distance converts to a canvas one. */
@@ -282,10 +299,19 @@ export interface EditorProps {
 	 */
 	previewing?: boolean;
 	/**
-	 * Instance node id -> the state to draw it in, handed straight to the
-	 * artboard. Editor state; the document knows nothing about it.
+	 * Instance node id -> layer id -> the state to draw that layer in, handed
+	 * straight to the artboard. Editor state; the document knows nothing about it.
+	 *
+	 * Nested since layers, because a machine is in one state per layer all at
+	 * once. Nothing in this file reads it — it is passed through — which is why
+	 * the widening cost one type and no logic.
 	 */
-	playing?: Readonly<Record<string, string>>;
+	playing?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+	/**
+	 * Instance node id -> where its timeline scrubber is, in milliseconds. Passed
+	 * through to the artboard for the same reason {@link playing} is.
+	 */
+	scrub?: Readonly<Record<string, number>>;
 	/**
 	 * A real pointer event at a real instance, in the machine's own vocabulary.
 	 *
@@ -312,6 +338,28 @@ export interface EditorProps {
 	/** Right-click, in client coordinates. */
 	onContextMenu?: (at: { x: number; y: number }) => void;
 }
+
+/**
+ * How many viewports on the editable copy may hold a live WebGL context at once.
+ *
+ * Browsers cap live contexts somewhere around sixteen and silently drop the
+ * oldest past that — which shows up as a scene that was there a moment ago going
+ * black for no reason a designer can act on. Eight is half the usual cap, on the
+ * grounds that the studio is not the only thing on the page and a lost context
+ * is a worse failure than a still.
+ *
+ * The ones over the line draw {@link Still} instead, which is not a placeholder
+ * for a missing feature: it is what twenty simultaneous 3D views have to be. The
+ * views that get the budget are the first in paint order, which is stable, which
+ * means the same document opened twice shows the same views live.
+ *
+ * `docs/merged-plan.md` M17 puts this in a `useViewportBudget.ts` of its own.
+ * That file is not one this step owns, and a hook whose whole body is "take the
+ * first eight of a memoised list" is not worth claiming another step's filename
+ * for — so it is a constant and a `slice` here, and when that file lands this is
+ * the line it replaces.
+ */
+const LIVE_VIEWS = 8;
 
 /**
  * The editing surface laid over the document.
@@ -352,9 +400,11 @@ export function Editor({
 	showGuides = true,
 	previewing = false,
 	playing,
+	scrub,
 	onTrigger,
 	motion,
 	onContextMenu,
+	onPoster,
 }: EditorProps) {
 	const surface = useRef<HTMLDivElement>(null);
 	const [gesture, setGesture] = useState<Gesture>({ kind: "none" });
@@ -391,6 +441,171 @@ export function Editor({
 	 * state that outlives the pointer being down.
 	 */
 	const [pen, setPen] = useState<PathPoint[] | null>(null);
+	/**
+	 * The viewport the editor has stepped *inside*, if any.
+	 *
+	 * A `viewport` is opaque: it is a rectangle on the page that you move, resize
+	 * and align like any other, and the pointer stops at its edge. That is what
+	 * makes a scene something you can lay out rather than something that swallows
+	 * every gesture near it — and it is also what makes selecting the mesh inside
+	 * one need a way in. The way in is a double-click, which is the gesture that
+	 * already means "reach through this" for a group and for a frame.
+	 *
+	 * While a view is entered its canvas takes pointer events, so orbiting and
+	 * picking happen in the scene and the 2D gestures never see those pixels;
+	 * Escape steps back out. Editor state, of course: which view somebody has
+	 * their nose in is a fact about the person and reaches no solve, no export and
+	 * no undo entry, exactly like the zero point and the guides toggle.
+	 */
+	const [entered, setEntered] = useState<string | null>(null);
+	/**
+	 * Leaving preview, or a document that no longer has the view in it, steps out.
+	 *
+	 * The second half matters more than it looks: a viewport deleted while the
+	 * editor was inside it would leave `entered` naming a node that is gone, and
+	 * every gesture would go on being routed round a hole in the document.
+	 */
+	useEffect(() => {
+		if (entered === null) return;
+		if (previewing || findInTree(scene.nodes, entered) === undefined) setEntered(null);
+	}, [previewing, scene.nodes, entered]);
+	// Escape steps out of a view before it does anything else. Capture phase and
+	// stopped there, because the studio's own Escape would otherwise clear the
+	// selection in the same keystroke that left the scene — two things happening
+	// for one press, only one of which was asked for. The same arrangement the
+	// pen's Enter/Escape already has, one effect below.
+	useEffect(() => {
+		if (entered === null) return;
+		const key = (event: KeyboardEvent) => {
+			if (event.key !== "Escape") return;
+			event.preventDefault();
+			event.stopPropagation();
+			setEntered(null);
+		};
+		window.addEventListener("keydown", key, true);
+		return () => window.removeEventListener("keydown", key, true);
+	}, [entered]);
+
+	/**
+	 * Every viewport in the document, and which of them may draw for real.
+	 *
+	 * `undefined` where the document has none, which is not the same as an empty
+	 * set and is the case worth being exact about: `Artboard` only imports
+	 * `@clingo-design/canvas-3d` when it actually mounts a live view, so a
+	 * document with no viewport never downloads three.js, never opens a WebGL
+	 * context, and pays for none of this. That promise is kept by these two lines
+	 * and by the `lazy` in `Artboard.tsx`, and nothing else has to know.
+	 */
+	const views = useMemo(() => viewports(scene).map((node) => node.id), [scene]);
+	const liveViews = useMemo(() => {
+		if (views.length === 0) return undefined;
+		// The view somebody has stepped into goes to the front of the queue. It is
+		// the one being pointed at, and a still cannot be picked in or orbited —
+		// entering a view past the budget and finding it inert would look exactly
+		// like the gesture not working.
+		const ordered =
+			entered === null ? views : [entered, ...views.filter((id) => id !== entered)];
+		return new Set(ordered.slice(0, LIVE_VIEWS));
+	}, [views, entered]);
+	/** The one view the pointer is inside, as the set the artboard takes. */
+	const orbiting = useMemo(
+		() => (entered === null ? undefined : new Set([entered])),
+		[entered],
+	);
+
+	/**
+	 * Which handles the entered view offers: arrows, or rings.
+	 *
+	 * Two modes and no third, because the gizmo has two — a translation is a
+	 * vector and its three components are one gesture, while the three rotations
+	 * are three stored numbers applied in a fixed order, so a scale mode would
+	 * need a third answer that `geometry.ts` does not have. Editor state like
+	 * `entered` itself: which handle somebody is holding is a fact about the
+	 * person and reaches no solve, no export and no undo entry.
+	 */
+	const [gizmo, setGizmo] = useState<GizmoMode>("move");
+
+	/**
+	 * `applySpatialEdit`, fetched when a view is entered and not before.
+	 *
+	 * It lives in `canvas-3d`, whose barrel pulls three.js, so a static import
+	 * here would put a megabyte and a half into the studio's main chunk in order
+	 * to hold one pure function — which is precisely the promise `Artboard`'s
+	 * `lazy` keeps and this must not break. The chunk is the same one the renderer
+	 * is in, so by the time a gizmo can be dragged the import has already
+	 * resolved; the state exists so that the handler is synchronous when it runs,
+	 * because a drag that awaited a module between two pointermoves would apply
+	 * its deltas out of order.
+	 *
+	 * No gizmo until it arrives, which is a fraction of a second in which the view
+	 * orbits and picks exactly as it did before.
+	 */
+	const [spatialEdits, setSpatialEdits] = useState<{
+		apply: (scene: Scene, edit: SpatialEdit, picks: Picks) => Scene;
+	} | null>(null);
+	useEffect(() => {
+		if (entered === null || spatialEdits !== null) return;
+		let alive = true;
+		void import("@clingo-design/canvas-3d").then((mod) => {
+			if (alive) setSpatialEdits({ apply: mod.applySpatialEdit });
+		});
+		return () => {
+			alive = false;
+		};
+	}, [entered, spatialEdits]);
+
+	/**
+	 * A drag on the gizmo, applied.
+	 *
+	 * One coalesce key for the whole drag, keyed on the node, so ⌘Z takes the
+	 * pose back to where the drag began rather than to the last pointermove —
+	 * which is what the `"start"` phase is for: it carries zero movement and
+	 * exists so the group opens before anything has changed. `applySpatialEdit`
+	 * refuses an empty edit and an id the document no longer holds by returning
+	 * the scene unchanged, so both are handled by not being special cases.
+	 *
+	 * The universe's picks go in because a mesh that is in two places is two
+	 * designs: the write lands on the alternative *this* universe chose and the
+	 * others are untouched, which is `setFrames`' contract one axis over.
+	 */
+	const onSpatialEdit = useMemo(() => {
+		if (!spatialEdits) return undefined;
+		return (edit: SpatialEdit) => {
+			onSceneChange(
+				(prev) => spatialEdits.apply(prev, edit, live.current.universe.pick),
+				`spatial-${edit.id}`,
+			);
+		};
+	}, [spatialEdits, onSceneChange]);
+
+	/**
+	 * Where the pointer stops on its way into a viewport.
+	 *
+	 * `KINDS.viewport.opaque` says the pointer does not go inside, and this is
+	 * where the editor keeps that promise. It has to be kept *here* rather than in
+	 * `hitTestTree`, and the reason is ownership rather than design: `tree.ts` is
+	 * `docs/merged-plan.md`'s M17 and not this step's file, so `hitTestTree`,
+	 * `frameAt` and `dropTargetAt` still walk straight into a viewport's subtree
+	 * and answer with the mesh they find. Left alone, a click near a cube would
+	 * select the cube by its *model-space* box drawn as if it were on the page,
+	 * which is a rectangle nowhere near where the cube appears.
+	 *
+	 * So every hit is folded back out to the outermost viewport the editor has not
+	 * entered. Inside the one it *has* entered the fold stops, because in there
+	 * the nodes really are what you are pointing at — though in practice the
+	 * canvas has already taken the event, and this is the answer for the pixels
+	 * of the view the scene does not cover.
+	 *
+	 * **This is a stand-in for the real fix, and it is narrower than the real
+	 * fix.** A marquee still collects a mesh through `targetFor`, and a *drop*
+	 * still lands inside a viewport because `dropTargetAt` is asked directly. Both
+	 * want the same one condition in `tree.ts`.
+	 */
+	function outOfView(id: string): string {
+		const view = viewportOf(scene, id);
+		if (!view || view.id === entered) return id;
+		return outOfView(view.id);
+	}
 
 	/**
 	 * Every node's absolute frame, indexed by id.
@@ -543,7 +758,8 @@ export function Editor({
 	}
 
 	function targetFor(nodeId: string): string {
-		return selectionTargetOf(scene.nodes, nodeId)?.id ?? nodeId;
+		const stopped = outOfView(nodeId);
+		return selectionTargetOf(scene.nodes, stopped)?.id ?? stopped;
 	}
 
 	/**
@@ -802,13 +1018,64 @@ export function Editor({
 		beginMove(point, ids);
 	}
 
-	/** Double-click reaches through a group or into a frame, to the leaf. */
+	/**
+	 * Double-click reaches through a group or into a frame, to the leaf — and
+	 * *into* a viewport, which is the one case where reaching through changes
+	 * which pointer owns the pixels.
+	 *
+	 * The same gesture for both because it is the same request: "the thing I want
+	 * is inside this one". For a group that is one more level of selection; for a
+	 * view it is a mode, because what is inside a view is not reachable by the 2D
+	 * pointer at all and the way to point at it is to let the scene's own
+	 * raycaster answer. Entering also turns orbiting on, since a camera you cannot
+	 * move is a scene you can only look at from wherever it was left.
+	 */
 	function onDoubleClick(event: React.MouseEvent) {
 		if (tool !== "select") return;
 		const hit = hitTestTree(scene.nodes, toDocument(event), universe.solved, context);
 		if (!hit) return;
 		event.stopPropagation();
+		// The outermost view the editor is not already inside, which is what
+		// `outOfView` answers and which is exactly the node the last click
+		// selected — so a double-click is "select it, then step into it".
+		const stopped = outOfView(hit.node.id);
+		if (findInTree(scene.nodes, stopped)?.kind === "viewport") {
+			setEntered(stopped);
+			onSelectionChange([stopped]);
+			return;
+		}
 		onSelectionChange([hit.node.id]);
+	}
+
+	/**
+	 * A click inside an entered view, with the node the raycaster landed on.
+	 *
+	 * **The whole of routing 3D picking into the studio's selection**, and it is
+	 * three lines because a mesh is an ordinary node: the id that comes back is
+	 * the id the layer list uses, the inspector inspects and a rule can name —
+	 * `inst(I,label)` for an instance's part, a plain node id otherwise — so there
+	 * is nothing to translate. The converse direction needed no code at all: the
+	 * layer list already selects any node, and `ViewportCanvas` takes the same
+	 * `selection` set and outlines whatever of it is in the scene.
+	 *
+	 * Shift extends, exactly as it does on the 2D canvas, so multi-selecting a
+	 * mesh and a rectangle together is one gesture with one meaning. Null is the
+	 * ray hitting nothing, which clears — the same answer clicking empty canvas
+	 * gives, and the reason `ViewportCanvas` reports it rather than swallowing it.
+	 */
+	function onPickInScene(id: string | null, event: PointerEvent) {
+		if (id === null) {
+			if (!event.shiftKey) onSelectionChange([]);
+			return;
+		}
+		if (!event.shiftKey) {
+			onSelectionChange([id]);
+			return;
+		}
+		const next = new Set(selection);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		onSelectionChange([...next]);
 	}
 
 	function onContext(event: React.MouseEvent) {
@@ -1250,6 +1517,46 @@ export function Editor({
 							now.context,
 						)?.node.id ?? null);
 
+				/**
+				 * A 3D view is drawn like any other rectangle and arrives with a
+				 * camera and a light in it, which is why it does not go through
+				 * `makeNode`.
+				 *
+				 * `addViewport` is the verb, and routing the gesture through it is
+				 * the difference between a working view and a black box: a viewport
+				 * with no camera and no light draws nothing at all, and every
+				 * question a person then asks — "is it broken?", "did it not take?"
+				 * — is a question about the tool rather than about the design. The
+				 * frame is in canvas coordinates and the two nodes it brings are in
+				 * the view's own space, which is exactly the split that verb owns.
+				 *
+				 * The id comes back by diffing the trees rather than by being
+				 * returned, because `addViewport` returns a `Scene` like every other
+				 * edit in that file and changing its signature for one caller's
+				 * convenience would be the wrong end to fix this from.
+				 */
+				if (gesture.nodeKind === "viewport") {
+					// Applied to the scene in hand and handed over whole, rather than
+					// as an updater, because the id of the node that was just made is
+					// only knowable by looking at the result — and an updater that
+					// reported its answer through a side effect would be an updater
+					// React is free to run twice. `live.current` is this render's
+					// document, which is exactly what the updater would have been
+					// given: the gesture that ends here began on it.
+					const before = new Set(flatten(now.scene.nodes).map((n) => n.id));
+					const next = addViewport(now.scene, host, frame, now.universe.pick);
+					const made = flatten(next.nodes).find(
+						(n) => n.kind === "viewport" && !before.has(n.id),
+					);
+					onSceneChange(() => next);
+					if (made) onSelectionChange([made.id]);
+					onToolChange("select");
+					setGesture({ kind: "none" });
+					setPreview(null);
+					setCurrent(null);
+					return;
+				}
+
 				// A drag up-right or down-left runs along the other diagonal of
 				// the same box: the frame alone cannot say which, so the
 				// direction of the gesture is what settles it.
@@ -1293,6 +1600,9 @@ export function Editor({
 	const dropHighlight = dropTarget
 		? placed.byId.get(dropTarget)?.world
 		: undefined;
+
+	/** Where the entered view sits, in the design, for the chip that marks it. */
+	const enteredBox = entered ? placed.byId.get(entered)?.world : undefined;
 
 	/**
 	 * Which lines the live gesture is caught on, so they can say so.
@@ -1425,6 +1735,19 @@ export function Editor({
 				preview={renderPreview}
 				varying={varying}
 				playing={playing}
+				scrub={scrub}
+				live={liveViews}
+				selection={selection}
+				orbit={orbiting}
+				// Only an entered view answers the pointer. Without this the canvas
+				// would take every event over its rectangle and the marquee, the
+				// drag and the context menu would stop working over a scene —
+				// `ViewportCanvas` defaults to `pointerEvents: none` for exactly
+				// this reason and turns them on when it is given a handler.
+				onPickNode={entered === null ? undefined : onPickInScene}
+				gizmo={entered === null ? undefined : gizmo}
+				onSpatialEdit={entered === null ? undefined : onSpatialEdit}
+				onPoster={onPoster}
 			/>
 
 			{topFrames.map((node) => {
@@ -1451,6 +1774,54 @@ export function Editor({
 					</button>
 				);
 			})}
+
+			{/* Which view the pointer is inside, and the way out. Drawn on the
+			    view's own top-left corner, and only while the answer set still
+			    places the node — a viewport a rule has hidden has no box to hang
+			    it on and the effect above has already stepped out. */}
+			{enteredBox ? (
+				<div
+					className={styles.enteredBar}
+					style={{ left: canvasPx(enteredBox.x), top: canvasPx(enteredBox.y) }}
+					onPointerDown={(e) => e.stopPropagation()}
+				>
+					<button
+						type="button"
+						className={styles.entered}
+						data-role="entered-view"
+						data-view={entered}
+						title="Leave this 3D view and go back to editing the page"
+						onClick={() => setEntered(null)}
+					>
+						Inside this view — Esc to leave
+					</button>
+					{/* Which handles the one selected object wears. Beside the way out
+					    rather than in the toolbar, because it is true of this view and
+					    only while somebody is in it — a mode switch in the main bar
+					    would be a control that does nothing almost all the time.
+
+					    Two buttons and no third: the gizmo translates and turns, and a
+					    scale mode would need an answer `geometry.ts` has not got. */}
+					{(["move", "turn"] as const).map((mode) => (
+						<button
+							key={mode}
+							type="button"
+							className={styles.entered}
+							data-role="gizmo-mode"
+							data-mode={mode}
+							aria-pressed={gizmo === mode}
+							title={
+								mode === "move"
+									? "Drag an axis to move the selected object in the scene"
+									: "Drag a ring to turn the selected object about one axis"
+							}
+							onClick={() => setGizmo(mode)}
+						>
+							{mode === "move" ? "Move" : "Turn"}
+						</button>
+					))}
+				</div>
+			) : null}
 
 			{dropHighlight ? (
 				<div

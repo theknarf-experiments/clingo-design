@@ -28,10 +28,12 @@ import { directSolver } from "./directSolver.ts";
 import { explore } from "./explore.ts";
 import { readModel, type ModelNode, type ModelScene } from "./model.ts";
 import {
+	type Dimension,
 	KINDS,
 	type PropName,
 	type Scene,
 	type SceneNode,
+	type Spatial,
 	frameOf,
 	propValueOf,
 } from "./scene.ts";
@@ -165,7 +167,17 @@ for (const template of TEMPLATES) {
 		const { visible } = decisions(atoms);
 		// `readSolved` is what `Universe.solved` is built from, so feeding it to
 		// `placedNodes` is exactly what hit testing sees.
-		const solved: Record<string, Partial<Record<"x" | "y" | "width" | "height", number>>> = {};
+		// Split the way the model splits, which is the way `readSolved` splits.
+		// `lv/2` and `lsz/2` answer for **six** dimensions now, and `readModel` puts
+		// the planar four on `ModelNode.frame` and the other two on
+		// `ModelNode.spatial` — deliberately, so that a two-dimensional reader asking
+		// a node for its frame gets four numbers whatever else the document holds.
+		// Poured into one record, the third axis would arrive on the left of an
+		// assertion about the frame and the frame would be missing it on the right,
+		// which is a disagreement between the test and the reader rather than
+		// between the reader and the editor.
+		const solved: Record<string, Partial<Record<Dimension, number>>> = {};
+		const spatial: Record<string, Partial<Record<Spatial, number>>> = {};
 		for (const text of atoms) {
 			const m = /^__lpx\((lv|lsz)\(([^,]+),([a-z]+)\),"([^"]*)"\)$/.exec(text);
 			if (!m) continue;
@@ -174,7 +186,8 @@ for (const template of TEMPLATES) {
 				slash === -1
 					? Number(m[4])
 					: Number(m[4].slice(0, slash)) / Number(m[4].slice(slash + 1));
-			(solved[m[2]] ??= {})[m[3] as "x"] = n;
+			if (m[3] === "z" || m[3] === "depth") (spatial[m[2]] ??= {})[m[3]] = n;
+			else (solved[m[2]] ??= {})[m[3] as Dimension] = n;
 		}
 		const { picks } = decisions(atoms);
 		const context = { tokens: scene.tokens, picks };
@@ -190,6 +203,17 @@ for (const template of TEMPLATES) {
 					: stored,
 				`${placed.node.id} sits somewhere else`,
 			);
+			// The other two, where the solver answered for them. Held to the same
+			// standard rather than merely kept out of the frame: a `depth` the
+			// equations decided and the reader dropped would otherwise be a silent
+			// hole exactly where the split above was made.
+			for (const [dim, value] of Object.entries(spatial[placed.node.id] ?? {})) {
+				assert.equal(
+					read.spatial?.[dim as Spatial],
+					value,
+					`${placed.node.id} is ${dim} somewhere else`,
+				);
+			}
 		}
 		// And nothing in the document is missing from the picture. The other
 		// direction no longer holds: a rule may put more in it than the document

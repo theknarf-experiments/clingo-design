@@ -18,9 +18,15 @@ import {
 	openVariables,
 } from "./components.ts";
 import {
+	findInput,
 	findMachine,
+	findTimeline,
+	holdsKeyCopy,
 	holdsStateCopy,
+	machineForNode,
 	machineForRoot,
+	machineLayers,
+	trackTerm,
 } from "./machines.ts";
 import {
 	DEFAULT_UNIT,
@@ -39,40 +45,68 @@ import {
 	scalePoints,
 } from "./geometry.ts";
 import {
+	type AssetInfo,
 	type AutoLayout,
-	type ChildProp,
+	type Axis3,
+	BLEND_KINDS,
+	type Blend,
+	type BlendStop,
+	COMPARE_OPS,
 	CONSTRAINT_KINDS,
+	CONSTRAINT_NAMES,
+	type ChildProp,
+	type Condition,
 	type Constraint,
 	type ConstraintKind,
 	type ConstraintSpec,
 	DIMENSIONS,
+	DIMENSIONS_3D,
 	type Diagonal,
 	type Dimension,
+	EASINGS,
 	EDGES,
+	type Easing,
 	type Edge,
 	type Guide,
 	type GuideProp,
+	INPUT_KINDS,
+	type InputKind,
 	KINDS,
+	type Keyframe,
+	type LoopMode,
 	type Machine,
+	type MachineInput,
+	type MachineLayer,
 	type MachineState,
+	type MeshRef,
 	type NodeKind,
 	PROPS,
 	type PropName,
+	SPATIALS,
 	type Scene,
 	type SceneNode,
 	type Sizing,
+	type Spatial,
+	type SpatialValue,
 	type StatePart,
 	type Style,
 	type StyleVariant,
 	type SurfaceGuides,
 	TRIGGERS,
+	TURNS,
+	type Timeline,
+	type Track,
 	type Transition,
 	type Trigger,
+	type Turn,
+	type TurnValue,
 	dimension,
 	edgeOn,
+	edgeOptions,
 	findGuide,
 	findStyle,
 	frameDim,
+	frameFrozen,
 	frameOf,
 	guideLines,
 	holdsDatum,
@@ -81,13 +115,17 @@ import {
 	isConstraintTerm,
 	makeFrame,
 	makeLayout,
+	makeSpatial,
 	rangesOverGroup,
 	sceneContext,
 	sharedPropsOfKinds,
+	spatialDim,
+	spatialFrozen,
 	stateTouches,
 	styleProps,
 	uniqueName,
 	withFrame,
+	withSpatial,
 	wornProps,
 	wrapsChildren,
 } from "./scene.ts";
@@ -103,6 +141,8 @@ import {
 	constraintVar,
 	frameVar,
 	lit,
+	msOf,
+	optionLabel,
 	propVar,
 	resolveValue,
 	single,
@@ -411,6 +451,13 @@ export function addNode(scene: Scene, node: SceneNode): Scene {
  * definition has just been deleted is dropped along with it, rather than left
  * ranging over a ghost until the next unrelated edit noticed. Which is the
  * sentence `pruneConstraints` opens with, applied one link further out.
+ *
+ * {@link pruneAssets} runs last and its position says nothing, because it reads
+ * the nodes and nothing else — no constraint and no machine has ever named an
+ * asset. It is here rather than at the gesture that deleted the model for
+ * {@link pruneMachines}' reason exactly: the index is a cache of what the
+ * document references, and a reference can go through any of the paths into this
+ * function.
  */
 export function deleteNodes(
 	scene: Scene,
@@ -418,14 +465,16 @@ export function deleteNodes(
 	picks: Picks = {},
 ): Scene {
 	const drop = new Set(ids);
-	return pruneConstraints(
-		pruneMachines({
-			...scene,
-			nodes: refreshGroups(
-				mapTree(scene.nodes, (node) => (drop.has(node.id) ? null : node)),
-				sceneContext(scene, picks),
-			),
-		}),
+	return pruneAssets(
+		pruneConstraints(
+			pruneMachines({
+				...scene,
+				nodes: refreshGroups(
+					mapTree(scene.nodes, (node) => (drop.has(node.id) ? null : node)),
+					sceneContext(scene, picks),
+				),
+			}),
+		),
 	);
 }
 
@@ -1703,15 +1752,31 @@ function shapeFor(
  * together. A valued kind seeds itself instead, so any of its edges changes
  * nothing and the axis is chosen for legibility — the one the members are
  * actually strung out along.
+ *
+ * **Ranged over `edgeOptions` and not over `spec.edges`, and that is not a
+ * refinement — it is what keeps the third axis from taking every default.** Two
+ * flat rectangles agree *perfectly* about their front faces: both are at z 0
+ * with no depth, so the spread is zero, and zero beats every planar answer.
+ * Without the narrowing, "align these two cards" would have started defaulting
+ * to `Front face` the day `EDGES` grew its z rows — a rule about a quantity
+ * neither member has, which the program then refuses through `gnoedge/2`, which
+ * is a rule that quietly does nothing chosen *by the tool* rather than by a
+ * person. `edgeOptions` offers the third axis only where every member is in it,
+ * so this now compares like with like.
+ *
+ * The fallback when nothing is offered is `spec.edges[0]`, which is the planar
+ * lead of the kind: a menu with nothing in it is not a state this can be asked
+ * to answer for, and the shipped default is the honest thing to return.
  */
 function quietestEdge(
 	scene: Scene,
 	spec: ConstraintSpec,
 	nodes: readonly string[],
 ): Edge {
-	let best = spec.edges[0];
+	const offered = edgeOptions(scene, kindOf(spec), nodes);
+	let best = offered[0] ?? spec.edges[0];
 	let least = Number.POSITIVE_INFINITY;
-	for (const edge of spec.edges) {
+	for (const edge of offered) {
 		const spread = spreadOf(scene, nodes, edge);
 		if (spread < least) {
 			least = spread;
@@ -1719,6 +1784,21 @@ function quietestEdge(
 		}
 	}
 	return best;
+}
+
+/**
+ * Which kind a spec is, for the one reader that has the spec and needs the name.
+ *
+ * `edgeOptions` takes a {@link ConstraintKind} because that is what a panel has;
+ * `quietestEdge` takes a {@link ConstraintSpec} because that is what its callers
+ * have. Identity over the table rather than a second argument threaded through
+ * two call sites, and `align` as the fallback for a spec that is not in the
+ * table at all — which nothing constructs and a test could.
+ */
+function kindOf(spec: ConstraintSpec): ConstraintKind {
+	return (
+		CONSTRAINT_NAMES.find((name) => CONSTRAINT_KINDS[name] === spec) ?? "align"
+	);
 }
 
 /**
@@ -1835,6 +1915,27 @@ export function sharedProps(
  * request, so the two spellings a designer is now offered side by side had better
  * survive a delete side by side. {@link holdsInstancePart} is blunt in the same
  * way its three siblings are.
+ *
+ * A **keyframe copy** — `kfr(c1,open,trkd(panel,y),3)` — is the fifth, and it is
+ * the same hole a fifth time. It is neither a node, nor a datum, nor a state
+ * copy, nor an instance part, so without {@link holdsKeyCopy} the first
+ * unrelated delete after somebody wrote a rule about a moment of an animation
+ * would strip the rule of its members and then delete it for falling below
+ * `minNodes`. And here the loss is worse than elsewhere, because the rule is
+ * **the only thing that makes the copy exist at all**: `keyframeParts` is seeded
+ * from `scene.constraints`, so deleting the rule un-mints the copy, and there is
+ * nothing left in the document to say what was lost.
+ *
+ * `holdsKeyCopy` is blunt about the track and sharp about the index, and the
+ * asymmetry is its own: a track that has lost its third key really has lost it,
+ * and no edit brings that moment back the way re-adding a delta brings a
+ * materialised part back.
+ *
+ * **A 3D node needs no clause and that is the invariant paying for itself.** A
+ * mesh, a camera and a light are `node/1` with a `kind/2`, they are in the tree,
+ * so they are in `alive` — the whole of what this function has to know about the
+ * third axis is nothing. `edits.test.ts` asserts it rather than assuming it,
+ * because "nothing had to change" is a claim like any other.
  */
 export function pruneConstraints(scene: Scene): Scene {
 	const alive = new Set(flatten(scene.nodes).map((n) => n.id));
@@ -1845,7 +1946,8 @@ export function pruneConstraints(scene: Scene): Scene {
 				alive.has(id) ||
 				holdsDatum(scene, id) ||
 				holdsStateCopy(scene, id) ||
-				holdsInstancePart(scene, id),
+				holdsInstancePart(scene, id) ||
+				holdsKeyCopy(scene, id),
 		);
 		// A group's members are the rule's business: deleting a document node
 		// says nothing about them, and a constraint over one is never a ghost.
@@ -2861,28 +2963,69 @@ export function setStateProp(
 }
 
 /**
- * The same for one of the four dimensions, in the part's own *parent-relative*
- * coordinates.
+ * The same for one of the **six** dimensions, in the part's own
+ * *parent-relative* coordinates.
  *
  * Which is what makes the materialisation analysis affordable rather than being
  * a detail of storage: a state that moves a container moves everything inside it
  * with no copy for any of them, so the analysis closes upward only and the usual
  * "the whole card lifts on hover" costs exactly one state copy.
+ *
+ * **Six and not four**, following {@link StatePart.frame} where the third axis
+ * widened it. A state that lifts a mesh 40px in z is the same kind of claim as
+ * one that moves a button two pixels down, `sfval(I,S,N,D)` takes any of the six
+ * and `mbase/4` carries all six, and narrowing the *edit* to four would have left
+ * the one thing `docs/merged-plan.md` §6.1 spends a page making work — a state
+ * that moves a mesh on the third axis — with no way to author it. A caller
+ * holding a {@link Dimension} needs no change: the four are a subset of the six,
+ * and a document with no third axis is unable to tell the difference.
  */
 export function setStateFrame(
 	scene: Scene,
 	machineId: string,
 	stateId: string,
 	part: string,
-	dim: Dimension,
+	dim: Axis3,
 	value: Value | undefined,
 ): Scene {
-	if (!DIMENSIONS.includes(dim)) return scene;
+	if (!DIMENSIONS_3D.includes(dim)) return scene;
 	return writeDelta(scene, machineId, stateId, part, (delta) => {
 		const frame = { ...delta.frame };
 		if (value === undefined || value.length === 0) delete frame[dim];
 		else frame[dim] = value;
 		return { ...delta, frame };
+	});
+}
+
+/**
+ * What one state says about one rotation of one definition part.
+ *
+ * The third of the three writers into a delta, beside {@link setStateProp} and
+ * {@link setStateFrame}, and it exists for the reason {@link stateTouches} reads
+ * `turn` at all: a state whose only delta is a rotation materialises no copy
+ * without it, so `turn(stt(I,S,N),R,V)` has nothing to be about and a hover that
+ * spins a card does nothing in a document that solves cleanly and reports
+ * nothing.
+ *
+ * Not in the merged plan's list of edits, and added here rather than deferred
+ * because `StatePart.turn` shipped in M3 and `srval(I,S,N,R)` shipped in M5 and
+ * M8 — a document field with a compiler behind it and no way to write it is a
+ * feature that exists everywhere except where a person could reach it.
+ */
+export function setStateTurn(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	part: string,
+	turn: Turn,
+	value: Value | undefined,
+): Scene {
+	if (!Object.hasOwn(TURNS, turn)) return scene;
+	return writeDelta(scene, machineId, stateId, part, (delta) => {
+		const turns = { ...delta.turn };
+		if (value === undefined || value.length === 0) delete turns[turn];
+		else turns[turn] = value;
+		return { ...delta, turn: turns };
 	});
 }
 
@@ -3136,4 +3279,1876 @@ export function pruneMachines(scene: Scene): Scene {
 	const alive = new Set(flatten(scene.nodes).map((n) => n.id));
 	const machines = scene.machines.filter((m) => alive.has(m.root));
 	return machines.length === scene.machines.length ? scene : { ...scene, machines };
+}
+
+/* ------------------------------------------------------------------ */
+/* Three dimensions                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * **A 3D object is an ordinary scene node**, so every edit in this section
+ * builds a {@link SceneNode} and hands it to the same `mapTree` the rectangle
+ * tool uses. There is no second document here: a mesh is `node/1` with a
+ * `kind/2`, a `child/2`, an `order/2` and a `frame/3` like everything else, it
+ * appears in the layer list, a rule can name it, and `deleteNodes` takes it away
+ * with no case of its own. What is new is three fields — `spatial`, `turn` and
+ * `mesh` — and every one of them is optional and sparse, so a flat document
+ * holds none of them and costs exactly nothing.
+ *
+ * The one thing this section has to be careful about is *where* a fresh node
+ * goes. A child's frame is relative to its parent's origin — the near-top-left
+ * corner — so a mesh added to a viewport is placed in the **viewport's own model
+ * space** and never in canvas coordinates. {@link addNodeTo} exists to do the
+ * canvas-to-parent conversion for a pointer, and is exactly what these must not
+ * use: there is no pointer here, and rebasing a number that was already local
+ * would put the mesh an artboard's width away from the view it was added to.
+ */
+
+/**
+ * Where a zero-sized node's frame goes so that its **centre** lands on `at`.
+ *
+ * A camera and a light have no size — `KINDS.camera.defaultSize` is 0×0 — and
+ * yet `makeNode` stores {@link MIN_NODE_SIZE}, because a node the pointer cannot
+ * grab is a node nobody can select. Everything that draws or measures one of
+ * these reads its *centre* (`transformOf` is `origin + size/2`, and that is the
+ * decision rotation rests on), so the two facts together mean a camera placed at
+ * its eye position would sit two pixels off it. Half the minimum, subtracted
+ * once, here, rather than at four call sites that could each get it wrong.
+ */
+const markerOrigin = (at: number): number => at - MIN_NODE_SIZE / 2;
+
+/**
+ * A fresh node of a 3D kind, with the sparse third axis it needs and no more.
+ *
+ * Only the dimensions the caller names are written, which is
+ * {@link makeSpatial}'s rule and the whole of the no-regression story: absent is
+ * z 0 and depth 0, so a camera that sits on the origin plane holds no `spatial`
+ * at all rather than holding `{ z: "0px" }`. Two spellings of "flat" is the one
+ * thing the third axis was designed not to have.
+ */
+function spatialNode(
+	kind: NodeKind,
+	frame: Frame,
+	spatial: Partial<Record<Spatial, number>>,
+	name: string,
+): SceneNode {
+	const node = makeNode(kind, frame, { name });
+	const written = makeSpatial(spatial);
+	return Object.keys(written).length > 0 ? { ...node, spatial: written } : node;
+}
+
+/**
+ * Appends a node to a parent's children **without touching its frame**.
+ *
+ * The counterpart of {@link addNodeTo} and deliberately not a variant of it. That
+ * one takes canvas coordinates because a pointer produces them; this one is for
+ * a node whose frame is already stated in the parent's space, which is every 3D
+ * node a menu creates — you cannot drag a box out in three dimensions with a
+ * two-dimensional pointer and mean anything by it, so nothing here comes from a
+ * gesture and nothing here has a canvas coordinate to convert.
+ */
+function appendChild(scene: Scene, parentId: string, node: SceneNode): Scene {
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (n) =>
+			n.id === parentId ? { ...n, children: [...(n.children ?? []), node] } : n,
+		),
+	};
+}
+
+/** A record with one key taken away, when it holds it — never an explicit `undefined`. */
+function without<T extends object, K extends keyof T>(record: T, key: K): T {
+	if (!Object.hasOwn(record, key)) return record;
+	const next = { ...record };
+	delete next[key];
+	return next;
+}
+
+/**
+ * A record with one optional list written, or the key **taken away** when the
+ * list is empty.
+ *
+ * "This machine has no layers" has one spelling — no key — and this is what keeps
+ * it that way, for {@link writeDelta}'s reason one level up: `machineLayers`
+ * reads an empty array and an absent field alike, so the two would never
+ * disagree about behaviour, but a document that could hold either would diff
+ * against itself and `normalizeScene` would drop one of them on the next read.
+ */
+function withList<T extends object, K extends keyof T & string>(
+	record: T,
+	key: K,
+	list: readonly unknown[],
+): T {
+	if (list.length > 0) return { ...record, [key]: list } as T;
+	return without(record, key);
+}
+
+/**
+ * The same for an optional *record* — {@link SceneNode.states} is the only one
+ * today, and it is the reason this is not {@link withList} with a looser type.
+ *
+ * The two look interchangeable and are not, which is a mistake this file made
+ * once and is written down here so it cannot be made twice: handing
+ * `Object.entries(...)` to `withList` typechecks, because the parameter is
+ * `readonly unknown[]` and the return is a cast, and it writes an *array of
+ * pairs* into a field every reader indexes by layer id. The document then holds
+ * `states: [["glow","on"]]`, `shownStates` finds nothing under any layer, and
+ * the instance silently falls back to every layer's initial state — a wrong
+ * picture with no error anywhere. A record has its own front door for that
+ * reason and for no other.
+ */
+function withRecord<T extends object, K extends keyof T & string>(
+	record: T,
+	key: K,
+	entries: Record<string, unknown>,
+): T {
+	if (Object.keys(entries).length > 0) return { ...record, [key]: entries } as T;
+	return without(record, key);
+}
+
+/**
+ * A 3D view on the page, with the two things a scene cannot be looked at
+ * without: one camera and one light.
+ *
+ * **Two, and not none**, which is the opposite call to {@link addMachine}'s one
+ * state and {@link addStyle}'s one variant, and the difference is what an empty
+ * one would look like. An empty machine still draws the component; an empty
+ * style still leaves the nodes painted; a viewport with no camera and no light
+ * is a black rectangle, and every question a person then asks — "is it broken?",
+ * "did the mesh go in?" — is a question about the tool rather than the design.
+ * So the view arrives able to show something, and both of them are ordinary
+ * nodes in the layer list that can be moved, hidden or deleted.
+ *
+ * The camera sits one viewport-height back on the near side (**−z is toward the
+ * viewer**, §2.4) and looks down the axis. With `PROPS.fov`'s 50° that frames
+ * about one viewport height at the origin plane, which is where {@link addMesh}
+ * puts a solid — so the first mesh somebody adds is in shot, at a sensible size,
+ * with no camera work at all. The light is up, forward and to the left of it,
+ * which is where a key light goes.
+ *
+ * `frame` is in **canvas coordinates** — this is the one thing here a pointer
+ * really does draw out — so it goes through {@link addNodeTo} like any other
+ * drawn node. Its contents do not: they are already in the view's own space.
+ */
+export function addViewport(
+	scene: Scene,
+	parent: string | null,
+	frame: Frame,
+	picks: Picks = {},
+): Scene {
+	const box = normaliseFrame(frame);
+	const camera = spatialNode(
+		"camera",
+		{
+			x: markerOrigin(box.width / 2),
+			y: markerOrigin(box.height / 2),
+			width: 0,
+			height: 0,
+		},
+		{ z: -box.height },
+		"Camera",
+	);
+	const light = spatialNode(
+		"light",
+		{
+			x: markerOrigin(box.width / 4),
+			y: markerOrigin(-box.height / 4),
+			width: 0,
+			height: 0,
+		},
+		{ z: -box.height / 2 },
+		"Key light",
+	);
+	const view: SceneNode = {
+		...makeNode("viewport", box),
+		camera: camera.id,
+		children: [camera, light],
+	};
+	return addNodeTo(scene, parent, view, picks);
+}
+
+/**
+ * The point at the middle of a viewport's origin plane, in its own model space
+ * — where a fresh object goes.
+ *
+ * The origin of that space is the view's near-top-left corner, so the middle is
+ * half the width across and half the height down, at z 0. Nothing here is
+ * clever; it is written down once because four functions want it and because
+ * getting it wrong puts a new mesh in a corner nobody is looking at.
+ */
+function viewCentre(
+	scene: Scene,
+	viewport: SceneNode,
+	picks: Picks,
+): { x: number; y: number } {
+	const box = frameOf(viewport, sceneContext(scene, picks));
+	return { x: box.width / 2, y: box.height / 2 };
+}
+
+/**
+ * The viewport a 3D add-edit was aimed at, or nothing.
+ *
+ * Strict: a `pivot` is not a viewport and neither is a frame. Adding is *into a
+ * view*, and putting a mesh further down the tree is {@link reparent}, which
+ * already exists and is the general gesture — a second, subtly different
+ * insertion path would be a second set of coordinate rules to get wrong.
+ */
+function viewportNode(scene: Scene, id: string): SceneNode | undefined {
+	const node = findInTree(scene.nodes, id);
+	return node?.kind === "viewport" ? node : undefined;
+}
+
+/**
+ * One of the six primitives, in the middle of the view and in front of its
+ * camera.
+ *
+ * The size is `KINDS.mesh.defaultSize` on all three axes — a cube rather than a
+ * card, because a `plane` is one of the six and a solid that arrived flat would
+ * be indistinguishable from one. `depth` is therefore the one spatial entry it
+ * is born with; `z` stays absent, which reads as zero and means the solid
+ * straddles nothing and sits on the origin plane.
+ *
+ * The primitive is a {@link Value} on the `solid` property and not a field, which
+ * is `PROPS.solid`'s own argument: `[box, sphere]` is a real design question with
+ * two answers, and a field would have put that variation outside the multiverse.
+ * An unknown word is kept rather than repaired — `tessellate` falls back to a box
+ * the way a dangling anything else falls back — and only an empty one takes the
+ * table's fallback, because a property with no value at all decides nothing.
+ */
+export function addMesh(scene: Scene, viewport: string, solid: string): Scene {
+	const view = viewportNode(scene, viewport);
+	if (!view) return scene;
+	const centre = viewCentre(scene, view, {});
+	const size = KINDS.mesh.defaultSize;
+	const word = solid.trim() || VALUE_TYPES.solid.fallback;
+	const node = spatialNode(
+		"mesh",
+		{
+			x: centre.x - size.width / 2,
+			y: centre.y - size.height / 2,
+			width: size.width,
+			height: size.height,
+		},
+		{ depth: size.width },
+		optionLabel("solid", word),
+	);
+	return appendChild(scene, viewport, {
+		...node,
+		props: { ...node.props, solid: single(word) },
+	});
+}
+
+/**
+ * Another eye, where the first one is.
+ *
+ * It becomes the view's own camera **only when the view has not got one**, which
+ * is the difference between helping and overruling: the first camera somebody
+ * adds is obviously the one to look through, and the third is obviously not. A
+ * dangling `camera` counts as having one, for `normalizeScene`'s reason — it is
+ * kept on read precisely so that deleting a camera leaves a repairable document,
+ * and silently re-pointing it here would repair it behind the designer's back.
+ */
+export function addCamera(scene: Scene, viewport: string): Scene {
+	const view = viewportNode(scene, viewport);
+	if (!view) return scene;
+	const centre = viewCentre(scene, view, {});
+	const box = frameOf(view, sceneContext(scene, {}));
+	const camera = spatialNode(
+		"camera",
+		{
+			x: markerOrigin(centre.x),
+			y: markerOrigin(centre.y),
+			width: 0,
+			height: 0,
+		},
+		{ z: -box.height },
+		"Camera",
+	);
+	const next = appendChild(scene, viewport, camera);
+	if (view.camera !== undefined) return next;
+	return mapSelected(next, [viewport], (n) => ({ ...n, camera: camera.id }));
+}
+
+/**
+ * A lamp of one of the four kinds — see `PROPS.lamp`.
+ *
+ * Its colour is `ink`, "the colour the thing itself is", so a brand palette
+ * lights the scene with nothing wired up; its kind is a `Value` for
+ * {@link addMesh}'s reason exactly. Where the light *is* matters for two of the
+ * four kinds and not for the other two, and it is placed as though it mattered
+ * for all of them: an `ambient` lamp with a position is a position nothing reads,
+ * which costs nothing, and a lamp somebody switches to `directional` afterwards
+ * is then already somewhere sensible instead of inside the subject.
+ */
+export function addLight(scene: Scene, viewport: string, lamp: string): Scene {
+	const view = viewportNode(scene, viewport);
+	if (!view) return scene;
+	const box = frameOf(view, sceneContext(scene, {}));
+	const word = lamp.trim() || VALUE_TYPES.lamp.fallback;
+	const node = spatialNode(
+		"light",
+		{
+			x: markerOrigin(box.width / 4),
+			y: markerOrigin(-box.height / 4),
+			width: 0,
+			height: 0,
+		},
+		{ z: -box.height / 2 },
+		optionLabel("lamp", word),
+	);
+	return appendChild(scene, viewport, {
+		...node,
+		props: { ...node.props, lamp: single(word) },
+	});
+}
+
+/**
+ * Imported geometry, and the entry in the index that says what it is.
+ *
+ * **The bytes are not here.** The caller has already put them in the
+ * content-addressed store and hands over the hash and the metadata, which is the
+ * one place the third axis departs from the `path` precedent it otherwise
+ * follows exactly: a glTF is megabytes, the document is edited by two people at
+ * once, and a payload in the document is a payload in every diff, every undo
+ * entry and every sync message.
+ *
+ * **And there is no such caller, which is why this verb is reachable from
+ * nothing but its own test while its five neighbours are wired into the studio.**
+ * `design-core/src/assets.ts` and the `AssetStore` it was to define do not exist,
+ * so nobody can put the bytes anywhere: a menu entry that called this would mint
+ * a `model` node carrying a hash that nothing can load, `canvas-3d`'s `Model.tsx`
+ * would draw its bounding box, and a glTF export of the view would write an empty
+ * mesh where the geometry should be. A feature that appears to work and produces
+ * nothing is worse than an absent one, so the verb waits for the store rather
+ * than being given a front door — and this paragraph says so, because a reader
+ * comparing it with `addMesh` is owed the difference.
+ *
+ * The node's box is the model's own bounds, centred in the view, so an import
+ * arrives at the size it really is rather than at a size this file invented — a
+ * chair modelled a metre tall is a metre tall, and a designer who wants it
+ * smaller resizes it and can see what they did. Bounds that say nothing fall back
+ * to `KINDS.model.defaultSize`, because a box of nothing is not a thing anybody
+ * can grab and drag out to the size they meant.
+ */
+export function addModel(
+	scene: Scene,
+	viewport: string,
+	ref: MeshRef,
+	info: AssetInfo,
+): Scene {
+	const view = viewportNode(scene, viewport);
+	if (!view) return scene;
+	const centre = viewCentre(scene, view, {});
+	const fallback = KINDS.model.defaultSize;
+	const width = ref.bounds?.width > 0 ? ref.bounds.width : fallback.width;
+	const height = ref.bounds?.height > 0 ? ref.bounds.height : fallback.height;
+	const depth = ref.bounds?.depth > 0 ? ref.bounds.depth : fallback.width;
+	const node = spatialNode(
+		"model",
+		{
+			x: centre.x - width / 2,
+			y: centre.y - height / 2,
+			width,
+			height,
+		},
+		{ depth },
+		info.name.trim() || KINDS.model.label,
+	);
+	const placed = appendChild(scene, viewport, { ...node, mesh: ref });
+	return { ...placed, assets: { ...placed.assets, [ref.asset]: info } };
+}
+
+/**
+ * Which camera a view looks through, or `null` for none.
+ *
+ * The camera has to be a camera **and inside this view**, which is `vcam/2`'s own
+ * three conditions and `cameraOf`'s: a view that named a rectangle, or a camera
+ * belonging to the view next to it, would be a view whose picture the document
+ * and the renderer disagree about. A name that fails them is refused at the edit
+ * rather than kept and ignored, because unlike a `camera` that has gone dangling
+ * — which is a deletion to repair — this one is a choice being made now, and
+ * there is nothing yet to lose by saying no.
+ *
+ * `null` **removes the field** rather than writing an empty string. An empty
+ * constant is not a node id and `vcam/2` would derive nothing from it either way,
+ * so the two behave alike in the program and differ everywhere a person looks: a
+ * `camera: ""` shows up in a diff, in a JSON file and in an inspector as a
+ * setting somebody made.
+ */
+export function setViewportCamera(
+	scene: Scene,
+	viewport: string,
+	camera: string | null,
+): Scene {
+	const view = viewportNode(scene, viewport);
+	if (!view) return scene;
+	if (camera !== null) {
+		const target = flatten(view.children ?? []).find((n) => n.id === camera);
+		if (target?.kind !== "camera") return scene;
+	}
+	if ((view.camera ?? null) === camera) return scene;
+	return mapSelected(scene, [viewport], (n) =>
+		camera === null ? without(n, "camera") : { ...n, camera },
+	);
+}
+
+/**
+ * Replaces one spatial dimension's whole list of alternatives — the twin of
+ * {@link setFrameValue}, one axis over.
+ *
+ * Like that one, this is the only edit that changes how *many* positions a node
+ * has on the third axis, and a drag never comes through here — `withSpatial` is
+ * the gesture writer and it writes to the alternative the visible universe
+ * picked.
+ *
+ * Offered on **every kind**, and that is the invariant rather than an oversight.
+ * A `rect` with a `z` and a `rotateY` on a plain artboard is exactly what the
+ * CSS-3D half of the export is for; the document decides what is in the third
+ * axis, not the kind — which is what `zstated/1` says in the program and what
+ * `isSpatialNode` says in TypeScript.
+ *
+ * An empty {@link Value} is {@link clearSpatial}, so that "this node says nothing
+ * about z" keeps having one spelling however it was arrived at.
+ */
+export function setSpatialValue(
+	scene: Scene,
+	id: string,
+	dim: Spatial,
+	value: Value,
+): Scene {
+	if (!SPATIALS.includes(dim)) return scene;
+	if (value.length === 0) return clearSpatial(scene, id, dim);
+	return mapSelected(scene, [id], (node) => ({
+		...node,
+		spatial: { ...node.spatial, [dim]: value },
+	}));
+}
+
+/** The same for one rotation, in whatever angle unit it is spelled in. */
+export function setTurnValue(
+	scene: Scene,
+	id: string,
+	turn: Turn,
+	value: Value,
+): Scene {
+	if (!Object.hasOwn(TURNS, turn)) return scene;
+	if (value.length === 0) return clearTurn(scene, id, turn);
+	return mapSelected(scene, [id], (node) => ({
+		...node,
+		turn: { ...node.turn, [turn]: value },
+	}));
+}
+
+/**
+ * "This node is not lifted", said in one gesture — and the record goes with the
+ * last entry.
+ *
+ * {@link writeDelta}'s rule, applied to a node instead of to a delta and for the
+ * same reason: `spatial: {}` and no `spatial` are the same claim, `isSpatialNode`
+ * and the compiler's gate both read them alike, and a document that could hold
+ * either would put a viewport-free file into three dimensions the moment somebody
+ * lifted a rectangle and put it back.
+ */
+export function clearSpatial(scene: Scene, id: string, dim: Spatial): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (node?.spatial?.[dim] === undefined) return scene;
+	return mapSelected(scene, [id], (n) => {
+		const spatial: SpatialValue = without(n.spatial ?? {}, dim);
+		return Object.keys(spatial).length > 0
+			? { ...n, spatial }
+			: without(n, "spatial");
+	});
+}
+
+/** The same for one rotation. */
+export function clearTurn(scene: Scene, id: string, turn: Turn): Scene {
+	const node = findInTree(scene.nodes, id);
+	if (node?.turn?.[turn] === undefined) return scene;
+	return mapSelected(scene, [id], (n) => {
+		const turns: TurnValue = without(n.turn ?? {}, turn);
+		return Object.keys(turns).length > 0 ? { ...n, turn: turns } : without(n, "turn");
+	});
+}
+
+/**
+ * Puts the named nodes under a fresh pivot, at their middle, without moving any
+ * of them.
+ *
+ * A pivot rather than a group, and the difference is the one `KINDS.pivot` states:
+ * a group is `wrapsChildren` and re-fits to its children's 2D bounding box, which
+ * inside a view is meaningless — the bounding box of rotated solids is exactly
+ * the trigonometry a linear solver cannot do. A pivot is a place and a rotation
+ * and has nothing to re-fit.
+ *
+ * **At their middle**, because a pivot turns about its own centre and that centre
+ * is the whole reason to make one. So the children are rebased by however far the
+ * pivot moved, which keeps the picture identical — and it is the one thing here
+ * that can fail. `withFrame` and `withSpatial` will not overwrite an alternative
+ * that is a token or a derivation: that number is the token's to decide, and
+ * unwiring it would silently break a link the designer set up. A child whose x is
+ * a link therefore *cannot* be rebased, and grouping it would move it by the
+ * pivot's offset — so the whole edit is refused instead, exactly as the editor
+ * refuses to drag such an axis and hides the resize handles. The panel greys the
+ * button using `frameFrozen` and says why.
+ *
+ * The middle is the middle of the **boxes the document holds**, not of the shapes
+ * on screen: a turned child occupies a region whose extent is
+ * `|w·cos θ| + |h·sin θ|`, which is irrational for all but a handful of angles,
+ * and `axisBounds` refuses to return a box for it rather than return a rounded
+ * lie. Averaging one here would be that same lie with a friendlier name.
+ */
+export function addPivot(
+	scene: Scene,
+	viewport: string,
+	children: readonly string[],
+	picks: Picks = {},
+): Scene {
+	const view = viewportNode(scene, viewport);
+	if (!view) return scene;
+	const wanted = new Set(children);
+	const moving = (view.children ?? []).filter((n) => wanted.has(n.id));
+	if (moving.length === 0) return scene;
+
+	const context = sceneContext(scene, picks);
+	let low = { x: Infinity, y: Infinity, z: Infinity };
+	let high = { x: -Infinity, y: -Infinity, z: -Infinity };
+	for (const child of moving) {
+		const box = frameOf(child, context);
+		const z = spatialDim(child, "z", context);
+		const depth = spatialDim(child, "depth", context);
+		low = {
+			x: Math.min(low.x, box.x),
+			y: Math.min(low.y, box.y),
+			z: Math.min(low.z, z),
+		};
+		high = {
+			x: Math.max(high.x, box.x + box.width),
+			y: Math.max(high.y, box.y + box.height),
+			z: Math.max(high.z, z + depth),
+		};
+	}
+	const pivot = spatialNode(
+		"pivot",
+		{
+			x: markerOrigin((low.x + high.x) / 2),
+			y: markerOrigin((low.y + high.y) / 2),
+			width: 0,
+			height: 0,
+		},
+		{ z: (low.z + high.z) / 2 },
+		KINDS.pivot.label,
+	);
+	// What the document actually stored, rather than what was asked for:
+	// `makeNode` quantizes every length a gesture writes onto the pixel grid, so
+	// the offset the children are shifted by has to be read back off the node or
+	// the group drifts by up to half a pixel on each axis.
+	const at = frameOf(pivot);
+	const origin = { x: at.x, y: at.y, z: spatialDim(pivot, "z") };
+
+	const stuck = moving.some(
+		(child) =>
+			(origin.x !== 0 && frameFrozen(child, "x", context)) ||
+			(origin.y !== 0 && frameFrozen(child, "y", context)) ||
+			(origin.z !== 0 && spatialFrozen(child, "z", context)),
+	);
+	if (stuck) return scene;
+
+	const inside = moving.map((child) => {
+		const box = frameOf(child, context);
+		const shifted = withFrame(
+			child,
+			{ x: box.x - origin.x, y: box.y - origin.y },
+			context,
+		);
+		return origin.z === 0
+			? shifted
+			: withSpatial(
+					shifted,
+					{ z: spatialDim(child, "z", context) - origin.z },
+					context,
+				);
+	});
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (n) =>
+			n.id === viewport
+				? {
+						...n,
+						children: [
+							...(n.children ?? []).filter((c) => !wanted.has(c.id)),
+							{ ...pivot, children: inside },
+						],
+					}
+				: n,
+		),
+	};
+}
+
+/**
+ * Assets nothing references any more, dropped from the index.
+ *
+ * The counterpart of `normalizeScene`'s deliberate hoarding, and the two are a
+ * pair rather than a disagreement: **an unreferenced asset is kept on read**,
+ * because a paste may be about to reference one and opening a file must not be a
+ * destructive act, and dropped on an **edit**, because by then the document has
+ * been changed by somebody who was looking at it. Undo is a stack of documents,
+ * so the entry comes back with the model it belonged to.
+ *
+ * Called by {@link deleteNodes} and by nothing else, for the reason
+ * {@link pruneMachines} is: a reference disappears when a node does, and every
+ * path that deletes a node goes through there.
+ */
+export function pruneAssets(scene: Scene): Scene {
+	if (scene.assets === undefined) return scene;
+	const used = new Set(
+		flatten(scene.nodes)
+			.map((node) => node.mesh?.asset)
+			.filter((hash): hash is string => hash !== undefined),
+	);
+	const kept = Object.entries(scene.assets).filter(([hash]) => used.has(hash));
+	if (kept.length === Object.keys(scene.assets).length) return scene;
+	return kept.length > 0
+		? { ...scene, assets: Object.fromEntries(kept) }
+		: without(scene, "assets");
+}
+
+/* ------------------------------------------------------------------ */
+/* Inputs                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * **An input is a runtime value and never a design-space one.** Nothing in this
+ * section can add a universe, and that is not a happy accident: every field an
+ * input holds is a plain string rather than a {@link Value}, so there is nowhere
+ * for an alternative to go. A document with three inputs has exactly the universe
+ * count of the same document with none — see {@link MachineInput}, which argues
+ * it at length, and `machineprogram.test.ts`, which asserts it.
+ */
+
+/** Replaces one input of one machine, if it holds it. */
+function mapInput(
+	scene: Scene,
+	machineId: string,
+	inputId: string,
+	fn: (input: MachineInput) => MachineInput,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const before = machine.inputs ?? [];
+		const inputs = before.map((x) => (x.id === inputId ? fn(x) : x));
+		return inputs.some((x, i) => x !== before[i]) ? { ...machine, inputs } : machine;
+	});
+}
+
+/**
+ * An input, with the resting value its kind implies and no range at all.
+ *
+ * **No range**, and it is the one field worth arguing about: absent is *open*,
+ * not zero. A designer who has not said how far the drawer opens has not said it
+ * does not open, and an edit that wrote `min: "0"` here would have the two checks
+ * that read a range reporting violations against a claim nobody made — a guard
+ * greyed out as impossible because of a number this function invented.
+ *
+ * The id is derived from the name rather than generated, which is
+ * {@link addState}'s call and it applies here for the same three reasons: an
+ * input id is read in `minput(m1,open)` in the program panel, typed into a
+ * condition row, and handed to `MachineTable`'s runtime by a host page. `x_3f2a`
+ * in all three places would be a machine nobody could drive.
+ */
+export function addInput(
+	scene: Scene,
+	machineId: string,
+	kind: InputKind = "boolean",
+	name?: string,
+): { scene: Scene; id: string } {
+	const machine = findMachine(scene.machines, machineId);
+	if (!machine) return { scene, id: "" };
+	if (!Object.hasOwn(INPUT_KINDS, kind)) return { scene, id: "" };
+	const existing = machine.inputs ?? [];
+	const label = name?.trim() || "";
+	const id = uniqueConstant(existing.map((x) => x.id), constantFrom(label) ?? "input");
+	const input: MachineInput = {
+		id,
+		name: uniqueName(existing.map((x) => x.name), label || "Input", " "),
+		kind,
+		...(INPUT_KINDS[kind].fallback ? { initial: INPUT_KINDS[kind].fallback } : {}),
+	};
+	return {
+		scene: mapMachine(scene, machineId, (m) => ({ ...m, inputs: [...existing, input] })),
+		id,
+	};
+}
+
+/**
+ * Renames an input. **The name, never the id** — {@link renameState}'s argument,
+ * one rung along: the id is in every `mcondin/4` the guards ground, in
+ * `mblendin/3`, and in the `InputValues` record a host page hands the runtime.
+ * Renaming through to the id would silently unwire every guard that reads it and
+ * the failure would only show up when somebody pressed something.
+ */
+export function renameInput(
+	scene: Scene,
+	machineId: string,
+	inputId: string,
+	name: string,
+): Scene {
+	const trimmed = name.trim();
+	if (!trimmed) return scene;
+	return mapInput(scene, machineId, inputId, (input) =>
+		input.name === trimmed ? input : { ...input, name: trimmed },
+	);
+}
+
+/**
+ * Changes what kind of thing an input is.
+ *
+ * **Nothing else is repaired**, and that is the interesting half. A boolean
+ * turned into a number leaves `initial: "false"`, which `permilleOf` reads as
+ * nothing, so `inputInitial` falls to the kind's own fallback and the program
+ * gains no `minnum/3`; the conditions that compared it with `is` are still
+ * conditions, and `mcbad/3` reports every one of them. That is the whole of the
+ * design: the mistake is *shown* rather than tidied away, in the panel, on the
+ * rows it is about — and one undo puts every field back, which a repair that
+ * rewrote four comparands could not offer.
+ */
+export function setInputKind(
+	scene: Scene,
+	machineId: string,
+	inputId: string,
+	kind: InputKind,
+): Scene {
+	if (!Object.hasOwn(INPUT_KINDS, kind)) return scene;
+	return mapInput(scene, machineId, inputId, (input) =>
+		input.kind === kind ? input : { ...input, kind },
+	);
+}
+
+/**
+ * What an input holds before anybody drives it — `null` for "whatever the kind
+ * starts at".
+ *
+ * Not in the merged plan's list and added for {@link setStateTurn}'s reason:
+ * `MachineInput.initial` is a document field the compiler emits as `minbool/3`
+ * and `minnum/3`, and a field with a compiler behind it and no writer is a
+ * feature nobody can reach. A trigger has no resting value — "not fired" is the
+ * absence of one — so the field is dropped rather than stored on one.
+ */
+export function setInputInitial(
+	scene: Scene,
+	machineId: string,
+	inputId: string,
+	initial: string | null,
+): Scene {
+	return mapInput(scene, machineId, inputId, (input) => {
+		const wanted = input.kind === "trigger" ? null : initial;
+		if ((input.initial ?? null) === wanted) return input;
+		return wanted === null ? without(input, "initial") : { ...input, initial: wanted };
+	});
+}
+
+/**
+ * The closed ends of a number input's range — `null` at either end is **open**.
+ *
+ * Two explicit arguments rather than a patch, because the two states this has to
+ * distinguish are "leave it alone" and "there is no minimum", and a patch of
+ * `{ min: undefined }` spells both. The distinction is the whole meaning of the
+ * field: a range is what the checks judge a guard and a blend threshold against,
+ * so an end that quietly became zero would make `mguardnever` and `mstopout`
+ * report against a claim nobody made.
+ *
+ * Stored as typed, whatever it says. `permilleOf` reads it or does not, and a
+ * range that reads as nothing is a range the checks stay silent about — which is
+ * the same answer an absent one gets, arrived at honestly rather than by
+ * repairing the text somebody typed while they were still typing it.
+ */
+export function setInputRange(
+	scene: Scene,
+	machineId: string,
+	inputId: string,
+	min: string | null,
+	max: string | null,
+): Scene {
+	return mapInput(scene, machineId, inputId, (input) => {
+		let next = input;
+		if ((next.min ?? null) !== min) {
+			next = min === null ? without(next, "min") : { ...next, min };
+		}
+		if ((next.max ?? null) !== max) {
+			next = max === null ? without(next, "max") : { ...next, max };
+		}
+		return next;
+	});
+}
+
+/**
+ * Takes an input away, and every condition that was about it.
+ *
+ * The conditions go, and this is {@link deleteState}'s judgement rather than
+ * {@link deleteMachine}'s. The line between the two is what the leftover would
+ * *derive*: an edge with a missing end derives `mdangling/2` and a condition with
+ * a missing input derives `mcbad/3` — violations in the panel that the designer
+ * did not write and cannot read the cause of — whereas a state naming a deleted
+ * timeline derives nothing at all, and silence is a thing undo can put right.
+ * So a leftover that would accuse somebody is removed, and a leftover that would
+ * merely wait is kept.
+ *
+ * A guard is a conjunction, so removing one conjunct leaves an edge that fires
+ * more often. That is the honest consequence of deleting the input it was about,
+ * and the alternative — deleting the whole transition — would take away edges
+ * that had three other conditions on them.
+ *
+ * A **blend state** that blends along this input is left exactly as it is. It
+ * derives nothing: `mstopout/3` and `mstopgap/2` join `minlow`/`minhigh` and
+ * find nobody, so the checks go quiet rather than wrong, and the blend is still
+ * a blend with its stops and its timelines. Un-wiring it here would lose a
+ * mixture somebody built in order to tidy a field they could set again in one
+ * click.
+ */
+export function deleteInput(scene: Scene, machineId: string, inputId: string): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const before = machine.inputs ?? [];
+		const inputs = before.filter((x) => x.id !== inputId);
+		if (inputs.length === before.length) return machine;
+		const transitions = machine.transitions.map((t) => {
+			if (!t.conditions?.some((c) => c.input === inputId)) return t;
+			return withList(t, "conditions", t.conditions.filter((c) => c.input !== inputId));
+		});
+		const kept = withList(machine, "inputs", inputs);
+		return transitions.some((t, i) => t !== machine.transitions[i])
+			? { ...kept, transitions }
+			: kept;
+	});
+}
+
+/* ------------------------------------------------------------------ */
+/* Conditions                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A condition has **no id**, and these three take an index instead. That is a
+ * decision the type makes rather than one this file makes: a guard is a
+ * conjunction in document order, the program numbers the conjuncts `1..n` as it
+ * emits them (`mcond(M,T,K)`), and `mcbad(M,T,K)` and `viol` name a condition by
+ * that number — so an id here would be a second name for a thing the panel, the
+ * program and the violation already agree how to point at.
+ *
+ * **One-based**, matching what the compiler emits and therefore what a person
+ * reads in a violation. Every index in this half of the file is: conditions,
+ * keyframes and blend stops all reach the program as `K = index + 1`, and an
+ * editor counting from zero beside a panel counting from one is the oldest
+ * off-by-one there is.
+ */
+
+/** Replaces one transition of one machine, if it holds it. */
+function mapTransition(
+	scene: Scene,
+	machineId: string,
+	transitionId: string,
+	fn: (transition: Transition) => Transition,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const transitions = machine.transitions.map((t) =>
+			t.id === transitionId ? fn(t) : t,
+		);
+		return transitions.some((t, i) => t !== machine.transitions[i])
+			? { ...machine, transitions }
+			: machine;
+	});
+}
+
+/**
+ * A conjunct on an edge's guard, about one input.
+ *
+ * The comparand starts at the input's **own resting value**, through
+ * `INPUT_KINDS`, so a fresh row says something true and harmless — "while `open`
+ * is false" — rather than something this file invented. A trigger takes `fired`
+ * and no comparand, because "the trigger happened" is the whole of what there is
+ * to say about a moment.
+ *
+ * **Refused where the machine has no inputs at all.** A condition names an input;
+ * one that named nothing would be `mcbad/3` at the instant it was created, which
+ * is an accusation the designer earned by pressing a button. The panel disables
+ * the control instead, which is where a person can see why.
+ */
+export function addCondition(
+	scene: Scene,
+	machineId: string,
+	transitionId: string,
+	input?: string,
+): Scene {
+	const machine = findMachine(scene.machines, machineId);
+	if (!machine) return scene;
+	const chosen = findInput(machine, input) ?? (machine.inputs ?? [])[0];
+	if (!chosen) return scene;
+	const condition: Condition =
+		chosen.kind === "trigger"
+			? { input: chosen.id, op: "fired" }
+			: {
+					input: chosen.id,
+					op: "eq",
+					value: chosen.initial ?? INPUT_KINDS[chosen.kind].fallback,
+				};
+	return mapTransition(scene, machineId, transitionId, (t) => ({
+		...t,
+		conditions: [...(t.conditions ?? []), condition],
+	}));
+}
+
+/**
+ * Changes one conjunct — its input, its operator, its comparand.
+ *
+ * One patch rather than three setters, {@link updateTransition}'s shape and its
+ * reason: a condition is one row of one panel with three controls on it.
+ *
+ * An operator the table has not got is refused, because it would reach the
+ * program as a term no rule reads; an operator the input's *kind* does not take
+ * is **kept**, because that is a mistake with a name — `mcbad/3` — and a row the
+ * panel greys and explains. The line between the two is the line the whole
+ * feature keeps: a syntax error is refused, and a wrong statement is reported.
+ */
+export function updateCondition(
+	scene: Scene,
+	machineId: string,
+	transitionId: string,
+	index: number,
+	patch: Partial<Condition>,
+): Scene {
+	if (patch.op !== undefined && !Object.hasOwn(COMPARE_OPS, patch.op)) return scene;
+	if (patch.input !== undefined && wordOf(patch.input) !== patch.input) return scene;
+	return mapTransition(scene, machineId, transitionId, (t) => {
+		const before = t.conditions ?? [];
+		if (index < 1 || index > before.length) return t;
+		const conditions = before.map((condition, i) => {
+			if (i !== index - 1) return condition;
+			const next: Condition = { ...condition, ...patch };
+			// A comparand set to nothing leaves as a key rather than as an explicit
+			// `undefined`, so that a condition on a `fired` and a condition whose
+			// value somebody cleared are the same object shape — `Object.hasOwn` is
+			// what `normalizeConditions` asks, and a diff is what a person reads.
+			const written = next.value === undefined ? without(next, "value") : next;
+			const keys = Object.keys(patch) as Array<keyof Condition>;
+			return keys.every((key) => Object.is(condition[key], written[key]))
+				? condition
+				: written;
+		});
+		return conditions.some((c, i) => c !== before[i]) ? { ...t, conditions } : t;
+	});
+}
+
+/** Drops one conjunct. The edge keeps the rest, and fires more often for it. */
+export function deleteCondition(
+	scene: Scene,
+	machineId: string,
+	transitionId: string,
+	index: number,
+): Scene {
+	return mapTransition(scene, machineId, transitionId, (t) => {
+		const before = t.conditions ?? [];
+		if (index < 1 || index > before.length) return t;
+		return withList(t, "conditions", before.filter((_, i) => i !== index - 1));
+	});
+}
+
+/* ------------------------------------------------------------------ */
+/* Layers                                                              */
+/* ------------------------------------------------------------------ */
+
+/** Replaces one layer of one machine, if it holds it. */
+function mapLayer(
+	scene: Scene,
+	machineId: string,
+	layerId: string,
+	fn: (layer: MachineLayer) => MachineLayer,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const before = machine.layers ?? [];
+		const layers = before.map((l) => (l.id === layerId ? fn(l) : l));
+		return layers.some((l, i) => l !== before[i]) ? { ...machine, layers } : machine;
+	});
+}
+
+/**
+ * A layer, and — the first time — **the one that was already there**.
+ *
+ * This is the load-bearing line in the whole rung and it is one word long:
+ * `machineLayers` rather than `machine.layers`. A machine that says nothing
+ * about layers has exactly one, called `base`, minted by the reader; its states
+ * carry no `layer` field, and `layerOf` reads an absent one as *the first layer*.
+ * So appending to `machine.layers ?? []` would make the new layer the first one,
+ * and every state in the machine would silently move into it — a four-state
+ * button whose states all landed on the glow layer, in one click, with nothing
+ * saying so. Writing the implicit layer down before appending is what keeps
+ * "absent is first" true through the edit that stops it being absent.
+ *
+ * Appended, so the new layer is **last**, and later layers win. That is the
+ * useful default — a glow you are adding goes over the button, not under it —
+ * and it is the one insertion that cannot change what any existing state writes.
+ * {@link reorderLayer} is how somebody changes their mind about that.
+ */
+export function addLayer(
+	scene: Scene,
+	machineId: string,
+	name?: string,
+): { scene: Scene; id: string } {
+	const machine = findMachine(scene.machines, machineId);
+	if (!machine) return { scene, id: "" };
+	const existing = machineLayers(machine);
+	const label = name?.trim() || "";
+	const id = uniqueConstant(existing.map((l) => l.id), constantFrom(label) ?? "layer");
+	const layer: MachineLayer = {
+		id,
+		name: uniqueName(existing.map((l) => l.name), label || "Layer", " "),
+	};
+	return {
+		scene: mapMachine(scene, machineId, (m) => ({ ...m, layers: [...existing, layer] })),
+		id,
+	};
+}
+
+/** Renames a layer. The name, never the id — it is in `mlayer/2` and `mslayer/3`. */
+export function renameLayer(
+	scene: Scene,
+	machineId: string,
+	layerId: string,
+	name: string,
+): Scene {
+	const trimmed = name.trim();
+	if (!trimmed) return scene;
+	return mapLayer(scene, machineId, layerId, (layer) =>
+		layer.name === trimmed ? layer : { ...layer, name: trimmed },
+	);
+}
+
+/**
+ * Takes a layer away. **Its states stay.**
+ *
+ * They stay because `layerOf` already knows what to do with a state naming a
+ * layer the machine has not got — it reads as the first layer, exactly as a
+ * `SceneNode.state` naming a deleted state reads as the initial one — so the
+ * document is legal the instant this returns, nothing derives a violation, and
+ * undo brings the layer back with all four states still on it. Deleting them
+ * would be deleting a designer's work to tidy up a list.
+ *
+ * Deleting the last one leaves no `layers` key at all, which is a one-layer
+ * machine: `machineLayers` mints `base` again and every state falls into it,
+ * which is what every machine written before layers existed already means. There
+ * is no state in which a machine has *no* layer, because every state belongs to
+ * one.
+ */
+export function deleteLayer(scene: Scene, machineId: string, layerId: string): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const before = machine.layers ?? [];
+		const layers = before.filter((l) => l.id !== layerId);
+		return layers.length === before.length
+			? machine
+			: withList(machine, "layers", layers);
+	});
+}
+
+/**
+ * Moves a layer in the list — which is how a designer changes who wins.
+ *
+ * The order *is* the priority, the same way `states[0]` is the initial state and
+ * `order/2` is the paint order: `mlindex/3` numbers this list and `mfwriter/4`
+ * takes the highest index that writes a given property. So a glow that should
+ * sit under the press goes there by being moved, and there is no second field to
+ * disagree with the arrangement.
+ *
+ * `to` is clamped rather than refused, like every other reorder in this file: a
+ * drag past the end of a list means the end of the list.
+ *
+ * A machine whose layers are implicit has nothing to reorder and is left alone —
+ * there is exactly one layer and it is already first.
+ */
+export function reorderLayer(
+	scene: Scene,
+	machineId: string,
+	layerId: string,
+	to: number,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const before = machine.layers ?? [];
+		const from = before.findIndex((l) => l.id === layerId);
+		if (from === -1) return machine;
+		const target = Math.max(0, Math.min(before.length - 1, Math.trunc(to)));
+		if (target === from) return machine;
+		const layers = [...before];
+		const [moved] = layers.splice(from, 1);
+		layers.splice(target, 0, moved);
+		return { ...machine, layers };
+	});
+}
+
+/**
+ * Which layer a state belongs to, or `null` for the first.
+ *
+ * **Not checked against the machine's layers**, which is {@link setNodeState}'s
+ * judgement and it holds here for the same reason: `layerOf` falls back to the
+ * first layer, so a state naming a layer somebody deleted is legal, and undoing
+ * the deletion puts the state back where it was rather than leaving it on the
+ * base layer with the name it used to carry gone. What *is* checked is that the
+ * id is spellable as a constant, because `mslayer(m1,hover,Not A Layer)` is a
+ * syntax error rather than a mistake.
+ */
+export function setStateLayer(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	layer: string | null,
+): Scene {
+	if (layer !== null && wordOf(layer) !== layer) return scene;
+	return mapState(scene, machineId, stateId, (state) => {
+		if ((state.layer ?? null) === layer) return state;
+		return layer === null ? without(state, "layer") : { ...state, layer };
+	});
+}
+
+/**
+ * Which state of one *layer* this instance is drawn in — the twin of
+ * {@link setNodeState}, and for the first layer it **is** that function.
+ *
+ * `SceneNode.state` says the first layer's state and `SceneNode.states` says any
+ * layer's, with an entry in the record winning where a document holds both. Two
+ * fields for one idea is a smell that is being paid for on purpose — every
+ * instance that exists today says its state in one string — and this is where the
+ * bill comes due: an edit that wrote `states.base` beside a `state` would leave
+ * two spellings of one claim in one node, agreeing today and diverging at the
+ * next edit that touched only one of them. So writing the first layer writes the
+ * string and clears the record entry, and a one-layer document goes on looking
+ * exactly like the one-layer documents that already exist.
+ *
+ * `null` hands the layer back to the machine: `shownStates` falls to that layer's
+ * own initial state. Nothing is checked against the machine, for
+ * {@link setNodeState}'s reason exactly.
+ */
+export function setNodeLayerState(
+	scene: Scene,
+	nodeId: string,
+	layer: string,
+	state: string | null,
+): Scene {
+	const node = findInTree(scene.nodes, nodeId);
+	if (!node || !isInstance(node)) return scene;
+	if (state !== null && wordOf(state) !== state) return scene;
+	const machine = machineForNode(scene, node);
+	const first = machine ? machineLayers(machine)[0].id : undefined;
+	if (layer === first) {
+		const cleared =
+			node.states?.[layer] === undefined
+				? scene
+				: mapSelected(scene, [nodeId], (n) =>
+						withRecord(n, "states", without(n.states ?? {}, layer)),
+					);
+		return setNodeState(cleared, nodeId, state);
+	}
+	if ((node.states?.[layer] ?? null) === state) return scene;
+	return mapSelected(scene, [nodeId], (n) => {
+		const states = { ...n.states };
+		if (state === null) delete states[layer];
+		else states[layer] = state;
+		return withRecord(n, "states", states);
+	});
+}
+
+/* ------------------------------------------------------------------ */
+/* Timelines, tracks and keyframes                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * **A timeline is a shape, not a schedule.** Nothing in this section writes a
+ * frame rate, a sample count or a step, and there is nowhere for one to go: a
+ * track is a list of moments, each a time and a value, and everything between
+ * two of them is interpolated by a compositor rather than solved. A timeline
+ * with nine keyframes costs the same whether it plays over 100ms or ten seconds.
+ *
+ * What that buys is the thing this section has to keep true. A keyframe's time
+ * and its value are ordinary {@link Value}s, so they may name a token, follow a
+ * motion scale, and hold alternatives — and two alternatives inside a keyframe
+ * really are two designs, exactly as two fills in a delta are. What it costs is
+ * that "time order" is a fact about a *universe* rather than about the document,
+ * which is why {@link placeKeys} is careful in a way an ordinary insert would
+ * not be: a track whose times are all literals is kept sorted here, and one that
+ * names a token is left in the order the designer typed it, because sorting on
+ * the first alternative would rearrange somebody's animation on the strength of
+ * a design they are not looking at. `normalizeScene` draws that line in
+ * `orderKeys` and this file draws it in the same place, so a document is the
+ * same before and after a round trip.
+ *
+ * **A timeline adds no universes by existing.** It mints `2·keyframes + 1`
+ * variables however many instances play it, and it mints a keyframe *copy* only
+ * where a rule named one — `keyframeParts` is seeded from `scene.constraints`
+ * and from nothing else. So the whole of this section is inside invariant 1: a
+ * timeline is not a choice, and a state that plays one is still one state, true
+ * at once with all the others.
+ */
+
+/** The millisecond a key sits at, where the document says so in a bare literal. */
+const keyMs = (key: Keyframe): number | undefined =>
+	key.at.length === 1 && key.at[0].kind === "literal"
+		? msOf(key.at[0].value)
+		: undefined;
+
+/**
+ * A track's keys with one more in it, in time order — or **nothing**, when the
+ * time asked for is already taken.
+ *
+ * Three behaviours in one small function, and each of them is a rule from
+ * somewhere else in the document rather than a choice made here.
+ *
+ * *Sorted where it can be.* `orderKeys` sorts a track on read whenever every
+ * time is a literal it can read, so an edit that appended would produce a
+ * document that rearranged itself the next time somebody opened it — the panel
+ * showing one order, the file another, and a rule naming `kfr(…,3)` pointing at
+ * two different moments on the two sides of a save.
+ *
+ * *Left alone where it cannot be.* One unreadable time — a token, a derivation,
+ * two alternatives — and the reader keeps document order, so this does too.
+ * Appending is then not a compromise: it is what the reader will decide, and the
+ * two agreeing is the whole requirement.
+ *
+ * *Refused onto an occupied moment.* Two keys at one time collapse to the first
+ * on read, so writing one would be writing a keyframe the next read deletes —
+ * a silent loss of exactly the kind this file exists to avoid. The caller gets
+ * the same scene back and the panel says the moment is taken; moving the key
+ * that is already there is {@link updateKeyframe}, which is what was meant.
+ */
+function placeKeys(
+	keys: readonly Keyframe[],
+	key: Keyframe,
+): Keyframe[] | undefined {
+	const ms = keyMs(key);
+	const times = keys.map(keyMs);
+	if (ms === undefined || times.some((t) => t === undefined)) return [...keys, key];
+	if (times.includes(ms)) return undefined;
+	const at = times.findIndex((t) => (t as number) > ms);
+	const out = [...keys];
+	out.splice(at === -1 ? out.length : at, 0, key);
+	return out;
+}
+
+/** Replaces one timeline of one machine, if it holds it. */
+function mapTimeline(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	fn: (timeline: Timeline) => Timeline,
+): Scene {
+	return mapMachine(scene, machineId, (machine) => {
+		const before = machine.timelines ?? [];
+		const timelines = before.map((w) => (w.id === timelineId ? fn(w) : w));
+		return timelines.some((w, i) => w !== before[i])
+			? { ...machine, timelines }
+			: machine;
+	});
+}
+
+/**
+ * Replaces one track, named by its **term** rather than by its index.
+ *
+ * A track has no id and does not need one, because it already has a name every
+ * layer of this system agrees on: `trkd(panel,y)` is what the program calls it
+ * in `mtrack/3`, what a keyframe copy carries in `kfr(c1,open,trkd(panel,y),3)`,
+ * and what `keyframeParts` matches a rule's member against. An index would be a
+ * second name for that, and the two would part company the first time somebody
+ * deleted a track above it — quietly, in every rule that named a copy.
+ *
+ * Conditions and keyframes take an index instead, and the difference is not an
+ * inconsistency: a condition and a keyframe are *positions* in an ordered list,
+ * and the program numbers them `1..n` for exactly that reason. A track is not
+ * ordered and never was.
+ */
+function mapTrack(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	track: string,
+	fn: (track: Track) => Track,
+): Scene {
+	return mapTimeline(scene, machineId, timelineId, (timeline) => {
+		const tracks = timeline.tracks.map((t) =>
+			trackTerm(t) === track ? fn(t) : t,
+		);
+		return tracks.some((t, i) => t !== timeline.tracks[i])
+			? { ...timeline, tracks }
+			: timeline;
+	});
+}
+
+/**
+ * What a track animates: exactly one of a property, one of the six axes, or one
+ * of the three rotations.
+ *
+ * A tagged union rather than three optional arguments, because "exactly one" is
+ * the whole of {@link Track}'s identity — a track that named two would be two
+ * tracks sharing a keyframe list, and the moment somebody moved a key on one of
+ * them it would be two tracks anyway. The type says it once so no caller has to
+ * remember it.
+ */
+export type TrackField = { prop: PropName } | { dim: Axis3 } | { turn: Turn };
+
+/**
+ * A {@link Track} for a part and a field, or nothing where the field is not one
+ * this document knows.
+ *
+ * Refused rather than carried, which is the judgement `normalizeTracks` makes on
+ * the same three lookups: a track's field is what gives it a *term*, so a track
+ * over `wobble` has no `trkp/2` to be, no `mtrack/3`, and its keyframes would be
+ * values keyed by nothing. That is a syntax error rather than a mistake, and
+ * this file refuses those.
+ */
+function trackOf(part: string, field: TrackField): Track | undefined {
+	if ("prop" in field) {
+		return Object.hasOwn(PROPS, field.prop)
+			? { part, prop: field.prop, keys: [] }
+			: undefined;
+	}
+	if ("dim" in field) {
+		return DIMENSIONS_3D.includes(field.dim)
+			? { part, dim: field.dim, keys: [] }
+			: undefined;
+	}
+	return Object.hasOwn(TURNS, field.turn)
+		? { part, turn: field.turn, keys: [] }
+		: undefined;
+}
+
+/**
+ * A timeline on a machine, with no tracks and no stated length.
+ *
+ * **No length**, and it is the same argument {@link addInput} makes about a
+ * range: absent is *derived*, not zero. A timeline's length is the last
+ * keyframe's time unless the document says otherwise, so a fresh one that stored
+ * `0ms` would be a timeline that plays nothing and that disagrees with its own
+ * contents the moment a key is added — and `timelineLength` would believe it.
+ * **No loop** for the same reason one rung along: absent is `none`, and writing
+ * the word down would be a second spelling of the default that a later change to
+ * the default could not reach.
+ *
+ * The id is derived from the name, which is {@link addState}'s call for
+ * {@link addState}'s reasons: it is read in `mtimeline(m1,open)` in the program
+ * panel, and it is typed into a rule by anybody naming a keyframe copy —
+ * `kfr(c1,open,trkd(panel,y),3)` has it in the middle. `w_3f2a` there would be a
+ * moment nobody could write a rule about.
+ *
+ * On the **machine** rather than on a state, because two states routinely play
+ * one animation and a blend state plays several. A timeline nothing plays is
+ * legal, costs no copies, and is how somebody works on one before wiring it up.
+ */
+export function addTimeline(
+	scene: Scene,
+	machineId: string,
+	name?: string,
+): { scene: Scene; id: string } {
+	const machine = findMachine(scene.machines, machineId);
+	if (!machine) return { scene, id: "" };
+	const existing = machine.timelines ?? [];
+	const label = name?.trim() || "";
+	const id = uniqueConstant(
+		existing.map((w) => w.id),
+		constantFrom(label) ?? "timeline",
+	);
+	const timeline: Timeline = {
+		id,
+		name: uniqueName(existing.map((w) => w.name), label || "Timeline", " "),
+		tracks: [],
+	};
+	return {
+		scene: mapMachine(scene, machineId, (m) => ({
+			...m,
+			timelines: [...existing, timeline],
+		})),
+		id,
+	};
+}
+
+/**
+ * Renames a timeline. **The name, never the id** — {@link renameState}'s
+ * argument, and here the id is not merely in the program but in the middle of
+ * every `kfr(…)` term a designer has typed into a rule.
+ */
+export function renameTimeline(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	name: string,
+): Scene {
+	const trimmed = name.trim();
+	if (!trimmed) return scene;
+	return mapTimeline(scene, machineId, timelineId, (w) =>
+		w.name === trimmed ? w : { ...w, name: trimmed },
+	);
+}
+
+/**
+ * How long the timeline is, or `null` for **as long as its contents**.
+ *
+ * The two are different claims and the difference is worth the explicit `null`.
+ * Absent is derived — the last keyframe's time — so a timeline cannot disagree
+ * with itself, and moving that key makes the animation longer with no second
+ * edit. Present is a statement, and a stated length *shorter* than the last
+ * keyframe is legal and means what it says: the tail is not played. Neither is
+ * repaired into the other.
+ *
+ * An empty {@link Value} is `null`, so "say nothing about the length" keeps
+ * having one spelling however a panel arrived at it.
+ */
+export function setTimelineLength(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	length: Value | null,
+): Scene {
+	const wanted = length === null || length.length === 0 ? null : length;
+	return mapTimeline(scene, machineId, timelineId, (w) => {
+		if (wanted === null) return without(w, "length");
+		return Object.is(w.length, wanted) ? w : { ...w, length: wanted };
+	});
+}
+
+/**
+ * How it repeats. `none` **takes the key away** rather than storing the word.
+ *
+ * {@link withList}'s rule, applied to a scalar: absent and `"none"` are read
+ * alike by `timelinePosition` and by the export, so a document that could hold
+ * either would diff against itself, and the two spellings would only ever be
+ * told apart by a reader that had no business telling them apart.
+ */
+export function setTimelineLoop(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	loop: LoopMode,
+): Scene {
+	if (loop !== "none" && loop !== "loop" && loop !== "pingPong") return scene;
+	return mapTimeline(scene, machineId, timelineId, (w) => {
+		if (loop === "none") return without(w, "loop");
+		return w.loop === loop ? w : { ...w, loop };
+	});
+}
+
+/**
+ * Takes a timeline away — and, unlike almost everything else in this file,
+ * **prunes the rules that were about it**.
+ *
+ * The exception needs the argument, because every other delete here leaves the
+ * dangling reference alone: an instance keeps its `state` when the machine goes,
+ * a state keeps its `layer` when the layer goes, and a blend keeps its stops when
+ * the input goes. Those are all cases where the leftover *says nothing* — the
+ * reader falls back, nothing derives, and undo puts it back word for word.
+ *
+ * A rule naming `kfr(c1,open,trkd(panel,y),3)` is not one of those. `holdsKeyCopy`
+ * is sharp about the timeline and the track on purpose, so once this timeline is
+ * gone the member is held by nothing — and it would then be stripped, silently,
+ * by whichever unrelated `deleteNodes` or `setGuides` happened next, taking the
+ * rule with it if that dropped it below `minNodes`. Between losing the rule
+ * *here*, in the gesture that caused it, where the panel can say so and one undo
+ * restores both — and losing it later, somewhere else, for no visible reason —
+ * the first is the only defensible one. The same goes for {@link deleteTrack} and
+ * {@link deleteKeyframe}, which un-hold the same terms one grain finer.
+ *
+ * The **states** that played it are left exactly as they were, which is the
+ * ordinary rule again: `statePlays` finds no timeline, `mtplays/3` derives
+ * nothing, the state is a state with no animation, and undo brings the wiring
+ * back with the timeline.
+ */
+export function deleteTimeline(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+): Scene {
+	const next = mapMachine(scene, machineId, (machine) => {
+		const before = machine.timelines ?? [];
+		const timelines = before.filter((w) => w.id !== timelineId);
+		return timelines.length === before.length
+			? machine
+			: withList(machine, "timelines", timelines);
+	});
+	return next === scene ? scene : pruneConstraints(next);
+}
+
+/**
+ * A track on a timeline, over one property, dimension or rotation of one part.
+ *
+ * **No keyframes.** A track begins empty for {@link addState}'s reason: a track
+ * seeded with the part's current value at time zero would be a claim the
+ * designer did not make, and it would be *wrong* the moment the definition
+ * changed, because a copied value stops following the thing it was copied from.
+ * `trackTerm` and `normalizeTracks` both already know what a track with no keys
+ * is — a row somebody is part way through building — and it materialises
+ * nothing until it says something.
+ *
+ * **One track per term, and asking again returns the one that is there.** Two
+ * tracks with one term would be one track as far as `mtrack/3`, `mkey/4` and
+ * every `kfr(…)` member are concerned, with the second's keyframes reachable by
+ * nothing. Returning the existing term rather than refusing is {@link addMachine}'s
+ * call: a panel that asked for "the track for `panel`'s `y`" wanted that track,
+ * and it now has it.
+ *
+ * The part is **not** checked against the definition, exactly as a delta's key is
+ * not: a part deleted and drawn again should find its animation waiting rather
+ * than gone.
+ */
+export function addTrack(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	part: string,
+	field: TrackField,
+): { scene: Scene; track: string } {
+	const machine = findMachine(scene.machines, machineId);
+	const timeline = machine ? findTimeline(machine, timelineId) : undefined;
+	if (!timeline || !part) return { scene, track: "" };
+	const track = trackOf(part, field);
+	const term = track && trackTerm(track);
+	if (!track || term === undefined) return { scene, track: "" };
+	if (timeline.tracks.some((t) => trackTerm(t) === term)) {
+		return { scene, track: term };
+	}
+	return {
+		scene: mapTimeline(scene, machineId, timelineId, (w) => ({
+			...w,
+			tracks: [...w.tracks, track],
+		})),
+		track: term,
+	};
+}
+
+/** Takes a track away, with its keyframes and the rules that named them. */
+export function deleteTrack(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	track: string,
+): Scene {
+	const next = mapTimeline(scene, machineId, timelineId, (timeline) => {
+		const tracks = timeline.tracks.filter((t) => trackTerm(t) !== track);
+		return tracks.length === timeline.tracks.length
+			? timeline
+			: { ...timeline, tracks };
+	});
+	return next === scene ? scene : pruneConstraints(next);
+}
+
+/**
+ * A moment on a track: a time and a value, both whole {@link Value}s.
+ *
+ * Both are required, and this is the one place a half-written thing is refused
+ * rather than kept. A track may have no field yet and a machine may have no
+ * layers yet, because those are rows being built; a keyframe with no time or no
+ * value is not a keyframe that says something odd, it is half a segment — the
+ * program mints `kat` and `kval` *per key* and the export interpolates between
+ * two of them, so one with neither end is a stretch of animation with nowhere to
+ * start. `normalizeKeyframes` drops exactly this shape, so writing one would be
+ * writing something the next read deletes.
+ *
+ * Where it lands, and when it is refused, is {@link placeKeys}.
+ */
+export function addKeyframe(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	track: string,
+	at: Value,
+	value: Value,
+	easing?: Easing,
+): Scene {
+	if (at.length === 0 || value.length === 0) return scene;
+	if (easing !== undefined && !Object.hasOwn(EASINGS, easing)) return scene;
+	const key: Keyframe = {
+		at,
+		value,
+		...(easing !== undefined ? { easing } : {}),
+	};
+	return mapTrack(scene, machineId, timelineId, track, (t) => {
+		const keys = placeKeys(t.keys, key);
+		return keys === undefined ? t : { ...t, keys };
+	});
+}
+
+/**
+ * Moves a keyframe, or changes what it says, or how it leaves.
+ *
+ * One patch rather than three setters, {@link updateTransition}'s shape and its
+ * reason: a keyframe is one row of one motion panel with three controls on it.
+ *
+ * `index` is **1-based**, matching `mkey(M,W,R,K)` and therefore matching the
+ * number a person reads in a violation and types inside a `kfr(…)` member. Every
+ * index in this half of the file is.
+ *
+ * **The list is re-sorted, and the indices really do move.** That is the honest
+ * consequence of dragging a key past its neighbour rather than a wrinkle to hide:
+ * `orderKeys` would do it on the next read anyway, so not doing it here would
+ * only mean the document and the panel disagreed until somebody saved. A rule
+ * naming `kfr(…,3)` then names whichever moment is third, which is what "the
+ * third keyframe" has meant all along.
+ *
+ * An easing the table has not got is refused, because it would reach the export
+ * as a timing function no browser parses. A time that lands on another key's
+ * moment is refused too, for {@link placeKeys}' reason.
+ */
+export function updateKeyframe(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	track: string,
+	index: number,
+	patch: Partial<Keyframe>,
+): Scene {
+	if (patch.at !== undefined && patch.at.length === 0) return scene;
+	if (patch.value !== undefined && patch.value.length === 0) return scene;
+	if (patch.easing !== undefined && !Object.hasOwn(EASINGS, patch.easing)) {
+		return scene;
+	}
+	return mapTrack(scene, machineId, timelineId, track, (t) => {
+		if (index < 1 || index > t.keys.length) return t;
+		const before = t.keys[index - 1];
+		const next: Keyframe = { ...before, ...patch };
+		const keys = (Object.keys(patch) as Array<keyof Keyframe>).every((key) =>
+			Object.is(before[key], next[key]),
+		)
+			? undefined
+			: placeKeys(
+					t.keys.filter((_, i) => i !== index - 1),
+					next,
+				);
+		return keys === undefined ? t : { ...t, keys };
+	});
+}
+
+/**
+ * Drops a moment. The track stays, even when it was the last one.
+ *
+ * A track with no keys is a track being built, which is exactly what
+ * {@link addTrack} makes and what `normalizeTracks` keeps — so emptying one is
+ * not a reason to take away the row the designer is working in. Somebody who
+ * wants the track gone deletes the track.
+ */
+export function deleteKeyframe(
+	scene: Scene,
+	machineId: string,
+	timelineId: string,
+	track: string,
+	index: number,
+): Scene {
+	const next = mapTrack(scene, machineId, timelineId, track, (t) =>
+		index < 1 || index > t.keys.length
+			? t
+			: { ...t, keys: t.keys.filter((_, i) => i !== index - 1) },
+	);
+	return next === scene ? scene : pruneConstraints(next);
+}
+
+/* ------------------------------------------------------------------ */
+/* What a state plays                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Which timeline this state plays, or `null` for none.
+ *
+ * A state that plays a timeline still has its `parts` delta and the two compose:
+ * the timeline decides what it has a track for and the delta decides the rest.
+ * The state's **settled pose** — what `stt(I,S,N)` is, what the canvas draws,
+ * what a cross-state rule compares — is the timeline's value at its own length,
+ * derived rather than stored, so moving the last keyframe moves the pose.
+ *
+ * **A blend on the same state is left exactly where it is**, and that is the one
+ * decision here worth arguing, because it deliberately creates a shape a check
+ * reports. {@link MachineState.blend} settles it: a state holding both a timeline
+ * and a blend is "a mistake a person should see rather than one a reader should
+ * quietly pick a side in" — `mtwosource/2` derives it and names the state. An
+ * edit that cleared the blend to keep the document tidy would be deleting a
+ * mixture somebody built, on the strength of a click, in order to avoid showing
+ * them a sentence they could act on. That is the same trade `deleteLayer` and
+ * `deleteInput` refuse, and it is refused here for the same reason.
+ *
+ * Not checked against the machine's timelines, for {@link setNodeState}'s reason:
+ * `statePlays` finds nothing and the state plays nothing, so a timeline deleted
+ * and undone comes back wired up.
+ */
+export function setStateTimeline(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	timeline: string | null,
+): Scene {
+	if (timeline !== null && wordOf(timeline) !== timeline) return scene;
+	return mapState(scene, machineId, stateId, (state) => {
+		if ((state.timeline ?? null) === timeline) return state;
+		return timeline === null
+			? without(state, "timeline")
+			: { ...state, timeline };
+	});
+}
+
+/**
+ * Makes a state a blend of several timelines, or stops it being one.
+ *
+ * The **kind is checked and nothing else is**, which is this file's line drawn
+ * once more: `mblend(M,S,Kind)` carries the word into the program, and a third
+ * word would be a mixing rule nothing implements — a syntax error. Everything
+ * else a blend can get wrong has a name and a report. A stop naming a timeline
+ * the machine has not got is the shape `mstop/4` finds no `mtimeline/2` for; a
+ * threshold outside the input's declared range is `mstopout/3`; an axis that
+ * extends past the outermost stop is `mstopgap/2`; a `oneD` blend with no input
+ * is a blend whose stops sit on no axis. All four are things a designer can read
+ * and fix, and `normalizeBlend` keeps every one of them for exactly that reason.
+ *
+ * `null` takes the field away rather than writing `{ stops: [] }`, so "this state
+ * is not a blend" has one spelling.
+ */
+export function setStateBlend(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	blend: Blend | null,
+): Scene {
+	if (blend !== null && !Object.hasOwn(BLEND_KINDS, blend.kind)) return scene;
+	return mapState(scene, machineId, stateId, (state) => {
+		if (blend === null) return without(state, "blend");
+		return Object.is(state.blend, blend) ? state : { ...state, blend };
+	});
+}
+
+/**
+ * Which number input a 1D blend is laid out along, or `null` for none.
+ *
+ * On the blend rather than on the stops, because a 1D blend is one axis with
+ * several places on it — that is what makes it one-dimensional — and an input per
+ * stop is what `direct` already is. A `direct` blend keeps the field if it has
+ * one and nothing reads it, which is {@link setInputKind}'s judgement: the
+ * leftover is shown rather than tidied away, and one undo puts it back.
+ *
+ * Refused on a state that is not a blend, because there is nothing to be the
+ * input *of* — {@link setStateBlend} is how a state becomes one.
+ */
+export function setBlendInput(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	input: string | null,
+): Scene {
+	if (input !== null && wordOf(input) !== input) return scene;
+	return mapState(scene, machineId, stateId, (state) => {
+		const blend = state.blend;
+		if (blend === undefined) return state;
+		if ((blend.input ?? null) === input) return state;
+		return {
+			...state,
+			blend: input === null ? without(blend, "input") : { ...blend, input },
+		};
+	});
+}
+
+/**
+ * One more timeline in the mixture, at a place on the axis.
+ *
+ * `at` and `by` are **plain strings kept as typed**, which is {@link MachineInput}'s
+ * shape and its argument: a threshold is a runtime number rather than a design
+ * decision, there is no universe in which the drawer is 40% open and 60% open at
+ * once, and a {@link Value} here would have put a runtime reading inside the
+ * multiverse. So a threshold that reads as no number states nothing — the stop
+ * has no place on the axis rather than a place at zero — and `mstopout/3` and
+ * `mstopgap/2` say so in the panel rather than this function repairing text
+ * somebody is still typing.
+ *
+ * Both are optional and neither is invented. A `oneD` stop with no `at` is a stop
+ * waiting to be placed, which is what a designer has just made by pressing "add";
+ * seeding `0` would put two stops on top of each other and call it a mixture.
+ *
+ * Appended, so the stops are in the order they were added and `mstop(M,S,J,W)`
+ * numbers them that way. The order is not the axis — `at` is — so appending
+ * cannot change what any existing stop means.
+ *
+ * Refused on a state that is not a blend, for {@link setBlendInput}'s reason.
+ */
+export function addBlendStop(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	timeline: string,
+	at?: string,
+	by?: string,
+): Scene {
+	if (!timeline) return scene;
+	return mapState(scene, machineId, stateId, (state) => {
+		const blend = state.blend;
+		if (blend === undefined) return state;
+		const stop: BlendStop = {
+			timeline,
+			...(at !== undefined ? { at } : {}),
+			...(by !== undefined ? { by } : {}),
+		};
+		return { ...state, blend: { ...blend, stops: [...blend.stops, stop] } };
+	});
+}
+
+/**
+ * Changes one stop — which timeline it plays, where it sits, what weighs it.
+ *
+ * **1-based**, like every other index here, because `mstop(M,S,J,W)` and
+ * `mstopout(M,S,J)` number the stops from one and that is the number a violation
+ * shows. A patch field set to `null` takes the key away, where `undefined` leaves
+ * it alone — {@link setInputRange}'s distinction, needed here for the same reason
+ * it is needed there: "unplace this stop" and "say nothing about its place" are
+ * two different edits and a single `undefined` spells both.
+ */
+export function updateBlendStop(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	index: number,
+	patch: { timeline?: string; at?: string | null; by?: string | null },
+): Scene {
+	if (patch.timeline !== undefined && !patch.timeline) return scene;
+	return mapState(scene, machineId, stateId, (state) => {
+		const blend = state.blend;
+		if (blend === undefined) return state;
+		if (index < 1 || index > blend.stops.length) return state;
+		const before = blend.stops[index - 1];
+		let next: BlendStop = before;
+		if (patch.timeline !== undefined && patch.timeline !== before.timeline) {
+			next = { ...next, timeline: patch.timeline };
+		}
+		if (patch.at !== undefined && (before.at ?? null) !== patch.at) {
+			next = patch.at === null ? without(next, "at") : { ...next, at: patch.at };
+		}
+		if (patch.by !== undefined && (before.by ?? null) !== patch.by) {
+			next = patch.by === null ? without(next, "by") : { ...next, by: patch.by };
+		}
+		if (next === before) return state;
+		return {
+			...state,
+			blend: {
+				...blend,
+				stops: blend.stops.map((s, i) => (i === index - 1 ? next : s)),
+			},
+		};
+	});
+}
+
+/**
+ * Drops one stop. The blend stays, even when it was the last one.
+ *
+ * {@link deleteKeyframe}'s judgement: a blend with no stops is a blend being
+ * built, `normalizeBlend` keeps one, and it mixes nothing rather than being
+ * broken. Somebody who wants the state to stop being a blend says so with
+ * {@link setStateBlend}.
+ */
+export function deleteBlendStop(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	index: number,
+): Scene {
+	return mapState(scene, machineId, stateId, (state) => {
+		const blend = state.blend;
+		if (blend === undefined) return state;
+		if (index < 1 || index > blend.stops.length) return state;
+		return {
+			...state,
+			blend: {
+				...blend,
+				stops: blend.stops.filter((_, i) => i !== index - 1),
+			},
+		};
+	});
 }

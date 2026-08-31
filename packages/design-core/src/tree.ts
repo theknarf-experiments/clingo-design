@@ -20,6 +20,7 @@ import {
 	isLaidOut,
 	isSurface,
 	layoutWord,
+	spatialDim,
 	withFrame,
 	wrapsChildren,
 } from "./scene.ts";
@@ -149,6 +150,18 @@ export function worldFrame(
  * stored frames — which is how a new `pin` or `gap` can start at the number
  * that changes nothing. Undefined for the whole-axis edges, which are a
  * direction rather than a place.
+ *
+ * **All six axes**, since `EDGES` grew its `z` rows, and the third is summed the
+ * same way the first two are: a node's `z` is relative to its parent's origin
+ * exactly as its `x` is, so the world coordinate is the chain of them added up.
+ * `spatialDim` reads absent as zero, so a node that has never heard of the third
+ * axis measures as a flat box at z 0 with no depth — which is where a flat
+ * document already is, and why this widening costs one nothing.
+ *
+ * What it does **not** do is refuse a turned node, which is `gnoedge/2`'s job in
+ * the program and `refusedEdge`'s in the panel. This reader is what seeds a new
+ * rule at the number that changes nothing, and a seed for a rule the program is
+ * about to refuse is a seed nobody reads.
  */
 export function edgeAt(
 	nodes: readonly SceneNode[],
@@ -156,12 +169,23 @@ export function edgeAt(
 	edge: Edge,
 	context: ResolveContext = NO_CONTEXT,
 ): number | undefined {
+	const node = findInTree(nodes, id);
+	if (!node) return undefined;
+	const spec = EDGES[edge];
+	if (spec.role === "axis") return undefined;
+	if (spec.axis === "z") {
+		const size = spatialDim(node, "depth", context);
+		if (spec.role === "span") return size;
+		let start = spatialDim(node, "z", context);
+		for (const ancestor of ancestorsOf(nodes, id)) {
+			start += spatialDim(ancestor, "z", context);
+		}
+		return start + size * (spec.place === "lead" ? 0 : spec.place === "mid" ? 0.5 : 1);
+	}
 	const frame = worldFrame(nodes, id, context);
 	if (!frame) return undefined;
-	const spec = EDGES[edge];
 	const size = spec.axis === "x" ? frame.width : frame.height;
 	if (spec.role === "span") return size;
-	if (spec.role === "axis") return undefined;
 	const start = spec.axis === "x" ? frame.x : frame.y;
 	return start + size * (spec.place === "lead" ? 0 : spec.place === "mid" ? 0.5 : 1);
 }

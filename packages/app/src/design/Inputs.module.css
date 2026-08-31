@@ -1,0 +1,201 @@
+.inputs {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+}
+
+.head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.4rem;
+}
+
+.title {
+	font-size: 0.68rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.55;
+}
+
+.add {
+	flex: none;
+	padding: 0.1rem 0.3rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.empty,
+.note {
+	margin: 0;
+	font-size: 0.66rem;
+	line-height: 1.45;
+	opacity: 0.45;
+}
+
+/* One input. The grid is two columns with a rule between them: everything left
+   of the rule is in the document, everything right of it is in this browser tab
+   and goes away when the page reloads. */
+.input {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	grid-template-areas:
+		"declare drive"
+		"settings drive"
+		"finding finding";
+	align-items: center;
+	column-gap: 0.4rem;
+	row-gap: 0.15rem;
+	padding: 0.25rem;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+/* No guard reads it. Dimmed rather than marked as an error: an input nothing
+   reads yet is the ordinary state of one somebody has just made. */
+.unread {
+	opacity: 0.7;
+}
+
+.declare {
+	grid-area: declare;
+	display: flex;
+	align-items: center;
+	gap: 0.2rem;
+	min-width: 0;
+}
+
+.settings {
+	grid-area: settings;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.35rem;
+	min-width: 0;
+}
+
+.drive {
+	grid-area: drive;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 0.25rem;
+	padding-left: 0.4rem;
+	border-left: 1px solid var(--dc-line);
+}
+
+.name {
+	flex: 1;
+	min-width: 0;
+	padding: 0.1rem 0.25rem;
+	font: inherit;
+	font-size: 0.74rem;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+}
+
+.name:focus {
+	background: var(--dc-raised);
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+.select,
+.field {
+	min-width: 0;
+	padding: 0.1rem 0.2rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.field {
+	font-variant-numeric: tabular-nums;
+}
+
+.setting {
+	display: flex;
+	align-items: center;
+	gap: 0.2rem;
+}
+
+.settingLabel,
+.to {
+	font-size: 0.62rem;
+	opacity: 0.45;
+}
+
+.action {
+	flex: none;
+	padding: 0 0.2rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	background: transparent;
+	border: none;
+	border-radius: 4px;
+	opacity: 0.4;
+	cursor: pointer;
+}
+
+.action:hover {
+	opacity: 1;
+	color: #dc2626;
+}
+
+.toggle {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+	font-size: 0.66rem;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.75;
+	cursor: pointer;
+}
+
+.slider {
+	width: 4.5rem;
+	accent-color: var(--dc-accent);
+}
+
+.fire {
+	padding: 0.1rem 0.4rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.fire:hover:not(:disabled) {
+	border-color: var(--dc-accent);
+	color: var(--dc-accent);
+}
+
+.fire:disabled,
+.slider:disabled,
+.field:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+
+.finding {
+	grid-area: finding;
+	margin: 0;
+	font-size: 0.62rem;
+	line-height: 1.4;
+	opacity: 0.5;
+}

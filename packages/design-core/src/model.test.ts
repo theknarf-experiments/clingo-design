@@ -11,17 +11,24 @@ import { test } from "node:test";
 
 import { PULL_ATOM, SCENERY_ATOM, compile } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
-import { statePart } from "./machines.ts";
-import { readModel, type ModelNode } from "./model.ts";
+import { keyCopy, statePart, trackDim, trackProp } from "./machines.ts";
+import { boxOf3, readModel, type ModelNode } from "./model.ts";
 import { makeNode } from "./edits.ts";
 import {
 	type Constraint,
+	type Keyframe,
 	type Machine,
+	type MachineInput,
+	type MachineLayer,
+	type MachineState,
 	type Scene,
 	type SceneNode,
 	type StatePart,
+	type Timeline,
 	type Transition,
+	DEFAULT_EASING,
 	dimension,
+	emptyScene,
 	frameOf,
 	makeLayout,
 } from "./scene.ts";
@@ -333,10 +340,27 @@ const FOUR = [
 
 function stateful(
 	spec: {
-		uses?: Array<{ id: string; state?: string }>;
-		states?: Array<{ id: string; name: string; parts: Record<string, StatePart> }>;
+		/**
+		 * `states` is the per-layer field rung four added *beside* `state` rather
+		 * than in place of it — a document written before layers existed still
+		 * says what it always said, and one that names three layers says three
+		 * things at once.
+		 */
+		uses?: Array<{ id: string; state?: string; states?: Record<string, string> }>;
+		/**
+		 * `MachineState[]` rather than the three-field shape this started as, so
+		 * that the layer, timeline and blend a state may carry come through the
+		 * *same* builder. A second builder for layered machines would let a test
+		 * assert something about a layered document that is not true of the
+		 * unlayered one beside it, which is the one thing these tests exist to
+		 * catch.
+		 */
+		states?: MachineState[];
 		transitions?: Transition[];
 		constraints?: Constraint[];
+		inputs?: MachineInput[];
+		layers?: MachineLayer[];
+		timelines?: Timeline[];
 	} = {},
 ): Scene {
 	const machine: Machine = {
@@ -345,6 +369,9 @@ function stateful(
 		root: "btn",
 		states: spec.states ?? FOUR,
 		transitions: spec.transitions ?? [],
+		...(spec.inputs ? { inputs: spec.inputs } : {}),
+		...(spec.layers ? { layers: spec.layers } : {}),
+		...(spec.timelines ? { timelines: spec.timelines } : {}),
 	};
 	const label: SceneNode = {
 		...makeNode("text", { x: px(12), y: px(14), width: px(136), height: px(20) }, {
@@ -400,6 +427,7 @@ function stateful(
 						),
 						instanceOf: "btn",
 						...(use.state ? { state: use.state } : {}),
+						...(use.states ? { states: use.states } : {}),
 					})),
 				],
 			},
@@ -653,4 +681,709 @@ test("an answer set asked for without the picture reads as no states at all", as
 	assert.deepEqual(model.states, {});
 	assert.deepEqual(model.shown, {});
 	assert.deepEqual(model.machines, {});
+});
+
+/* ------------------------------------------------------------------ */
+/* The third axis and the rotation                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A node of any kind at a place, in pixels — the shape `spatialprogram.test.ts`
+ * builds its documents out of, repeated here rather than shared because the two
+ * files are asking different questions of the same document and a helper that
+ * moved would move both answers at once.
+ */
+const at = (
+	id: string,
+	kind: SceneNode["kind"],
+	box: { x: number; y: number; w: number; h: number },
+	extra: Partial<SceneNode> = {},
+): SceneNode => ({
+	...makeNode(
+		kind,
+		{ x: px(box.x), y: px(box.y), width: px(box.w), height: px(box.h) },
+		{ id, name: id },
+	),
+	...extra,
+});
+
+/** An artboard, which is the one kind every document's top level is. */
+const board = (id: string, x: number, children: SceneNode[]): SceneNode => ({
+	...at(id, "frame", { x, y: 0, w: 800, h: 600 }),
+	props: { fill: single("#ffffff") },
+	children,
+});
+
+const scened = (...nodes: SceneNode[]): Scene => ({ ...emptyScene(), nodes });
+
+/** A flat card beside a view holding a camera, a light, a pivot and two meshes. */
+const oneView = (): Scene =>
+	scened(
+		board("page", 0, [
+			at("card", "rect", { x: 20, y: 20, w: 100, h: 40 }),
+			at("view", "viewport", { x: 200, y: 40, w: 480, h: 320 }, {
+				camera: "cam",
+				children: [
+					at("cam", "camera", { x: 0, y: 0, w: 0, h: 0 }),
+					at("key", "light", { x: 0, y: 0, w: 0, h: 0 }),
+					at("rig", "pivot", { x: 40, y: 60, w: 0, h: 0 }, {
+						spatial: { z: single("80px") },
+						children: [
+							at("cube", "mesh", { x: 10, y: 20, w: 100, h: 100 }, {
+								spatial: { z: single("30px"), depth: single("40px") },
+								turn: { rotateY: single("30deg") },
+							}),
+							at("bust", "model", { x: 0, y: 0, w: 60, h: 60 }, {
+								mesh: {
+									asset: "9f2c",
+									format: "glb",
+									bounds: {
+										x: 0,
+										y: 0,
+										width: px(60),
+										height: px(60),
+										z: 0,
+										depth: px(60),
+									},
+									triangles: 1234,
+								},
+							}),
+						],
+					}),
+				],
+			}),
+		]),
+	);
+
+test("a flat document reads back four numbers, and the two new fields are absent rather than zero", async () => {
+	// Invariant 4 at this end of the pipe, and the reason both fields are
+	// optional. Absence is a *claim* — "this is a flat thing in a flat place" —
+	// so a reader that defaulted them to `{z: 0, depth: 0}` would have made every
+	// existing assertion about every existing template true by accident rather
+	// than by the program having said nothing.
+	for (const scene of [card(), stateful()]) {
+		const model = readModel(await firstModel(scene));
+		for (const node of Object.values(model.byId)) {
+			assert.equal(node.spatial, undefined, `${node.id} has a third axis`);
+			assert.equal(node.turn, undefined, `${node.id} is turned`);
+		}
+		for (const [term, copy] of Object.entries(model.states)) {
+			assert.equal(copy.spatial, undefined, `${term} has a third axis`);
+			assert.equal(copy.turn, undefined, `${term} is turned`);
+		}
+		// ...and the five maps the third axis and the ladder added read as empty
+		// rather than absent, which is the same additive reading the state
+		// material already gets on a document that has never heard of a machine.
+		assert.deepEqual(model.keyframes, {});
+		assert.deepEqual(model.fightsAt, {});
+		assert.deepEqual(model.triangles, {});
+		assert.deepEqual(model.looks, {});
+	}
+
+	// The one place a caller is allowed to stop caring which it is holding. A
+	// renderer placing a box does not care, and `boxOf3` is where it says so.
+	const flat = readModel(await firstModel(card()));
+	const badge = flat.byId.badge;
+	assert.ok(badge);
+	assert.deepEqual(boxOf3(badge), { ...badge.frame, z: 0, depth: 0 });
+});
+
+test("a viewport's subtree reads six numbers and a rotation; the page it is drawn on reads four", async () => {
+	// The whole architecture in one assertion: a mesh is an ordinary scene node,
+	// so it is in `byId`, in its parent's `children`, in paint order, with a
+	// `rendered` — and the only thing that distinguishes it from the rect on the
+	// same artboard is that the answer set had two more numbers and three angles
+	// to say about it.
+	const model = readModel(await firstModel(oneView()));
+
+	const cube = model.byId.cube;
+	assert.ok(cube);
+	assert.equal(cube.kind, "mesh");
+	assert.deepEqual(cube.spatial, { z: px(30), depth: px(40) });
+	// Thousandths of a degree, and complete where it is present: a node the
+	// answer set turned about one axis is not turned about the other two, and
+	// saying so with a zero is cheaper for every reader than saying it with a
+	// hole.
+	assert.deepEqual(cube.turn, { rotateX: 0, rotateY: 30_000, rotateZ: 0 });
+	assert.deepEqual(boxOf3(cube), { ...cube.frame, z: px(30), depth: px(40) });
+
+	// A pivot the document lifted and never turned still reads three zeros, and a
+	// camera the document said nothing about at all still reads six numbers,
+	// because being *in* the third axis is what `s3/1` decides and the program's
+	// own default fills the rest in.
+	assert.deepEqual(model.byId.rig?.spatial, { z: px(80), depth: 0 });
+	assert.deepEqual(model.byId.rig?.turn, { rotateX: 0, rotateY: 0, rotateZ: 0 });
+	assert.deepEqual(model.byId.cam?.spatial, { z: 0, depth: 0 });
+	assert.deepEqual(model.byId.view?.spatial, { z: 0, depth: 0 });
+
+	// And the rectangle two hundred pixels to the left of the view is not in a
+	// scene. A viewport puts *its own subtree* into three dimensions, never the
+	// page it is drawn on, and this is where a designer could observe it.
+	assert.equal(model.byId.card?.spatial, undefined);
+	assert.equal(model.byId.card?.turn, undefined);
+	assert.equal(model.byId.page?.spatial, undefined);
+
+	// The tree is the ordinary tree, in the ordinary paint order — a mesh sorts by
+	// `order/2` beside every other node rather than by anything of its own.
+	assert.deepEqual(
+		model.byId.rig?.children.map((c) => c.id),
+		["cube", "bust"],
+	);
+
+	// Two maps that exist so a panel can answer without loading an asset or
+	// re-deciding what a view looks through.
+	assert.deepEqual(model.triangles, { bust: 1234 });
+	assert.deepEqual(model.looks, { view: "cam" });
+});
+
+test("a hidden camera stops the marker and not the looking", async () => {
+	// `vcam/2` is deliberately not filtered by `visible/1` in the reader either,
+	// and the reader is where it would be easiest to filter it by accident: the
+	// camera is gone from the picture and the view still knows what it looks
+	// through. A view that went black because somebody hid a marker would be the
+	// tool answering a question nobody asked.
+	const model = readModel(await firstModel({ ...oneView(), rules: "hidden(cam)." }));
+	assert.equal(model.byId.cam, undefined);
+	assert.deepEqual(model.looks, { view: "cam" });
+});
+
+test("solved geometry on the third axis lands in `spatial`, by the same lines as `x`", async () => {
+	// `readSolved` reads six axes now, not four, because `gpos(N,z)` and
+	// `gsize(N,depth)` mint `lv(N,z)` and `lsz(N,depth)` for a node in the third
+	// axis exactly as they mint the planar four — a mesh in a viewport is placed
+	// by the same simplex, in the same units, by the same rules. So a `z` the
+	// solver worked out has to beat the stored one for the reason a solved `x`
+	// does, and land in the field that is not the `Frame`.
+	const scene: Scene = {
+		...scened(
+			board("page", 0, [
+				at("view", "viewport", { x: 0, y: 0, w: 480, h: 320 }, {
+					children: [
+						at("cube", "mesh", { x: 20, y: 20, w: 100, h: 100 }, {
+							spatial: { z: single("0px") },
+						}),
+						at("pillar", "mesh", { x: 200, y: 20, w: 100, h: 100 }),
+					],
+				}),
+			]),
+		),
+		rules: [
+			"gsolved(cube). gsolved(pillar).",
+			"&sum{ wv(cube,z); -wv(pillar,z) } = 240*emupx.",
+		].join("\n"),
+	};
+	const model = readModel(await firstModel(scene));
+	const cube = model.byId.cube;
+	const pillar = model.byId.pillar;
+	assert.ok(cube && pillar);
+	assert.equal(cube.spatial?.z, px(240));
+	assert.equal(pillar.spatial?.z, 0);
+	// Not folded into the frame, which is the no-regression promise: `Frame` is
+	// four numbers in every consumer of this package, and a fifth key here would
+	// be a shape none of them has a field for.
+	assert.deepEqual(Object.keys(cube.frame).sort(), ["height", "width", "x", "y"]);
+	// The artboard gains a `z` here and not in the test above, and the difference
+	// is real rather than incidental: the world chain a placed node hangs from
+	// needs a floor to run down to, and a document where nothing inside the view
+	// is placed never asks for one.
+	assert.deepEqual(model.byId.page?.spatial, { z: 0, depth: 0 });
+});
+
+/* ------------------------------------------------------------------ */
+/* A state, a keyframe and a pose                                      */
+/* ------------------------------------------------------------------ */
+
+/** A definition holding one lifted mesh, one instance of it, and a machine. */
+const spatialComponent = (states: MachineState[]): Scene => ({
+	...scened(
+		board("page", 0, [
+			at("view", "viewport", { x: 0, y: 0, w: 700, h: 400 }, {
+				children: [
+					at("widget", "pivot", { x: 0, y: 0, w: 120, h: 120 }, {
+						component: true,
+						children: [
+							at("cube", "mesh", { x: 10, y: 10, w: 100, h: 100 }, {
+								spatial: { z: single("0px"), depth: single("40px") },
+							}),
+						],
+					}),
+					at("u1", "instance", { x: 200, y: 0, w: 120, h: 120 }, { instanceOf: "widget" }),
+				],
+			}),
+		]),
+	),
+	machines: [
+		{ id: "m1", name: "Widget", root: "widget", states, transitions: [] },
+	],
+});
+
+test("a state that lifts and turns a mesh reads back as a pose the canvas can draw", async () => {
+	// A state copy carrying only four numbers is a pose nothing can draw and a
+	// diff nothing can write, which is why `ModelState` grew the same two
+	// optional halves a node has. A state whose *only* delta is a rotation is the
+	// sharp case: it says nothing through `frame/3` or `rendered/3`, so without
+	// `turn/3` as a source of copies it would be missing from a document that
+	// plainly holds it.
+	const model = readModel(
+		await firstModel(
+			spatialComponent([
+				{ id: "flat", name: "flat", parts: {} },
+				{
+					id: "lifted",
+					name: "lifted",
+					parts: {
+						cube: {
+							frame: { z: dimension(px(120)) },
+							turn: { rotateY: single("45deg") },
+						},
+					},
+				},
+			]),
+		),
+	);
+
+	const flat = model.states[statePart("u1", "flat", "cube")];
+	const lifted = model.states[statePart("u1", "lifted", "cube")];
+	assert.ok(flat && lifted);
+	assert.deepEqual(flat.spatial, { z: 0, depth: px(40) });
+	assert.deepEqual(lifted.spatial, { z: px(120), depth: px(40) });
+	assert.deepEqual(flat.turn, { rotateX: 0, rotateY: 0, rotateZ: 0 });
+	assert.deepEqual(lifted.turn, { rotateX: 0, rotateY: 45_000, rotateZ: 0 });
+	// The depth is not in the delta and is in both copies, which is the whole
+	// point of a delta: a dimension a state says nothing about is the instance's
+	// own, shared rather than copied.
+	assert.equal(flat.spatial?.depth, lifted.spatial?.depth);
+	// The planar four are untouched by a delta that only spoke about `z`.
+	assert.deepEqual(flat.frame, lifted.frame);
+
+	// And the drawn part is the shown copy, on all six axes and all three angles
+	// — the alias carries the third axis exactly as it carries `x`, or the canvas
+	// would draw a state the answer set does not hold.
+	const drawn = model.byId["inst(u1,cube)"];
+	assert.ok(drawn);
+	assert.equal(model.shown.u1, "flat");
+	assert.deepEqual(drawn.spatial, flat.spatial);
+	assert.deepEqual(drawn.turn, flat.turn);
+});
+
+test("a viewport on another artboard does not put a flat button's states into three dimensions", async () => {
+	// merged-plan §4, observed where it can actually be observed. The program's
+	// state-copy defaults are narrowed to `s3(stt(I,S,N))` precisely so that one
+	// viewport anywhere in the document does not silently give every state of
+	// every button a `z` and a `depth` — and the reader is the only place that
+	// narrowing is visible as anything other than an atom count.
+	const button = stateful();
+	const scene: Scene = {
+		...button,
+		nodes: [
+			...button.nodes,
+			board("page2", 900, [
+				at("view", "viewport", { x: 20, y: 20, w: 480, h: 320 }, {
+					camera: "cam",
+					children: [
+						at("cam", "camera", { x: 0, y: 0, w: 0, h: 0 }),
+						at("cube", "mesh", { x: 100, y: 100, w: 100, h: 100 }),
+					],
+				}),
+			]),
+		],
+	};
+	const model = readModel(await firstModel(scene));
+
+	// The document is spatial — there is a mesh in it, with six numbers.
+	assert.deepEqual(model.byId.cube?.spatial, { z: 0, depth: 0 });
+	// ...and the button on the other artboard is exactly as flat as it was.
+	assert.equal(model.byId["inst(b1,label)"]?.spatial, undefined);
+	assert.ok(Object.keys(model.states).length > 0, "there were copies to check");
+	for (const [term, copy] of Object.entries(model.states)) {
+		assert.equal(copy.spatial, undefined, `${term} gained a third axis`);
+		assert.equal(copy.turn, undefined, `${term} gained a rotation`);
+	}
+});
+
+/* ------------------------------------------------------------------ */
+/* Layers                                                              */
+/* ------------------------------------------------------------------ */
+
+test("a machine with no layers reads as the one-layer machine it is", async () => {
+	// `shown` is kept and is `shownByLayer`'s first layer, so every reader written
+	// before layers existed is asking the question it always asked. The layer it
+	// is in is the one the *reader* mints, called `base`, and the two maps have to
+	// agree about it or a panel indexed by layer would be showing a state `shown`
+	// does not name.
+	const model = readModel(await firstModel(stateful()));
+	assert.deepEqual(model.machines.m1?.layers, ["base"]);
+	assert.deepEqual(model.shown, { b1: "rest" });
+	assert.deepEqual(model.shownByLayer, { b1: { base: "rest" } });
+});
+
+/**
+ * Two layers over one part, both with an opinion about all three of paint,
+ * geometry and rotation.
+ *
+ * The later layer is `glow`, so `glow` is what wins — the position in the list
+ * *is* the priority, which is the same "the order is the answer" the initial
+ * state and `order/2` already use.
+ */
+const layered = (): Scene =>
+	stateful({
+		layers: [
+			{ id: "words", name: "Words" },
+			{ id: "glow", name: "Glow" },
+		],
+		states: [
+			{ id: "rest", name: "rest", parts: {}, layer: "words" },
+			{
+				id: "hot",
+				name: "hot",
+				layer: "words",
+				parts: {
+					label: {
+						props: { ink: single(HOT_INK) },
+						frame: { y: dimension(px(30)) },
+						turn: { rotateZ: single("10deg") },
+					},
+				},
+			},
+			{ id: "cool", name: "cool", parts: {}, layer: "glow" },
+			{
+				id: "warm",
+				name: "warm",
+				layer: "glow",
+				parts: {
+					label: {
+						props: { ink: single("#22c55e") },
+						frame: { y: dimension(px(40)) },
+						turn: { rotateZ: single("20deg") },
+					},
+				},
+			},
+		],
+		uses: [{ id: "b1", states: { words: "hot", glow: "warm" } }],
+	});
+
+test("two layers are two states on screen at once, and `shown` is the lowest of them", async () => {
+	// The rung the copy encoding was bought for. Two `shown/2` facts in ONE
+	// answer set is what a layer *is*; a reader that took `shown` alone would be
+	// showing half the picture with no way to know it, and one that treated two
+	// of them as a contradiction would be refusing the feature.
+	const model = readModel(await firstModel(layered()));
+	assert.deepEqual(model.machines.m1?.layers, ["words", "glow"]);
+	assert.deepEqual(model.shownByLayer, { b1: { words: "hot", glow: "warm" } });
+	assert.equal(model.shown.b1, "hot", "the lowest layer, not whichever atom arrived first");
+	// Both states are copies in the same answer set, as every other state is.
+	assert.ok(model.states[statePart("b1", "hot", "label")]);
+	assert.ok(model.states[statePart("b1", "warm", "label")]);
+});
+
+test("the later layer is what is drawn, and all three kinds of fight are named", async () => {
+	const model = readModel(await firstModel(layered()));
+	const drawn = model.byId["inst(b1,label)"];
+	assert.ok(drawn);
+	// `glow` is second, so `glow` writes — for paint, for geometry and for the
+	// rotation alike. Exactly one value each: a `turn/3` derived twice for one
+	// (part, axis) is not two designs, it is one arbitrary answer.
+	assert.equal(drawn.rendered.ink, "#22c55e");
+	assert.equal(drawn.frame.y, px(40));
+	// The rotation too, and it is worth being explicit that this is a *flat*
+	// document: `rotateZ` is a turn in the plane, so a state that spins a label
+	// spins the drawn label, with no viewport and no mesh anywhere near it. The
+	// third axis and the rotation arrived together and are not the same feature.
+	assert.deepEqual(drawn.turn, { rotateX: 0, rotateY: 0, rotateZ: 20_000 });
+	assert.deepEqual(model.states[statePart("b1", "warm", "label")]?.rendered.ink, "#22c55e");
+	assert.deepEqual(model.states[statePart("b1", "hot", "label")]?.turn, {
+		rotateX: 0,
+		rotateY: 0,
+		rotateZ: 10_000,
+	});
+
+	// The three fight lists are three sentences a panel writes differently, which
+	// is why they are three fields rather than one with a tag. Static, and a
+	// claim about the machine: these two layers *would* argue.
+	const machine = model.machines.m1;
+	assert.ok(machine);
+	assert.deepEqual(machine.fights, [["glow", "words", "label", "ink"]]);
+	assert.deepEqual(machine.frameFights, [["glow", "words", "label", "y"]]);
+	assert.deepEqual(machine.rotationFights, [["glow", "words", "label", "rotateZ"]]);
+	// ...and the same argument as *drawn*, which needs both fighting layers to
+	// have a state on screen and so belongs beside the picture rather than beside
+	// the health. Only the property fight is carried, which is `mfightat/5`'s own
+	// arity and is flagged in this reader's field comment as the deviation it is.
+	assert.deepEqual(model.fightsAt, { b1: [["glow", "words", "label", "ink"]] });
+});
+
+/* ------------------------------------------------------------------ */
+/* Timelines                                                           */
+/* ------------------------------------------------------------------ */
+
+/** One keyframe, spelled the way a track holds one. */
+const key = (at: string, value: string): Keyframe => ({
+	at: [lit(at)],
+	value: [lit(value)],
+});
+
+const PULSE: Timeline = {
+	id: "pulse",
+	name: "Pulse",
+	loop: "loop",
+	tracks: [
+		{ part: "label", dim: "y", keys: [key("0ms", "14px"), key("300ms", "2px")] },
+		{ part: "panel", prop: "fill", keys: [key("0ms", "#0f172a"), key("120ms", "#334155")] },
+	],
+};
+
+const animated = (constraints: Constraint[] = []): Scene =>
+	stateful({
+		timelines: [PULSE],
+		states: [
+			{ id: "rest", name: "rest", parts: {} },
+			{ id: "beat", name: "beat", parts: {}, timeline: "pulse" },
+		],
+		constraints,
+	});
+
+test("a timeline reads back as the times this universe put it at, and mints no copies", async () => {
+	// What is here is what the answer set *decided*, which is the times and not
+	// the values: `mkat/5` is the resolution of a `duration` Value against this
+	// universe, so a panel that asked the document instead would be showing a
+	// different animation from the one the solver answered with.
+	//
+	// And the default is no copies at all. A timeline on its own costs two
+	// variables per keyframe and one per timeline, which is enough for the export
+	// and enough for the canvas — so `keyframes` being empty here is the
+	// rationing working rather than the feature missing.
+	const model = readModel(await firstModel(animated()));
+	const timelines = model.machines.m1?.timelines;
+	assert.deepEqual(Object.keys(timelines ?? {}), ["pulse"]);
+	assert.equal(timelines?.pulse?.length, 300, "derived from the last key");
+	assert.equal(timelines?.pulse?.loop, "loop");
+	assert.deepEqual(timelines?.pulse?.tracks, {
+		[trackDim("label", "y")]: [
+			{ index: 1, at: 0, easing: DEFAULT_EASING },
+			{ index: 2, at: 300, easing: DEFAULT_EASING },
+		],
+		[trackProp("panel", "fill")]: [
+			{ index: 1, at: 0, easing: DEFAULT_EASING },
+			{ index: 2, at: 120, easing: DEFAULT_EASING },
+		],
+	});
+	assert.deepEqual(model.keyframes, {});
+});
+
+test("a keyframe copy appears where a rule named one, and is a pose rather than a node", async () => {
+	// `keyframeParts` seeds copies from the *constraints*, so naming a `kfr(...)`
+	// term is what brings one into being. It is not a `node/1` for a state copy's
+	// reasons exactly: a drawable copy per keyframe would paint every moment of
+	// every animation on top of the picture and grow the layer list by the
+	// keyframe count.
+	const named = keyCopy("b1", "pulse", trackDim("label", "y"), 2);
+	const model = readModel(
+		await firstModel(
+			animated([
+				{
+					id: "k",
+					kind: "align",
+					prop: "fill",
+					nodes: [named, "inst(b1,panel)"],
+					edge: "left",
+					enabled: true,
+				},
+			]),
+		),
+	);
+
+	// Both keys of the named track, because the closure is over the track: a copy
+	// of only the moment a rule mentioned would be a pose with nothing to
+	// interpolate from.
+	assert.deepEqual(Object.keys(model.keyframes).sort(), [
+		keyCopy("b1", "pulse", trackDim("label", "y"), 1),
+		named,
+	]);
+	const second = model.keyframes[named];
+	assert.ok(second);
+	assert.equal(second.instance, "b1");
+	assert.equal(second.timeline, "pulse");
+	assert.equal(second.track, trackDim("label", "y"));
+	assert.equal(second.index, 2);
+	assert.equal(second.at, 300, "the millisecond this universe put it at");
+	assert.equal(second.easing, DEFAULT_EASING);
+	// It is where the track says it is at that moment, and it paints with what
+	// the part paints with — a copy is a pose, so it carries the whole of one.
+	assert.equal(second.frame.y, px(2));
+	assert.equal(model.keyframes[keyCopy("b1", "pulse", trackDim("label", "y"), 1)]?.frame.y, px(14));
+	assert.equal(second.rendered.text, "Go");
+
+	// Nowhere a node would be, and beside `states` rather than in it: a state copy
+	// is a pose the machine settles in, a keyframe copy is one it passes through,
+	// and a reader that wanted "every pose" would still have to know which was
+	// which to draw either.
+	for (const id of Object.keys(model.byId)) {
+		assert.ok(!id.startsWith("kfr("), `${id} is a keyframe copy in byId`);
+	}
+	for (const id of Object.keys(model.states)) {
+		assert.ok(!id.startsWith("kfr("), `${id} is a keyframe copy in states`);
+	}
+});
+
+/* ------------------------------------------------------------------ */
+/* What the ladder finds wrong                                         */
+/* ------------------------------------------------------------------ */
+
+test("the ladder's health and its fourth motion table read back per machine", async () => {
+	// The program's own answers rather than `machineHealth`'s, deliberately
+	// duplicated for the reason the shipped four are: a panel has to be able to
+	// say "no valuation can take this edge" while the document is unsatisfiable
+	// and there is no answer set at all.
+	const model = readModel(
+		await firstModel(
+			stateful({
+				inputs: [
+					{ id: "hovered", name: "hovered", kind: "boolean", initial: "false" },
+					{ id: "n", name: "n", kind: "number", min: "0", max: "1" },
+				],
+				states: [
+					{ id: "rest", name: "rest", parts: {} },
+					{ id: "hot", name: "hot", parts: { label: { props: { ink: single(HOT_INK) } } } },
+				],
+				transitions: [
+					// A guard no valuation can satisfy: `hovered` is a boolean and
+					// nothing it can hold is both true and false.
+					edge({
+						id: "never",
+						from: "rest",
+						to: "hot",
+						conditions: [
+							{ input: "hovered", op: "eq", value: "true" },
+							{ input: "hovered", op: "eq", value: "false" },
+						],
+					}),
+					// A reserved id in a position it may not hold: nothing leaves Exit,
+					// and nothing arrives at Entry.
+					edge({ id: "wrong", from: "exit", to: "rest", trigger: "click" }),
+					edge({ id: "alsowrong", from: "rest", to: "entry", trigger: "click" }),
+					// An exit time is the fourth motion setting: a `duration` Value that
+					// clamps at zero like a delay and is projected like a duration.
+					edge({ id: "slow", from: "hot", to: "rest", trigger: "pointerleave", exit: [lit("50ms")] }),
+				],
+			}),
+		),
+	);
+	const machine = model.machines.m1;
+	assert.ok(machine);
+
+	assert.deepEqual(machine.impossible, ["never"]);
+	assert.deepEqual(machine.misplaced, ["alsowrong", "wrong"]);
+	// A superset of `unreachable`: the ordinary reachability walk ignores guards,
+	// this one refuses to walk an edge no valuation can take. `hot` is reachable
+	// on paper and unreachable in the machine, which is exactly why the two lists
+	// are separate rather than one.
+	assert.deepEqual(machine.unreachable, []);
+	assert.deepEqual(machine.unreachableWithGuards, ["hot"]);
+	// Every transition has an exit time, because the program supplies its own
+	// default where the document is silent.
+	assert.deepEqual(machine.exit, { never: 0, wrong: 0, alsowrong: 0, slow: 50 });
+});
+
+test("a blend's stops, and a keyframe this universe put behind the one in front of it", async () => {
+	// Two answers that are properties of an *answer* rather than of a document,
+	// which is the class of bug a multiverse invents and a linter over the
+	// document could never catch.
+	const backwards: Timeline = {
+		id: "pulse",
+		name: "Pulse",
+		tracks: [{ part: "label", dim: "y", keys: [key("300ms", "14px"), key("50ms", "2px")] }],
+	};
+	const model = readModel(
+		await firstModel(
+			stateful({
+				inputs: [{ id: "n", name: "n", kind: "number", min: "0", max: "1" }],
+				timelines: [backwards],
+				states: [
+					{
+						id: "mix",
+						name: "mix",
+						parts: {},
+						// Both a timeline and a blend: reported rather than repaired,
+						// because a state with two sources is a mistake a person should
+						// see rather than one a reader should quietly pick a side in.
+						timeline: "pulse",
+						blend: {
+							kind: "oneD",
+							input: "n",
+							stops: [
+								{ timeline: "pulse", at: "-0.5" },
+								{ timeline: "pulse", at: "0.4" },
+							],
+						},
+					},
+				],
+			}),
+		),
+	);
+	const machine = model.machines.m1;
+	assert.ok(machine);
+	assert.deepEqual(machine.stopsOutOfRange, [["mix", 1]]);
+	assert.deepEqual(machine.stopGaps, ["mix"]);
+	assert.deepEqual(machine.twoSource, ["mix"]);
+	assert.deepEqual(machine.backwardsKeys, [["pulse", trackDim("label", "y"), 2]]);
+	// ...and the timeline is sorted by the time this universe resolved, with the
+	// index as the tie-break, which is the same stable order `solvedKeys` uses —
+	// so "key 3" is the same keyframe in the panel, in the term and here.
+	assert.deepEqual(machine.timelines.pulse?.tracks[trackDim("label", "y")], [
+		{ index: 2, at: 50, easing: DEFAULT_EASING },
+		{ index: 1, at: 300, easing: DEFAULT_EASING },
+	]);
+});
+
+test("two readings of one answer set are the same reading, whatever order the atoms arrive in", async () => {
+	// Every sort in this file — the copies, the fights, the health lists, the
+	// track keys, the layer stack, the `wears` table, the `shown` tie-break — is
+	// there for one reason, and this is it stated once instead of thirteen times.
+	// clingo's print order is a property of the search rather than of the answer,
+	// so a reader that let it through would make a panel reorder itself between
+	// two solves that decided exactly the same thing.
+	//
+	// The document is deliberately the busiest one this file builds: two layers
+	// arguing over three things, a timeline, a blend, and an instance drawn in a
+	// state per layer.
+	const atoms = await firstModel(
+		stateful({
+			layers: [
+				{ id: "words", name: "Words" },
+				{ id: "glow", name: "Glow" },
+			],
+			timelines: [PULSE],
+			inputs: [{ id: "n", name: "n", kind: "number", min: "0", max: "1" }],
+			states: [
+				{ id: "rest", name: "rest", parts: {}, layer: "words" },
+				{
+					id: "hot",
+					name: "hot",
+					layer: "words",
+					parts: { label: { props: { ink: single(HOT_INK) }, turn: { rotateZ: single("10deg") } } },
+				},
+				{ id: "cool", name: "cool", parts: {}, layer: "glow" },
+				{
+					id: "warm",
+					name: "warm",
+					layer: "glow",
+					parts: { label: { props: { ink: single("#22c55e") }, frame: { y: dimension(px(40)) } } },
+				},
+				{ id: "beat", name: "beat", parts: {}, layer: "glow", timeline: "pulse" },
+			],
+			uses: [{ id: "b1", states: { words: "hot", glow: "warm" } }],
+		}),
+	);
+
+	// Reversed rather than shuffled at random, so a failure is reproducible: it
+	// is the one permutation that puts every "first one wins" tie-break under the
+	// opposite pressure at once.
+	const forwards = readModel(atoms);
+	const backwards = readModel([...atoms].reverse());
+	assert.deepEqual(backwards, forwards);
+	// `deepEqual` on an object compares keys as a set, so the two orders are
+	// asserted separately — and they are what a panel actually iterates.
+	assert.deepEqual(Object.keys(backwards.states), Object.keys(forwards.states));
+	assert.deepEqual(Object.keys(backwards.byId), Object.keys(forwards.byId));
+	assert.ok(Object.keys(forwards.states).length > 0, "there was something to sort");
 });

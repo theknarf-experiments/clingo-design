@@ -38,12 +38,20 @@ import { test } from "node:test";
 
 import { makeNode } from "./edits.ts";
 import {
+	BASE_LAYER,
+	type InputValues,
 	type MachineTable,
+	type RuntimeEdge,
+	type RuntimeLayer,
 	machineTable,
+	stepInstance,
+	stepLayer,
 	stepMachine,
 } from "./machines.ts";
 import {
+	type Condition,
 	type Machine,
+	type MachineInput,
 	type MachineState,
 	type Scene,
 	type SceneNode,
@@ -89,10 +97,10 @@ const edge = (
  * and the one a `switch` per machine gets wrong.
  */
 function menus(
-	uses: Array<{ id: string; state?: string }>,
+	uses: Array<{ id: string; state?: string; at?: Record<string, string> }>,
 	states: MachineState[],
 	transitions: Transition[],
-	machineId = "m1",
+	extra: Partial<Machine> = {},
 ): Scene {
 	const label: SceneNode = {
 		...makeNode(
@@ -113,11 +121,12 @@ function menus(
 		component: true,
 	};
 	const machine: Machine = {
-		id: machineId,
+		id: "m1",
 		name: "Menu states",
 		root: "menu",
 		states,
 		transitions,
+		...extra,
 	};
 	return {
 		...emptyScene(),
@@ -140,6 +149,7 @@ function menus(
 						),
 						instanceOf: "menu",
 						...(use.state ? { state: use.state } : {}),
+						...(use.at ? { states: use.at } : {}),
 					})),
 				],
 			},
@@ -167,6 +177,126 @@ const threeEdges = (): Transition[] => [
 
 const menuTable = (): MachineTable =>
 	machineTable(menus([{ id: "m_a" }, { id: "m_b", state: "open" }], threeStates(), threeEdges()));
+
+/* ------------------------------------------------------------------ */
+/* The ladder, as one fixture                                          */
+/* ------------------------------------------------------------------ */
+
+const input = (
+	id: string,
+	kind: MachineInput["kind"],
+	rest: Partial<MachineInput> = {},
+): MachineInput => ({ id, name: id, kind, ...rest });
+
+const when = (
+	input: string,
+	op: Condition["op"],
+	value?: string,
+): Condition => ({ input, op, ...(value === undefined ? {} : { value }) });
+
+/**
+ * One machine with all five rungs on it, because the rungs interact and a
+ * fixture per rung would never catch that.
+ *
+ * Three layers, and they are three so that "later wins" has a middle to be
+ * wrong about, and so that one layer stopping leaves *two* still answering. The
+ * first layer keeps the shut/open/busy story the shipped matrix is written
+ * against, so the two matrices are about one machine.
+ *
+ * - **press**, the first layer: the shipped toggle, plus a guard on the edge
+ *   into `busy` (so a condition is the difference between moving and not), an
+ *   exit time on the edge out of it (so the gate has something to gate), and an
+ *   Any edge home on `pointerleave` (so precedence has a case).
+ * - **glow**: a number-guarded edge, which is the one guard the four orderings
+ *   are ever asked of, and an ordinary edge back.
+ * - **boot**: an Entry edge guarded on a trigger input — which is exactly the
+ *   idiom "when the save succeeds, move" — and an Exit edge, so a layer can
+ *   stop while the other two carry on.
+ *
+ * The cross-layer edge at the end is deliberate and is asserted about below: it
+ * names a destination in another layer, so no layer can honour it and
+ * `machineTable` drops it rather than writing an id whose rules live under
+ * somebody else's selector.
+ */
+function ladder(uses: Array<{ id: string; at?: Record<string, string> }> = [{ id: "m_a" }]): Scene {
+	return menus(
+		uses,
+		[
+			state("shut", "Shut"),
+			state("open", "Open"),
+			state("busy", "Busy"),
+			{ ...state("dim", "Dim"), layer: "glow" },
+			{ ...state("bright", "Bright"), layer: "glow" },
+			{ ...state("cold", "Cold"), layer: "boot" },
+			{ ...state("warm", "Warm"), layer: "boot" },
+		],
+		[
+			edge("t1", "shut", "open", "click"),
+			edge("t2", "open", "shut", "click"),
+			edge("t3", "open", "busy", "pointerdown", {
+				conditions: [when("ready", "eq", "true")],
+			}),
+			edge("t4", "busy", "open", "pointerup", { exit: single("300ms") }),
+			edge("t5", "any", "shut", "pointerleave"),
+			// Specific, on the trigger the Any edge above also answers, and from a
+			// state the Any edge reaches: this pair is the whole of the precedence
+			// rule, and without it nothing here would notice an interpreter that
+			// tried the fallback first.
+			edge("t6", "busy", "open", "pointerleave"),
+			edge("g1", "dim", "bright", "pointerenter", {
+				conditions: [when("level", "ge", "0.5")],
+			}),
+			edge("g2", "bright", "dim", "pointerleave"),
+			edge("b1", "entry", "warm", "load", {
+				conditions: [when("saved", "fired")],
+			}),
+			edge("b2", "warm", "exit", "click"),
+			edge("x1", "shut", "bright", "pointerup"),
+		],
+		{
+			layers: [
+				{ id: "press", name: "Press" },
+				{ id: "glow", name: "Glow" },
+				{ id: "boot", name: "Boot" },
+			],
+			inputs: [
+				input("ready", "boolean", { initial: "true" }),
+				input("armed", "boolean", { initial: "false" }),
+				input("level", "number", { initial: "0.2", min: "0", max: "1" }),
+				input("saved", "trigger"),
+			],
+		},
+	);
+}
+
+const ladderTable = (uses?: Array<{ id: string; at?: Record<string, string> }>): MachineTable =>
+	machineTable(ladder(uses));
+
+/**
+ * The one use {@link ladder} makes by default, named so the matrices below read
+ * as being about layers and states rather than about which button it is.
+ *
+ * A test that wants two of them passes its own ids to `ladderTable` and spells
+ * them out; everything else varies the layer, the state, the trigger and the
+ * valuation against this single instance, because an instance is not the
+ * dimension any of those tests are exploring.
+ */
+const instance = "m_a";
+
+/** A clock a test winds by hand, and the runtime that reads it. */
+function clocked(
+	table: MachineTable,
+	root: unknown = null,
+): { js: ReturnType<typeof evalRuntime>; tick: (ms: number) => void } {
+	let at = 0;
+	const js = evalRuntime(table, root, undefined, () => at);
+	return {
+		js,
+		tick: (ms: number) => {
+			at += ms;
+		},
+	};
+}
 
 /* ------------------------------------------------------------------ */
 /* A DOM small enough to read                                          */
@@ -351,19 +481,73 @@ test("a trigger with no edge from here is a no-op, not an error", () => {
 
 	assert.equal(js.state("m_a"), "shut");
 	// `pointerleave` leaves `open`, and nothing leaves `shut` but a click.
-	assert.equal(js.fire("m_a", "pointerleave"), null);
+	assert.equal(js.fireIn("m_a", "pointerleave"), null);
 	assert.equal(js.state("m_a"), "shut");
-	assert.equal(js.fire("m_a", "pointerup"), null);
+	assert.equal(js.fireIn("m_a", "pointerup"), null);
 	assert.equal(js.state("m_a"), "shut");
 
 	// A trigger no document can even spell.
-	assert.equal(js.fire("m_a", "wiggle"), null);
+	assert.equal(js.fireIn("m_a", "wiggle"), null);
 	assert.equal(js.state("m_a"), "shut");
 
 	// And the edge that is there still works afterwards — the refusals left
-	// nothing behind.
+	// nothing behind. What comes back is a record now, keyed by layer, because an
+	// instance moves one state per layer and a string cannot say that; a one-layer
+	// machine's record is the one entry `machineLayers` mints for it.
+	assert.deepEqual(js.fireIn("m_a", "click"), { [BASE_LAYER]: "open" });
+	assert.deepEqual(js.fireIn("m_a", "pointerleave"), { [BASE_LAYER]: "shut" });
+});
+
+test("fire and states keep the shape they shipped, and the layered answers took new names", () => {
+	// **A compatibility test, and the thing it protects is a file somebody keeps.**
+	// An exported page is HTML on disk with a host script beside it, and the host
+	// that was written against the export before layers existed does
+	// `M.fire("btn","click") === "hover"` and reads `M.states[id]` as a string. If
+	// `fire` had quietly started returning a record and `states` a nested one, both
+	// of those would have become silently wrong the moment the document was
+	// re-exported: an object is always truthy, `===` against a state id never
+	// matches again, and there is nothing on screen to show for it.
+	//
+	// So the pair is the one the rest of the handle already uses — `set`/`setIn`,
+	// `state`/`stateIn`, `step`/`stepIn` — and `fire`/`fireIn` and
+	// `states`/`statesIn` join it. The bare name means the first layer, which is
+	// the layer that writes `data-state`, which is the whole of what a one-layer
+	// document ever had.
+	const js = evalRuntime(menuTable());
+	js.start();
+
+	assert.equal(typeof js.states.m_a, "string", "flat, as it shipped");
+	assert.equal(js.states.m_a, "shut");
+	assert.deepEqual(js.statesIn.m_a, { [BASE_LAYER]: "shut" }, "and the whole answer beside it");
+
+	// A string out of `fire`, and the same move reported as a record by `fireIn`.
 	assert.equal(js.fire("m_a", "click"), "open");
-	assert.equal(js.fire("m_a", "pointerleave"), "shut");
+	assert.equal(js.states.m_a, "open", "the flat record is live, not a snapshot");
+	assert.deepEqual(js.fireIn("m_a", "pointerleave"), { [BASE_LAYER]: "shut" });
+	assert.equal(js.states.m_a, "shut");
+
+	// Null where the first layer took no edge, exactly as the shipped one did —
+	// including the trigger no document can spell.
+	assert.equal(js.fire("m_a", "pointerleave"), null);
+	assert.equal(js.fire("m_a", "wiggle"), null);
+	assert.equal(js.states.m_a, "shut");
+});
+
+test("fire reports the first layer and still moves every one of them", () => {
+	// The half of the compatibility promise that is not about the return value:
+	// `fire` is a narrower *report*, never a narrower run. A click that presses a
+	// button and lights it must do both whichever function the host called, or a
+	// page written against the old shape would have half a machine.
+	const js = evalRuntime(ladderTable());
+	js.start();
+	js.fireInput(instance, "saved");
+
+	// press moves, glow does not, boot exits — and only press's answer comes back.
+	assert.equal(js.fire(instance, "click"), "open");
+	assert.equal(js.stateIn(instance, "press"), "open");
+	assert.equal(js.stateIn(instance, "glow"), "dim");
+	assert.equal(js.stopped(instance, "boot"), true, "the layer nobody asked about still stopped");
+	assert.equal(js.states[instance], "open", "and data-state's twin is the first layer");
 });
 
 test("an instance the table does not drive answers null and stays out of it", () => {
@@ -371,8 +555,8 @@ test("an instance the table does not drive answers null and stays out of it", ()
 	js.start();
 
 	assert.equal(js.state("menu"), null);
-	assert.equal(js.fire("menu", "click"), null);
-	assert.equal(js.fire("nobody", "click"), null);
+	assert.equal(js.fireIn("menu", "click"), null);
+	assert.equal(js.fireIn("nobody", "click"), null);
 	// Firing at nothing did not invent an entry for it, which is what would make
 	// `states` grow every time a stray event arrived.
 	assert.deepEqual(Object.keys(js.states).sort(), ["m_a", "m_b"]);
@@ -384,7 +568,7 @@ test("before start, an instance is in no state and nothing fires", () => {
 	// here would be a second place the initial state is decided.
 	const js = evalRuntime(menuTable());
 	assert.equal(js.state("m_a"), null);
-	assert.equal(js.fire("m_a", "click"), null);
+	assert.equal(js.fireIn("m_a", "click"), null);
 	// `step` is pure, so it answers perfectly well without a current state — which
 	// is exactly what lets the matrix above ask it about states nothing is in.
 	assert.equal(js.step("m_a", "shut", "click"), "open");
@@ -517,7 +701,7 @@ test("an instance with no element in the page still runs, silently", () => {
 	js.start();
 
 	assert.equal(js.state("m_a"), "shut");
-	assert.equal(js.fire("m_a", "click"), "open");
+	assert.deepEqual(js.fireIn("m_a", "click"), { [BASE_LAYER]: "open" });
 });
 
 test("a host that re-renders hears every move through onChange", () => {
@@ -531,7 +715,7 @@ test("a host that re-renders hears every move through onChange", () => {
 		seen.push([instance, next]);
 	});
 	js.start();
-	js.fire("m_a", "click");
+	js.fireIn("m_a", "click");
 	js.set("m_b", "busy");
 
 	assert.deepEqual(seen, [
@@ -618,7 +802,7 @@ test("a load self-edge is not a loop", () => {
 /* Pacing is the stylesheet's, and stays there                         */
 /* ------------------------------------------------------------------ */
 
-test("the runtime has no timers, because the transition declarations are the pacing", () => {
+test("the runtime reads a clock and never sets one", () => {
 	// Load-bearing, and stated as a test because it is exactly the kind of fact
 	// somebody helpfully breaks. A transition's duration, delay and stagger are
 	// already in the exported file, as the `transition:` declaration `export.ts`
@@ -627,21 +811,31 @@ test("the runtime has no timers, because the transition declarations are the pac
 	// sequence (spec §8.2). The browser's compositor is the animator. A script
 	// that *also* waited before flipping `data-state` would apply every delay
 	// twice and turn every stagger into a stutter.
-	for (const timer of [
-		"setTimeout",
-		"setInterval",
-		"requestAnimationFrame",
-		"Date.now",
-		"performance.now",
-	]) {
+	for (const timer of ["setTimeout", "setInterval", "requestAnimationFrame"]) {
 		assert.ok(
 			!MACHINE_RUNTIME.includes(timer),
 			`the runtime must not reach for ${timer}`,
 		);
 	}
-	// Nor does the table carry a number for it to wait on — which is the same fact
-	// one level down, and why `MachineTable` has no timing fields.
-	assert.equal(JSON.stringify(menuTable()).includes("duration"), false);
+
+	// `Date.now` is the one that changed, and the two halves of this test are the
+	// distinction the ladder spec §2.5 draws. An exit time here is a *gate* and not
+	// a schedule: a trigger arriving too early is dropped and not remembered, so
+	// the runtime subtracts two clock readings and never asks to be woken. Reading
+	// the clock is therefore required — an exit gate without one would be an exit
+	// gate that always opens — and it is required to appear exactly once, as the
+	// fallback for the injected clock, because a second reading in a different
+	// place is how a "held for" turns into a "wait for".
+	assert.equal(MACHINE_RUNTIME.split("Date.now").length - 1, 1);
+	assert.ok(MACHINE_RUNTIME.includes("var readClock = clock || function ()"));
+
+	// Nor does the table carry a duration for it to wait on. `exit` is the one
+	// number that had to be added and it is the only one: `MachineTable` still has
+	// no `duration`, no `delay` and no `stagger`, because those are the CSS's.
+	const json = JSON.stringify(menuTable());
+	assert.equal(json.includes("duration"), false);
+	assert.equal(json.includes("delay"), false);
+	assert.equal(json.includes("stagger"), false);
 });
 
 test("firing is synchronous: the state is decided at the instant of the event", () => {
@@ -654,7 +848,7 @@ test("firing is synchronous: the state is decided at the instant of the event", 
 
 	els.m_a.dispatch("click");
 	assert.equal(els.m_a.attrs["data-state"], "open");
-	assert.equal(js.states.m_a, "open");
+	assert.equal(js.statesIn.m_a[BASE_LAYER], "open");
 });
 
 /* ------------------------------------------------------------------ */
@@ -691,5 +885,702 @@ test("a document with no machines has an empty table and no behaviour to lose", 
 	assert.deepEqual(none, { instances: {}, machines: {} });
 	const js = evalRuntime(none);
 	js.start();
-	assert.equal(js.fire("m_a", "click"), null);
+	assert.equal(js.fireIn("m_a", "click"), null);
+});
+
+/* ------------------------------------------------------------------ */
+/* The ladder: one table, two readers, still                           */
+/* ------------------------------------------------------------------ */
+
+test("every (layer, state, trigger, valuation) the runtime answers is the one stepLayer answers", () => {
+	// The extended agreement test, and the reason this file exists said one rung
+	// up. Exhaustive rather than illustrative, for the shipped matrix's reason:
+	// the interesting half of an interpreter is what it *refuses*, and a runtime
+	// that took the first edge it found would sail through any test that only ever
+	// asked it about edges that fire. Guards make that far worse, because a
+	// runtime that ignored `when` entirely would pass every test written about a
+	// guard that holds.
+	const table = ladderTable();
+	const js = evalRuntime(table);
+
+	const layers = ["press", "glow", "boot", "nope"];
+	const states = ["shut", "open", "busy", "dim", "bright", "cold", "warm", "gone", ""];
+	const triggers = [...TRIGGER_NAMES, "wiggle"];
+	// Four valuations: the store as seeded, the store with the number guard open,
+	// the store with the boolean guard shut, and an empty store — which is the one
+	// a reader is most likely to get wrong, because "the host has said nothing" has
+	// to refuse every condition rather than pass it.
+	const valuations: InputValues[] = [
+		{},
+		{ ready: true, armed: false, level: 200 },
+		{ ready: false, armed: false, level: 800 },
+		{ ready: true, level: 500 },
+	];
+	const fireds = [[], ["saved"], ["armed"]];
+	const helds = [0, 299, 300, undefined];
+
+	let moves = 0;
+	let stops = 0;
+	for (const layer of layers) {
+		for (const from of states) {
+			for (const trigger of triggers) {
+				for (const inputs of valuations) {
+					for (const fired of fireds) {
+						for (const heldMs of helds) {
+							const mine = js.stepIn(instance, layer, from, trigger, inputs, fired, heldMs);
+							const theirs = stepLayer(
+								table,
+								instance,
+								layer,
+								from,
+								trigger as Trigger,
+								inputs,
+								new Set(fired),
+								heldMs,
+							);
+							assert.equal(
+								mine,
+								theirs,
+								`${layer}/${from} on ${trigger} with ${JSON.stringify(inputs)} fired ${fired.join()} held ${String(heldMs)}: runtime ${String(mine)}, studio ${String(theirs)}`,
+							);
+							if (typeof theirs === "string") moves += 1;
+							if (theirs === null) stops += 1;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Guards on the guard. Agreement is trivially true if neither ever moves, and
+	// a typo in the fixture would produce exactly that — so both halves of the
+	// three-valued answer have to have happened, and the `null` half is the one a
+	// reader that treated "stopped" as "nothing" would silently lose.
+	assert.ok(moves > 0);
+	assert.ok(stops > 0);
+});
+
+test("the shipped step and the layered one disagree, and the layered one is right", () => {
+	// `x1` in the fixture goes from a state of the press layer to a state of the
+	// glow layer. The flat table cannot see layers at all — it checks only that
+	// both ends are states of the *machine* — so the shipped lookup answers it,
+	// and answering it would write `bright` into the press layer's attribute,
+	// where the only rules named `bright` live under the glow layer's selector.
+	//
+	// This is not a bug being asserted into permanence: `machines.ts` records that
+	// the flat table is kept for the shipped readers and goes when they do, and the
+	// per-layer table already drops the edge. What the test pins is that `fire`
+	// reads the right one of the two, which is the whole difference between the
+	// two lookups being a transition and being a trap.
+	const table = ladderTable();
+	const js = evalRuntime(table);
+	assert.equal(js.step(instance, "shut", "pointerup"), "bright");
+	assert.equal(stepMachine(table, instance, "shut", "pointerup"), "bright");
+	assert.equal(js.stepIn(instance, "press", "shut", "pointerup"), undefined);
+	assert.equal(js.stepIn(instance, "glow", "shut", "pointerup"), undefined);
+
+	js.start();
+	assert.equal(js.fireIn(instance, "pointerup"), null);
+	assert.equal(js.state(instance), "shut");
+	assert.equal(js.stateIn(instance, "glow"), "dim");
+});
+
+test("firing asks every layer at once, and the answer is stepInstance's", () => {
+	// A layer is the thing that is in one state at a time; an instance is in one
+	// state per layer, all at once. So one trigger may move the press layer and
+	// leave the glow layer where it was, and both are true in the same moment.
+	//
+	// Driven twice over the same script, once with the clock stopped and once with
+	// it far ahead, because the exit gate is the one thing in here whose answer
+	// depends on when it is asked — and a runtime that read its own clock
+	// differently from the record handed to `stepInstance` would agree by accident
+	// in the first pass and diverge in the second.
+	for (const ahead of [false, true]) {
+		const table = ladderTable();
+		const { js, tick } = clocked(table);
+		js.start();
+		js.setInput(instance, "level", 800);
+
+		const script: Array<[string, string[]]> = [
+			["click", []],
+			["pointerdown", []],
+			["pointerup", []],
+			["pointerenter", []],
+			["pointerleave", []],
+			["click", []],
+			["load", ["saved"]],
+			["click", []],
+			["focus", []],
+		];
+		let moved = 0;
+		for (const [trigger, fired] of script) {
+			if (ahead) tick(1_000_000);
+			// What the twin is told is exactly what the runtime knows: the layers that
+			// are still answering, and how long each has been where it is. A stopped
+			// layer is a layer the caller leaves out, which is how `stepInstance` says
+			// "stopped" without holding any state of its own.
+			const current: Record<string, string> = {};
+			const heldMs: Record<string, number> = {};
+			for (const layer of ["press", "glow", "boot"]) {
+				const at = js.stateIn(instance, layer);
+				if (at === null || js.stopped(instance, layer)) continue;
+				current[layer] = at;
+				heldMs[layer] = ahead ? Number.POSITIVE_INFINITY : 0;
+			}
+			const theirs = stepInstance(
+				table,
+				instance,
+				current,
+				trigger as Trigger,
+				js.inputs[instance],
+				new Set(fired),
+				heldMs,
+			);
+			const mine = js.fireIn(instance, trigger, fired);
+			assert.deepEqual(mine ?? undefined, theirs, `${trigger} (${ahead ? "late" : "at once"})`);
+			if (mine !== null) moved += 1;
+		}
+		assert.ok(moved >= 4, "the script has to actually move things");
+	}
+});
+
+/* ------------------------------------------------------------------ */
+/* Rung one: inputs                                                    */
+/* ------------------------------------------------------------------ */
+
+test("the store is seeded from the table, and a trigger is not in it", () => {
+	// An input is a runtime value, so the store is per *instance*: two buttons made
+	// from one definition have two hover progresses and always did. A trigger has
+	// no entry at all, because "not fired" is the absence of a value rather than
+	// one — a store that held one would fire every guarded edge on the next
+	// unrelated event, which reads to a person as a machine gone off on its own.
+	const js = evalRuntime(ladderTable([{ id: "m_a" }, { id: "m_b" }]));
+	js.start();
+
+	assert.deepEqual(js.inputs.m_a, { ready: true, armed: false, level: 200 });
+	assert.deepEqual(js.inputs.m_b, { ready: true, armed: false, level: 200 });
+	assert.equal(Object.hasOwn(js.inputs.m_a, "saved"), false);
+
+	// And they are two stores, not one read twice.
+	js.setInput("m_a", "level", 900);
+	assert.equal(js.inputs.m_a.level, 900);
+	assert.equal(js.inputs.m_b.level, 200);
+});
+
+test("a number input is clamped to its declared range, and the seed is not", () => {
+	const js = evalRuntime(ladderTable());
+	js.start();
+
+	assert.equal(js.setInput(instance, "level", 800), 800);
+	assert.equal(js.setInput(instance, "level", 5000), 1000);
+	assert.equal(js.setInput(instance, "level", -5000), 0);
+
+	// The asymmetry is deliberate and is worth a fixture of its own: what the
+	// *document* says an input starts at is carried through untouched, even where
+	// it sits outside the document's own declared range, because that is a thing
+	// the checks report and a person fixes rather than a thing the runtime should
+	// quietly rewrite so nobody ever sees it. What a *host* hands in is clamped,
+	// because a host is not a person and there is nowhere to report it to.
+	const wide = machineTable(
+		ladder().machines?.[0]
+			? {
+					...ladder(),
+					machines: [
+						{
+							...ladder().machines[0],
+							inputs: [input("level", "number", { initial: "9", min: "0", max: "1" })],
+						},
+					],
+				}
+			: ladder(),
+	);
+	const loose = evalRuntime(wide);
+	loose.start();
+	assert.equal(loose.inputs[instance].level, 9000);
+});
+
+test("setInput refuses what it cannot store, rather than coercing it", () => {
+	// Every refusal here is a value that would otherwise sit in the store failing
+	// comparisons in silence, which reads exactly like a machine that has stopped
+	// responding — the hardest kind of bug to report, because nothing happened.
+	const js = evalRuntime(ladderTable());
+	js.start();
+	const before = { ...js.inputs[instance] };
+
+	assert.equal(js.setInput(instance, "nosuch", true), null);
+	assert.equal(js.setInput("nobody", "ready", true), null);
+	// A trigger is fired, not set.
+	assert.equal(js.setInput(instance, "saved", true), null);
+	// Kind mismatches, both ways round.
+	assert.equal(js.setInput(instance, "ready", 1 as unknown as boolean), null);
+	assert.equal(js.setInput(instance, "level", true as unknown as number), null);
+	assert.equal(js.setInput(instance, "level", Number.NaN), null);
+
+	assert.deepEqual(js.inputs[instance], before);
+});
+
+test("a guard is the difference between moving and not, on the same trigger", () => {
+	// The whole of rung two from the outside. Same state, same trigger, two
+	// answers, and the only thing that changed is a value no pixel depends on —
+	// which is exactly why an input is not a design-space variable.
+	const { root, els } = page([instance]);
+	const js = evalRuntime(ladderTable(), root);
+	js.start();
+
+	els[instance].dispatch("click");
+	assert.equal(js.state(instance), "open");
+
+	// `ready` is true, so the guarded edge into `busy` is open.
+	els[instance].dispatch("pointerdown");
+	assert.equal(js.state(instance), "busy");
+	assert.equal(els[instance].attrs["data-state"], "busy");
+
+	// Wind it back and shut the guard.
+	js.set(instance, "open");
+	js.setInput(instance, "ready", false);
+	els[instance].dispatch("pointerdown");
+	assert.equal(js.state(instance), "open");
+});
+
+test("the four orderings are asked of a number, in thousandths", () => {
+	// `ge 0.5` is 500 thousandths, and the boundary is the point: a ratio reaches
+	// the runtime as a whole number of thousandths for the same reason a length
+	// reaches the program as a whole number of EMU, so "at least" and "more than"
+	// are exact rather than approximate.
+	const js = evalRuntime(ladderTable());
+	js.start();
+
+	assert.equal(js.stepIn(instance, "glow", "dim", "pointerenter", { level: 499 }), undefined);
+	assert.equal(js.stepIn(instance, "glow", "dim", "pointerenter", { level: 500 }), "bright");
+	assert.equal(js.stepIn(instance, "glow", "dim", "pointerenter", { level: 1000 }), "bright");
+	// An input the host has said nothing about refuses, rather than passing: the
+	// store is seeded from every declared initial, so a missing entry means the
+	// input is not one of this machine's at all, and answering "yes" would let a
+	// typo open an edge.
+	assert.equal(js.stepIn(instance, "glow", "dim", "pointerenter", {}), undefined);
+});
+
+test("a trigger input is true for one evaluation and gone", () => {
+	// The Entry edge of the boot layer is guarded on `saved fired`, which is the
+	// idiom the rung exists for: "when the save succeeds, move". Nothing has fired
+	// at start, so settling leaves the layer at its initial state.
+	const js = evalRuntime(ladderTable());
+	js.start();
+	assert.equal(js.stateIn(instance, "boot"), "cold");
+
+	// Firing it settles the layer, now, rather than arming it for whatever event
+	// happens to come next. An armed trigger would be the failure `INPUT_KINDS`
+	// warns about, one event later: a machine that goes off on its own.
+	assert.deepEqual(js.fireInput(instance, "saved"), { boot: "warm" });
+	assert.equal(js.stateIn(instance, "boot"), "warm");
+	assert.equal(Object.hasOwn(js.inputs[instance], "saved"), false);
+
+	// And it is spent. A second settle moves nothing, because the trigger is not
+	// in a store to be found again.
+	assert.equal(js.fireInput(instance, "saved"), null);
+
+	assert.equal(js.fireInput(instance, "ready"), null, "a boolean is set, not fired");
+	assert.equal(js.fireInput(instance, "nosuch"), null);
+});
+
+test("firing an input on a machine with no guarded load edge moves nothing", () => {
+	// Settling is a fixpoint: `start` already followed every load edge that was
+	// open, so re-running it can only move something a guard has just unlocked.
+	// That is what makes `load` the honest trigger for a host-fired input rather
+	// than an invented one — the alternative, firing every trigger the machine
+	// uses, would take a click nobody clicked.
+	const js = evalRuntime(
+		machineTable(
+			menus([{ id: "m_a" }], [state("boot"), state("shut")], [
+				edge("t0", "boot", "shut", "load"),
+			], { inputs: [input("saved", "trigger")] }),
+		),
+	);
+	js.start();
+	assert.equal(js.state(instance), "shut");
+	assert.equal(js.fireInput(instance, "saved"), null);
+	assert.equal(js.state(instance), "shut");
+});
+
+/* ------------------------------------------------------------------ */
+/* Rung two: the exit gate                                             */
+/* ------------------------------------------------------------------ */
+
+test("an exit time gates a trigger, and the trigger is dropped rather than deferred", () => {
+	// The stated departure from Rive, asserted rather than described. Rive would
+	// fire the transition when the time elapsed if the condition still held; we
+	// drop the event. The reason is this file's own: a deferred fire is a state
+	// change nobody's finger caused, arriving at a moment nothing on the page
+	// marks, and a runtime with a queue in it is a second animator arguing with
+	// the compositor.
+	const { js, tick } = clocked(ladderTable());
+	js.start();
+	js.fireIn(instance, "click");
+	js.fireIn(instance, "pointerdown");
+	assert.equal(js.state(instance), "busy");
+
+	// Too early: nothing moves, and nothing is remembered.
+	tick(299);
+	assert.equal(js.fireIn(instance, "pointerup"), null);
+	assert.equal(js.state(instance), "busy");
+
+	// Past the gate with no new event: still nothing. This is the whole of "not
+	// remembered" — a queue would have moved the machine here, with no finger on
+	// it.
+	tick(9_000);
+	assert.equal(js.state(instance), "busy");
+
+	// And the next event, which is a real one, is taken.
+	assert.deepEqual(js.fireIn(instance, "pointerup"), {
+		press: "open",
+		glow: "dim",
+		boot: "cold",
+	});
+});
+
+test("the gate opens at the exit time, not after it", () => {
+	// `held < exit`, strictly, so a 300ms exit time fires *at* 300ms. An off-by-one
+	// here is a debounce that is one tick long in the studio and another in the
+	// file, which is the class of disagreement this whole file is built to make
+	// impossible.
+	const { js, tick } = clocked(ladderTable());
+	js.start();
+	js.fireIn(instance, "click");
+	js.fireIn(instance, "pointerdown");
+	tick(300);
+	assert.deepEqual(js.fireIn(instance, "pointerup"), {
+		press: "open",
+		glow: "dim",
+		boot: "cold",
+	});
+});
+
+test("the clock is read at each state change, per layer", () => {
+	// The gate is a difference between two readings, so what it measures is how
+	// long *this layer* has been where it is — not how long the instance has
+	// existed, and not how long some other layer has been settled. A single
+	// per-instance stamp would make a busy glow layer open the press layer's gate.
+	const { js, tick } = clocked(ladderTable());
+	js.start();
+	tick(10_000);
+	js.fireIn(instance, "click");
+	// The press layer has just moved, so its clock restarts here; every other
+	// layer has been where it is for ten seconds.
+	js.fireIn(instance, "pointerdown");
+	tick(299);
+	assert.equal(js.fireIn(instance, "pointerup"), null);
+	tick(1);
+	assert.ok(js.fireIn(instance, "pointerup"));
+});
+
+/* ------------------------------------------------------------------ */
+/* Rung three: Entry, Exit and Any                                     */
+/* ------------------------------------------------------------------ */
+
+test("an Any edge is taken from every state of its own layer, and never another's", () => {
+	// It is a source, not a state: it does not appear in `states`, nothing goes
+	// *to* it, and it is written into every row of the layer whose state it lands
+	// in — *every* row, including the row of a state that already answers the same
+	// trigger with an edge of its own.
+	//
+	// That last row is why this test reads the table as well as running it, and the
+	// reason is worth spelling out because the obvious version of this test is
+	// wrong. `busy` has `t6` on `pointerleave` too, so from there the specific edge
+	// wins and `stepIn` says `open` — which is the *next* test's whole subject. So
+	// asking `stepIn` alone could not tell "the Any edge is in that row and was
+	// overridden" apart from "the Any edge was never written into that row at all",
+	// and those two are a precedence rule and a missing feature. This test is the
+	// coverage half and reads the rows; the one below is the precedence half and
+	// runs them. Between them the Any edge is pinned at both ends, which is what an
+	// earlier draft of this pair did not do: it asserted `shut` from all three
+	// states, contradicting the test directly beneath it.
+	const table = ladderTable();
+	const js = evalRuntime(table);
+	js.start();
+
+	// Annotated rather than inferred, here and on `row` below, because `assert.ok`
+	// is a TypeScript assertion function: narrowing one is only allowed against a
+	// name that carries an explicit type, and without the annotations the whole
+	// chain reading out of `press` infers circularly and lands as `any` — which
+	// would quietly turn the row assertions below into no assertions at all.
+	const press: RuntimeLayer | undefined = table.machines.m1.layers?.find(
+		(layer) => layer.id === "press",
+	);
+	assert.ok(press);
+	// Not a state, and nothing arrives at it: `any` is spelled in the document and
+	// exists nowhere in the table.
+	assert.equal(press.states.includes("any"), false);
+	assert.deepEqual(press.states, ["shut", "open", "busy"]);
+	assert.equal(js.stepIn(instance, "press", "any", "pointerleave"), undefined);
+
+	// Every row of this layer ends with it, which is what "from every state" means
+	// once expansion has happened — last because Any comes after the specific
+	// edges, which is the tie-break the table holds.
+	for (const from of press.states) {
+		const row: RuntimeEdge[] = press.edges[from]?.pointerleave ?? [];
+		assert.equal(row[row.length - 1]?.to, "shut", from);
+	}
+	// Two of the three rows hold nothing else on that trigger, so what the Any edge
+	// says is what the runtime does. The third holds two, and is the next test's.
+	for (const from of ["shut", "open"]) {
+		assert.equal(js.stepIn(instance, "press", from, "pointerleave"), "shut", from);
+	}
+	assert.equal(press.edges.busy?.pointerleave?.length, 2);
+
+	// And it stops at its own layer's wall. An Any edge that leaked into the other
+	// two would be a fallback that hijacked them — neither of which has any edge on
+	// `pointerleave` from the state it starts in.
+	assert.equal(js.stepIn(instance, "glow", "dim", "pointerleave"), undefined);
+	assert.equal(js.stepIn(instance, "boot", "cold", "pointerleave"), undefined);
+});
+
+test("a layer with no edge table at all is inert rather than a throw", () => {
+	// The table in an exported file is JSON in a script tag that no compiler ever
+	// saw, so `RuntimeLayer.edges` being a required field says nothing about what
+	// can actually arrive here. A layer without one moves nowhere — which is what a
+	// layer with an empty edge table does too, so this is the runtime being more
+	// careful than `stepLayer` rather than answering differently from it. The whole
+	// point is that the *rest* of the machine keeps working, because a throw on
+	// line one takes the behaviour of the whole page with it.
+	const table = {
+		instances: { m_a: { machine: "m1", initial: "shut", layerStart: { press: "shut", glow: "dim" } } },
+		machines: {
+			m1: {
+				initial: "shut",
+				states: ["shut", "open", "dim"],
+				edges: {},
+				layers: [
+					{ id: "press", initial: "shut", states: ["shut", "open"], edges: { shut: { click: [{ to: "open" }] } } },
+					// No `edges` key whatever, which is the shape a hand-written table has.
+					{ id: "glow", initial: "dim", states: ["dim"] },
+				],
+			},
+		},
+	} as unknown as MachineTable;
+	const js = evalRuntime(table);
+	js.start();
+	assert.equal(js.stepIn("m_a", "glow", "dim", "click"), undefined);
+	assert.deepEqual(js.fireIn("m_a", "click"), { press: "open", glow: "dim" });
+	assert.equal(js.stateIn("m_a", "glow"), "dim");
+});
+
+test("a specific edge beats an Any edge on the same trigger", () => {
+	// Rive's rule, and the only rule that makes Any usable: a fallback that beat
+	// the specific case would be a fallback nobody could override. It is a
+	// tie-break in the *table* — specific edges first, Any second — rather than a
+	// comparison here, so the studio cannot order the list differently.
+	const js = evalRuntime(ladderTable());
+	js.start();
+	assert.equal(js.stepIn(instance, "press", "busy", "pointerleave"), "open");
+	// Both edges really are there, so this is a precedence and not an absence.
+	assert.equal(js.stepIn(instance, "press", "open", "pointerleave"), "shut");
+});
+
+test("an Entry edge decides where the runtime starts, and the document decides what is drawn", () => {
+	// Entry is sugar over the initial state, and it is spelled as a rule so that a
+	// hand-written `entry` gets what a document one gets. What it does *not* touch
+	// is which state the canvas draws: that is a fact from the document, and the
+	// two can differ exactly as they already can when a node names a non-initial
+	// state.
+	const table = ladderTable();
+	assert.equal(table.instances[instance].layerStart?.boot, "cold");
+
+	const js = evalRuntime(table);
+	js.start();
+	assert.equal(js.stateIn(instance, "boot"), "cold");
+	// The Entry edge is on the layer's initial state, where the runtime starts,
+	// which is what makes it an Entry edge at all.
+	assert.equal(
+		js.stepIn(instance, "boot", "cold", "load", { }, ["saved"]),
+		"warm",
+	);
+});
+
+test("an Exit edge stops one layer and leaves the rest of the machine running", () => {
+	// A stopped layer keeps whatever state it was last in — its classes stay on
+	// the element, its copy is still what the picture draws — and stops answering.
+	// It is emphatically not in a state called Exit: a `data-state="exit"` would
+	// match no rule in the stylesheet and would look exactly like a machine that
+	// had failed.
+	const { root, els } = page([instance]);
+	const js = evalRuntime(ladderTable(), root);
+	js.start();
+	js.fireInput(instance, "saved");
+	assert.equal(js.stateIn(instance, "boot"), "warm");
+	assert.equal(js.stopped(instance, "boot"), false);
+
+	// One click: the press layer moves and the boot layer stops, in one event.
+	assert.deepEqual(js.fireIn(instance, "click"), {
+		press: "open",
+		glow: "dim",
+		boot: null,
+	});
+	assert.equal(js.stopped(instance, "boot"), true);
+	assert.equal(js.stateIn(instance, "boot"), "warm");
+	assert.equal(els[instance].attrs["data-state-boot"], "warm");
+
+	// And it is out of the walk from here on: the other two keep answering, and
+	// nothing writes `exit` anywhere.
+	assert.deepEqual(js.fireIn(instance, "click"), { press: "shut", glow: "dim" });
+	assert.equal(JSON.stringify(els[instance].attrs).includes("exit"), false);
+});
+
+/* ------------------------------------------------------------------ */
+/* Rung four: layers                                                   */
+/* ------------------------------------------------------------------ */
+
+test("the first layer writes data-state and every further one writes its own", () => {
+	// The asymmetry is the whole reason for it: a one-layer file is byte-identical
+	// to the one that shipped before layers existed, so no existing export changes
+	// and no existing stylesheet has to learn a new attribute.
+	const { root, els } = page([instance]);
+	evalRuntime(ladderTable(), root).start();
+
+	assert.equal(els[instance].attrs["data-state"], "shut");
+	assert.equal(els[instance].attrs["data-state-glow"], "dim");
+	assert.equal(els[instance].attrs["data-state-boot"], "cold");
+	assert.equal(els[instance].attrs["data-state-press"], undefined);
+
+	// And the one-layer document that came before writes exactly one attribute,
+	// spelled exactly as it always was.
+	const { root: plain, els: one } = page(["m_a"]);
+	evalRuntime(menuTable(), plain).start();
+	assert.deepEqual(Object.keys(one.m_a.attrs).sort(), ["data-node", "data-state"]);
+});
+
+test("two layers move independently, and one trigger can move both", () => {
+	const { root, els } = page([instance]);
+	const js = evalRuntime(ladderTable(), root);
+	js.start();
+	js.setInput(instance, "level", 800);
+
+	// `pointerenter` is the glow layer's alone.
+	els[instance].dispatch("pointerenter");
+	assert.equal(js.stateIn(instance, "glow"), "bright");
+	assert.equal(js.state(instance), "shut");
+
+	// `pointerleave` is both layers' at once: the press layer's Any edge and the
+	// glow layer's own. Two answers, one moment, which is what a layer is.
+	els[instance].dispatch("pointerleave");
+	assert.equal(js.stateIn(instance, "glow"), "dim");
+	assert.equal(js.state(instance), "shut");
+	assert.equal(els[instance].attrs["data-state-glow"], "dim");
+});
+
+test("an instance starts each layer where the document drew it", () => {
+	// `SceneNode.state` says the first layer's and `SceneNode.states` says any
+	// layer's, with the record winning where a document holds both. Two fields for
+	// one idea, paid for on purpose: every instance that exists today says its
+	// state in one string, and a migration is a thing that can go wrong in
+	// exchange for a tidiness nobody can see.
+	const js = evalRuntime(ladderTable([{ id: "m_a", at: { press: "busy", glow: "bright" } }]));
+	js.start();
+	assert.equal(js.state(instance), "busy");
+	assert.equal(js.stateIn(instance, "glow"), "bright");
+	assert.equal(js.stateIn(instance, "boot"), "cold");
+	assert.equal(js.stateIn(instance, "nope"), null);
+});
+
+test("a layer only listens for what its own edges use, across all the layers", () => {
+	// One listener per distinct event any layer names. Attaching all eight would
+	// put a click handler on every exported instance in the document, which is a
+	// real cost on a page and a real surprise in a devtools panel — and attaching
+	// only the first layer's would make a further layer's edges dead.
+	const { root, els } = page([instance]);
+	evalRuntime(ladderTable(), root).start();
+	assert.deepEqual(
+		Object.keys(els[instance].listeners).sort(),
+		["click", "pointerdown", "pointerenter", "pointerleave", "pointerup"],
+	);
+	// `load` has no event and never becomes a listener, however many layers use it.
+	assert.equal(els[instance].listeners[""], undefined);
+});
+
+test("onChange names the layer, so a host that re-renders knows which attribute moved", () => {
+	// The third argument is appended rather than substituted: a host written
+	// against the shipped two-argument callback goes on working and simply ignores
+	// it, which is the only way to add a layer id to a signature that is already in
+	// somebody's page.
+	const seen: Array<[string, string, string]> = [];
+	const js = evalRuntime(ladderTable(), null, (id, next, layer) => {
+		seen.push([id, next, layer]);
+	});
+	js.start();
+	assert.deepEqual(seen, [
+		[instance, "shut", "press"],
+		[instance, "dim", "glow"],
+		[instance, "cold", "boot"],
+	]);
+
+	seen.length = 0;
+	js.fireIn(instance, "click");
+	assert.deepEqual(seen, [[instance, "open", "press"]]);
+});
+
+test("a state id that is not one is refused, per layer", () => {
+	// The empty string is the case worth having: a layer somebody has just added
+	// has no states, so the table spells its initial as `""`, and a
+	// `data-state-glow=""` would match no rule in the stylesheet while looking to
+	// a reader exactly like a machine that failed to move.
+	const table: MachineTable = {
+		instances: { m_a: { machine: "m1", initial: "shut", layerStart: { press: "shut" } } },
+		machines: {
+			m1: {
+				initial: "shut",
+				states: ["shut"],
+				edges: {},
+				layers: [
+					{ id: "press", initial: "shut", states: ["shut"], edges: {} },
+					{ id: "glow", initial: "", states: [], edges: {} },
+				],
+			},
+		},
+	};
+	const { root, els } = page(["m_a"]);
+	const js = evalRuntime(table, root);
+	js.start();
+
+	assert.equal(js.state("m_a"), "shut");
+	assert.equal(js.stateIn("m_a", "glow"), null);
+	assert.equal(els.m_a.attrs["data-state-glow"], undefined);
+	assert.equal(js.setIn("m_a", "glow", undefined as unknown as string), null);
+});
+
+/* ------------------------------------------------------------------ */
+/* Rung five: what is not here                                         */
+/* ------------------------------------------------------------------ */
+
+test("the table carries no timeline and the runtime samples none", () => {
+	// Stated as a test because it is a boundary somebody will otherwise try to
+	// helpfully cross. A timeline is `@keyframes` in the exported file and the
+	// compositor plays it once this script switches the attribute; a blend is
+	// arithmetic over a runtime value CSS cannot mix, so the file carries one stop
+	// and a `lost` entry says which. Neither is in `MachineTable`, so there is
+	// nothing here to sample — and a sampler in here, reading a second copy of the
+	// keyframes shipped inside the script tag, would be exactly the two
+	// implementations that drift.
+	//
+	// The real sampling is `machines.ts`'s `sampleTimeline` and `blendWeights`,
+	// which need the *document* and the answer set, and which the studio canvas
+	// calls with a model it already has.
+	const table = machineTable(
+		menus([{ id: "m_a" }], threeStates(), threeEdges(), {
+			timelines: [
+				{
+					id: "w1",
+					name: "Open",
+					tracks: [
+						{ part: "label", dim: "y", keys: [{ at: single("0ms"), value: single("0px") }] },
+					],
+				},
+			],
+		}),
+	);
+	const json = JSON.stringify(table);
+	for (const word of ["timeline", "keys", "blend", "track"]) {
+		assert.equal(json.includes(word), false, `the table must not carry ${word}`);
+	}
+	for (const word of ["keyframe", "lerp", "blend", "sample"]) {
+		assert.equal(MACHINE_RUNTIME.includes(word), false, `the runtime must not mention ${word}`);
+	}
 });

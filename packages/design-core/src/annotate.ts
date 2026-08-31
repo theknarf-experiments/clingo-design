@@ -54,6 +54,26 @@ export interface Annotation {
 	constraint: string;
 	kind: ConstraintKind;
 	shape: "line" | "span";
+	/**
+	 * The axis the constraint talks about — and **the planar pair, where
+	 * `EdgeSpec.axis` has three.**
+	 *
+	 * That difference is the one design decision the third axis asked of this
+	 * file, and the answer is that a rule about depth draws **nothing**. A mark
+	 * is a line ruled across the design or a distance measured along it, and
+	 * both of those are lengths *on the page*: `front`, `centerZ`, `back` and
+	 * `depth` are none of them. Projecting one onto the plane would put a
+	 * measurement on screen for a number the page does not contain — a card and
+	 * a cube "aligned on centerZ" would grow a line between them that means
+	 * nothing anyone can see — and drawing it somewhere arbitrary would be worse
+	 * than drawing nothing.
+	 *
+	 * So {@link annotate} skips a constraint whose edge is on `z` and this type
+	 * keeps its two axes. It is the same refusal `axisBounds` makes about a
+	 * turned node in the other file that draws, and it is made visible the same
+	 * way: `refusedEdge` and the Rules panel say what the rule is about, in
+	 * words, where a mark cannot.
+	 */
 	axis: "x" | "y";
 	at: number;
 	from: number;
@@ -105,10 +125,16 @@ const along = (frame: Frame, axis: "x" | "y") =>
 const across = (frame: Frame, axis: "x" | "y") =>
 	along(frame, axis === "x" ? "y" : "x");
 
-/** What the solver calls `ge(N,E)`, halved: one edge of one placed node. */
-function edgeOf(frame: Frame, edge: Edge): number {
+/**
+ * What the solver calls `ge(N,E)`, halved: one edge of one placed node.
+ *
+ * `axis` is handed in already narrowed for {@link marksFor}'s reason: the only
+ * caller has one, and re-reading `EDGES[edge].axis` here would be a second place
+ * the third axis has to be turned away from a `Frame` that has four numbers.
+ */
+function edgeOf(frame: Frame, edge: Edge, axis: "x" | "y"): number {
 	const spec = EDGES[edge];
-	const { start, size } = along(frame, spec.axis);
+	const { start, size } = along(frame, axis);
 	if (spec.role === "span") return size;
 	return start + size * OFFSET[spec.place ?? "lead"];
 }
@@ -208,11 +234,16 @@ export function annotate(
 		if (!c.nodes.some((id) => selection.has(id))) continue;
 		const edge = c.edge ?? spec.edges[0];
 		if (!edge) continue;
+		// A depth rule draws nothing — see {@link Annotation.axis}. Skipped here
+		// rather than filtered by the caller, because every caller would have to
+		// know the same thing and one of them would forget.
+		const axis = EDGES[edge].axis;
+		if (axis !== "x" && axis !== "y") continue;
 		const frames = c.nodes
 			.map((id) => placed.get(id)?.world ?? datumFrame(id, edge, lines()))
 			.filter((f): f is Frame => f !== undefined);
 		if (frames.length < spec.minNodes) continue;
-		out.push(...marksFor(c, edge, frames, scene.unit ?? DEFAULT_UNIT));
+		out.push(...marksFor(c, edge, axis, frames, scene.unit ?? DEFAULT_UNIT));
 	}
 	return out;
 }
@@ -220,13 +251,20 @@ export function annotate(
 function marksFor(
 	c: Constraint,
 	edge: Edge,
+	/**
+	 * The axis, handed in already narrowed to the two this file can draw.
+	 *
+	 * An argument rather than a second `EDGES[edge].axis` read, so that the one
+	 * place the third axis is turned away — {@link annotate}'s loop — is also the
+	 * only place that has to know it exists.
+	 */
+	axis: "x" | "y",
 	frames: readonly Frame[],
 	unit: Unit,
 ): Annotation[] {
 	const spec = CONSTRAINT_KINDS[c.kind];
 	/** Every label on a mark, in the unit the document is read in. */
 	const say = (emu: number) => displayLength(emu, unit);
-	const axis = EDGES[edge].axis;
 	const of = { constraint: c.id, kind: c.kind, axis } as const;
 
 	/** The band a line has to cross to touch every member. */
@@ -284,7 +322,7 @@ function marksFor(
 			label: say(round(along(f, axis).size)),
 		}));
 	}
-	const at = round(edgeOf(frames[0], edge));
+	const at = round(edgeOf(frames[0], edge, axis));
 	return [
 		{
 			...of,

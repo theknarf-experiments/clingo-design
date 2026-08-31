@@ -287,3 +287,53 @@
 	stroke-width: 1;
 	opacity: 0.55;
 }
+
+/*
+ * The chip that says you are inside a 3D view, and how to get out again.
+ *
+ * A viewport that has been entered swallows the pointer over its own rectangle
+ * — that is what makes orbiting and picking possible in there — so the marquee,
+ * the drag and the context menu stop working over those pixels. That is a mode,
+ * and a mode with no indicator is a tool that has stopped responding for a
+ * reason nobody can see. The same argument the toolbar's Preview button makes
+ * one file over, made in place rather than in the chrome, because the mode is
+ * about one rectangle rather than about the canvas.
+ *
+ * Positioned on the view's own top-left corner, in canvas pixels like every
+ * other overlay here, and it takes the pointer so that clicking it leaves.
+ */
+/* The chip row that hangs off an entered view's top-left corner: the way out,
+   and which handles the selection wears. Absolute here so the buttons inside it
+   are ordinary flow items rather than three things stacked on one point. */
+.enteredBar {
+	position: absolute;
+	display: flex;
+	gap: 1px;
+	transform: translate(0, -100%);
+	z-index: 4;
+}
+
+.entered {
+	padding: 2px 8px;
+	font: inherit;
+	font-size: 11px;
+	line-height: 1.5;
+	white-space: nowrap;
+	color: var(--dc-bg, #fff);
+	background: #6366f1;
+	border: 0;
+	border-radius: 3px 3px 0 0;
+	cursor: pointer;
+	pointer-events: auto;
+	z-index: 4;
+}
+
+.entered:hover {
+	background: color-mix(in srgb, #6366f1 80%, #000);
+}
+
+/* The mode that is on. Darkened rather than outlined, because an outline on a
+   3px-radius chip two pixels tall reads as a rendering fault. */
+.entered[aria-pressed="true"] {
+	background: color-mix(in srgb, #6366f1 62%, #000);
+}

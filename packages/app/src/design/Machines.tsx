@@ -1,10 +1,18 @@
+import { useState } from "react";
+
 import {
+	BLEND_KINDS,
+	BLEND_KIND_NAMES,
+	type Blend,
+	type BlendKind,
 	DEFAULT_DURATION_BUDGET_MS,
 	DEFAULT_UNIT,
 	DIMENSIONS,
 	type Dimension,
 	FRAME_DIMS,
+	type InputValues,
 	type Machine,
+	type MachineState,
 	type ModelMachine,
 	PROPS,
 	PROP_NAMES,
@@ -19,26 +27,35 @@ import {
 	type Token,
 	type Value,
 	type ValueType,
+	addBlendStop,
+	addLayer,
 	addMachine,
 	addMachineCheck,
 	addState,
+	addTimeline,
 	clearStatePart,
 	componentDef,
 	componentDefs,
+	deleteBlendStop,
+	deleteLayer,
 	deleteMachine,
 	deleteState,
 	durationBudgetCheck,
 	findInTree,
+	findInput,
 	findState,
 	findTransition,
 	hasMachineCheck,
-	initialState,
 	instanceNodes,
 	isInstance,
+	layerInitial,
+	layerOf,
 	lit,
+	machineCheckFinding,
 	machineChecks,
 	machineForRoot,
 	machineHealth,
+	machineLayers,
 	materializedParts,
 	motionMs,
 	nodeNames,
@@ -46,25 +63,36 @@ import {
 	parseStatePart,
 	propValues,
 	removeMachineCheck,
+	renameLayer,
 	renameMachine,
 	renameState,
+	reorderLayer,
 	reorderState,
 	resolveValue,
-	setNodeState,
+	setBlendInput,
+	setNodeLayerState,
+	setStateBlend,
 	setStateFrame,
 	setStateHidden,
+	setStateLayer,
 	setStateProp,
+	setStateTimeline,
 	sharedPropsOfKinds,
-	shownState,
+	shownStates,
 	stateFrameVar,
 	stateName,
 	statePropVar,
 	tokensFor,
 	tokensOfType,
+	transitionExit,
+	updateBlendStop,
 	writeDuration,
 } from "@clingo-design/design-core";
 
+import { Inputs } from "./Inputs";
+import { LayerStrip } from "./LayerStrip";
 import { StateStrip } from "./StateStrip";
+import { Timeline, suspectKey } from "./Timeline";
 import { Transitions } from "./Transitions";
 import { ValueEditor, type WhyRow } from "./ValueEditor";
 import { cx } from "./cx";
@@ -89,11 +117,47 @@ export interface MachinesProps {
 	selection: ReadonlySet<string>;
 	onSelectionChange?: (ids: string[]) => void;
 	/**
-	 * Instance node id -> the state the canvas is drawing instead of the
-	 * document's. **Editor state, not the document's** — see `useMachinePlayback`.
+	 * Instance node id -> layer id -> the state the canvas is drawing instead of
+	 * the document's. **Editor state, not the document's** — see
+	 * `useMachinePlayback`.
+	 *
+	 * Nested where it used to be flat, and the nesting is the rung: a machine is
+	 * in one state *per layer*, all at once, so a flat record could only ever have
+	 * carried the first layer's third of the picture.
 	 */
-	playing: Readonly<Record<string, string>>;
-	onPlay: (instance: string, state: string | null) => void;
+	playing: Readonly<Record<string, Readonly<Record<string, string>>>>;
+	/** Drive one layer of one instance; null hands that layer back to the document. */
+	onPlay: (instance: string, layer: string, state: string | null) => void;
+	/**
+	 * Instance -> input id -> what the preview is holding. Editor state.
+	 *
+	 * **Optional, where `rive-ladder-spec.md` §10.6 has these three required.** A
+	 * studio that has not wired a playback store yet must still be able to declare
+	 * inputs, and the alternative — a required prop — would take the whole panel
+	 * out of the build for the length of one other step's edit. A caller that
+	 * passes them is exactly the frozen contract; a caller that does not gets the
+	 * declaring half and a sentence saying the driving half is not connected.
+	 */
+	inputs?: Readonly<Record<string, InputValues>>;
+	onSetInput?: (instance: string, input: string, value: boolean | number) => void;
+	onFireInput?: (instance: string, input: string) => void;
+	/** Which layer the panel's strips are showing. Editor state, held by Studio. */
+	layer?: string;
+	onLayerChange?: (layer: string) => void;
+	/**
+	 * Instance -> where its timeline scrubber is, in milliseconds, and how to move
+	 * it.
+	 *
+	 * **Two props beyond the frozen five, and they are not optional to the
+	 * feature.** `rive-ladder-spec.md` §10.4 puts `at` and `onScrub` on the
+	 * timeline editor and §10.5 puts `scrub`/`setScrub` on the playback hook, and
+	 * the timeline editor lives inside this panel — so with no way through, the
+	 * scrubber could only ever move rows in this list and never the canvas, which
+	 * is the one thing it exists to do. Absent, the position is held locally and
+	 * says so.
+	 */
+	scrub?: Readonly<Record<string, number>>;
+	onScrub?: (instance: string, ms: number) => void;
 	/** What the answer set says about each machine, by machine id. */
 	health?: Readonly<Record<string, ModelMachine>>;
 	/** Rules the design on screen breaks, so a machine check reads like any rule. */
@@ -159,8 +223,18 @@ function subjectOf(
 	return { instance: instance ?? instances[0], part: part ?? machine.root };
 }
 
-/** What one universe resolved one machine's edges to, in whole milliseconds. */
-type Timing = Record<string, { duration: number; delay: number; stagger: number }>;
+/**
+ * What one universe resolved one machine's edges to, in whole milliseconds.
+ *
+ * Four numbers rather than three since the ladder: an exit time is a `duration`
+ * Value like a delay, it clamps at zero like a delay and the program `#project`s
+ * it like a delay, so a debounce scale holding two ends is two designs and only
+ * the solver knows which end is on screen.
+ */
+type Timing = Record<
+	string,
+	{ duration: number; delay: number; stagger: number; exit: number }
+>;
 
 /**
  * Every edge's pacing: the answer set's number where there is one, the
@@ -187,6 +261,12 @@ function timingFor(
 				duration: answer?.duration[t.id] ?? motionMs(machine, t, "duration", context),
 				delay: answer?.delay[t.id] ?? motionMs(machine, t, "delay", context),
 				stagger: answer?.stagger[t.id] ?? motionMs(machine, t, "stagger", context),
+				// Through `transitionExit` rather than `motionMs`, because `exit` is not
+				// a `MotionProp` — `MOTION_PROPS` still has three entries and
+				// `motionMs` reads that table. One function each until the day the
+				// fourth entry lands, at which point both readings become the same
+				// call. The clamp at zero is the same one either way.
+				exit: answer?.exit[t.id] ?? transitionExit(machine, t, context),
 			},
 		]),
 	);
@@ -210,6 +290,22 @@ function timingFor(
  * canned bodies are anonymous in every argument (`munreached(_,_)`), so a check
  * is a claim about the document and not about one machine. The machine's name is
  * only put in front of a phrase where there is more than one to confuse.
+ *
+ * ## Eleven checks, five sentences here and six from design-core
+ *
+ * The four graph checks and the budget keep their sentences in this file,
+ * because they were written when those checks shipped and a second spelling of
+ * "Ghost cannot be reached" would be a second spelling that drifts. The six the
+ * ladder added get theirs from {@link machineCheckFinding}, which is exported
+ * for exactly this and is documented as "the six the ladder added, and `null`
+ * for everything else, including a check id it has never heard of" — so it is
+ * spelled here as the `default:` branch after this switch's own cases rather
+ * than as five more `case`s that would have to be kept in step with a list in
+ * another package.
+ *
+ * The budget is the one check that could not be answered from a document at all:
+ * what a transition takes is `mdur/3` in an answer set, which is why this
+ * function is handed a {@link Timing} table and `machineCheckFinding` is not.
  */
 function findingFor(
 	check: string,
@@ -222,7 +318,10 @@ function findingFor(
 		const health = machineHealth(machine);
 		const states = (ids: readonly string[]) =>
 			ids.map((id) => stateName(machine, id)).join(", ");
-		let phrase: string | null = null;
+		// The document's reading, handed on so `machineCheckFinding` does not walk
+		// the machine a second time per row: eleven rows times N machines is eleven
+		// walks of the same graph otherwise.
+		let phrase: string | null = machineCheckFinding(check, machine, health);
 		switch (check) {
 			case "machine_reachable":
 				if (health.unreachable.length > 0) {
@@ -700,6 +799,390 @@ function StateDelta({
 }
 
 /**
+ * What one state plays: nothing, a timeline, or a mixture of them.
+ *
+ * **This is a property of a state and it is edited where the state is**, which
+ * is the whole reason it is here rather than in the timeline editor. A timeline
+ * belongs to the machine and is routinely played by two states — a `loop` and a
+ * `pressed` both playing `idle` — so "which timeline does this play" is a
+ * sentence about the state, and putting the control on the timeline would make
+ * it a sentence about a thing that has several answers at once.
+ *
+ * **A state's settled pose is the timeline's last keyframe, and it is derived.**
+ * The state still has its own delta, and the two compose exactly as everything
+ * else here does: the timeline decides what it has a track for and the delta
+ * decides the rest. Nothing is stored twice, so moving the last keyframe moves
+ * the picture rather than leaving it behind.
+ *
+ * **A state holding both a timeline and a blend is reported, never repaired.**
+ * The blend wins where a document somehow holds both — that is `MachineState`'s
+ * own shipped rule — and `mtwosource/2` says so out loud, because a state with
+ * two sources is a mistake a person should see rather than one a reader should
+ * quietly pick a side in. So the two controls are both live and the sentence
+ * appears underneath.
+ */
+function Plays({
+	machine,
+	state,
+	twoSource,
+	stopsOutOfRange,
+	gap,
+	onSceneChange,
+}: {
+	machine: Machine;
+	state: MachineState;
+	twoSource: boolean;
+	/** 1-based stop numbers outside the blend input's own range. */
+	stopsOutOfRange: ReadonlySet<number>;
+	/** The stops do not cover the input's range — legal, and worth saying. */
+	gap: boolean;
+	onSceneChange: MachinesProps["onSceneChange"];
+}) {
+	const timelines = machine.timelines ?? [];
+	const layers = machineLayers(machine);
+	const numbers = (machine.inputs ?? []).filter((x) => x.kind === "number");
+	const blend = state.blend;
+
+	/**
+	 * A fresh blend starts `oneD` with no stops, on the first number input there
+	 * is.
+	 *
+	 * With no stops rather than with one, because a stop names a timeline and
+	 * inventing which timeline somebody meant to mix is a guess this panel cannot
+	 * make — and a blend with one stop plays that stop flat everywhere, which
+	 * looks like a working mixture and is not one.
+	 */
+	const fresh = (): Blend => ({
+		kind: "oneD",
+		...(numbers[0] ? { input: numbers[0].id } : {}),
+		stops: [],
+	});
+
+	/**
+	 * Where a new 1D stop lands: an end of the input's own declared range.
+	 *
+	 * The bottom for the first stop and the top for every one after it, out of the
+	 * strings the document holds rather than out of `inputRange`'s thousandths,
+	 * because those strings are exactly what the field beside it edits. A range
+	 * nobody stated has no ends to use, so it falls back to `0` and then to the
+	 * count — which stacks two stops on one threshold if somebody keeps pressing,
+	 * and that is visible in the row and fixed by typing rather than hidden by a
+	 * clever guess about an axis the document has not described.
+	 */
+	const along = blend === undefined ? undefined : findInput(machine, blend.input);
+	const nextAt = (): string | undefined => {
+		if (blend === undefined || blend.kind !== "oneD") return undefined;
+		if (blend.stops.length === 0) return along?.min ?? "0";
+		return along?.max ?? String(blend.stops.length);
+	};
+
+	return (
+		<div className={styles.plays} data-role="state-plays" data-state={state.id}>
+			{/*
+			 * Which layer this state belongs to.
+			 *
+			 * Here rather than on the chip in the strip above, and the reason is what
+			 * the control does: moving a state to another layer takes it out of the
+			 * strip it is being edited in, so a select on the chip would be a menu
+			 * that makes the thing it is attached to disappear. Here it sits with the
+			 * state's other whole-state facts — what it plays, what it mixes — and the
+			 * strip re-renders around it.
+			 *
+			 * `null` is the first layer and is written as *absence*, not as the first
+			 * layer's id, because absent-is-first is what every document written
+			 * before layers existed means and a writer that filled the field in would
+			 * change nothing today and everything the moment somebody reordered the
+			 * layers.
+			 */}
+			<label className={styles.play}>
+				<span className={styles.playLabel}>In</span>
+				<select
+					className={styles.select}
+					data-role="state-layer"
+					aria-label="Layer this state belongs to"
+					title="Which layer this state is one of. A machine is in one state per layer at once, so moving a state here changes what it composes with rather than what it replaces."
+					value={layerOf(machine, state)}
+					onChange={(e) =>
+						onSceneChange((prev) =>
+							setStateLayer(
+								prev,
+								machine.id,
+								state.id,
+								e.target.value === layers[0].id ? null : e.target.value,
+							),
+						)
+					}
+				>
+					{layers.map((l) => (
+						<option key={l.id} value={l.id}>
+							{l.name}
+						</option>
+					))}
+				</select>
+			</label>
+
+			<label className={styles.play}>
+				<span className={styles.playLabel}>Plays</span>
+				<select
+					className={styles.select}
+					data-role="state-timeline"
+					aria-label="Timeline this state plays"
+					title="A timeline this state plays from its start. Its settled pose — what a cross-state rule compares and what the canvas draws at rest — is the timeline at its own length, derived rather than stored."
+					value={state.timeline ?? ""}
+					disabled={timelines.length === 0}
+					onChange={(e) =>
+						onSceneChange((prev) =>
+							setStateTimeline(
+								prev,
+								machine.id,
+								state.id,
+								e.target.value || null,
+							),
+						)
+					}
+				>
+					<option value="">nothing</option>
+					{timelines.map((w) => (
+						<option key={w.id} value={w.id}>
+							{w.name}
+						</option>
+					))}
+				</select>
+
+				<button
+					type="button"
+					className={styles.add}
+					data-role="toggle-blend"
+					title={
+						blend === undefined
+							? "Mix several timelines by a number input. None of the mixing is solved and none of it can be — the input is not in the program — but every keyframe of every timeline a stop names is, and so are the thresholds the checks judge."
+							: "Take the mixture away. The timelines stay in the machine."
+					}
+					onClick={() =>
+						onSceneChange((prev) =>
+							setStateBlend(
+								prev,
+								machine.id,
+								state.id,
+								blend === undefined ? fresh() : null,
+							),
+						)
+					}
+				>
+					{blend === undefined ? "+ Blend" : "− Blend"}
+				</button>
+			</label>
+
+			{blend !== undefined ? (
+				<div className={styles.blend} data-role="blend">
+					<div className={styles.blendHead}>
+						<select
+							className={styles.select}
+							data-role="blend-kind"
+							aria-label="Blend kind"
+							title="1D lays the stops along one number input's axis and mixes the two either side of it. Direct gives every stop its own weight input, which is a mixture nothing interpolates between."
+							value={blend.kind}
+							onChange={(e) =>
+								onSceneChange((prev) =>
+									setStateBlend(prev, machine.id, state.id, {
+										...blend,
+										kind: e.target.value as BlendKind,
+									}),
+								)
+							}
+						>
+							{BLEND_KIND_NAMES.map((kind) => (
+								<option key={kind} value={kind}>
+									{BLEND_KINDS[kind].label}
+								</option>
+							))}
+						</select>
+
+						{blend.kind === "oneD" ? (
+							<select
+								className={styles.select}
+								data-role="blend-input"
+								aria-label="Blend input"
+								title="The number input the stops are laid out along. Its declared range is what `mstopout/3` judges the thresholds against — and a range nobody stated is open, so the check simply stays quiet."
+								value={blend.input ?? ""}
+								onChange={(e) =>
+									onSceneChange((prev) =>
+										setBlendInput(
+											prev,
+											machine.id,
+											state.id,
+											e.target.value || null,
+										),
+									)
+								}
+							>
+								<option value="">no input</option>
+								{numbers.map((x) => (
+									<option key={x.id} value={x.id}>
+										{x.name || x.id}
+									</option>
+								))}
+							</select>
+						) : null}
+
+						<button
+							type="button"
+							className={styles.add}
+							data-role="add-blend-stop"
+							disabled={timelines.length === 0}
+							title={
+								timelines.length === 0
+									? "A stop plays a timeline, and this machine has none yet."
+									: "Another timeline in the mixture, at an end of the input's own range."
+							}
+							onClick={() =>
+								onSceneChange((prev) =>
+									addBlendStop(
+										prev,
+										machine.id,
+										state.id,
+										timelines[0].id,
+										nextAt(),
+									),
+								)
+							}
+						>
+							+ Stop
+						</button>
+					</div>
+
+					{blend.stops.map((stop, i) => (
+						<div
+							// The index is the identity, because a stop has none: deleting
+							// stop 2 really does make stop 3 into stop 2, in the document and
+							// in `mstopat/4`, and a synthetic key would be pretending
+							// otherwise.
+							key={i}
+							className={cx(
+								styles.stop,
+								stopsOutOfRange.has(i + 1) && styles.outside,
+							)}
+							data-role="blend-stop"
+							data-stop={i + 1}
+						>
+							<span className={styles.stopIndex}>{i + 1}</span>
+							<select
+								className={styles.select}
+								data-role="stop-timeline"
+								aria-label="Timeline this stop plays"
+								value={stop.timeline}
+								onChange={(e) =>
+									onSceneChange((prev) =>
+										updateBlendStop(prev, machine.id, state.id, i + 1, {
+											timeline: e.target.value,
+										}),
+									)
+								}
+							>
+								{timelines.some((w) => w.id === stop.timeline) ? null : (
+									<option value={stop.timeline}>
+										{stop.timeline} — no such timeline
+									</option>
+								)}
+								{timelines.map((w) => (
+									<option key={w.id} value={w.id}>
+										{w.name}
+									</option>
+								))}
+							</select>
+
+							{blend.kind === "oneD" ? (
+								<input
+									className={styles.threshold}
+									data-role="stop-at"
+									aria-label="Where on the axis this stop sits"
+									title="Where on the input's axis this stop sits. Read as a ratio in thousandths, which is the integer `mstopat/4` carries and the one the checks compare against the input's range."
+									value={stop.at ?? ""}
+									onChange={(e) =>
+										onSceneChange(
+											(prev) =>
+												updateBlendStop(prev, machine.id, state.id, i + 1, {
+													at: e.target.value === "" ? null : e.target.value,
+												}),
+											`stop-at-${machine.id}-${state.id}-${i + 1}`,
+										)
+									}
+								/>
+							) : (
+								<select
+									className={styles.select}
+									data-role="stop-by"
+									aria-label="The input that is this stop's weight"
+									value={stop.by ?? ""}
+									onChange={(e) =>
+										onSceneChange((prev) =>
+											updateBlendStop(prev, machine.id, state.id, i + 1, {
+												by: e.target.value || null,
+											}),
+										)
+									}
+								>
+									<option value="">no weight</option>
+									{numbers.map((x) => (
+										<option key={x.id} value={x.id}>
+											{x.name || x.id}
+										</option>
+									))}
+								</select>
+							)}
+
+							<button
+								type="button"
+								className={styles.clear}
+								data-role="delete-blend-stop"
+								title="Take this stop out of the mixture."
+								onClick={() =>
+									onSceneChange((prev) =>
+										deleteBlendStop(prev, machine.id, state.id, i + 1),
+									)
+								}
+							>
+								×
+							</button>
+						</div>
+					))}
+
+					{blend.stops.length === 0 ? (
+						<p className={styles.empty} data-role="no-stops">
+							No stops, so this blend mixes nothing. Every keyframe of every
+							timeline a stop names is solved; the mixing itself is arithmetic
+							over a runtime value and is not.
+						</p>
+					) : null}
+
+					{gap ? (
+						<p className={styles.trouble} data-role="blend-gap">
+							The stops do not cover the input's whole range, so part of the axis
+							plays one timeline flat. Legal, sometimes meant, and worth knowing.
+						</p>
+					) : null}
+					{stopsOutOfRange.size > 0 ? (
+						<p className={styles.trouble} data-role="blend-outside">
+							{stopsOutOfRange.size === 1 ? "A stop sits" : "Stops sit"} outside
+							the input's own range, where the input can never be, so{" "}
+							{stopsOutOfRange.size === 1 ? "it plays" : "they play"} nothing.
+						</p>
+					) : null}
+				</div>
+			) : null}
+
+			{twoSource ? (
+				<p className={styles.trouble} data-role="two-source">
+					This state holds a timeline <em>and</em> a blend. The blend wins, and the
+					pair is reported rather than repaired — a state with two sources is a
+					mistake to see rather than one to be quietly decided for.
+				</p>
+			) : null}
+		</div>
+	);
+}
+
+/**
  * One machine: what it drives, its states, what a state changes, its edges, and
  * what is wrong with it.
  *
@@ -728,6 +1211,13 @@ function MachineCard({
 	onSelectionChange,
 	playing,
 	onPlay,
+	inputs,
+	onSetInput,
+	onFireInput,
+	layer,
+	onLayerChange,
+	scrub,
+	onScrub,
 	health,
 }: {
 	scene: Scene;
@@ -740,10 +1230,47 @@ function MachineCard({
 	const { instance, part } = subjectOf(scene, machine, selection, instances);
 	const names = nodeNames(scene.nodes);
 
-	const shown = instance
-		? shownState(machine, instance)
-		: (initialState(machine)?.id ?? "");
-	const played = instance ? playing[instance.id] : undefined;
+	/**
+	 * Which layer this card is pointed at.
+	 *
+	 * The prop first, because Studio holds one selection for the whole panel and
+	 * a card that ignored it would disagree with whatever else reads it; then this
+	 * card's own memory, because the prop is one string and this list may hold
+	 * several machines with different layers; then the first layer, which is what
+	 * every un-layered machine has and is the reading `StateStrip` documents for
+	 * an absent `layer`.
+	 */
+	const layers = machineLayers(machine);
+	const [remembered, setRemembered] = useState<string | undefined>(undefined);
+	const has = (id: string | undefined): id is string =>
+		id !== undefined && layers.some((l) => l.id === id);
+	const looking = has(layer) ? layer : has(remembered) ? remembered : layers[0].id;
+	const look = (id: string) => {
+		setRemembered(id);
+		onLayerChange?.(id);
+	};
+
+	/**
+	 * What each layer is showing, and what the canvas is playing in each.
+	 *
+	 * `shownStates` is the document's answer for every layer at once — it is the
+	 * same walk the compiler makes to emit `shown/2`, including its refusal to
+	 * draw a state that has since moved to another layer — and with no use of the
+	 * component in the document there is nothing to ask it about, so each layer
+	 * falls back to its own first state. That fallback is what lets the panel
+	 * still edit a machine nothing has used yet.
+	 */
+	const shownByLayer: Readonly<Record<string, string>> = instance
+		? shownStates(machine, instance)
+		: Object.fromEntries(
+				layers
+					.map((l) => [l.id, layerInitial(machine, l.id)?.id])
+					.filter((pair): pair is [string, string] => pair[1] !== undefined),
+			);
+	const playedByLayer = instance ? (playing[instance.id] ?? {}) : {};
+
+	const shown = shownByLayer[looking] ?? "";
+	const played = playedByLayer[looking];
 	/**
 	 * The state being edited is the state being looked at.
 	 *
@@ -756,11 +1283,108 @@ function MachineCard({
 	 * the two visibly apart.
 	 */
 	const editing = played ?? shown;
+	const editingState = findState(machine, editing);
 
+	/**
+	 * What is wrong with this machine — the answer set's reading where there is
+	 * one, the document's where there is not.
+	 *
+	 * The order matters and it is the opposite of the checks': there, the document
+	 * is authoritative because a finding has to be showable while the solve is
+	 * unsatisfiable. Here the answer set goes first because these lists are what
+	 * *mark* rows, and a mark that disagreed with the sentence beside it would be
+	 * worse than either. An empty array from the answer set is an answer and not
+	 * an absence, so `??` falls through only when the machine is missing from the
+	 * model entirely — which is what a solve asked for without `scenery` looks
+	 * like.
+	 */
 	const answer = health?.[machine.id];
-	const unreachable = new Set(machineHealth(machine).unreachable);
+	const doc = machineHealth(machine);
+	const unreachable = new Set(answer?.unreachable ?? doc.unreachable);
 	const reachable = new Set(
 		machine.states.map((s) => s.id).filter((id) => !unreachable.has(id)),
+	);
+	const deadWithGuards = new Set(
+		answer?.unreachableWithGuards ?? doc.unreachableWithGuards,
+	);
+	const impossible = new Set(answer?.impossible ?? doc.impossible);
+	const misplaced = new Set(answer?.misplaced ?? doc.misplaced);
+	/**
+	 * Every layer named in a fight, over paint, geometry **or rotation**.
+	 *
+	 * All three families, because they are one finding: a designer told two layers
+	 * argue over `fill` and not that they also argue over `rotateZ` fixes half of
+	 * it and comes back. The two readings spell the rotation family differently —
+	 * `MachineHealth.turnFights` against `ModelMachine.rotationFights` — which is
+	 * a seam in the two packages and not a difference in the claim.
+	 */
+	const fighting = new Set<string>();
+	for (const [first, second] of [
+		...(answer?.fights ?? doc.fights),
+		...(answer?.frameFights ?? doc.frameFights),
+		...(answer?.rotationFights ?? doc.turnFights),
+	]) {
+		fighting.add(first);
+		fighting.add(second);
+	}
+
+	/**
+	 * Inputs no guard and no blend reads, so a row can say it is unused.
+	 *
+	 * Blends counted as readers as well as guards, which the predicate name
+	 * `unread` might not suggest: an input that decides nothing about which edges
+	 * may be taken but lays out a mixture is very much being read, and telling
+	 * somebody it is not would send them to delete it.
+	 */
+	const readInputs = new Set<string>();
+	for (const t of machine.transitions) {
+		for (const c of t.conditions ?? []) readInputs.add(c.input);
+	}
+	for (const s of machine.states) {
+		if (s.blend?.input !== undefined) readInputs.add(s.blend.input);
+		for (const stop of s.blend?.stops ?? []) {
+			if (stop.by !== undefined) readInputs.add(stop.by);
+		}
+	}
+	const unreadInputs = new Set(
+		(machine.inputs ?? []).map((x) => x.id).filter((id) => !readInputs.has(id)),
+	);
+
+	/** Which timeline the editor below is open on, and where its scrubber is. */
+	const timelines = machine.timelines ?? [];
+	const [opened, setOpened] = useState<string | undefined>(undefined);
+	const open = timelines.find((w) => w.id === opened) ?? timelines[0];
+	const [localScrub, setLocalScrub] = useState(0);
+	/**
+	 * The shared position is only read where there is a way to write it.
+	 *
+	 * Not defensiveness: `scrub` without `onScrub` is a controlled slider with no
+	 * setter, so every drag would be overwritten on the next render by the value
+	 * that was already there and the control would sit still under the pointer.
+	 * Falling back to the local position keeps the editor usable and honest about
+	 * what it can reach — the rows and the resolved times move, and the canvas does
+	 * not, because nothing has told it to.
+	 */
+	const shared =
+		onScrub !== undefined && instance ? scrub?.[instance.id] : undefined;
+	const at = shared ?? localScrub;
+	const moveScrub = (ms: number) => {
+		setLocalScrub(ms);
+		if (instance) onScrub?.(instance.id, ms);
+	};
+
+	/**
+	 * Keyframes this universe put out of order, for the timeline that is open.
+	 *
+	 * `mkbackwards/4` is a property of an **answer** and not of a document — a
+	 * keyframe's time is a `Value`, so the same keys in another universe may be in
+	 * order — which is why it arrives through the model and there is no
+	 * document-side reading of it beside the others above.
+	 */
+	const suspect = new Set(
+		(answer?.backwardsKeys ?? [])
+			.filter(([timeline]) => open !== undefined && timeline === open.id)
+			.map(([, track, index]) => suspectKey(track, index)),
 	);
 
 	/**
@@ -772,14 +1396,24 @@ function MachineCard({
 	 * it ends. Interpolating between the two frames in the studio would be the tool
 	 * animating something the exported file animates differently, and a preview
 	 * that lies about the artefact is worse than one that admits what it is.
+	 *
+	 * Played **in the edge's own layer**, which is the layer of the state it
+	 * leaves — or of the state it arrives at, where it leaves a reserved word. An
+	 * edge played into the wrong layer would put a state on screen beside a
+	 * sibling that has no idea it is there, which is precisely the picture
+	 * `mtwoshown/1` reports and nothing here should be able to cause.
 	 */
 	const playTransition = (id: string) => {
 		const transition = findTransition(machine, id);
 		if (!transition || !instance) return;
-		onPlay(instance.id, transition.from);
+		const from = findState(machine, transition.from);
+		const to = findState(machine, transition.to);
+		const where = from ? layerOf(machine, from) : to ? layerOf(machine, to) : undefined;
+		if (where === undefined) return;
+		if (from) onPlay(instance.id, where, from.id);
 		const pace = timing[id] ?? { duration: 0, delay: 0 };
 		window.setTimeout(
-			() => onPlay(instance.id, transition.to),
+			() => onPlay(instance.id, where, to ? to.id : null),
 			Math.max(0, pace.delay) + pace.duration,
 		);
 	};
@@ -850,19 +1484,83 @@ function MachineCard({
 				</span>
 			</div>
 
+			<Inputs
+				scene={scene}
+				machine={machine}
+				onSceneChange={onSceneChange}
+				values={instance ? inputs?.[instance.id] : undefined}
+				onSet={
+					instance && onSetInput
+						? (input, value) => onSetInput(instance.id, input, value)
+						: undefined
+				}
+				onFire={
+					instance && onFireInput
+						? (input) => onFireInput(instance.id, input)
+						: undefined
+				}
+				unread={unreadInputs}
+			/>
+
+			<LayerStrip
+				machine={machine}
+				shown={shownByLayer}
+				playing={playedByLayer}
+				fighting={fighting}
+				looking={looking}
+				onLook={look}
+				onAdd={() => onSceneChange((prev) => addLayer(prev, machine.id).scene)}
+				onRename={(id, name) =>
+					onSceneChange(
+						(prev) => renameLayer(prev, machine.id, id, name),
+						`layer-name-${machine.id}-${id}`,
+					)
+				}
+				onDelete={(id) => onSceneChange((prev) => deleteLayer(prev, machine.id, id))}
+				onReorder={(id, to) =>
+					onSceneChange((prev) => reorderLayer(prev, machine.id, id, to))
+				}
+			/>
+
 			<StateStrip
 				machine={machine}
 				shown={shown}
 				playing={played}
 				reachable={reachable}
-				onPlay={instance ? (state) => onPlay(instance.id, state) : undefined}
+				deadWithGuards={deadWithGuards}
+				layer={looking}
+				onPlay={
+					instance ? (state) => onPlay(instance.id, looking, state) : undefined
+				}
 				onShow={
 					instance
 						? (state) =>
-								onSceneChange((prev) => setNodeState(prev, instance.id, state))
+								// Through `setNodeLayerState` rather than `setNodeState`, which
+								// is what makes ◉ mean the same thing on a layered machine as
+								// on an un-layered one: it writes `SceneNode.states[layer]`,
+								// and for the *first* layer it writes the shipped
+								// `SceneNode.state` instead, so a one-layer document produced
+								// by this panel is byte-identical to one produced before
+								// layers existed.
+								onSceneChange((prev) =>
+									setNodeLayerState(prev, instance.id, looking, state),
+								)
 						: undefined
 				}
-				onAdd={() => onSceneChange((prev) => addState(prev, machine.id).scene)}
+				onAdd={() =>
+					onSceneChange((prev) => {
+						// Two edits in one gesture, and therefore one undo: `addState`
+						// appends to the machine, and the new state belongs to the layer
+						// being looked at rather than to the first one. Without the second
+						// half, adding a state while looking at the glow layer would put it
+						// in the press layer and the strip it was added from would not show
+						// it.
+						const made = addState(prev, machine.id);
+						return looking === layers[0].id
+							? made.scene
+							: setStateLayer(made.scene, machine.id, made.id, looking);
+					})
+				}
 				onRename={(state, name) =>
 					onSceneChange(
 						(prev) => renameState(prev, machine.id, state, name),
@@ -876,6 +1574,31 @@ function MachineCard({
 					onSceneChange((prev) => reorderState(prev, machine.id, state, to))
 				}
 			/>
+
+			{editingState !== undefined ? (
+				<Plays
+					machine={machine}
+					state={editingState}
+					twoSource={
+						answer?.twoSource.includes(editing) ??
+						(editingState.timeline !== undefined &&
+							editingState.blend !== undefined)
+					}
+					stopsOutOfRange={
+						new Set(
+							(answer?.stopsOutOfRange ?? doc.stopsOutOfRange)
+								.filter(([state]) => state === editing)
+								// `+ 1` because `mstopout/3` numbers a blend's stops from one
+								// and both health readings record the array index. The number
+								// shown is the program's, so a designer sent to "stop 2" finds
+								// the second row rather than the third.
+								.map(([, index]) => index + 1),
+						)
+					}
+					gap={answer?.stopGaps.includes(editing) ?? false}
+					onSceneChange={onSceneChange}
+				/>
+			) : null}
 
 			{machine.states.length > 0 ? (
 				<StateDelta
@@ -906,8 +1629,76 @@ function MachineCard({
 				onPin={onPin}
 				timing={timing}
 				health={answer}
+				impossible={impossible}
+				misplaced={misplaced}
+				layer={looking}
 				onPlay={instance ? playTransition : undefined}
 			/>
+
+			{/*
+			 * Timelines, under the edges rather than above them, because that is the
+			 * order a machine gets built in: states, then what moves between them,
+			 * then the animation one of those states plays. One editor at a time —
+			 * the machine's timelines are a list of names and the open one is a
+			 * panel — because a timeline is tall and three of them expanded would
+			 * push everything a designer came here for off the bottom.
+			 */}
+			<div className={styles.timelines} data-role="timelines">
+				<div className={styles.timelineHead}>
+					<span className={styles.title}>Timelines</span>
+					{timelines.map((w) => (
+						<button
+							key={w.id}
+							type="button"
+							className={cx(styles.tab, w.id === open?.id && styles.openTab)}
+							data-role="open-timeline"
+							data-timeline={w.id}
+							aria-pressed={w.id === open?.id}
+							onClick={() => setOpened(w.id)}
+						>
+							{w.name}
+						</button>
+					))}
+					<button
+						type="button"
+						className={styles.add}
+						data-role="add-timeline"
+						title="A timeline: one or more properties of one or more parts, over time, as keyframes. Grounding scales with the number of keys and with nothing else — there is no frame rate anywhere in this system."
+						onClick={() =>
+							onSceneChange((prev) => {
+								const made = addTimeline(prev, machine.id);
+								setOpened(made.id);
+								return made.scene;
+							})
+						}
+					>
+						+ Timeline
+					</button>
+				</div>
+
+				{open !== undefined ? (
+					<Timeline
+						scene={scene}
+						machine={machine}
+						timeline={open}
+						onSceneChange={onSceneChange}
+						picks={picks}
+						varying={varying}
+						pins={pins}
+						onPin={onPin}
+						solved={answer?.timelines[open.id]}
+						suspect={suspect}
+						at={at}
+						onScrub={moveScrub}
+					/>
+				) : (
+					<p className={styles.empty} data-role="no-timelines">
+						No timelines. A state can play one, and several states routinely play
+						the same one — a `loop` and a `pressed` both playing `idle` — which is
+						why they belong to the machine rather than to a state.
+					</p>
+				)}
+			</div>
 		</section>
 	);
 }
@@ -931,6 +1722,29 @@ function MachineCard({
  * alternatives written inside one state's delta — branches through an ordinary
  * value row and not through the strip.
  *
+ * ## Five more rungs, and the claim survives every one of them
+ *
+ * The panel now holds inputs, guards, layers, timelines and blend states, and
+ * none of them is an alternative either. **Inputs** are runtime values: nothing
+ * projected depends on one, so driving a slider here cannot change which universe
+ * is on screen, and the panel draws a rule down the middle of every input row to
+ * say which half is the document and which half is this browser tab. **Layers**
+ * compose where a choice rule would multiply — two layers are two `shown/2` facts
+ * in one answer set, not a four-state layer times a three-state layer — which is
+ * exactly why the layer strip lists what every layer is showing *at once* rather
+ * than offering a current one. **Timelines** cost keyframes and nothing else:
+ * there is no frame rate here, in the program, in the model or in the export, so
+ * the scrubber is a read of two copies the answer set already holds. **Blends**
+ * are arithmetic over a runtime value and are not solved at all; what *is* solved
+ * is every keyframe of every timeline a stop names, and the thresholds the checks
+ * judge.
+ *
+ * The one thing any of them adds to the design space is what was already there:
+ * a `Value` with two alternatives. A keyframe's time and a keyframe's value are
+ * ordinary value rows, so a timeline that names a motion scale really is two
+ * animations — and that branch arrives through the same {@link ValueEditor} a
+ * fill does, for the same reason, with the same pin and the same why-button.
+ *
  * A machine belongs to a component definition, so the panel is a list of
  * machines and not a property of the selection; but every subject it needs — the
  * instance to resolve against, the part to edit — comes from the selection, so
@@ -950,6 +1764,13 @@ export function Machines({
 	onSelectionChange,
 	playing,
 	onPlay,
+	inputs,
+	onSetInput,
+	onFireInput,
+	layer,
+	onLayerChange,
+	scrub,
+	onScrub,
 	health,
 	broken,
 	conflict,
@@ -976,8 +1797,9 @@ export function Machines({
 		<div className={styles.machines} data-role="machines">
 			<div className={styles.head}>
 				<span className={styles.hint}>
-					Every state is true at once. Adding one changes what the component can
-					do, never how many designs there are.
+					Every state is true at once, on every layer at once. Adding a state, a
+					layer, an input or a timeline changes what the component can do, never
+					how many designs there are.
 				</span>
 				<select
 					className={styles.add}
@@ -1039,6 +1861,13 @@ export function Machines({
 					onSelectionChange={onSelectionChange}
 					playing={playing}
 					onPlay={onPlay}
+					inputs={inputs}
+					onSetInput={onSetInput}
+					onFireInput={onFireInput}
+					layer={layer}
+					onLayerChange={onLayerChange}
+					scrub={scrub}
+					onScrub={onScrub}
 					health={health}
 				/>
 			))}

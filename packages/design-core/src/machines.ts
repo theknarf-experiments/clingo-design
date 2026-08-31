@@ -2202,8 +2202,23 @@ export interface MachineTable {
  *     layer two would write, into layer one's attribute, a state id whose only
  *     rules are under layer two's selector. `mcrosslayer/2` reports it; the
  *     runtime cannot honour it, so it does not pretend to.
+ *
+ * `context` is the universe's, and it reaches exactly one number: an edge's
+ * **exit time**, the only motion setting that lands in this table rather than in
+ * a CSS `transition:` declaration. Optional and defaulting to nothing for every
+ * caller that has no universe to hand — but a caller that *has* one owes it,
+ * because {@link transitionExit} resolves a {@link Value}, and an exit time that
+ * names a `duration` token resolves to nothing without it and is then dropped
+ * from the table as a zero. That was live and silent: the exported file's own
+ * `lost` sentence read the same edge *with* a context and announced a 180ms
+ * debounce, while the runtime embedded three lines above it waited zero. A
+ * motion scale with a hole in it is precisely what pacing-as-a-token exists to
+ * prevent, so the hole is closed here rather than papered over at the reader.
  */
-export function machineTable(scene: Scene): MachineTable {
+export function machineTable(
+	scene: Scene,
+	context: ResolveContext = NO_CONTEXT,
+): MachineTable {
 	const instances: MachineTable["instances"] = {};
 	const machines: MachineTable["machines"] = {};
 
@@ -2249,7 +2264,7 @@ export function machineTable(scene: Scene): MachineTable {
 			initial: initialState(machine).id,
 			states: machine.states.map((state) => state.id),
 			edges,
-			layers: runtimeLayers(machine),
+			layers: runtimeLayers(machine, context),
 			inputs,
 		};
 	}
@@ -2257,8 +2272,14 @@ export function machineTable(scene: Scene): MachineTable {
 	return { instances, machines };
 }
 
-/** The per-layer half of {@link machineTable}, split out so the loop above reads. */
-function runtimeLayers(machine: Machine): RuntimeLayer[] {
+/**
+ * The per-layer half of {@link machineTable}, split out so the loop above reads.
+ *
+ * `context` is carried through rather than defaulted here, because this is the
+ * one place an exit time is resolved and a second default would be a second
+ * answer to "what does a token-paced debounce come to".
+ */
+function runtimeLayers(machine: Machine, context: ResolveContext): RuntimeLayer[] {
 	const out: RuntimeLayer[] = [];
 	for (const layer of machineLayers(machine)) {
 		const states = layerStates(machine, layer.id);
@@ -2310,7 +2331,7 @@ function runtimeLayers(machine: Machine): RuntimeLayer[] {
 
 				const when = runtimeGuard(machine, transition);
 				if (when === undefined) continue;
-				const exit = transitionExit(machine, transition);
+				const exit = transitionExit(machine, transition, context);
 
 				for (const source of sources) {
 					const row = (edges[source] ??= {});
