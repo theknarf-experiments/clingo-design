@@ -3659,6 +3659,47 @@ export function addModel(
 }
 
 /**
+ * A whole glTF import, landed in one view — the edit half of `importGltf`.
+ *
+ * The importer hands back a subtree and a payload per primitive; the payloads go
+ * to an {@link AssetStore}, which is the caller's business because it is I/O,
+ * and this is everything else: the nodes into the tree and the metadata into
+ * `Scene.assets`, in one edit so that one ⌘Z takes the whole chair back out.
+ *
+ * **One primitive is centred; several keep their arrangement.** A file holding a
+ * single mesh has no arrangement to preserve — its origin is wherever the person
+ * who exported it left it, which is as likely to be a metre off in z as not — so
+ * it goes through {@link addModel} and lands in shot, the same as a cube from the
+ * add row. A file holding several *is* an arrangement: a chair is a seat, a back
+ * and four legs whose whole meaning is where they are relative to each other, and
+ * re-centring each one would deliver a pile of parts. The importer has already
+ * put those frames in the view's space, so they are appended as they came.
+ *
+ * A viewport this document does not hold leaves the scene alone, like every other
+ * verb here — an import whose target was deleted while the file was being read is
+ * a no-op rather than a throw.
+ */
+export function addImport(
+	scene: Scene,
+	viewport: string,
+	nodes: readonly SceneNode[],
+	assets: Readonly<Record<string, AssetInfo>>,
+): Scene {
+	if (!viewportNode(scene, viewport) || nodes.length === 0) return scene;
+	const [only] = nodes;
+	if (nodes.length === 1 && only.mesh && !only.children?.length) {
+		const info = assets[only.mesh.asset];
+		if (info) return addModel(scene, viewport, only.mesh, info);
+	}
+	let next = scene;
+	for (const node of nodes) next = appendChild(next, viewport, node);
+	// Merged rather than replaced: another model in another view may already have
+	// brought in a hash this import also uses, and content addressing means both
+	// entries describe the same bytes.
+	return { ...next, assets: { ...next.assets, ...assets } };
+}
+
+/**
  * Which camera a view looks through, or `null` for none.
  *
  * The camera has to be a camera **and inside this view**, which is `vcam/2`'s own

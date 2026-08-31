@@ -210,6 +210,22 @@ export interface InspectorProps {
 	 */
 	playing?: Readonly<Record<string, string>>;
 	onPlay?: (instance: string, state: string | null) => void;
+	/**
+	 * Bring a glTF into this view — the one verb in the add row that is not a
+	 * pure edit.
+	 *
+	 * A prop rather than something this panel does, because importing is three
+	 * things the inspector has no business holding: a file the person picks, a
+	 * parse that needs three.js and must stay behind a dynamic import so a flat
+	 * document never downloads it, and a write to the asset store. `Studio` owns
+	 * all three already. What is left here is a button and a viewport id, which
+	 * is the shape of every other entry in that row.
+	 *
+	 * Absent where the host has no store to put payloads in — a headless render
+	 * of the panel, or a test — and the button is then simply not offered rather
+	 * than offered and broken.
+	 */
+	onImportModel?: (viewport: string) => void;
 }
 
 const SIZINGS: Sizing[] = ["hug", "fixed"];
@@ -1880,6 +1896,7 @@ export function Inspector({
 	onSelectionChange,
 	playing,
 	onPlay,
+	onImportModel,
 }: InspectorProps) {
 	/**
 	 * Which state's delta the panel is authoring, or null for the definition
@@ -2966,6 +2983,23 @@ export function Inspector({
 						>
 							Camera
 						</button>
+						{/* The one that is not a pure edit. Everything else in this row
+						    builds a node out of nothing; this one reads a file, hashes
+						    it, puts the payload in the store and *then* makes a node —
+						    so it is handed up rather than done here. See
+						    `onImportModel`. Offered only where the host gave us a way
+						    to store bytes. */}
+						{onImportModel ? (
+							<button
+								type="button"
+								className={styles.follow}
+								data-role="import-model"
+								title="Bring a .glb or .gltf into this view. The geometry is stored beside the document and the node is an ordinary one: it is in the layer list, a rule can name it, and its material is a property you can drive with a token."
+								onClick={() => onImportModel(node.id)}
+							>
+								Import…
+							</button>
+						) : null}
 					</div>
 					{/* A pivot is not here, and its absence is a decision. `addPivot`
 					    takes the objects to group, so it belongs on a *selection of

@@ -539,6 +539,22 @@ export interface ModelScene {
 	 */
 	triangles: Record<string, number>;
 	/**
+	 * Model node id -> the content hash of the geometry it draws — `asset/2`.
+	 *
+	 * The one thing a `model` needs that the picture could not otherwise carry.
+	 * Everything else about it is here already — its box, its turn, its material,
+	 * its triangle count — but the vertices live in an `AssetStore` keyed by this
+	 * hash, and a renderer that read the hash off the *document* would be a
+	 * renderer drawing something other than the answer set. So the compiler states
+	 * it and this reads it, and `canvas-3d` resolves it through a function that
+	 * knows nothing about where bytes are kept.
+	 *
+	 * Absent for a node the answer set gave no asset — a primitive `mesh`, and a
+	 * `model` a rule minted without one — which is what makes the stand-in box the
+	 * ordinary case rather than an error path.
+	 */
+	assets: Record<string, string>;
+	/**
 	 * Viewport node id -> the camera node it looks through — `vcam/2`, and
 	 * `vcam/2` rather than `looks/2` deliberately.
 	 *
@@ -709,6 +725,8 @@ interface Facts {
 	fightsAt: Map<string, Array<[string, string, string, string]>>;
 	/** node id -> its triangle count — `tris/2`. */
 	triangles: Map<string, number>;
+	/** model node id -> the content hash of its payload — `asset/2`. */
+	assets: Map<string, string>;
 	/** viewport id -> the camera it looks through — `vcam/2`. */
 	looks: Map<string, string>;
 	/**
@@ -817,6 +835,7 @@ function collect(atoms: readonly string[]): Facts {
 		layerIndex: new Map(),
 		fightsAt: new Map(),
 		triangles: new Map(),
+		assets: new Map(),
 		looks: new Map(),
 		timelines: new Map(),
 		machines: new Map(),
@@ -1117,6 +1136,14 @@ function collect(atoms: readonly string[]): Facts {
 				const count = Number(b);
 				if (!Number.isFinite(count)) break;
 				facts.triangles.set(a, count);
+				break;
+			}
+			// A quoted term, because a SHA-256 is 64 hex characters and a bare one
+			// starting with a digit is not a constant a grounder would take.
+			case "asset/2": {
+				const hash = unquote(b);
+				if (hash === "") break;
+				facts.assets.set(a, hash);
 				break;
 			}
 			case "vcam/2":
@@ -1652,6 +1679,11 @@ export function readModel(atoms: readonly string[]): ModelScene {
 	for (const [id, count] of [...facts.triangles].sort(([a], [b]) => cmp(a, b))) {
 		triangles[id] = count;
 	}
+	// Sorted like its neighbours, so one answer set reads the same way twice.
+	const assets: Record<string, string> = {};
+	for (const [id, hash] of [...facts.assets].sort(([a], [b]) => cmp(a, b))) {
+		assets[id] = hash;
+	}
 	const looks: Record<string, string> = {};
 	for (const [view, camera] of [...facts.looks].sort(([a], [b]) => cmp(a, b))) {
 		looks[view] = camera;
@@ -1670,6 +1702,7 @@ export function readModel(atoms: readonly string[]): ModelScene {
 		machines,
 		fightsAt,
 		triangles,
+		assets,
 		looks,
 	};
 }

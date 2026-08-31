@@ -50,7 +50,12 @@
  * still is not a placeholder for a missing feature; it is what twenty
  * simultaneous 3D views have to be.
  */
-import { type ModelNode, type ModelScene, boxOf3 } from "@clingo-design/design-core";
+import {
+	type AssetResolver,
+	type ModelNode,
+	type ModelScene,
+	boxOf3,
+} from "@clingo-design/design-core";
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import {
 	type Ref,
@@ -186,6 +191,17 @@ export interface ViewportCanvasProps {
 	poster?: string;
 	/** Hands back a fresh poster. Costs a preserved drawing buffer — see below. */
 	onPoster?: (dataUrl: string) => void;
+	/**
+	 * Where a model's payload bytes come from — see design-core's `assets.ts`.
+	 *
+	 * A function and not the store, and the narrowing is the point: a renderer
+	 * that could `put` could change the document, and one that could `keys` could
+	 * decide what to draw by asking the database rather than the answer set.
+	 *
+	 * Absent draws every model as its stand-in box, which is what a host with no
+	 * asset store — a test, a poster render — should get.
+	 */
+	resolve?: AssetResolver;
 	/** The camera commands — see {@link ViewportHandle}. */
 	ref?: Ref<ViewportHandle>;
 }
@@ -240,6 +256,7 @@ export function ViewportCanvas({
 	scale,
 	poster,
 	onPoster,
+	resolve,
 	ref,
 }: ViewportCanvasProps) {
 	const host = useRef<HTMLDivElement>(null);
@@ -328,6 +345,8 @@ export function ViewportCanvas({
 					orbit={orbit}
 					focus={focus}
 					onPoster={onPoster}
+					assets={model.assets}
+					resolve={resolve}
 				/>
 			</Canvas>
 		</div>
@@ -358,6 +377,8 @@ function Contents({
 	orbit,
 	focus,
 	onPoster,
+	assets,
+	resolve,
 }: {
 	nodes: readonly ModelNode[];
 	looksThrough: string | undefined;
@@ -370,6 +391,8 @@ function Contents({
 	orbit: boolean;
 	focus?: OrbitFocus;
 	onPoster?: (dataUrl: string) => void;
+	assets?: Readonly<Record<string, string>>;
+	resolve?: AssetResolver;
 }) {
 	const bounds = boundsHint(nodes);
 	// Whether a gizmo handle owns the pointer. Shared with `useOrbit`, which is
@@ -484,6 +507,8 @@ function Contents({
 				hovered={marks}
 				pointer={pointer}
 				gizmo={handles}
+				assets={assets}
+				resolve={resolve}
 			/>
 
 			{/*

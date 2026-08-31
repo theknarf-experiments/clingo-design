@@ -152,22 +152,22 @@ export {
 // `SolidKind` as a *type-only* import from `Solid.tsx` and guards with its own
 // argument table — see `gltfexport.ts`.
 //
-// **The way out is wired and the way in is not, and the asymmetry is reported
-// rather than left to be discovered.** `exportViewportGltf` is a third format in
-// the studio's export panel on any document holding a view — the panel imports
-// this package dynamically, exactly as the canvas does, so a flat document still
-// downloads none of it — and `export.ts`'s viewport loss sentence names it,
-// which is what makes that sentence true.
+// Both ways are wired. `exportViewportGltf` is a third format in the studio's
+// export panel on any document holding a view — the panel imports this package
+// dynamically, exactly as the canvas does, so a flat document still downloads
+// none of it — and `export.ts`'s viewport loss sentence names it, which is what
+// makes that sentence true.
 //
-// `importGltf` is reachable from nothing but its own tests, and it is not a
-// question of wiring: an import has to *put the vertices somewhere*, and the
-// somewhere is `design-core/src/assets.ts` and the `AssetStore` it was to
-// define, neither of which exists. Without one, an importer would mint `model`
-// nodes carrying a content hash that nothing can load, which `Model.tsx` would
-// draw as bounding boxes and `exportViewportGltf` would write out as empty
-// meshes — a feature that appears to work and produces nothing. So it stays
-// unwired, and this paragraph is here so that the next person to open the file
-// does not read 889 finished-looking lines as a finished feature.
+// `importGltf` is the "Import…" button on a viewport's add row. It was
+// unreachable until recently and it was never a question of wiring: an import
+// has to *put the vertices somewhere*, and until `design-core/src/assets.ts`
+// defined what a store is there was nowhere to put them — an importer would have
+// minted `model` nodes carrying a content hash nothing could load, which is a
+// feature that appears to work and produces nothing. That piece exists now: the
+// app implements the store over IndexedDB, `Studio` puts the payloads before it
+// touches the document, and `useAsset` resolves them back into geometry for
+// `Model.tsx`, which draws its stand-in box only when the bytes are genuinely
+// absent — a relink rather than a failure.
 export {
 	METRE_IN_EMU,
 	type GltfFile,

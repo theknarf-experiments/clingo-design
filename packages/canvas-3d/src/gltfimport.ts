@@ -35,13 +35,19 @@
  * document is the soup. **This disagreement is reported rather than absorbed** —
  * see the return value of the step that ran this.
  *
- * ## What is not here
+ ## Where the bytes go
  *
- * The store. `design-core/src/assets.ts` — the `AssetStore` interface of
- * `docs/merged-plan.md` M4 — is not in the tree, and this package may not invent
- * it. So {@link importGltf} returns the payloads as bytes with their hashes
- * already computed, and the caller puts them wherever the store turns out to be.
- * That is the honest seam: everything up to `store.put(bytes)` is done here.
+ * Not here, and deliberately. {@link importGltf} returns the payloads with their
+ * hashes already computed and puts none of them anywhere: storing is I/O, this
+ * module is a parser, and a parser that wrote to a database could not be tested
+ * without one. The seam is `store.put(id, bytes)`, and everything up to it is
+ * done here.
+ *
+ * `design-core/src/assets.ts` defines what a store is; the app implements one
+ * over IndexedDB; `Studio.tsx` is the caller that puts the payloads and then
+ * makes the nodes, in that order — a failed parse leaves a document that never
+ * heard of the file, where the other order would leave a `model` pointing at
+ * bytes nobody has.
  */
 import {
 	type AssetInfo,

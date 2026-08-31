@@ -421,3 +421,54 @@
 	color: var(--dc-bad, #fca5a5);
 	opacity: 1;
 }
+
+/*
+ * The import report — above the footer, out of the canvas, gone on dismiss.
+ *
+ * Bounded and scrollable rather than allowed to grow: a file with twenty things
+ * it could not bring across is a file whose report must not push the program
+ * panel off the screen.
+ */
+.importNotice {
+	position: relative;
+	flex: none;
+	max-height: 30vh;
+	overflow-y: auto;
+	padding: 10px 96px 10px 14px;
+	border-top: 1px solid var(--line);
+	background: var(--surface-2, var(--surface));
+	font-size: 12px;
+	line-height: 1.5;
+}
+
+.importName {
+	font-weight: 550;
+}
+
+.importLost {
+	margin: 6px 0 0;
+	padding-left: 18px;
+	color: var(--ink-muted, inherit);
+}
+
+.importLost li {
+	margin-top: 3px;
+}
+
+.importDismiss {
+	position: absolute;
+	top: 10px;
+	right: 14px;
+	padding: 3px 10px;
+	border: 1px solid var(--line);
+	border-radius: 5px;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.importDismiss:hover {
+	background: var(--surface);
+}

@@ -1,48 +1,41 @@
 /**
- * A `model` node — imported geometry — drawn as **its bounding box**, because
- * the geometry is not here.
+ * A `model` node — imported geometry, drawn when the bytes are here and drawn as
+ * **its bounding box** when they are not.
  *
- * **Read this before assuming the feature is missing something small.** A
- * `model` is the one kind whose picture does not live in the answer set. Its
- * `frame/3` does, its `turn/3` does, its material does, and `tris/2` carries the
- * triangle count — but the vertices are a payload addressed by a content hash on
- * `SceneNode.mesh`, and the payload itself is in an `AssetStore`. Two of those
- * three things do not exist at the time this package was written:
+ * A `model` is the one kind whose picture does not live entirely in the answer
+ * set. Its `frame/3` does, its `turn/3` does, its material does, `tris/2` carries
+ * the triangle count and `asset/2` carries the content hash — but the vertices
+ * are a payload in an `AssetStore`, addressed by that hash, and a store is I/O.
+ * So the hash comes off `ModelScene.assets` like everything else this package
+ * draws, and the bytes come through an {@link AssetResolver} the host supplies:
+ * `canvas-3d` never learns whether they were in IndexedDB, in memory or over a
+ * network, which is what keeps it a renderer.
  *
- *   - `design-core/src/assets.ts` — the `AssetStore` interface and
- *     `referencedAssets` (`docs/merged-plan.md` M4) — **is not in the tree**;
- *   - `packages/app/src/projects/assets.ts`, the IndexedDB implementation
- *     (M20) — **is not in the tree**;
- *   - and `MeshRef` (the hash, the format and the imported bounds) is a field of
- *     the *document*, which this package does not read, by the same rule that
- *     keeps the picture the solver's answer.
+ * `useAsset.ts` does the loading and says why it is not three's `GLTFLoader`.
  *
- * So `useAsset.ts` and a `GLTFLoader` are not written here. Writing them would
- * have meant inventing the store interface they load through, and inventing an
- * interface other steps are coding against is the one thing this run was told
- * not to do quietly. **This is reported as unbuilt, not as done.**
+ * **The box is not a placeholder graphic and does not go away because it was
+ * cheap to keep.** A model with no payload — never imported into this store, a
+ * project copied without its assets, a corrupt file — is still a node with a
+ * real place and a real size, which the solver decided, which a rule can align,
+ * which a state can move and which a pivot turns. All of that is true whether
+ * the chair has arrived or not, so the honest picture of it is its box, in its
+ * own material, with an edge on it so it reads as *a stand-in for geometry*
+ * rather than as a cube somebody modelled. It is the same answer the glTF
+ * exporter gives when it is not handed the bytes — "Model “Chair” is in the file
+ * as its bounding box" — and two readers that disagreed about what a model with
+ * no payload is would be two documents.
  *
- * What *is* drawn is the honest remainder, and it is not a placeholder graphic:
- * a `model` is a node with a real box that the solver placed, that a rule can
- * align, that a state can move and that a pivot turns, and all of that is true
- * of the box whether or not the chair inside it has loaded. So it draws as its
- * box, in its own material, with an edge on it so it reads as *a stand-in for
- * geometry* rather than as a cube somebody modelled. It is the same answer the
- * glTF exporter is specified to give when it is not handed the bytes — "Model
- * “Chair” is in the file as its bounding box" — which is worth matching: two
- * readers that disagree about what a model with no payload is would be two
- * documents.
- *
- * The seam this leaves for whoever builds it: replace the body of this component
- * with the loaded `Object3D` when the store has it, keep the box for when it does
- * not, and leave the material and the `userData.nodeId` exactly where they are.
- * Nothing else in this package needs to change.
+ * Which of the two is showing is therefore not an error state and is not
+ * reported here. "This document references geometry this store has never held"
+ * is a question about a project rather than about a frame, and `missingAssets`
+ * answers it where a person can act on it.
  */
-import type { ModelNode } from "@clingo-design/design-core";
+import type { AssetResolver, ModelNode } from "@clingo-design/design-core";
 import { BoxGeometry } from "three";
 
 import type { PointerHandlers } from "./SceneTree.tsx";
 import { materialOf } from "./readings.ts";
+import { useAsset } from "./useAsset.ts";
 
 export interface ModelProps {
 	node: ModelNode;
@@ -58,11 +51,54 @@ export interface ModelProps {
 	 * optional callback the next time.
 	 */
 	pointer?: PointerHandlers;
+	/**
+	 * The content hash of the geometry this node draws — `ModelScene.assets`.
+	 *
+	 * Off the answer set and not off the document, which is the same rule that
+	 * keeps every other thing this package draws the solver's answer: a rule that
+	 * mints a model states its own `asset/2` and gets its geometry drawn, exactly
+	 * as a rule that mints a rect gets its fill.
+	 */
+	asset?: string;
+	/** Where bytes come from. Absent on a host with no store — see `useAsset`. */
+	resolve?: AssetResolver;
 }
 
-export function Model({ node, size, pointer }: ModelProps) {
+export function Model({ node, size, pointer, asset, resolve }: ModelProps) {
 	const material = materialOf(node.rendered);
+	const geometry = useAsset(asset, resolve);
 	const scale: [number, number, number] = [size[0] || 1, size[1] || 1, size[2] || 1];
+
+	/*
+	 * The loaded chair, drawn in the box the solver placed.
+	 *
+	 * The payload was written centred on its own origin and in metres, so the
+	 * geometry arrives as a unit-ish thing at the middle of nothing; scaling the
+	 * group by the node's box is what puts it exactly where every other kind is
+	 * put. That is also why the box and the geometry are interchangeable here
+	 * rather than two layouts: they occupy the same space by construction, so a
+	 * payload arriving mid-drag changes what is drawn and never where.
+	 *
+	 * `normalized` is deliberately not set on the geometry: `importGltf` wrote
+	 * float positions, and a reader that re-normalised them would be scaling a
+	 * chair by whatever its own extent happened to be.
+	 */
+	if (geometry) {
+		return (
+			<group scale={scale} userData={{ nodeId: node.id }}>
+				<mesh {...pointer} geometry={geometry} userData={{ nodeId: node.id }}>
+					<meshStandardMaterial
+						color={material.colour ?? STANDIN}
+						roughness={material.roughness}
+						metalness={material.metalness}
+						opacity={material.opacity}
+						transparent={material.transparent}
+					/>
+				</mesh>
+			</group>
+		);
+	}
+
 	return (
 		<group scale={scale} userData={{ nodeId: node.id }}>
 			<mesh {...pointer} userData={{ nodeId: node.id }}>

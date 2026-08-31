@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
+import { assetStore } from "../projects/idb";
 import {
 	CONSTRAINT_KINDS,
 	DEFAULT_EASING,
@@ -27,6 +28,7 @@ import {
 	type Universe,
 	addConstraint,
 	addInstance,
+	addImport,
 	addPivot,
 	defineComponent,
 	deleteNodes,
@@ -1284,6 +1286,89 @@ export function Studio({
 		if (created) setSelection(new Set([created]));
 	}
 
+	/**
+	 * What the last import could not bring across, shown once and dismissed.
+	 *
+	 * An import's loss list is the mirror of an export's and is worth exactly as
+	 * much: a designer who imports a rigged, animated, textured character and gets
+	 * a static grey one is owed the difference in sentences rather than in
+	 * silence. Session state, never the document — it is a fact about a thing that
+	 * just happened, not about the design.
+	 */
+	const [imported, setImported] = useState<{ name: string; lost: string[] } | null>(
+		null,
+	);
+
+	/**
+	 * Bring a glTF into a view: pick a file, parse it, store the payloads, make
+	 * the nodes.
+	 *
+	 * Here rather than in the inspector because every step but the last is
+	 * something a panel should not be holding — a file the person chooses, a
+	 * parser that pulls in three.js and therefore has to stay behind a dynamic
+	 * import so a flat document never downloads it, and a write to the asset
+	 * store. What the inspector gets is a button and a viewport id.
+	 *
+	 * The payloads go to the store **before** the document is touched. That order
+	 * is the whole error story: a failed parse or a refused write leaves a
+	 * document that never heard of this file, where the other order would leave a
+	 * model node pointing at bytes nobody has. The reverse — bytes with no node —
+	 * is harmless and self-correcting, since `pruneAssets` drops the index entry
+	 * and a content-addressed payload nothing references is simply never asked
+	 * for.
+	 */
+	const importModel = useCallback(
+		(viewport: string) => {
+			const input = document.createElement("input");
+			input.type = "file";
+			input.accept = ".glb,.gltf,model/gltf-binary,model/gltf+json";
+			input.onchange = () => {
+				const file = input.files?.[0];
+				if (!file) return;
+				void (async () => {
+					try {
+						const [bytes, mod] = await Promise.all([
+							file.arrayBuffer().then((b) => new Uint8Array(b)),
+							import("@clingo-design/canvas-3d"),
+						]);
+						const result = await mod.importGltf(bytes, {
+							source: file.name,
+							name: file.name.replace(/\.(glb|gltf)$/i, ""),
+						});
+						for (const asset of result.assets) {
+							await assetStore.put(asset.id, asset.payload);
+						}
+						const index = Object.fromEntries(
+							result.assets.map((a) => [a.id, a.info] as const),
+						);
+						const landed = new Set(result.nodes.map((n) => n.id));
+						onSceneChange((prev) =>
+							addImport(prev, viewport, result.nodes, index),
+						);
+						setSelection(landed);
+						setImported({ name: file.name, lost: result.lost });
+					} catch (error) {
+						// A file that is not a glTF at all is the only thing `importGltf`
+						// throws for, and it is a thing a person does by accident. It
+						// reports through the same channel as a loss, because from where
+						// they are standing "this did not come in" and "this came in
+						// without its animation" are the same question.
+						setImported({
+							name: file.name,
+							lost: [
+								error instanceof Error
+									? error.message
+									: "This file could not be read as glTF.",
+							],
+						});
+					}
+				})();
+			};
+			input.click();
+		},
+		[onSceneChange],
+	);
+
 	const selectedGroups = [...selection].filter((id) => {
 		const node = byId.get(id);
 		return node !== undefined && wrapsChildren(node);
@@ -2279,6 +2364,7 @@ export function Studio({
 								onSelectionChange={selectionIds}
 								playing={playingFlat}
 								onPlay={playFlat}
+								onImportModel={importModel}
 							/>
 						) : panel === "variables" ? (
 							<Variables
@@ -2352,6 +2438,38 @@ export function Studio({
 					</div>
 				</aside>
 			</div>
+
+			{/* What the last import flattened, said once. Dismissible and never
+			    stored: it is a fact about a thing that just happened, and a
+			    document that carried it would re-announce a two-week-old import
+			    every time it was opened. A file that came in whole says so and
+			    goes, so the common case is one line rather than a panel to
+			    close. */}
+			{imported ? (
+				<div className={styles.importNotice} data-role="import-notice" role="status">
+					<div className={styles.importName}>
+						{imported.lost.length === 0
+							? `${imported.name} came in whole.`
+							: `${imported.name} — what did not come across:`}
+					</div>
+					{imported.lost.length > 0 ? (
+						<ul className={styles.importLost}>
+							{imported.lost.map((line) => (
+								<li key={line}>{line}</li>
+							))}
+						</ul>
+					) : null}
+					<button
+						type="button"
+						className={styles.importDismiss}
+						data-role="import-dismiss"
+						aria-label="Dismiss import report"
+						onClick={() => setImported(null)}
+					>
+						Dismiss
+					</button>
+				</div>
+			) : null}
 
 			<footer className={styles.foot}>
 				<ProgramPanel

@@ -52,7 +52,7 @@
  * walked, so a mesh under a stray `group` is still drawn in the right place —
  * a `group` is a transform and a transform is something this file understands.
  */
-import { type ModelNode, boxOf3 } from "@clingo-design/design-core";
+import { type AssetResolver, type ModelNode, boxOf3 } from "@clingo-design/design-core";
 import type { ThreeEvent } from "@react-three/fiber";
 import type { RefObject } from "react";
 
@@ -134,6 +134,15 @@ export interface SceneTreeProps {
 	pointer?: PointerHandlers;
 	/** The transform gizmo, on at most one node. */
 	gizmo?: GizmoSpec;
+	/**
+	 * Model node id -> the content hash of its geometry — `ModelScene.assets`.
+	 *
+	 * Threaded down rather than looked up per node, for the reason `looksThrough`
+	 * is: this tree is walked once per frame and the whole map is one object.
+	 */
+	assets?: Readonly<Record<string, string>>;
+	/** Where a payload's bytes come from — see `useAsset.ts`. */
+	resolve?: AssetResolver;
 }
 
 export function SceneTree({
@@ -143,6 +152,8 @@ export function SceneTree({
 	hovered,
 	pointer,
 	gizmo,
+	assets,
+	resolve,
 }: SceneTreeProps) {
 	return (
 		<>
@@ -155,6 +166,8 @@ export function SceneTree({
 					hovered={hovered}
 					pointer={pointer}
 					gizmo={gizmo}
+					assets={assets}
+					resolve={resolve}
 				/>
 			))}
 		</>
@@ -180,6 +193,8 @@ function Placed({
 	hovered,
 	pointer,
 	gizmo,
+	assets,
+	resolve,
 }: {
 	node: ModelNode;
 	looksThrough: string | undefined;
@@ -187,6 +202,8 @@ function Placed({
 	hovered?: ReadonlySet<string>;
 	pointer?: PointerHandlers;
 	gizmo?: GizmoSpec;
+	assets?: Readonly<Record<string, string>>;
+	resolve?: AssetResolver;
 }) {
 	const { position, size } = worldBox(boxOf3(node));
 	const rotation = worldEuler(node.turn);
@@ -197,11 +214,20 @@ function Placed({
 	return (
 		<>
 			<group position={position} rotation={rotation}>
-				<Contents node={node} size={size} looksThrough={looksThrough} pointer={pointer} />
+				<Contents
+					node={node}
+					size={size}
+					looksThrough={looksThrough}
+					pointer={pointer}
+					asset={assets?.[node.id]}
+					resolve={resolve}
+				/>
 				{marked ? <Selection size={size} tone={marked} /> : null}
 				<group position={worldOriginOffset(size)}>
 					<SceneTree
 						nodes={node.children}
+						assets={assets}
+						resolve={resolve}
 						looksThrough={looksThrough}
 						selection={selection}
 						hovered={hovered}
@@ -257,12 +283,16 @@ function Contents({
 	size,
 	looksThrough,
 	pointer,
+	asset,
+	resolve,
 }: {
 	node: ModelNode;
 	/** The node's box, already converted by {@link Placed}, so it crosses once. */
 	size: readonly [number, number, number];
 	looksThrough: string | undefined;
 	pointer?: PointerHandlers;
+	asset?: string;
+	resolve?: AssetResolver;
 }) {
 	switch (node.kind) {
 		case "mesh": {
@@ -288,7 +318,15 @@ function Contents({
 			);
 		}
 		case "model":
-			return <Model node={node} size={size} pointer={pointer} />;
+			return (
+				<Model
+					node={node}
+					size={size}
+					pointer={pointer}
+					asset={asset}
+					resolve={resolve}
+				/>
+			);
 		case "light":
 			return <Lights lamp={lampOf(node.rendered)} />;
 		case "camera":
