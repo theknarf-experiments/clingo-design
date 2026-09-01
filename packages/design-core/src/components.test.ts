@@ -12,6 +12,11 @@ import { test } from "node:test";
 
 import {
 	componentDef,
+	componentIdOf,
+	componentName,
+	componentPath,
+	composeLibrary,
+	decomposeLibrary,
 	heldPicks,
 	instancePart,
 	instanceVariable,
@@ -33,6 +38,7 @@ import {
 	setVariant,
 } from "./edits.ts";
 import { explore } from "./explore.ts";
+import { flatten } from "./tree.ts";
 import type { Scene, SceneNode } from "./scene.ts";
 import { component } from "./templates/component.ts";
 import { EMU_PER_PX } from "./units.ts";
@@ -661,4 +667,166 @@ test("a style a definition wears reaches every instance, at the same variant", a
 			{ node: "inst(two,label)", props: ["size", "weight"] },
 		],
 	});
+});
+
+/* ------------------------------------------------------------------ */
+/* Definitions in their own documents                                  */
+/* ------------------------------------------------------------------ */
+
+/** The same button, as a document rather than as a subtree of a page. */
+function buttonDoc(): SceneNode {
+	const label: SceneNode = {
+		...makeNode("text", { x: px(12), y: px(14), width: px(136), height: px(20) }, {
+			id: "label",
+			name: "Label",
+		}),
+		props: { text: [lit("Go"), lit("Stop")], size: single("14px") },
+	};
+	return {
+		...makeNode("frame", { x: px(20), y: px(20), width: px(160), height: px(48) }, {
+			id: "btn",
+			name: "Button",
+		}),
+		props: { fill: [lit("#3b82f6"), lit("#0f172a")] },
+		children: [label],
+		component: true,
+	};
+}
+
+/** A page holding uses of a component that is not in it. */
+function pageUsing(path: string, ids: string[]): Scene {
+	return {
+		styles: [],
+		machines: [],
+		tokens: [],
+		constraints: [],
+		rules: "",
+		nodes: [
+			{
+				...makeNode("frame", { x: 0, y: 0, width: px(600), height: px(400) }, {
+					id: "page",
+					name: "Page",
+				}),
+				children: ids.map((id, i) => ({
+					...makeNode("instance", { x: px(40), y: px(40 + i * 80), width: px(160), height: px(48) }, {
+						id,
+						name: id,
+					}),
+					instanceOf: path,
+				})),
+			},
+		],
+	};
+}
+
+const BUTTON = componentPath("Button");
+
+test("an instance resolves a definition that is not in its own document", async () => {
+	// The thing multi-page could not do. `instanceOf` names a path, the definition
+	// lives in a document of its own, and the page holding the uses has no
+	// definition in it at all — which is what makes the same component usable from
+	// every page rather than from the one it was drawn on.
+	const composed = composeLibrary(pageUsing(BUTTON, ["one", "two"]), {
+		[BUTTON]: buttonDoc(),
+	});
+	const id = componentIdOf(BUTTON);
+
+	// Spliced as an ordinary definition, under an id the program can carry.
+	assert.match(id, /^[a-z][a-z0-9_]*$/, "a legal ASP constant");
+	const def = componentDef(composed, id);
+	assert.ok(def, "the definition is in the composed scene");
+	assert.deepEqual(def?.parts.map((p) => p.name), ["Button", "Label"]);
+
+	// And the uses point at it rather than at a path.
+	const instances = flatten(composed.nodes).filter((n) => n.kind === "instance");
+	assert.deepEqual(instances.map((n) => n.instanceOf), [id, id]);
+
+	// Through the solver: both instances derive their own copy of the parts, which
+	// is the whole of what being an instance means.
+	const answer = await explore(composed, directSolver, { limit: 40 });
+	const drawn = answer.universes[0].model.byId;
+	for (const use of ["one", "two"]) {
+		// The instance node itself is the root's copy — `cinner/2` is the parts
+		// *without* the root, because the root's box is the instance's own. So what
+		// each use gets of its own is the inner parts.
+		assert.ok(drawn[use], `${use} is drawn`);
+		assert.ok(drawn[instancePart(use, "label")], `${use} has its own label`);
+	}
+	// Two uses, two labels, and they are different nodes rather than one shared —
+	// which is the whole of what makes an instance a point in the space rather
+	// than a picture of it.
+	assert.notEqual(instancePart("one", "label"), instancePart("two", "label"));
+});
+
+test("a definition kept in a document is not drawn on the page that uses it", async () => {
+	// The reason the spliced root is hidden. A definition that is a subtree of a
+	// page is drawn there deliberately — that is what three templates ship — but
+	// one kept in its own document belongs on its own canvas, and appearing on
+	// every page that used it would be a second copy of the component in the
+	// picture.
+	const composed = composeLibrary(pageUsing(BUTTON, ["one"]), {
+		[BUTTON]: buttonDoc(),
+	});
+	const answer = await explore(composed, directSolver, { limit: 40 });
+	const drawn = answer.universes[0].model.byId;
+
+	assert.equal(drawn[componentIdOf(BUTTON)], undefined, "the definition is not drawn");
+	assert.equal(drawn.label, undefined, "nor is any part of it");
+	// Hidden and not absent: the instance's copies are there, which is only
+	// possible because the definition itself is a node the program still holds.
+	assert.ok(drawn[instancePart("one", "label")], "the instance's copy is drawn");
+});
+
+test("a path nothing answers leaves the instance dangling rather than failing", async () => {
+	// Deleting a component out from under its uses. A dangling `instanceOf`
+	// derives nothing, which is exactly what a dangling node id has always done —
+	// and is a great deal better than refusing to open the page.
+	const scene = pageUsing(BUTTON, ["one"]);
+	const composed = composeLibrary(scene, {});
+	assert.equal(composed, scene, "nothing to splice is the scene it was given");
+
+	const answer = await explore(composed, directSolver, { limit: 4 });
+	assert.ok(answer.universes.length > 0, "the page still opens");
+	assert.equal(
+		answer.universes[0].model.byId[instancePart("one", "btn")],
+		undefined,
+		"and the use draws nothing",
+	);
+});
+
+test("the id is derived, legal and injective", () => {
+	// Derived and never stored, so there is one source of truth for which document
+	// a definition came from and it is the path.
+	assert.equal(componentIdOf(BUTTON), componentIdOf(BUTTON), "deterministic");
+	// Sanitising alone is not injective — these two flatten alike — so the suffix
+	// is what keeps two components from becoming one.
+	assert.notEqual(
+		componentIdOf(componentPath("my button")),
+		componentIdOf(componentPath("my-button")),
+	);
+	for (const name of ["Button", "my button", "2 wide", "Unicode"]) {
+		assert.match(componentIdOf(componentPath(name)), /^[a-z][a-z0-9_]*$/, name);
+	}
+	// The path round-trips through the name, which is what the UI lists.
+	assert.equal(componentName(componentPath("About us")), "About us");
+});
+
+test("composing and decomposing is a round trip, which is what stops a page eating a component", () => {
+	// The failure this pair exists to prevent does not look like anything: a scene
+	// carrying one extra hidden definition renders identically, so a save that
+	// wrote it into the page would copy the component into every page that used
+	// it, and the copies would drift from the document that was supposed to be
+	// the one source of it. Nothing would go red. So the round trip is asserted.
+	const page = pageUsing(BUTTON, ["one", "two"]);
+	const library = { [BUTTON]: buttonDoc() };
+
+	const composed = composeLibrary(page, library);
+	assert.notDeepEqual(composed.nodes, page.nodes, "composing did something");
+	assert.deepEqual(decomposeLibrary(composed, library), page, "and it came back");
+
+	// A definition the page genuinely owns is not touched: three templates ship
+	// one, and a component drawn on a page is still a component.
+	const own = buttons([{ id: "use" }]);
+	assert.equal(decomposeLibrary(own, library), own);
+	assert.equal(decomposeLibrary(composeLibrary(own, library), library), own);
 });

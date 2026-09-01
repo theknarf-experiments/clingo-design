@@ -2533,6 +2533,22 @@ export interface SceneNode {
 	 * relink rather than a failure.
 	 */
 	image?: ImageRef;
+	/**
+	 * Take this node and everything under it out of the picture.
+	 *
+	 * `true` or absent, like {@link SceneNode.component} and like a state's own
+	 * `hidden`, and deliberately with no `false`: a node is drawn unless
+	 * something says otherwise, so "shown" needs no spelling.
+	 *
+	 * It reaches the program as `hidden/1`, which the contract has always
+	 * documented as assertable and which `visible/1` is derived against — so a
+	 * hidden node is absent from the picture, absent from an export, and still
+	 * entirely present as a node: it has an id, a place, a kind, and a rule may
+	 * name it. That is what makes it the right way to carry a **component
+	 * definition that lives in another document**, which is drawn on its own
+	 * canvas and must not appear on every page that uses it.
+	 */
+	hidden?: true;
 }
 
 /** True when this node's children are placed by the solver. */

@@ -3908,6 +3908,13 @@ export function compile(
 	const thirdAxis = thirdAxisParts(scene);
 	for (const node of flatten(scene.nodes)) {
 		nodeLines.push(atom("node", node.id));
+		// A node the document says is out of the picture. `hidden/1` has always
+		// been assertable by a rule and derived against by `visible/1`; this is the
+		// document's own half of it. Everything else about the node is still
+		// emitted, because hidden is about the picture and not about existence — a
+		// rule can still name it, and a component definition living in another
+		// document is present for its instances while drawn on nobody's page.
+		if (node.hidden === true) nodeLines.push(atom("hidden", node.id));
 		nodeLines.push(atom("kind", node.id, node.kind));
 		nodeLines.push(atom("order", node.id, order.get(node.id) ?? 1));
 		// Geometry, as a fact where the document holds one number and as a

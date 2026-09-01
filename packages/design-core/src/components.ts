@@ -49,7 +49,7 @@ import {
 	type Scene,
 	type SceneNode,
 } from "./scene.ts";
-import { findInTree, flatten, nodeNames, propValues } from "./tree.ts";
+import { findInTree, flatten, mapTree, nodeNames, propValues } from "./tree.ts";
 import {
 	type Picks,
 	type ResolveContext,
@@ -420,3 +420,195 @@ export function holdsInstancePart(scene: Scene, term: string): boolean {
 /** What a property row on a definition part is called, for the override list. */
 export const varLabel = (v: ComponentVar): string =>
 	`${v.node.name} · ${PROPS[v.prop].label}`;
+
+/* ------------------------------------------------------------------ */
+/* Definitions that live in their own documents                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A component whose definition is its own document in the project's tree.
+ *
+ * The reason is the one multi-page raised and could not answer: a definition
+ * that is a subtree of a page can only be used on that page, because
+ * `instanceOf` names a node and a node belongs to one scene. A definition in its
+ * own document at `/components/button.component` is named by a **path**, the
+ * same way an image and a mesh are, so any page can point at it — and there is
+ * one of it, so editing it changes every use on every page, which is what a
+ * component was always supposed to mean.
+ *
+ * ## The composition, and why the compiler knows nothing about any of this
+ *
+ * A path cannot be a node id: `node/1` takes a bare term and
+ * `/components/button.component` is not one. And the whole machinery downstream
+ * — `componentDefs`, the instance rules, the machines, the edits — is written
+ * against definitions that are *nodes in the scene*.
+ *
+ * So the definitions are spliced in before anything sees them.
+ * {@link composeLibrary} takes the documents a project holds and returns a scene
+ * with each definition present as an ordinary `component: true` node under an
+ * ASP-safe id, and every path-valued `instanceOf` rewritten to that id. Nothing
+ * downstream changed, and nothing downstream can tell the difference — which is
+ * the point, and is why this is a function at the edge rather than a concept
+ * threaded through the compiler.
+ *
+ * The spliced roots are {@link SceneNode.hidden}, because a definition kept in
+ * its own document is drawn on its own canvas and must not appear on every page
+ * that uses it. Hidden is exactly right rather than a trick: the node is
+ * entirely present — it has an id, a kind, parts, and a rule may name it — and
+ * only the picture leaves it out.
+ *
+ * **In-scene definitions still work.** This is additive: a `component: true`
+ * subtree drawn on a page is what three templates ship and what the feature was
+ * built as, and it still resolves by node id exactly as before. A project can
+ * hold both.
+ */
+
+/** The datatype a component document declares. */
+export const COMPONENT_TYPE = "clingo-design:component";
+
+/** Where components live in a project's tree. */
+export const COMPONENT_DIR = "/components/";
+
+/** A component document's path, from the name a person typed. */
+export const componentPath = (name: string): string =>
+	`${COMPONENT_DIR}${name}.component`;
+
+/** And back, for a list somebody reads. */
+export const componentName = (path: string): string =>
+	path.slice(COMPONENT_DIR.length).replace(/\.component$/, "");
+
+/** True where an `instanceOf` names a document rather than a node in this scene. */
+export const isComponentPath = (ref: string): boolean => ref.startsWith("/");
+
+/**
+ * The node id a component document's definition takes once spliced.
+ *
+ * Derived from the path and never stored, so there is one source of truth for
+ * which document a definition came from and it is the path. Two properties it
+ * has to have: it must be a legal ASP constant, because it reaches the program
+ * as `node(<id>)`; and it must be injective, because two definitions sharing an
+ * id would be one definition and the instances of the second would silently
+ * draw the first.
+ *
+ * The readable part is for a person reading a generated program or an unsat
+ * core — `cmp_button_3f9a` says which component far better than a bare hash —
+ * and the suffix is what makes it injective, because sanitising is not: `my
+ * button` and `my-button` both flatten to `my_button`.
+ */
+export function componentIdOf(path: string): string {
+	const stem = componentName(path)
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "_")
+		.replace(/^_+|_+$/g, "");
+	// djb2, which is small, deterministic and has no dependency. A collision here
+	// would need two paths agreeing in 32 bits *and* sanitising alike, and the
+	// consequence is caught by the uniqueness assertion in `composeLibrary`.
+	let hash = 5381;
+	for (let i = 0; i < path.length; i++) hash = ((hash << 5) + hash + path.charCodeAt(i)) >>> 0;
+	return `cmp_${stem || "c"}_${hash.toString(36)}`;
+}
+
+/**
+ * A scene with the project's component documents spliced into it.
+ *
+ * `library` is path -> that document's definition subtree. A path an instance
+ * names and the library does not hold is left exactly as it was: a dangling
+ * `instanceOf` derives nothing, which is what deleting a component out from
+ * under its uses has always left behind, and is a great deal better than
+ * refusing to open the page.
+ *
+ * Returns the scene it was given when the project has no component documents
+ * and no instance names one, so a document that has never heard of this pays
+ * nothing and compares equal by identity.
+ */
+export function composeLibrary(
+	scene: Scene,
+	library: Readonly<Record<string, SceneNode>>,
+): Scene {
+	const used = new Set<string>();
+	for (const node of flatten(scene.nodes)) {
+		const ref = node.instanceOf;
+		if (ref !== undefined && isComponentPath(ref) && library[ref]) used.add(ref);
+	}
+	if (used.size === 0) return scene;
+
+	const ids = new Map<string, string>();
+	for (const path of [...used].sort()) {
+		const id = componentIdOf(path);
+		// Injective by construction, and asserted rather than assumed: two
+		// definitions under one id would be one definition, and the instances of
+		// the second would quietly draw the first.
+		if ([...ids.values()].includes(id)) continue;
+		ids.set(path, id);
+	}
+
+	const definitions = [...ids].map(([path, id]) => ({
+		...library[path],
+		id,
+		component: true as const,
+		// Present for its instances, drawn on nobody's page. See the note above.
+		hidden: true as const,
+	}));
+
+	return {
+		...scene,
+		nodes: [
+			...definitions,
+			...mapTree(scene.nodes, (node) => {
+				const ref = node.instanceOf;
+				if (ref === undefined || !isComponentPath(ref)) return node;
+				const id = ids.get(ref);
+				return id === undefined ? node : { ...node, instanceOf: id };
+			}),
+		],
+	};
+}
+
+/**
+ * The inverse of {@link composeLibrary}: a scene as its *page document* holds
+ * it.
+ *
+ * Composition is a read and every read in the studio is followed by writes — the
+ * editor is handed a scene and hands back a new one on every keystroke. Without
+ * this, saving would write the spliced definitions into the page: a component
+ * would be copied into every page that used it, the copies would drift, and the
+ * document that was supposed to be the one source of it would become one of
+ * several.
+ *
+ * So the pair is compose-on-read and decompose-on-write, and the round trip is
+ * asserted rather than assumed — see the test, which is the only thing standing
+ * between this and that failure, because nothing about a scene carrying an extra
+ * hidden definition *looks* wrong.
+ *
+ * Definitions are recognised by the id {@link componentIdOf} derives, so a
+ * `component: true` node the page genuinely owns — the three templates that ship
+ * one, and any component drawn on a page — is left exactly where it is. This
+ * removes what it added and nothing else.
+ */
+export function decomposeLibrary(
+	scene: Scene,
+	library: Readonly<Record<string, SceneNode>>,
+): Scene {
+	const paths = new Map<string, string>();
+	for (const path of Object.keys(library)) paths.set(componentIdOf(path), path);
+	if (paths.size === 0) return scene;
+
+	const spliced = scene.nodes.filter(
+		(node) => node.component === true && paths.has(node.id),
+	);
+	const instances = flatten(scene.nodes).some(
+		(node) => node.instanceOf !== undefined && paths.has(node.instanceOf),
+	);
+	if (spliced.length === 0 && !instances) return scene;
+
+	return {
+		...scene,
+		nodes: mapTree(
+			scene.nodes.filter((node) => !spliced.includes(node)),
+			(node) => {
+				const path = node.instanceOf === undefined ? undefined : paths.get(node.instanceOf);
+				return path === undefined ? node : { ...node, instanceOf: path };
+			},
+		),
+	};
+}
