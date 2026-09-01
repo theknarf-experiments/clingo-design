@@ -106,6 +106,7 @@ import { ProgramPanel } from "./ProgramPanel";
 import { PanelResizer, usePanelWidth } from "./PanelResizer";
 import { Rulers } from "./Rulers";
 import { ShapePicker } from "./ShapePicker";
+import { SyncSettings } from "./SyncSettings";
 import { StatusLine } from "./StatusLine";
 import { ToolIcon } from "./ToolIcon";
 import { Variables } from "./Variables";
@@ -267,6 +268,14 @@ export interface StudioProps {
 	scene: Scene;
 	onSceneChange: (next: Scene | ((prev: Scene) => Scene), coalesce?: string) => void;
 	projectName: string;
+	/**
+	 * The project's url — its identity, and what a collaborator is given.
+	 *
+	 * Beside the name rather than instead of it: the name is what a person reads
+	 * and the url is what the sync settings act on, and a studio rendered without
+	 * one (a test, a preview) simply shows no sync chip.
+	 */
+	projectUrl?: string;
 	undo: () => void;
 	redo: () => void;
 	canUndo: boolean;
@@ -277,6 +286,7 @@ export function Studio({
 	scene,
 	onSceneChange,
 	projectName,
+	projectUrl,
 	undo,
 	redo,
 	canUndo,
@@ -2182,6 +2192,7 @@ export function Studio({
 							<span aria-hidden="true">←</span>
 							<span className={styles.projectName}>{projectName}</span>
 						</Link>
+						{projectUrl ? <SyncSettings url={projectUrl} /> : null}
 						<ViewSwitcher options={VIEWS} value={view} onChange={setView} />
 						{view === "design" ? (
 							<div className={styles.tools}>

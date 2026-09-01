@@ -63,6 +63,7 @@ export function Project() {
 				)
 			}
 			projectName={page.name}
+			projectUrl={id}
 			undo={history.undo}
 			redo={history.redo}
 			canUndo={history.canUndo}

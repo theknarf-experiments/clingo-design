@@ -1,11 +1,14 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import {
 	type AutomergeUrl,
+	DEFAULT_SYNC_SERVER,
 	type DocHandle,
+	type SyncTarget,
 	type UrlHeads,
 	type VfsProject,
 	createProject as createVfsProject,
 	openProject,
+	serverConnected,
 } from "@clingo-design/vfs";
 import {
 	type Scene,
@@ -14,7 +17,13 @@ import {
 	reconcile,
 } from "@clingo-design/design-core";
 
-import { type ProjectEntry, forgetProject, listProjects, upsertProject } from "./registry";
+import {
+	type ProjectEntry,
+	findEntry,
+	forgetProject,
+	listProjects,
+	upsertProject,
+} from "./registry";
 
 /**
  * The project store, over the virtual filesystem.
@@ -143,10 +152,40 @@ ready = true;
  */
 const open = new Map<string, Promise<VfsProject>>();
 
+/**
+ * Where a project syncs, as *this device's registry* says — and `null`, which
+ * means nowhere, for anything the registry has never heard of.
+ *
+ * **The default is local and that is the whole of this function.** `openProject`
+ * defaults its target to `DEFAULT_SYNC_SERVER`, which is the build's configured
+ * server and, in development, `ws://localhost:8080`. Calling it with no target
+ * therefore opened *every* project into a syncing repo — while `createProject`
+ * made them in the local one. It appeared to work because both repos share an
+ * IndexedDB namespace, so the document was found either way, and the only
+ * visible symptom was a websocket dialled at every open.
+ *
+ * What it would have cost is not a symptom. The moment a build is configured
+ * with a server, opening a project would have published it — every project,
+ * including ones nobody chose to share — and the vfs states the rule this
+ * breaks in as many words: a project stays on the machine it was made on until
+ * its settings say otherwise, because creating it in a syncing repo publishes it
+ * before anyone had the chance to decide, and there is no unpublishing.
+ *
+ * So the setting is read, never defaulted to a server. A project with `sync` off
+ * or absent is local; one with `sync` on and no server of its own follows the
+ * build's default, which is what lets a deployment move without every project
+ * pinning itself to an address.
+ */
+function targetFor(url: string): SyncTarget {
+	const entry = findEntry(url);
+	if (!entry?.sync) return null;
+	return entry.server ?? DEFAULT_SYNC_SERVER;
+}
+
 function project(url: string): Promise<VfsProject> {
 	const existing = open.get(url);
 	if (existing) return existing;
-	const opening = openProject(url).then((p) => {
+	const opening = openProject(url, targetFor(url)).then((p) => {
 		// The document's title is authoritative; the registry caches it. Opening a
 		// url someone shared is also what adds it to this device's list.
 		upsertProject(url, { name: p.name() });
@@ -155,6 +194,78 @@ function project(url: string): Promise<VfsProject> {
 	});
 	open.set(url, opening);
 	return opening;
+}
+
+/**
+ * Move a project between "nowhere" and a server, and answer where it ended up.
+ *
+ * Two writes, in this order and not the other: the registry first, then the
+ * project is dropped from the open map so the next read reopens it through
+ * {@link targetFor}. Reopening is how a project *moves* — the vfs flushes every
+ * other repo first and the document keeps its url, so a project that starts
+ * syncing is the same project at the same address rather than a copy.
+ *
+ * Turning sync **on** is the irreversible half and the UI says so. Turning it
+ * off stops this device sending, and does not unsend: a document already on a
+ * server is on it, and anyone holding the url still has it. "Stop syncing" and
+ * "unpublish" are two different sentences and only the first one is true.
+ */
+export async function setProjectSync(
+	url: string,
+	sync: boolean,
+	server?: string,
+): Promise<void> {
+	upsertProject(url, { sync, ...(server === undefined ? {} : { server }) });
+	open.delete(url);
+	for (const key of [...pages.keys()]) {
+		if (key.startsWith(`${url}\u0000`)) pages.delete(key);
+	}
+	publish();
+	// Reopened eagerly rather than left to the next render, so the socket is
+	// dialled while the person is still looking at the switch they flipped —
+	// which is what makes `useSyncState` below able to report a failure.
+	await project(url);
+}
+
+/** Whether this project is set to sync, and to where. */
+export function syncOf(url: string): { sync: boolean; server: string | null } {
+	const entry = findEntry(url);
+	return {
+		sync: entry?.sync === true,
+		server: entry?.server ?? DEFAULT_SYNC_SERVER,
+	};
+}
+
+/**
+ * Whether the socket for a project's server is actually up, polled.
+ *
+ * Polled rather than subscribed because the repo exposes a predicate and no
+ * event, and a second-long poll is a truthful answer to a question nobody asks
+ * more often than that. It costs a function call: `serverConnected` reads a flag
+ * on a repo that already exists and never dials anything to find out.
+ *
+ * **Three states, not two, and the third is the one worth having.** A project
+ * that does not sync is `"off"`; one that syncs and is talking is `"live"`; one
+ * that is set to sync and is *not* talking is `"waiting"` — a server that is
+ * down, a laptop on a train, a url with the right shape and the wrong host. The
+ * settings panel can only validate the shape, because subduction refuses a
+ * handshake whose audience does not match and from the browser that refusal is
+ * silence. So the honest report is the live state, and this is it.
+ */
+export function useSyncState(url: string | undefined): "off" | "waiting" | "live" {
+	const [live, setLive] = useState(false);
+	const { sync, server } = url ? syncOf(url) : { sync: false, server: null };
+
+	useEffect(() => {
+		if (!sync || !server) return;
+		const read = () => setLive(serverConnected(server));
+		read();
+		const timer = setInterval(read, 1000);
+		return () => clearInterval(timer);
+	}, [sync, server]);
+
+	if (!sync || !server) return "off";
+	return live ? "live" : "waiting";
 }
 
 /**
