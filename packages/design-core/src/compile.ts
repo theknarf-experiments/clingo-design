@@ -3999,6 +3999,13 @@ export function compile(
 		// is structure rather than a design decision, the same call `gline/3`'s
 		// axis makes. A dangling id, an id naming a rect and a camera in another
 		// view all reach the program identically and all derive no `vcam/2`.
+		// The file an image draws, by path. Nothing about its *pixels* reaches the
+		// program — a photograph is not facts — but where it lives does, so a rule
+		// can ask which images a design uses and a renderer reads its subject from
+		// the answer set like everything else it draws.
+		if (node.image !== undefined) {
+			nodeLines.push(atom("asset", node.id, quote(node.image.src)));
+		}
 		if (node.kind === "viewport" && node.camera !== undefined) {
 			nodeLines.push(atom("looks", node.id, node.camera));
 		}
@@ -4011,7 +4018,12 @@ export function compile(
 			nodeLines.push(
 				atom("tris", node.id, Math.max(0, Math.round(node.mesh.triangles))),
 			);
-			nodeLines.push(atom("asset", node.id, quote(node.mesh.asset)));
+			// A path in the project's tree, which is what `asset/2` carries for
+			// every kind that draws a payload — see the image case below. A mesh
+			// payload has no name a person chose, so its file is its hash; an
+			// image's is the file somebody imported. Both are files, and this is
+			// where each one lives.
+			nodeLines.push(atom("asset", node.id, quote(`/assets/${node.mesh.asset}`)));
 		}
 		const parent = parents.get(node.id);
 		if (parent) nodeLines.push(atom("child", parent.id, node.id));
@@ -5086,10 +5098,16 @@ export function compile(
 			"% else. What is left here is what no other predicate carries.",
 			"#defined turn/3.",
 			"#defined tris/2.",
+			"#defined asset/2.",
 			"#defined looks/2.",
 			"#defined vcam/2.",
 			"#show turn(N,R,V) : turn(N,R,V), scenery.",
 			"#show tris(N,K) : tris(N,K), scenery.",
+			// Where a node's payload lives, for the two kinds that draw one. The
+			// reader has always been there and this was not, so `ModelScene.assets`
+			// was empty on every document — a `model` fell back to its stand-in box
+			// for want of one line, which looked exactly like a missing asset.
+			"#show asset(N,P) : asset(N,P), scenery.",
 			"#show looks(V,C) : looks(V,C), scenery.",
 			"#show vcam(V,C) : vcam(V,C), scenery.",
 			"% A rotation is a design decision like a position: an `angle` token with",

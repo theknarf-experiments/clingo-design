@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
-import { putAsset } from "../projects/store";
+import { putAsset, putNamedAsset } from "../projects/store";
 import {
 	CONSTRAINT_KINDS,
 	DEFAULT_EASING,
@@ -28,6 +28,7 @@ import {
 	type Universe,
 	addConstraint,
 	addInstance,
+	addImage,
 	addImport,
 	addPivot,
 	defineComponent,
@@ -62,6 +63,7 @@ import {
 	parseVariable,
 	placedNodes,
 	reachableAlternatives,
+	frameAt,
 	sceneContext,
 	shownState,
 	shownStates,
@@ -1369,6 +1371,67 @@ export function Studio({
 		[onSceneChange],
 	);
 
+	/**
+	 * Bring a picture in: choose a file, put it in the tree, place a node.
+	 *
+	 * The file goes in **before** the node, which is the same order the glTF
+	 * import uses and for the same reason: a node that referenced a path nothing
+	 * had written yet would be a picture the canvas could never draw, while a
+	 * file with no node is inert and gets swept by `pruneAssets`.
+	 *
+	 * The intrinsic size is decoded here rather than guessed, because it is what
+	 * the node's box becomes — a photograph arrives at the size it really is, and
+	 * a designer who wants it smaller resizes it and can see what they did.
+	 * `createImageBitmap` rather than an `<img>` and a load event: it reports the
+	 * dimensions without attaching anything to the document, and it rejects on a
+	 * file that is not an image, which is the check this needs anyway.
+	 */
+	const importImage = useCallback(() => {
+		const input = document.createElement("input");
+		input.type = "file";
+		input.accept = "image/*";
+		input.onchange = () => {
+			const file = input.files?.[0];
+			if (!file) return;
+			void (async () => {
+				try {
+					const bytes = new Uint8Array(await file.arrayBuffer());
+					const bitmap = await createImageBitmap(new Blob([bytes.slice().buffer as ArrayBuffer], { type: file.type }));
+					const { width, height } = bitmap;
+					// Freed at once: it was decoded to be measured, and the picture the
+					// canvas draws comes from the file in the tree.
+					bitmap.close();
+					const src = await putNamedAsset(file.name, bytes);
+					const centre = {
+						x: region.x + region.width / 2,
+						y: region.y + region.height / 2,
+					};
+					onSceneChange((prev) =>
+						addImage(
+							prev,
+							// The artboard under the middle of the view, exactly as the
+							// drawing tools choose a host — an image dropped into a frame
+							// belongs to it, and one placed over empty canvas is a root.
+							frameAt(prev.nodes, centre, primary?.solved ?? {}, context)?.node.id ??
+								null,
+							{ src, mimeType: file.type || "image/png", width, height },
+							centre,
+							file.name.replace(/\.[^.]+$/, ""),
+							picks,
+						),
+					);
+					setImported({ name: file.name, lost: [] });
+				} catch {
+					setImported({
+						name: file.name,
+						lost: ["This file could not be read as an image."],
+					});
+				}
+			})();
+		};
+		input.click();
+	}, [onSceneChange, picks, region, context, primary?.solved]);
+
 	const selectedGroups = [...selection].filter((id) => {
 		const node = byId.get(id);
 		return node !== undefined && wrapsChildren(node);
@@ -2129,6 +2192,26 @@ export function Studio({
 										</button>
 									),
 								)}
+								{/* Not a tool, and it sits at the end of the row rather than
+								    among them for that reason: every other entry here arms a
+								    drag, and this one opens a file picker. An image cannot be
+								    drawn — there is a file to choose first, and its own
+								    dimensions are what the box should be. */}
+								<button
+									type="button"
+									data-role="import-image"
+									aria-label="Place an image"
+									className={cx(styles.tool, styles.iconTool)}
+									onClick={importImage}
+								>
+									<span aria-hidden="true">▨</span>
+									<span className={styles.tip} role="tooltip" aria-hidden="true">
+										Place an image
+										<span className={styles.tipHint}>
+											arrives at its own size, in the artboard under the view
+										</span>
+									</span>
+								</button>
 							</div>
 						) : null}
 						{view === "design" ? (

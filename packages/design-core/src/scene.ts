@@ -117,6 +117,7 @@ const pxLength = (px: number): string => writeLength(fromPx(px));
 export type PropName =
 	| "text"
 	| "fill"
+	| "fit"
 	| "radius"
 	| "stroke"
 	| "strokeWidth"
@@ -195,6 +196,13 @@ export const PROPS: Record<PropName, PropSpec> = {
 		label: "Fill",
 		type: "color",
 		fallback: VALUE_TYPES.color.fallback,
+		styleable: true,
+		inherited: false,
+	},
+	fit: {
+		label: "Fit",
+		type: "fit",
+		fallback: VALUE_TYPES.fit.fallback,
 		styleable: true,
 		inherited: false,
 	},
@@ -448,6 +456,7 @@ export type NodeKind =
 	| "viewport"
 	| "pivot"
 	| "mesh"
+	| "image"
 	| "model"
 	| "camera"
 	| "light";
@@ -898,6 +907,35 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	 * every imported asset the moment it landed. Stated, it overrides — which is
 	 * the affordance a designer wants and the default nobody wants.
 	 */
+	image: {
+		label: "Image",
+		// `fit` first: it is the one a designer changes, because a box is almost
+		// never the aspect of the picture in it. No `fill` — an image *is* its
+		// pixels, and a colour behind them would only be seen through the
+		// letterboxing, which is a thing to notice rather than a thing to offer.
+		props: ["fit", "radius", "opacity"],
+		defaults: {},
+		// Only ever seen by a node whose file went missing before it was placed:
+		// an import sizes the node to the picture's own dimensions.
+		defaultSize: { width: fromPx(200), height: fromPx(150) },
+		drawable: true,
+		// Not a tool. Every other drawable kind is made by dragging a box, and an
+		// image cannot be — there is a file to choose first, and its intrinsic
+		// size is what the box should be. It arrives through Import.
+		tool: false,
+		container: false,
+		surface: false,
+		wrapsChildren: false,
+		shape: false,
+		diagonal: false,
+		measured: false,
+		plotted: false,
+		spatial: false,
+		// Not opaque. That column is the viewport seam — "does the pointer stop
+		// here" — and an image has nothing inside for a pointer to reach. A leaf
+		// with no children answers it the way every other leaf does.
+		opaque: false,
+	},
 	model: {
 		label: "Model",
 		props: ["fill", "roughness", "metalness", "opacity"],
@@ -2163,6 +2201,36 @@ export interface MeshRef {
 	source?: string;
 }
 
+/**
+ * A raster image the document points at rather than holds.
+ *
+ * The same trade {@link MeshRef} makes, and for a sharper reason: a photograph
+ * is megabytes of pixels with no structure to merge, and a document is diffed,
+ * undone and synced on every keystroke.
+ *
+ * **Addressed by path, not by hash.** The image is a real file in the project's
+ * tree — `/assets/hero.png` — with the name the person who imported it chose,
+ * and this node references that file. Which means it is a file in every sense
+ * the rest of the world uses the word: it appears in the tree, it clones onto
+ * disk under its own name, and replacing it replaces the picture everywhere it
+ * is used, because the reference is to *the file* rather than to some bytes
+ * that happened to be there.
+ *
+ * The intrinsic size is here rather than read from the payload because it is
+ * needed before the payload arrives: to place a new node at the size the picture
+ * really is, and to keep the right aspect while the bytes are loading, missing,
+ * or on the far end of a sync.
+ */
+export interface ImageRef {
+	/** Absolute path in the project's tree — `/assets/hero.png`. */
+	src: string;
+	/** The media type, so a data url and an `<img>` agree about what it is. */
+	mimeType: string;
+	/** Intrinsic pixel dimensions, as the decoder reported them. */
+	width: number;
+	height: number;
+}
+
 /** What the document remembers about an asset it does not hold. */
 export interface AssetInfo {
 	format: "gltf" | "glb";
@@ -2384,6 +2452,15 @@ export interface SceneNode {
 	 * it sits beside it for that reason.
 	 */
 	mesh?: MeshRef;
+	/**
+	 * On an `image`: which file in the tree it draws — see {@link ImageRef}.
+	 *
+	 * The pixels are **not here**, for the reason `mesh` and `points` are not
+	 * either. A node whose file is missing is still a node: it has a place, a
+	 * size, and a rule that can name it. What it lacks is a picture, which is a
+	 * relink rather than a failure.
+	 */
+	image?: ImageRef;
 }
 
 /** True when this node's children are placed by the solver. */

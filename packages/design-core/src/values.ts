@@ -28,6 +28,7 @@ export type ValueType =
 	| "placement"
 	| "justify"
 	| "sizing"
+	| "fit"
 	| "growth"
 	| "solid"
 	| "lamp";
@@ -215,6 +216,24 @@ const SIZINGS: ValueOption[] = [
  * field. A closed menu of two already is a boolean, spelled the way every
  * other value is.
  */
+/**
+ * How a picture sits in a box that is not its shape.
+ *
+ * The three CSS `object-fit` values worth offering, under the names a designer
+ * would use rather than the ones the property uses: a box is almost never the
+ * aspect of the photograph put in it, and which of the three you want is a
+ * design decision made per image rather than a default anybody could pick.
+ *
+ * `cover` first, because it is the answer for the case that brought this here —
+ * a photograph filling a card — and a first alternative is what a value that
+ * says nothing comes to.
+ */
+const FITS: ValueOption[] = [
+	{ value: "cover", label: "Fill the box, cropping" },
+	{ value: "contain", label: "Fit inside, letterboxed" },
+	{ value: "stretch", label: "Stretch to the box" },
+];
+
 const GROWTH: ValueOption[] = [
 	{ value: "fixed", label: "Keep its size" },
 	{ value: "grow", label: "Fill the leftover space" },
@@ -327,6 +346,7 @@ export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
 		options: JUSTIFICATIONS,
 	},
 	sizing: { label: "Sizing", fallback: SIZINGS[0].value, options: SIZINGS },
+	fit: { label: "Fit", fallback: FITS[0].value, options: FITS },
 	growth: { label: "Growth", fallback: GROWTH[0].value, options: GROWTH },
 	solid: { label: "Solid", fallback: SOLIDS[0].value, options: SOLIDS },
 	lamp: { label: "Lamp", fallback: LAMPS[1].value, options: LAMPS },

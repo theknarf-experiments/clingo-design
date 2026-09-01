@@ -922,9 +922,17 @@ test("an imported mesh is a node and its vertices are not", async () => {
 			}),
 		]),
 	);
-	const atoms = await answer(scene, "#show asset/2.\n");
+	// No `#show asset/2.` of its own any more: the compiler shows it, because
+	// `ModelScene.assets` reads it and for a while nothing did — the reader was
+	// written and the directive was not, so every model fell back to its
+	// stand-in box for want of one line. A second show here duplicated the atom,
+	// which is how that was noticed.
+	const atoms = await answer(scene);
 	assert.deepEqual(of(atoms, "tris"), [["bust", "240000"]]);
-	assert.deepEqual(of(atoms, "asset"), [["bust", '"9f2c"']]);
+	// A path in the project's tree, not a bare hash. `asset/2` says where a
+	// payload lives for every kind that draws one — a mesh's file is its content
+	// hash because nobody named it, an image's is the file somebody imported.
+	assert.deepEqual(of(atoms, "asset"), [["bust", '"/assets/9f2c"']]);
 	// The count is emitted for its own sake, and this is the cheapest useful
 	// thing the whole section buys: a budget is a rule a team writes on day one,
 	// with a name in the core, a switch and a `why`.

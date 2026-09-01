@@ -1,4 +1,5 @@
 import { resolveAsset } from "../projects/store";
+import { useImage } from "./useImage";
 import {
 	type CSSProperties,
 	type ReactNode,
@@ -164,7 +165,32 @@ const CONTENT: Partial<
 	arrow: (_node, frame, doc) => <Stroke frame={frame} doc={doc} head />,
 	path: (_node, frame, doc) => <Plot frame={frame} doc={doc} />,
 	viewport: (node, _frame, _doc, view) => (view ? <View node={node} view={view} /> : null),
+	image: (node) => <Picture node={node} />,
 };
+
+/**
+ * An image node's picture.
+ *
+ * The file it draws comes off the **answer set** — `asset/2`, read into
+ * `ModelScene.assets` — and not off the document, which is the same rule every
+ * other thing on this canvas is drawn by. So a rule that mints an image node and
+ * states its own `asset/2` gets a picture, exactly as a rule that mints a rect
+ * gets a fill.
+ *
+ * The box is the node's, always. `object-fit` decides what the picture does
+ * inside it, which is what makes a photograph in a card a design decision rather
+ * than an accident of the file's aspect — and it is why the node keeps its size
+ * while the bytes are still arriving instead of reflowing when they land.
+ */
+function Picture({ node }: { node: ModelNode }) {
+	const src = useImage(node.asset);
+	if (!src) return null;
+	// No inline `object-fit`. The box already carries it — `fit` is a property
+	// like any other and the paint table put it there — and the stylesheet below
+	// inherits it onto the picture. Setting it here as well would be a second
+	// answer that a token or a state override could silently disagree with.
+	return <img className={styles.picture} src={src} alt="" draggable={false} />;
+}
 
 /**
  * A line across the node's box, optionally with a head.

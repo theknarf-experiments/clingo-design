@@ -115,6 +115,17 @@ export interface ModelNode {
 	turn?: Record<Turn, number>;
 	/** What it draws with: final text per property, tokens already followed. */
 	rendered: Partial<Record<PropName, string>>;
+	/**
+	 * Where in the project's tree the payload it draws lives — `asset/2`.
+	 *
+	 * On the node as well as in {@link ModelScene.assets}, because the two are
+	 * asked by different readers: a renderer walking the tree has the node and
+	 * wants its picture, and anything auditing a project wants the whole map
+	 * without walking. One fact, two shapes, both built in the same pass.
+	 *
+	 * Absent on every kind that draws no payload, which is most of them.
+	 */
+	asset?: string;
 	children: ModelNode[];
 }
 
@@ -1483,6 +1494,7 @@ export function readModel(atoms: readonly string[]): ModelScene {
 			frame: boxOf(id, facts, solved),
 			...poseExtras(id, facts, solved),
 			rendered: renderedTexts(id, facts),
+			...(facts.assets.has(id) ? { asset: facts.assets.get(id) } : {}),
 			children: [],
 		};
 	}

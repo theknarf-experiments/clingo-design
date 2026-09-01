@@ -2506,3 +2506,113 @@ test("a keyframe past the end of its timeline is held at the end, and the file s
 	);
 	assert.ok(out.lost.some((line) => line.includes("land on the same whole percentage")));
 });
+
+/* ------------------------------------------------------------------ */
+/* Images                                                              */
+/* ------------------------------------------------------------------ */
+
+/** A one-pixel PNG, as the bytes a file would actually hold. */
+const PNG = Uint8Array.from([
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
+	0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
+	0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+]);
+
+const SRC = "/assets/hero.png";
+
+/** One artboard with one picture on it, sized as the decoder reported it. */
+function withPicture(fit?: Value): Scene {
+	const picture: SceneNode = {
+		...makeNode("image", { x: 0, y: 0, width: 800 * EMU_PER_PX, height: 600 * EMU_PER_PX }, {
+			id: "hero",
+			name: "Hero",
+		}),
+		image: { src: SRC, mimeType: "image/png", width: 800, height: 600 },
+		...(fit ? { props: { fit } } : {}),
+	};
+	return {
+		...card(),
+		nodes: [
+			{
+				...makeNode("frame", { x: 0, y: 0, width: 800 * EMU_PER_PX, height: 600 * EMU_PER_PX }, {
+					id: "page",
+					name: "Page",
+				}),
+				children: [picture],
+			},
+		],
+	};
+}
+
+test("a picture comes out inlined, in both targets", async () => {
+	const scene = withPicture();
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+
+	const html = exportUniverse(scene, universe, {
+		target: "html",
+		images: { [SRC]: PNG },
+	});
+	// An `<img>`, not a background: an image is content, it takes the box's own
+	// border-radius, and a page it is pasted into keeps an element to select.
+	assert.match(html.text, /<img src="data:image\/png;base64,[A-Za-z0-9+/=]+" alt="" draggable="false"\/>/);
+	// The media type is read off the path's extension, and the bytes round-trip.
+	const encoded = html.text.match(/base64,([A-Za-z0-9+/=]+)"/)?.[1];
+	assert.ok(encoded);
+	assert.deepEqual(
+		Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)),
+		PNG,
+	);
+
+	const svg = exportUniverse(scene, universe, {
+		target: "svg",
+		images: { [SRC]: PNG },
+	});
+	assert.match(svg.text, /<image [^>]*href="data:image\/png;base64,/);
+	// Neither target reports a loss when the bytes were there.
+	assert.equal(
+		[...html.lost, ...svg.lost].some((l) => l.includes(SRC)),
+		false,
+	);
+});
+
+test("fit maps onto the two targets' own words for it", async () => {
+	const universe = async (fit: Value) => {
+		const scene = withPicture(fit);
+		const u = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+		return {
+			html: exportUniverse(scene, u, { target: "html", images: { [SRC]: PNG } }).text,
+			svg: exportUniverse(scene, u, { target: "svg", images: { [SRC]: PNG } }).text,
+		};
+	};
+	// The mapping is exact rather than nearly: slice crops to fill, meet
+	// letterboxes, none stretches — so the two files show the same picture.
+	const cover = await universe(single("cover"));
+	assert.match(cover.html, /object-fit: cover/);
+	assert.match(cover.svg, /preserveAspectRatio="xMidYMid slice"/);
+
+	const contain = await universe(single("contain"));
+	assert.match(contain.html, /object-fit: contain/);
+	assert.match(contain.svg, /preserveAspectRatio="xMidYMid meet"/);
+
+	// `stretch` is the designer's word; CSS calls it `fill` and SVG calls it
+	// `none`, and neither of those is a word anybody would pick from a menu.
+	const stretch = await universe(single("stretch"));
+	assert.match(stretch.html, /object-fit: fill/);
+	assert.match(stretch.svg, /preserveAspectRatio="none"/);
+});
+
+test("a picture whose bytes were not handed over says so rather than going blank", async () => {
+	// The real case: a shared project whose assets are still syncing. The node is
+	// still in the file at its size — that is the right picture for a design
+	// whose file has not arrived — and what must not happen is silence.
+	const scene = withPicture();
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+	const out = exportUniverse(scene, universe, { target: "html" });
+
+	assert.doesNotMatch(out.text, /<img/);
+	// The box is still there, and still the size the picture is.
+	assert.match(out.text, /data-kind="image"/);
+	const named = out.lost.filter((l) => l.includes(SRC));
+	assert.equal(named.length, 1, "named once, by the path to go and find");
+	assert.match(named[0], /Hero/);
+});

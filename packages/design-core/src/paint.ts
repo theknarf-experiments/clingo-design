@@ -82,6 +82,11 @@ export const PAINT: Partial<Record<PropName, (value: string) => Declarations>> =
 	weight: (value) => ({ fontWeight: value }),
 	lineHeight: (value) => ({ lineHeight: value }),
 	align: (value) => ({ textAlign: value }),
+	// `stretch` is the designer's word and CSS's is `fill`, which is already
+	// taken in this vocabulary by the colour a box is painted. Translated here,
+	// in the one place both targets read, so the menu can say what it means
+	// without the stylesheet meaning something else.
+	fit: (value) => ({ objectFit: value === "stretch" ? "fill" : value }),
 };
 
 /**

@@ -355,6 +355,36 @@ function viewportLost(index: DocIndex, node: ModelNode, inside: number, poster: 
 }
 
 /**
+ * Pictures the caller did not hand over, one sentence each.
+ *
+ * An image whose bytes were not supplied comes out as an empty box — the node
+ * is still there, at its size, with its corners and its opacity — and that is
+ * the right picture for a design whose file has not arrived. What it must not be
+ * is silent: an export taken while a shared project was still syncing its assets
+ * is a file with holes in it, and the difference between that and a design that
+ * genuinely has an empty box is exactly this list.
+ *
+ * Named by the path rather than the node, because the path is the thing to go
+ * and find.
+ */
+function missingImages(
+	index: DocIndex,
+	model: ModelScene,
+	images: Readonly<Record<string, Uint8Array>>,
+): string[] {
+	const out: string[] = [];
+	for (const node of Object.values(model.byId)) {
+		if (node.kind !== "image") continue;
+		const path = node.asset;
+		if (path !== undefined && images[path] !== undefined) continue;
+		out.push(
+			`The ${nodeLabel(index, node.id)} draws ${path === undefined ? "no file at all" : `“${path}”`}, and those bytes were not available when this file was written — so its box is here and its picture is not. A project still syncing its assets, or opened without them, exports this way.`,
+		);
+	}
+	return out;
+}
+
+/**
  * The one thing a `transform` costs, said once for the whole document.
  *
  * Not a loss of information — the transform is exact, and this is the one place
@@ -388,6 +418,23 @@ export interface ExportResult {
 
 export interface ExportOptions {
 	target: ExportTarget;
+	/**
+	 * The bytes behind every image the design draws, by the tree path `asset/2`
+	 * names.
+	 *
+	 * Handed in for the same reason {@link ExportOptions.posters} is: the
+	 * payloads live in the project's document store, reaching one is I/O, and
+	 * this package does not do I/O — it turns an answer set into a file. The
+	 * caller resolves what it needs and passes it.
+	 *
+	 * A path with no entry is a picture that does not come out, and it is named
+	 * in `lost` rather than left as a silently empty box. That covers the real
+	 * case as well as the careless one: a project opened without its assets, or
+	 * shared before they finished syncing, is a design whose images are still
+	 * arriving — and an export taken at that moment should say which ones were
+	 * not in it.
+	 */
+	images?: Readonly<Record<string, Uint8Array>>;
 	/**
 	 * Emit `var(--accent)` where a value named a token, with the definitions at
 	 * the top. Off inlines the literal everywhere, which is what a paste into
@@ -1307,12 +1354,69 @@ function declarationsFor(
 	return box;
 }
 
+/**
+ * A payload as a `data:` url, or nothing where the caller did not supply it.
+ *
+ * Base64 through `btoa`, which both a browser and Node have as a global — this
+ * package has no DOM in its `lib` and must not gain one for an encoder. Built
+ * in chunks because `String.fromCharCode(...bytes)` spreads the whole array
+ * into an argument list, and a four-megabyte photograph is four million
+ * arguments and a stack overflow.
+ *
+ * The media type comes from the extension rather than from the document,
+ * because what the exporter has is a path. A type it does not recognise is left
+ * to the browser to sniff, which is what `application/octet-stream` would
+ * prevent.
+ */
+function dataUrl(
+	images: Readonly<Record<string, Uint8Array>>,
+	path: string,
+): string | undefined {
+	const bytes = images[path];
+	if (!bytes || bytes.length === 0) return undefined;
+	let binary = "";
+	const CHUNK = 0x8000;
+	for (let at = 0; at < bytes.length; at += CHUNK) {
+		binary += String.fromCharCode(...bytes.subarray(at, at + CHUNK));
+	}
+	const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+	const type = IMAGE_TYPES[ext];
+	return `data:${type ?? "image/png"};base64,${btoa(binary)}`;
+}
+
+/** What an extension means, for the handful a design tool actually places. */
+const IMAGE_TYPES: Record<string, string> = {
+	png: "image/png",
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	gif: "image/gif",
+	webp: "image/webp",
+	avif: "image/avif",
+	svg: "image/svg+xml",
+};
+
 /** The markup a kind draws inside its box, as a string. */
 function htmlContent(
 	index: DocIndex,
 	layer: Layer,
 	node: ModelNode,
+	images: Readonly<Record<string, Uint8Array>> = {},
 ): string {
+	// A picture, inlined. `<img>` rather than a CSS background, because an image
+	// is content: it takes the box's own `border-radius`, it honours `object-fit`
+	// as a declaration the stylesheet already carries, and a file somebody pastes
+	// into a page keeps an element they can select and label.
+	//
+	// The alt is deliberately empty. The document has no field for a description,
+	// and inventing one from the filename would read "hero-final-2" to a screen
+	// reader — worse than saying nothing. An empty alt means decorative, which is
+	// the honest default until the document can say otherwise.
+	if (node.kind === "image") {
+		const url = node.asset === undefined ? undefined : dataUrl(images, node.asset);
+		return url === undefined
+			? ""
+			: `<img src="${escapeAttr(url)}" alt="" draggable="false"/>`;
+	}
 	// How a kind draws what is inside its box: its words, a stroke along a
 	// diagonal, a plotted outline, or nothing — a plain shape is all box. Every
 	// test reads the one table rather than naming a kind, so `svgNode` below
@@ -1400,7 +1504,20 @@ ${cssText(DOCUMENT_BASE, "\t")}
 .design [data-node] { position: absolute; }
 /* A line, an arrow or a path, drawn across its own box. Overflow is visible so
    a thick stroke is not clipped in half along the frame's edge. */
-.design .s { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }`;
+.design .s { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+/* An image fills its node's box, and takes the box's own object-fit — which is
+   where the \`fit\` property painted it, so a token or a variant still drives it.
+   Inherited explicitly because object-fit does not inherit on its own, and the
+   declaration has to live on the box for the property table to reach it. The
+   radius likewise, so a rounded image is rounded rather than square pixels
+   overflowing a rounded box. */
+.design [data-kind="image"] > img {
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: inherit;
+	border-radius: inherit;
+}`;
 
 /**
  * True when a kind renders the whitespace between its tags.
@@ -1419,6 +1536,7 @@ function htmlBody(
 	layer: Layer,
 	/** The style class each wearer carries beside its own, if any. */
 	wearing: Map<string, string>,
+	images: Readonly<Record<string, Uint8Array>> = {},
 ): string {
 	const byId = new Map(slots.map((s) => [s.id, s] as const));
 	const render = (node: ModelNode, depth: number, pretty: boolean): string => {
@@ -1428,7 +1546,7 @@ function htmlBody(
 		const worn = wearing.get(node.id);
 		const names = worn === undefined ? slot.className : `${slot.className} ${worn}`;
 		const open = `${pad}<div class="${names}" data-node="${escapeAttr(node.id)}" data-kind="${node.kind}">`;
-		const content = htmlContent(index, layer, node);
+		const content = htmlContent(index, layer, node, images);
 		// A viewport's box is markup and its contents are not — see `stopsHere`.
 		// The element is still emitted, still carries its id and its kind, and is
 		// still selectable and rule-able by anything the page is pasted into; what
@@ -1648,6 +1766,7 @@ function htmlExport(
 		);
 	}
 	if (depthOf(base.universe.model).turned) spatialLost.push(TURNED_LOST);
+	spatialLost.push(...missingImages(index, base.universe.model, options.images ?? {}));
 
 	const title = escapeText(options.title ?? "Design");
 	// At the end of the body, where a script that reads the document has to be:
@@ -1672,7 +1791,7 @@ ${css.join("\n")}
 </head>
 <body>
 \t<div class="design">
-${htmlBody(index, slots, base, wearing)}
+${htmlBody(index, slots, base, wearing, options.images ?? {})}
 \t</div>${script}
 </body>
 </html>
@@ -1807,6 +1926,7 @@ function svgNode(
 	useTokens: boolean,
 	used: Set<string>,
 	depth: number,
+	images: Readonly<Record<string, Uint8Array>>,
 	clips: string[],
 ): string {
 	const pad = "\t".repeat(depth + 1);
@@ -1822,7 +1942,23 @@ function svgNode(
 
 	let own = "";
 	const doc = docNode(index, node.id);
-	if (drawsWords(node)) {
+	if (node.kind === "image") {
+		// `preserveAspectRatio` is SVG's spelling of `object-fit`: slice crops to
+		// fill, meet letterboxes inside, and `none` stretches. The mapping is
+		// exact, so the two targets show the same picture rather than nearly.
+		const url = node.asset === undefined ? undefined : dataUrl(images, node.asset);
+		const fit = node.rendered.fit ?? "cover";
+		const ratio =
+			fit === "stretch"
+				? "none"
+				: fit === "contain"
+					? "xMidYMid meet"
+					: "xMidYMid slice";
+		own =
+			url === undefined
+				? ""
+				: `<image x="0" y="0" width="${round(frame.width)}" height="${round(frame.height)}" preserveAspectRatio="${ratio}" href="${escapeAttr(url)}"${style}/>`;
+	} else if (drawsWords(node)) {
 		own = svgText(node, frame, style);
 	} else if (isDiagonal(node)) {
 		const { y1, y2 } = diagonalRun(frame, doc?.diagonal);
@@ -1870,7 +2006,7 @@ function svgNode(
 	// The same stop the HTML target makes, in the flat target that has even less
 	// to say about a scene than a page does.
 	const inside = (stopsHere(node.kind) ? [] : node.children).map((child) =>
-		svgNode(index, layer, child, useTokens, used, depth + 1, clips),
+		svgNode(index, layer, child, useTokens, used, depth + 1, images, clips),
 	);
 	const kids =
 		inside.length === 0 ? "" : `\n${pad}\t<g${clip}>\n${inside.join("\n")}\n${pad}\t</g>`;
@@ -1911,6 +2047,7 @@ function svgExport(
 				useTokens,
 				used,
 				0,
+				options.images ?? {},
 				clips,
 			),
 		)

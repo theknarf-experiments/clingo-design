@@ -79,6 +79,8 @@
 	place-items: center;
 	overflow: hidden;
 	border-radius: inherit;
+	/* From the node's box, where the `fit` property painted it. */
+	object-fit: inherit;
 }
 
 .stillLabel {
@@ -93,4 +95,26 @@
 	border-radius: 999px;
 	pointer-events: none;
 	white-space: nowrap;
+}
+
+/*
+ * An image node's picture.
+ *
+ * Fills the node's box exactly; `object-fit` decides what the pixels do inside
+ * it, which is the whole of the `fit` property. `display: block` because an
+ * inline image sits on a text baseline and would leave a few pixels of gap
+ * under itself inside a box that is meant to be exactly the picture.
+ */
+.picture {
+	display: block;
+	width: 100%;
+	height: 100%;
+	/* Inherited from the node's own `radius`, so a rounded image is rounded
+	   rather than a rounded box with square pixels overflowing it. */
+	border-radius: inherit;
+	/* From the node's box, where the `fit` property painted it. */
+	object-fit: inherit;
+	/* A dragged image would be the browser's drag, not the editor's. */
+	user-select: none;
+	-webkit-user-drag: none;
 }

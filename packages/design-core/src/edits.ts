@@ -78,6 +78,7 @@ import {
 	type MachineInput,
 	type MachineLayer,
 	type MachineState,
+	type ImageRef,
 	type MeshRef,
 	type NodeKind,
 	PROPS,
@@ -435,6 +436,46 @@ export function addNodeTo(
 			n.id === parentId ? { ...n, children: [...(n.children ?? []), local] } : n,
 		),
 	};
+}
+
+/**
+ * Place an imported picture on the canvas.
+ *
+ * At its own size, not at a size this file invented: a photograph is 3024×4032
+ * or 800×600, and a designer who wants it smaller resizes it and can see what
+ * they did. The intrinsic dimensions are pixels as the decoder reported them, so
+ * they cross into EMU here — the one conversion an import makes.
+ *
+ * Centred on `at`, because the gesture that produces one is a drop or a menu
+ * command rather than a drag, and neither of those draws a box. Where a picture
+ * would land off the artboard entirely that is the caller's business: this
+ * places it where it was asked to.
+ *
+ * The bytes are already in the tree by the time this runs — the file is written
+ * first, then the node references it — so a node made here always points at
+ * something. The reverse order would leave a picture nobody could draw.
+ */
+export function addImage(
+	scene: Scene,
+	parentId: string | null,
+	image: ImageRef,
+	at: Point,
+	name: string,
+	picks: Picks = {},
+): Scene {
+	// Pixels as the decoder reported them, crossing into EMU — the one
+	// conversion an import makes.
+	const width = image.width * EMU_PER_PX;
+	const height = image.height * EMU_PER_PX;
+	const node: SceneNode = {
+		...makeNode(
+			"image",
+			{ x: at.x - width / 2, y: at.y - height / 2, width, height },
+			{ name: name.trim() || KINDS.image.label },
+		),
+		image,
+	};
+	return addNodeTo(scene, parentId, node, picks);
 }
 
 export function addNode(scene: Scene, node: SceneNode): Scene {

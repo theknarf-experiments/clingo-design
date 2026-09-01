@@ -64,6 +64,7 @@ const GLYPH: Record<SceneNode["kind"], string> = {
 	viewport: "▦",
 	pivot: "✛",
 	mesh: "⬡",
+	image: "▨",
 	model: "⬢",
 	camera: "◎",
 	light: "☀",

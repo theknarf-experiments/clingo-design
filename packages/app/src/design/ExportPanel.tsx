@@ -13,6 +13,7 @@ import {
 } from "@clingo-design/design-core";
 import type { GltfExport } from "@clingo-design/canvas-3d";
 
+import { useImageBytes } from "./useImageBytes";
 import styles from "./ExportPanel.module.css";
 
 export interface ExportPanelProps {
@@ -75,6 +76,7 @@ export function ExportPanel({
 	projectName,
 	posters,
 }: ExportPanelProps) {
+	const images = useImageBytes(scene);
 	const [target, setTarget] = useState<PanelTarget>("html");
 	const [which, setWhich] = useState<string>(WHOLE);
 	const [view, setView] = useState<string>("");
@@ -171,7 +173,7 @@ export function ExportPanel({
 						: `Design ${gltfUniverse + 1} of ${universes.length}. A glTF holds one arrangement of one set of objects, so the whole space cannot collapse into it the way a stylesheet can.`,
 			};
 		}
-		const options = { target, tokens, title: projectName, posters };
+		const options = { target, tokens, title: projectName, posters, images };
 		return one === null
 			? exportSpace(scene, universes, options)
 			: exportUniverse(scene, universes[one], options);
@@ -182,6 +184,7 @@ export function ExportPanel({
 		target,
 		tokens,
 		projectName,
+		images,
 		writer,
 		view,
 		gltfUniverse,
