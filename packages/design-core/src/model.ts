@@ -126,6 +126,33 @@ export interface ModelNode {
 	 * Absent on every kind that draws no payload, which is most of them.
 	 */
 	asset?: string;
+	/**
+	 * Which part of that file it draws — `meshpart/3`, the glTF node index and
+	 * the primitive index within that node's mesh.
+	 *
+	 * The other half of {@link asset}'s sentence, and it has to be a second atom
+	 * rather than a fragment on the path for the reason `compile.ts` argues where
+	 * it states them: a path with a `#node=3` on the end is not a path, and every
+	 * reader that treats `asset/2` as one — `resolveAsset`, the exporter's
+	 * `files` lookup, a rule asking which files a design uses — would need a
+	 * strip first.
+	 *
+	 * **On the node and deliberately not in a second map on {@link ModelScene}.**
+	 * `ModelScene.assets` exists so a project can be audited without walking the
+	 * tree — how much does this design weigh, which files does it need, which are
+	 * missing — and a primitive index answers none of those questions. Only a
+	 * renderer standing at a node wants it, and a renderer standing at a node has
+	 * the node.
+	 *
+	 * Absent wherever {@link asset} is absent, and absent as a pair: a file with
+	 * no part is a reference to a whole chair where a leg was meant, and the
+	 * renderer refuses it rather than defaulting to `{0, 0}` — see `modelPart` in
+	 * `canvas-3d/src/gltfexport.ts`, which makes the same choice for the same
+	 * reason. Guessing here would paper over a `#show meshpart/3` that stopped
+	 * reaching the answer set, which is precisely the failure `f2b6316` spent a
+	 * release not noticing.
+	 */
+	part?: { node: number; primitive: number };
 	children: ModelNode[];
 }
 
@@ -550,15 +577,27 @@ export interface ModelScene {
 	 */
 	triangles: Record<string, number>;
 	/**
-	 * Model node id -> the content hash of the geometry it draws — `asset/2`.
+	 * Model node id -> where in the project's tree the geometry it draws lives —
+	 * `asset/2`.
 	 *
 	 * The one thing a `model` needs that the picture could not otherwise carry.
 	 * Everything else about it is here already — its box, its turn, its material,
-	 * its triangle count — but the vertices live in an `AssetStore` keyed by this
-	 * hash, and a renderer that read the hash off the *document* would be a
-	 * renderer drawing something other than the answer set. So the compiler states
-	 * it and this reads it, and `canvas-3d` resolves it through a function that
-	 * knows nothing about where bytes are kept.
+	 * its triangle count — but the vertices are in a file, and a renderer that
+	 * read the path off the *document* would be a renderer drawing something
+	 * other than the answer set. So the compiler states it and this reads it, and
+	 * `canvas-3d` resolves it through a function that knows nothing about where
+	 * bytes are kept.
+	 *
+	 * A **path**, not a content hash, since `f2b6316`: replacing the file under
+	 * the path replaces the picture, which is the whole point of a project having
+	 * a tree. That change was one expression on the writing side and none at all
+	 * here, because this only ever held whatever string `asset/2` carried.
+	 *
+	 * Deliberately still one map of one string. Which *part* of the file a node
+	 * draws is on {@link ModelNode.part} and is not mirrored here, because the
+	 * questions this map exists to answer without walking the tree — what does
+	 * this design weigh, which files does it need, which are missing — are all
+	 * questions about files, and a primitive index answers none of them.
 	 *
 	 * Absent for a node the answer set gave no asset — a primitive `mesh`, and a
 	 * `model` a rule minted without one — which is what makes the stand-in box the
@@ -736,8 +775,10 @@ interface Facts {
 	fightsAt: Map<string, Array<[string, string, string, string]>>;
 	/** node id -> its triangle count — `tris/2`. */
 	triangles: Map<string, number>;
-	/** model node id -> the content hash of its payload — `asset/2`. */
+	/** model node id -> the tree path of the file it draws — `asset/2`. */
 	assets: Map<string, string>;
+	/** model node id -> which part of that file — `meshpart/3`. */
+	parts: Map<string, { node: number; primitive: number }>;
 	/** viewport id -> the camera it looks through — `vcam/2`. */
 	looks: Map<string, string>;
 	/**
@@ -847,6 +888,7 @@ function collect(atoms: readonly string[]): Facts {
 		fightsAt: new Map(),
 		triangles: new Map(),
 		assets: new Map(),
+		parts: new Map(),
 		looks: new Map(),
 		timelines: new Map(),
 		machines: new Map(),
@@ -1149,12 +1191,37 @@ function collect(atoms: readonly string[]): Facts {
 				facts.triangles.set(a, count);
 				break;
 			}
-			// A quoted term, because a SHA-256 is 64 hex characters and a bare one
-			// starting with a digit is not a constant a grounder would take.
+			// A quoted term, because a tree path holds slashes and dots and a bare
+			// one is not a constant a grounder would take. It was quoted when it
+			// held a SHA-256 for the neighbouring reason — 64 hex characters
+			// starting with a digit — and stayed quoted when it became a path,
+			// which is why `f2b6316` was a one-expression change on the writing
+			// side and no change at all here.
 			case "asset/2": {
-				const hash = unquote(b);
-				if (hash === "") break;
-				facts.assets.set(a, hash);
+				const path = unquote(b);
+				if (path === "") break;
+				facts.assets.set(a, path);
+				break;
+			}
+			// The other half of that sentence: which part of the file. Two bare
+			// integers, not quoted, because they are numbers and a grounder takes
+			// them as numbers — see `compile.ts`, which argues at length why this
+			// is a second atom rather than a `#node=3` on the end of the path.
+			//
+			// Both must parse and both must be whole and non-negative, and a half
+			// that fails takes the whole pair down: `part` is stored as a pair
+			// because a node index without a primitive index addresses nothing, and
+			// filling the missing half with a zero would hand the renderer a
+			// well-formed reference to geometry nobody asked for. A hand-written
+			// rule stating `meshpart(n, foo, 0)` therefore leaves the node drawing
+			// its stand-in box, which is the same silence a missing `asset/2`
+			// leaves and is read the same way by the same code.
+			case "meshpart/3": {
+				const node = Number(b);
+				const primitive = Number(c);
+				if (!Number.isInteger(node) || node < 0) break;
+				if (!Number.isInteger(primitive) || primitive < 0) break;
+				facts.parts.set(a, { node, primitive });
 				break;
 			}
 			case "vcam/2":
@@ -1495,6 +1562,7 @@ export function readModel(atoms: readonly string[]): ModelScene {
 			...poseExtras(id, facts, solved),
 			rendered: renderedTexts(id, facts),
 			...(facts.assets.has(id) ? { asset: facts.assets.get(id) } : {}),
+			...(facts.parts.has(id) ? { part: facts.parts.get(id) } : {}),
 			children: [],
 		};
 	}

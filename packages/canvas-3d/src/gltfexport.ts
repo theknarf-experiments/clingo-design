@@ -14,15 +14,25 @@
  * stored rather than where the rules put it.
  *
  * The cost is stated in §5.3 of `docs/three-d-spec.md` and it is real: an
- * imported `model`'s vertices are not in the answer set. `tris/2` is, `asset/2`
- * is emitted by `compile.ts` — and `readModel` does not collect it, so a
- * `ModelScene` cannot say which payload a model draws. **That is a gap upstream,
- * reported rather than papered over**: this exporter takes a
- * {@link GltfExportOptions.geometry} resolver keyed by *node id*, because a node
- * id is the one identifier the answer set actually carries, and a model it
- * cannot resolve exports as its bounding box with a sentence in `lost` — the
- * same answer `Model.tsx` draws on screen, which is deliberate. Two readers that
- * disagreed about what a model with no payload is would be two documents.
+ * imported `model`'s vertices are not in the answer set. What *is* there is the
+ * path of the file in the project's tree (`asset/2`, on `ModelNode.asset`) and
+ * which part of it the node draws (`meshpart/3`, on `ModelNode.part`) — so this
+ * exporter takes {@link GltfExportOptions.files}, the project's payloads keyed
+ * by path, exactly as `design-core`'s `ExportOptions.images` is keyed. One rule
+ * for both kinds of payload, in both exporters, which is the shape §5.3 asked
+ * for and could not have until a model referenced a file.
+ *
+ * A model whose file the caller did not hand over exports as its bounding box
+ * with a sentence in `lost` — the same answer `Model.tsx` draws on screen, which
+ * is deliberate. Two readers that disagreed about what a model with no payload
+ * is would be two documents.
+ *
+ * The geometry itself comes from `meshPart`, the one normalisation, which is
+ * also what the renderer draws and what the importer measured the node's box
+ * from. This module reads no accessor of its own for a model any more: it used
+ * to walk *every* primitive of *every* mesh in a payload, which was right when a
+ * payload was one primitive and would export an entire chair for one of its ten
+ * parts now that the payload is the file.
  *
  * ## Where the loss list comes from
  *
@@ -63,12 +73,13 @@ import {
 	type GltfNode,
 	type GltfWriter,
 	type MaterialSpec,
+	type MeshPart,
 	type Triangles,
-	boundsOf,
+	fitScale,
 	gltfWriter,
+	meshPart,
 	metresFromEmu,
 	parseGltfFile,
-	readTriangles,
 } from "./gltf.ts";
 // **Type-only, and it has to stay that way.** `Solid.tsx` is JSX, and Node's
 // type stripping — which is what runs `gltfexport.test.ts` — cannot load a
@@ -133,20 +144,25 @@ export interface GltfExportOptions {
 	/** Names the scene in the file. */
 	title?: string;
 	/**
-	 * An imported `model`'s payload, by **node id**.
+	 * The project's payload files, by **tree path** — `/assets/chair.glb`.
 	 *
-	 * By node id rather than by asset hash, and that is a workaround with a
-	 * reason: §5.3 specifies `assets?: (id: string) => Uint8Array | undefined`
-	 * keyed by the content hash, and a `ModelScene` does not carry the hash —
-	 * `readModel` collects `tris/2` and not `asset/2`. The node id is what an
-	 * answer set has, the caller holds the document and the store and can join
-	 * the two, and the signature goes back to §5.3's the day `ModelScene` grows
-	 * an `assets` map.
+	 * `design-core`'s `ExportOptions.images` in the other exporter is the same
+	 * record keyed the same way, and that is the point of the shape: a payload is
+	 * a file in the project's tree whichever exporter is writing it out, and a
+	 * caller collecting bytes for one collects them for the other with one walk.
 	 *
-	 * Synchronous, for §5.3's reason: an export is synchronous all the way up
-	 * through the panel, and the studio prefetches.
+	 * This replaced a resolver keyed by *node id*, which existed only because a
+	 * `ModelScene` could not say which payload a model drew. It can now:
+	 * `asset/2` puts the path on the node and `meshpart/3` puts the part beside
+	 * it, so the by-node-id workaround has nothing left to work around.
+	 *
+	 * A plain record rather than a function, and unlike the resolver the renderer
+	 * takes: an export is synchronous all the way up through the panel, the whole
+	 * set is small (one entry per file, however many nodes draw it), and the
+	 * caller has to have fetched them anyway. Absent, or missing an entry, is a
+	 * bounding box and a sentence — never a failure.
 	 */
-	geometry?: (nodeId: string) => Uint8Array | undefined;
+	files?: Record<string, Uint8Array>;
 }
 
 export interface GltfExport {
@@ -176,7 +192,7 @@ export function exportViewportGltf(
 	const state: Emit = {
 		writer,
 		lost,
-		geometry: options.geometry,
+		files: options.files,
 		looks: view ? model.looks[view.id] : undefined,
 	};
 	if (!view) {
@@ -211,7 +227,7 @@ const isNumber = (value: number | undefined): value is number => value !== undef
 interface Emit {
 	writer: GltfWriter;
 	lost: string[];
-	geometry: ((nodeId: string) => Uint8Array | undefined) | undefined;
+	files: Record<string, Uint8Array> | undefined;
 	/** The id `looks/2` named for this view, so the camera can be marked. */
 	looks: string | undefined;
 }
@@ -470,8 +486,8 @@ function fromBufferGeometry(geometry: BufferGeometry): Triangles {
 }
 
 /**
- * An imported `model`: its payload where the caller could resolve one, and its
- * bounding box where it could not.
+ * An imported `model`: the part of its file where the caller handed the file
+ * over, and its bounding box where it did not.
  *
  * The box is not a placeholder graphic and is not an apology. A `model` is a
  * node with a real box that the solver placed, that a rule can align and that a
@@ -479,13 +495,15 @@ function fromBufferGeometry(geometry: BufferGeometry): Triangles {
  * chair inside it was handed over. `Model.tsx` draws exactly this, and
  * `docs/three-d-spec.md` §5.3 specifies exactly this sentence for it.
  *
- * Where there *is* a payload, its geometry is scaled so its bounds fill the
- * node's box — the same rule the stand-in follows, and the rule a loader has to
- * follow for the picture and the file to agree. The material is the **node's**,
- * never the payload's: `gltfimport.ts` puts an imported material on the node as
- * ordinary props precisely so a designer can change it, and reading it back off
- * the payload would export the colour the chair arrived in rather than the one
- * the document says it is.
+ * Where there *is* a file, **one part of it** goes in — `node.part`, the two
+ * indices the answer set carries — normalised by `meshPart` and scaled by
+ * `fitScale` so its bounds fill the node's box. Both of those are the functions
+ * the renderer calls on the same numbers, which is what makes "the file is the
+ * picture" true of a downloaded chair and not only of a drawn one. The material
+ * is the **node's**, never the file's: `gltfimport.ts` puts an imported material
+ * on the node as ordinary props precisely so a designer can change it, and
+ * reading it back out of the file would export the colour the chair arrived in
+ * rather than the one the document says it is.
  */
 function modelNode(
 	state: Emit,
@@ -494,71 +512,68 @@ function modelNode(
 	material: Material,
 ): number {
 	const spec = state.writer.material(materialSpec(material));
-	const bytes = state.geometry?.(node.id);
-	const parts = bytes ? payloadParts(state, node, bytes) : undefined;
-	if (!parts || parts.length === 0) {
-		say(
-			state,
-			`Model “${node.id}” is in the file as its bounding box: its geometry lives outside the document, and this export was not handed it.`,
-		);
+	const part = modelPart(state, node);
+	if (!part) {
 		return state.writer.node({
 			name: node.id,
 			scale: [size[0] || 1, size[1] || 1, size[2] || 1],
 			mesh: state.writer.mesh(tessellate("box"), spec, node.id),
 		});
 	}
-	// The payload's own bounds decide the scale, so a box the designer resized
+	// The part's own bounds decide the scale, so a box the designer resized
 	// resizes the geometry with it — which is what the six numbers in the
-	// inspector mean and what the renderer shows.
-	const bounds = parts.map((part) => boundsOf(part));
-	const extent = (axis: 0 | 1 | 2): number =>
-		Math.max(...bounds.map((b) => b.max[axis] - b.min[axis]), 0);
-	const scale: [number, number, number] = [
-		fit(size[0], extent(0)),
-		fit(size[1], extent(1)),
-		fit(size[2], extent(2)),
-	];
+	// inspector mean and what the renderer shows, through this same function.
 	return state.writer.node({
 		name: node.id,
-		scale,
-		mesh: state.writer.meshOf(
-			parts.map((triangles) => ({ triangles, material: spec })),
-			node.id,
-		),
+		scale: fitScale(part.bounds, size),
+		mesh: state.writer.mesh(part.triangles, spec, node.id),
 	});
 }
 
 /**
- * How much to scale one axis of a payload to fill one axis of a box.
+ * The one part a `model` draws, or nothing with the reason said out loud.
  *
- * `1` where either is zero, which covers the two real cases: a flat payload — a
- * plane has no thickness and no scale makes it thick — and a node whose depth
- * the document never stated. Dividing anyway would give `0` or `Infinity`, and
- * both of them are a mesh nobody can see.
+ * Four ways to have nothing and they are one sentence with four endings, because
+ * what a reader of a loss list wants is which chair and what happened to it:
+ * the answer set named no file, the caller handed no bytes for that file, the
+ * bytes are not a glTF, or the file no longer holds the part the document
+ * addresses — which is the stale-reference case §2.1 describes, where somebody
+ * replaced `/assets/chair.glb` with a structurally different chair.
+ *
+ * A model with a path and **no part** is deliberately in the first case rather
+ * than defaulted to `{node: 0, primitive: 0}`. A default would export whatever
+ * primitive happened to be first, which is a chair nobody asked for and looks
+ * right often enough to ship; and the missing atom it would paper over is
+ * `meshpart/3` failing to reach the answer set, which is the exact failure
+ * `f2b6316` paid for once.
  */
-const fit = (want: number, have: number): number =>
-	want === 0 || have === 0 ? 1 : want / have;
-
-/** Every triangle soup in a payload, or nothing where it could not be read. */
-function payloadParts(state: Emit, node: ModelNode, bytes: Uint8Array): Triangles[] {
+function modelPart(state: Emit, node: ModelNode): MeshPart | undefined {
+	const missing = (because: string): undefined => {
+		say(state, `Model “${node.id}” is in the file as ${because}`);
+		return undefined;
+	};
+	if (node.asset === undefined || node.part === undefined) {
+		return missing(
+			"its bounding box: its geometry lives outside the document, and this export was not handed it.",
+		);
+	}
+	const bytes = state.files?.[node.asset];
+	if (!bytes) {
+		return missing(
+			`its bounding box: its geometry is in “${node.asset}”, and this export was not handed that file.`,
+		);
+	}
 	let file;
 	try {
 		file = parseGltfFile(bytes);
 	} catch {
-		say(
-			state,
-			`Model “${node.id}” is in the file as its bounding box: its payload could not be read.`,
-		);
-		return [];
+		return missing("its bounding box: its payload could not be read.");
 	}
-	const parts: Triangles[] = [];
-	for (const mesh of file.json.meshes ?? []) {
-		for (const primitive of mesh.primitives) {
-			const read = readTriangles(file, primitive);
-			if ("triangles" in read) parts.push(read.triangles);
-		}
+	const part = meshPart(file, node.part);
+	if ("refused" in part) {
+		return missing(`its bounding box, because ${part.refused}.`);
 	}
-	return parts;
+	return part;
 }
 
 /* ------------------------------------------------------------------ */

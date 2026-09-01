@@ -4,12 +4,20 @@
  *
  * A `model` is the one kind whose picture does not live entirely in the answer
  * set. Its `frame/3` does, its `turn/3` does, its material does, `tris/2` carries
- * the triangle count and `asset/2` carries the content hash — but the vertices
- * are a payload in an `AssetStore`, addressed by that hash, and a store is I/O.
- * So the hash comes off `ModelScene.assets` like everything else this package
- * draws, and the bytes come through an {@link AssetResolver} the host supplies:
- * `canvas-3d` never learns whether they were in IndexedDB, in memory or over a
- * network, which is what keeps it a renderer.
+ * the triangle count, `asset/2` carries the path of the file in the project's
+ * tree and `meshpart/3` carries which part of it — but the vertices are in that
+ * file, and reading a file is I/O. So the path and the two indices come off the
+ * answer set like everything else this package draws, and the bytes come through
+ * an {@link AssetResolver} the host supplies: `canvas-3d` never learns whether
+ * they were in IndexedDB, in memory or over a network, which is what keeps it a
+ * renderer.
+ *
+ * **Both halves off the answer set, and `meshpart/3` is the half that is easy to
+ * forget.** A rule that mints a model must get its geometry drawn exactly as a
+ * rule that mints a rect gets its fill, and a path with no part selector is a
+ * chair that draws its first primitive whatever the document said — which looks
+ * like a missing asset and so goes unnoticed. `f2b6316` found and paid for that
+ * failure mode once already, with a reader whose `#show` had never shipped.
  *
  * `useAsset.ts` does the loading and says why it is not three's `GLTFLoader`.
  *
@@ -34,6 +42,7 @@ import type { AssetResolver, ModelNode } from "@clingo-design/design-core";
 import { BoxGeometry } from "three";
 
 import type { PointerHandlers } from "./SceneTree.tsx";
+import { fitScale } from "./gltf.ts";
 import { materialOf } from "./readings.ts";
 import { useAsset } from "./useAsset.ts";
 
@@ -52,7 +61,8 @@ export interface ModelProps {
 	 */
 	pointer?: PointerHandlers;
 	/**
-	 * The content hash of the geometry this node draws — `ModelScene.assets`.
+	 * The path of the file this node draws, in the project's tree — `asset/2`,
+	 * off `ModelScene.assets`.
 	 *
 	 * Off the answer set and not off the document, which is the same rule that
 	 * keeps every other thing this package draws the solver's answer: a rule that
@@ -60,33 +70,50 @@ export interface ModelProps {
 	 * as a rule that mints a rect gets its fill.
 	 */
 	asset?: string;
+	/**
+	 * Which part of that file — `meshpart/3`, the glTF node index and the
+	 * primitive index, off the answer set beside the path.
+	 *
+	 * Optional in the same way and for the same reason `asset` is: a `mesh`, a
+	 * `pivot` and a model whose file the document never stated all arrive here
+	 * with nothing, and every one of them is a node that draws its box.
+	 */
+	part?: { node: number; primitive: number };
 	/** Where bytes come from. Absent on a host with no store — see `useAsset`. */
 	resolve?: AssetResolver;
 }
 
-export function Model({ node, size, pointer, asset, resolve }: ModelProps) {
+export function Model({ node, size, pointer, asset, part, resolve }: ModelProps) {
 	const material = materialOf(node.rendered);
-	const geometry = useAsset(asset, resolve);
-	const scale: [number, number, number] = [size[0] || 1, size[1] || 1, size[2] || 1];
-
+	const loaded = useAsset(asset, part, resolve);
 	/*
-	 * The loaded chair, drawn in the box the solver placed.
+	 * The loaded chair, drawn at the size of the box the solver placed.
 	 *
-	 * The payload was written centred on its own origin and in metres, so the
-	 * geometry arrives as a unit-ish thing at the middle of nothing; scaling the
-	 * group by the node's box is what puts it exactly where every other kind is
-	 * put. That is also why the box and the geometry are interchangeable here
-	 * rather than two layouts: they occupy the same space by construction, so a
-	 * payload arriving mid-drag changes what is drawn and never where.
+	 * `fitScale` and not `size`, and this line is the bug `docs/model-files.md`
+	 * §1.1 found. The vertices arrive in **metres** — the file's own numbers,
+	 * centred on their own origin, deliberately not divided by anything (see
+	 * `fitScale`'s rejected alternative) — while the stand-in beside them is a
+	 * `boxGeometry` of `[1,1,1]`, which really is a unit box. Scaling both by the
+	 * node's box in render units therefore drew a four-metre slab sixteen metres
+	 * wide and a mug at half size, and only the box was ever right. Dividing by
+	 * the part's own extent is what makes the two branches the same picture, and
+	 * the extent comes off the same `meshPart` measurement that
+	 * `MeshRef.bounds` was written from and that `gltfexport.ts` fits with — so
+	 * the editor and the export cannot disagree about where a chair sits, which is
+	 * the drift this whole change is about.
 	 *
-	 * `normalized` is deliberately not set on the geometry: `importGltf` wrote
-	 * float positions, and a reader that re-normalised them would be scaling a
-	 * chair by whatever its own extent happened to be.
+	 * `normalized` is deliberately not set on the geometry: the file holds float
+	 * positions, and a reader that re-normalised them would be scaling a chair by
+	 * whatever its own extent happened to be.
 	 */
-	if (geometry) {
+	const scale: [number, number, number] = loaded
+		? fitScale(loaded.bounds, size)
+		: [size[0] || 1, size[1] || 1, size[2] || 1];
+
+	if (loaded) {
 		return (
 			<group scale={scale} userData={{ nodeId: node.id }}>
-				<mesh {...pointer} geometry={geometry} userData={{ nodeId: node.id }}>
+				<mesh {...pointer} geometry={loaded.geometry} userData={{ nodeId: node.id }}>
 					<meshStandardMaterial
 						color={material.colour ?? STANDIN}
 						roughness={material.roughness}

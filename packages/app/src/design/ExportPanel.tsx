@@ -13,7 +13,7 @@ import {
 } from "@clingo-design/design-core";
 import type { GltfExport } from "@clingo-design/canvas-3d";
 
-import { useImageBytes } from "./useImageBytes";
+import { assetPaths, usePathBytes } from "./useAssetBytes";
 import styles from "./ExportPanel.module.css";
 
 export interface ExportPanelProps {
@@ -76,12 +76,41 @@ export function ExportPanel({
 	projectName,
 	posters,
 }: ExportPanelProps) {
-	const images = useImageBytes(scene);
 	const [target, setTarget] = useState<PanelTarget>("html");
 	const [which, setWhich] = useState<string>(WHOLE);
 	const [view, setView] = useState<string>("");
 	const [tokens, setTokens] = useState(true);
 	const [copied, setCopied] = useState(false);
+
+	/**
+	 * The payloads, per kind, and only for the kind the chosen target can use.
+	 *
+	 * **This is where a real bug was.** The panel used to fetch images and hand
+	 * the glTF writer *nothing at all* — no geometry resolver, no files — so every
+	 * glTF this studio has ever written contained twelve-triangle bounding boxes
+	 * where its models should have been, and the code path that reads a payload
+	 * had never run outside `gltfexport.test.ts`. It was invisible to every
+	 * headless check in the repo: the export succeeded, the file parsed, and the
+	 * loss list said the geometry lived outside the document, which reads as a
+	 * statement of policy rather than as a missing argument.
+	 *
+	 * The gating on `target` is not premature: a chair is megabytes and an HTML
+	 * export has no use for one, so reading them to open the panel would make
+	 * every export of every 3D document wait on geometry it will not write. The
+	 * empty list is how a hook gets skipped without being called conditionally.
+	 */
+	const images = usePathBytes(
+		useMemo(
+			() => (target === "gltf" ? [] : assetPaths(scene, "image")),
+			[scene, target],
+		),
+	);
+	const files = usePathBytes(
+		useMemo(
+			() => (target === "gltf" ? assetPaths(scene, "mesh") : []),
+			[scene, target],
+		),
+	);
 
 	const collapse = useMemo(
 		() => collapseSpace(scene, universes),
@@ -124,7 +153,12 @@ export function ExportPanel({
 	const [writer, setWriter] = useState<{
 		export: (
 			model: Universe["model"],
-			options: { viewport?: string; title?: string },
+			options: {
+				viewport?: string;
+				title?: string;
+				/** Keyed by tree path, exactly as `ExportOptions.images` is. */
+				files?: Record<string, Uint8Array>;
+			},
 		) => GltfExport;
 		spec: TargetSpec;
 	} | null>(null);
@@ -161,6 +195,7 @@ export function ExportPanel({
 			const out = writer.export(universe.model, {
 				viewport: view || undefined,
 				title: projectName,
+				files,
 			});
 			const name = out.viewport ?? "scene";
 			return {
@@ -185,6 +220,7 @@ export function ExportPanel({
 		tokens,
 		projectName,
 		images,
+		files,
 		writer,
 		view,
 		gltfUniverse,

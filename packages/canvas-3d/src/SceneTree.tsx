@@ -135,10 +135,18 @@ export interface SceneTreeProps {
 	/** The transform gizmo, on at most one node. */
 	gizmo?: GizmoSpec;
 	/**
-	 * Model node id -> the content hash of its geometry — `ModelScene.assets`.
+	 * Model node id -> the path of the file it draws — `ModelScene.assets`.
 	 *
 	 * Threaded down rather than looked up per node, for the reason `looksThrough`
 	 * is: this tree is walked once per frame and the whole map is one object.
+	 *
+	 * The other half of a model's reference — **which part** of that file — is
+	 * *not* threaded beside this, and the asymmetry is deliberate rather than an
+	 * omission. It is on the node, as `ModelNode.part`, because the map form of
+	 * `asset/2` exists so a project can be audited without walking the tree — what
+	 * does this design weigh, which files does it need — and a primitive index
+	 * answers none of those questions. Only a renderer standing at a node wants
+	 * it, and this walk is standing at the node.
 	 */
 	assets?: Readonly<Record<string, string>>;
 	/** Where a payload's bytes come from — see `useAsset.ts`. */
@@ -324,6 +332,11 @@ function Contents({
 					size={size}
 					pointer={pointer}
 					asset={asset}
+					// Straight off the node, where `meshpart/3` was read into it, and
+					// not out of a second map handed down beside `assets` — see
+					// {@link SceneTreeProps.assets} for why the two halves of one
+					// reference legitimately arrive by two routes.
+					part={node.part}
 					resolve={resolve}
 				/>
 			);

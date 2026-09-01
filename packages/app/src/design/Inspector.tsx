@@ -217,13 +217,13 @@ export interface InspectorProps {
 	 * A prop rather than something this panel does, because importing is three
 	 * things the inspector has no business holding: a file the person picks, a
 	 * parse that needs three.js and must stay behind a dynamic import so a flat
-	 * document never downloads it, and a write to the asset store. `Studio` owns
-	 * all three already. What is left here is a button and a viewport id, which
-	 * is the shape of every other entry in that row.
+	 * document never downloads it, and a write into the project's file tree.
+	 * `Studio` owns all three already. What is left here is a button and a
+	 * viewport id, which is the shape of every other entry in that row.
 	 *
-	 * Absent where the host has no store to put payloads in — a headless render
-	 * of the panel, or a test — and the button is then simply not offered rather
-	 * than offered and broken.
+	 * Absent where the host has no tree to write into — a headless render of the
+	 * panel, or a test — and the button is then simply not offered rather than
+	 * offered and broken.
 	 */
 	onImportModel?: (viewport: string) => void;
 }
@@ -2984,11 +2984,15 @@ export function Inspector({
 							Camera
 						</button>
 						{/* The one that is not a pure edit. Everything else in this row
-						    builds a node out of nothing; this one reads a file, hashes
-						    it, puts the payload in the store and *then* makes a node —
-						    so it is handed up rather than done here. See
-						    `onImportModel`. Offered only where the host gave us a way
-						    to store bytes. */}
+						    builds a node out of nothing; this one reads a file, parses
+						    it, writes it into the project's tree under its own name and
+						    only *then* makes the nodes — and the nodes are stamped with
+						    the path the write actually landed on, so it cannot be
+						    reordered. That is three things a panel should not be
+						    holding, so it is handed up rather than done here. See
+						    `onImportModel`, and `Studio.tsx`'s `importModel` for why the
+						    order is the error story. Offered only where the host gave us
+						    a way to write bytes. */}
 						{onImportModel ? (
 							<button
 								type="button"
@@ -3016,39 +3020,68 @@ export function Inspector({
 			{/* Imported geometry, read out rather than edited. The vertices are not
 			    in the document — a glTF is megabytes, the document is edited by two
 			    people at once, and a blob here would be a blob in every diff, every
-			    undo entry and every sync message — so what the node holds is the
-			    hash, the box and the counts, and this shows exactly those.
+			    undo entry and every sync message — so what the node holds is a path,
+			    a part, the box and the counts, and this shows exactly those.
 
-			    **The relink affordance is not here, and that is a gap rather than a
-			    decision.** `docs/merged-plan.md` M4's `AssetStore` does not exist in
-			    the tree and neither does the app's implementation of it, so there is
-			    nothing to relink *through*; a button that opened a file picker and
-			    dropped the bytes on the floor would be worse than no button. The
-			    triangle count is here because the budget rule reads it and a person
-			    about to trip that rule should be able to see the number. */}
+			    **What it shows is a file in the tree, under the name somebody chose.**
+			    It used to show a content hash and a free-form "source" the importer
+			    copied off the file picker, with a note saying the relink affordance
+			    was a gap because there was nothing to relink *through*. There is
+			    now: the geometry is `/assets/chair.glb`, a real file that syncs and
+			    that a clone writes to disk under that name, and whatever writes new
+			    bytes there changes every chair at once, because the node references
+			    the file and not some bytes that happened to be in a store. So the
+			    path is shown as the identity it is, and it is a string a person can
+			    act on — which a 64-character hex digest never was.
+
+			    **The button is still missing, and this is not the place it goes.**
+			    The studio has no file browser: nothing in the app lists `/assets`,
+			    and `putNamedAsset` deliberately *suffixes* a collision rather than
+			    overwriting, so re-importing `chair.glb` mints `chair-2.glb` and a
+			    second set of nodes instead of replacing the first. Replacing a file
+			    in place is therefore something done on the synced clone today,
+			    outside this window. A button here would not be the fix: relinking is
+			    an operation on a *file* that every node referencing it feels, and
+			    hanging it off whichever node happens to be selected would be the
+			    per-node re-import the path was introduced to abolish. It belongs to a
+			    view of the tree, which is a panel this app has yet to grow.
+
+			    The part is shown beside it because a file is a chair and a node is a
+			    leg: two nodes reading one path are not a duplicate, they are two
+			    pieces of one import, and a panel that showed only the path would make
+			    them look like the same thing. The triangle count is here because the
+			    budget rule reads it and a person about to trip that rule should be
+			    able to see the number. */}
 			{node.kind === "model" ? (
 				<div data-role="model-section">
 					<h3>Model</h3>
 					{node.mesh ? (
 						<>
 							<p className={styles.note} data-role="mesh-ref">
-								{node.mesh.source ?? "An imported mesh"} ·{" "}
 								{node.mesh.format.toUpperCase()} ·{" "}
 								{node.mesh.triangles.toLocaleString()} triangles. Its vertices
-								live in the asset store, keyed by content hash, and never enter
-								the document or the program — what a rule can be about is this
-								node’s box and this count.
+								live in the file this points at, never in the document and never
+								in the program — what a rule can be about is this node’s box and
+								this count.
 							</p>
 							<div className={styles.resolved} data-resolved="asset">
-								<span className={styles.fieldLabel}>asset</span>
-								<span className={styles.resolvedValue}>{node.mesh.asset}</span>
+								<span className={styles.fieldLabel}>file</span>
+								<span className={styles.resolvedValue}>{node.mesh.src}</span>
+							</div>
+							<div className={styles.resolved} data-resolved="meshpart">
+								<span className={styles.fieldLabel}>part</span>
+								<span className={styles.resolvedValue}>
+									node {node.mesh.part.node} · primitive{" "}
+									{node.mesh.part.primitive}
+								</span>
 							</div>
 						</>
 					) : (
 						<p className={styles.note} data-role="no-mesh">
-							Nothing imported yet, so this draws as its own box. The importer is
-							not built — there is no asset store behind it — and until there is,
-							a model is a placeholder with a real frame that rules can hold.
+							Nothing imported yet, so this draws as its own box. Import a glTF
+							into this view and the file lands in the project’s tree under its
+							own name; until then a model is a placeholder with a real frame
+							that rules can hold.
 						</p>
 					)}
 				</div>

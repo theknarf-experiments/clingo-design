@@ -735,8 +735,23 @@ const oneView = (): Scene =>
 							}),
 							at("bust", "model", { x: 0, y: 0, w: 60, h: 60 }, {
 								mesh: {
-									asset: "9f2c",
+									// The file somebody imported, and which part of it — a path
+									// and two of the file's own indices, where this used to be a
+									// content hash. The fixture is a `model` node and nothing
+									// here reads its geometry, so the only thing the change
+									// costs is that the compiler now has a `src` to quote — and a
+									// ref written the old way has none, so `quote` is handed
+									// `undefined` and the whole compile throws. That is why this
+									// fixture moved in the same change as `compile.ts` rather
+									// than after it, and it is also the argument for the
+									// migration in `project.ts`: a *document* never arrives here
+									// in the old shape, because `normalizeScene` rewrites it on
+									// the way out of its store. A test that builds a `Scene`
+									// literal skips that door and so has to spell the shape the
+									// compiler expects.
+									src: "/assets/bust.glb",
 									format: "glb",
+									part: { node: 0, primitive: 0 },
 									bounds: {
 										x: 0,
 										y: 0,

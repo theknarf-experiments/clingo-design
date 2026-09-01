@@ -11,6 +11,7 @@ import {
 	addInstance,
 	addKeyframe,
 	addLayer,
+	addImport,
 	addLight,
 	addMachine,
 	addMesh,
@@ -86,6 +87,7 @@ import { type Frame, MIN_NODE_SIZE } from "./geometry.ts";
 import { keyCopy, statePart, trackDim, trackTerm } from "./machines.ts";
 import { normalizeScene } from "./project.ts";
 import {
+	type AssetInfo,
 	type Blend,
 	type Keyframe,
 	type Machine,
@@ -902,9 +904,15 @@ test("a 3D node needs no pruning clause, and an unused asset is dropped", () => 
 	// on an *edit*, because by then somebody who was looking at the document has
 	// changed it. Undo is a stack of documents, so the entry comes back with the
 	// model it belonged to.
+	//
+	// Keyed by the **path** of the file, which is also the whole of what this
+	// assertion has to say about the move off content hashes: the index entry the
+	// edit writes and the reference the node carries are the same string, and
+	// that string is something a person could go and open.
 	const ref3d: MeshRef = {
-		asset: "sha-1",
+		src: "/assets/chair.gltf",
 		format: "gltf",
+		part: { node: 0, primitive: 0 },
 		bounds: { x: 0, y: 0, width: 200 * P, height: 100 * P, z: 0, depth: 50 * P },
 		triangles: 1200,
 	};
@@ -915,14 +923,87 @@ test("a 3D node needs no pruning clause, and an unused asset is dropped", () => 
 		name: "Chair",
 	});
 	const model = oneOf(imported, "model");
-	assert.equal(model.mesh?.asset, "sha-1");
+	assert.equal(model.mesh?.src, "/assets/chair.gltf");
+	assert.deepEqual(model.mesh?.part, { node: 0, primitive: 0 });
 	// The model's box is the model's own bounds, so an import arrives at the size
 	// it really is rather than at a size this file invented.
 	assert.equal(frameOf(model).width, 200 * P);
 	assert.deepEqual(model.spatial?.depth, single("50px"));
-	assert.deepEqual(Object.keys(imported.assets ?? {}), ["sha-1"]);
+	assert.deepEqual(Object.keys(imported.assets ?? {}), ["/assets/chair.gltf"]);
 	assert.equal(deleteNodes(imported, [model.id]).assets, undefined);
 	assert.equal(pruneAssets(imported), imported);
+});
+
+test("an import wears the file's material whether the file held one mesh or two", () => {
+	// **This test exists because a browser found what none of the headless ones
+	// did.** `importGltf` turns a glTF material into `fill`, `roughness` and
+	// `metalness` props on the node it mints, and `addImport` short-circuits a
+	// one-part file to `addModel` — which used to build its node from the ref and
+	// the index entry alone and threw those props away. So a chair modelled as a
+	// single mesh came into the studio grey, wearing `Model.tsx`'s stand-in
+	// colour, and the same chair modelled as two meshes came in painted. Nothing
+	// asserted it either way, because every material assertion in the repo was
+	// made against the multi-part path that keeps them.
+	//
+	// Both shapes are exercised here for exactly that reason: the bug was not that
+	// a path was wrong, it was that two paths disagreed, and a test of one of them
+	// is a test that would have passed.
+	const { scene, view } = withView();
+	const info: AssetInfo = { format: "gltf", bytes: 512, triangles: 2, name: "Chair" };
+	const bounds = { x: -50 * P, y: -50 * P, z: -50 * P, width: 100 * P, height: 100 * P, depth: 100 * P };
+	const meshOf = (primitive: number): MeshRef => ({
+		src: "/assets/chair.gltf",
+		format: "gltf",
+		part: { node: 0, primitive },
+		bounds,
+		triangles: 1,
+	});
+	const painted = (primitive: number, colour: string): SceneNode => ({
+		...makeNode("model", box(0, 0, 100 * P, 100 * P), { id: `part${primitive}`, name: `Part ${primitive}` }),
+		props: { fill: single(colour), roughness: single("0.35") },
+		mesh: meshOf(primitive),
+	});
+
+	// One part: the short-circuit to `addModel`.
+	const one = addImport(scene, view, [painted(0, "#e77c7c")], {
+		"/assets/chair.gltf": info,
+	});
+	const solo = oneOf(one, "model");
+	assert.deepEqual(solo.props.fill, single("#e77c7c"), "the file's colour is on the node");
+	assert.deepEqual(solo.props.roughness, single("0.35"));
+	// And the things `addModel` decides for itself still win, because those are
+	// the file's *arrangement* and not its material: a lone part is re-centred in
+	// the view and named from the index entry.
+	assert.equal(solo.name, "Chair");
+	assert.equal(frameOf(solo).width, 100 * P);
+
+	// Two parts: appended as they came, which is the path that always worked.
+	const two = addImport(
+		scene,
+		view,
+		[painted(0, "#e77c7c"), painted(1, "#7c95f3")],
+		{ "/assets/chair.gltf": info },
+	);
+	const models = flatten(two.nodes).filter((n) => n.kind === "model");
+	assert.deepEqual(
+		models.map((n) => n.props.fill),
+		[single("#e77c7c"), single("#7c95f3")],
+		"a mesh drawn in two materials keeps both",
+	);
+	// One file, one index entry, two nodes against it — §6's re-keying, from the
+	// edit's own side.
+	assert.deepEqual(Object.keys(two.assets ?? {}), ["/assets/chair.gltf"]);
+	assert.deepEqual(
+		models.map((n) => n.mesh?.part.primitive),
+		[0, 1],
+		"and each node still says which primitive it is",
+	);
+
+	// A view this document does not hold leaves the scene alone, like every other
+	// verb here — an import whose target was deleted while the file was being read
+	// is a no-op rather than a throw.
+	assert.equal(addImport(scene, "nobody", [painted(0, "#e77c7c")], {}), scene);
+	assert.equal(addImport(scene, view, [], {}), scene);
 });
 
 /* ------------------------------------------------------------------ */

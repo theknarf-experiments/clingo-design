@@ -44,6 +44,9 @@ import { SOLID_ARGS, exportViewportGltf, tessellate } from "./gltfexport.ts";
 const PX = 9525;
 const px = (n: number): number => n * PX;
 
+/** The chair's file, in the project's tree — the key `files` is keyed by. */
+const CHAIR = "/assets/chair.gltf";
+
 /* ------------------------------------------------------------------ */
 /* A document, solved                                                  */
 /* ------------------------------------------------------------------ */
@@ -110,6 +113,26 @@ function scene(): Scene {
 								frame: makeFrame({ x: px(50), y: px(50), width: px(80), height: px(80) }),
 								spatial: makeSpatial({ depth: px(80) }),
 								props: { fill: single("#0000ff") },
+								// The reference the document holds: a file in the project's
+								// tree and one part of it. It is on the *document* node so
+								// that `compile` states `asset/2` and `meshpart/3` and the
+								// exporter reads them off the answer set like everything
+								// else — the same rule that makes a rule-minted model draw
+								// its geometry.
+								mesh: {
+									src: CHAIR,
+									format: "gltf",
+									part: { node: 0, primitive: 0 },
+									bounds: {
+										x: -px(40),
+										y: -px(40),
+										z: -px(40),
+										width: px(80),
+										height: px(80),
+										depth: px(80),
+									},
+									triangles: 1,
+								},
 							}),
 						],
 					}),
@@ -195,17 +218,105 @@ test("lamps are KHR_lights_punctual, and an ambient one is named as a stand-in",
 	assert.match(out.lost.join(" "), /Ambient light/);
 });
 
-test("a model with no payload is its bounding box, and says so", async () => {
+test("a model whose file was not handed over is its bounding box, and says which file", async () => {
 	const out = exportViewportGltf(await solved(scene()));
 	assert.match(out.lost.join(" "), /Model “chair” is in the file as its bounding box/);
+	// The sentence now names the file, which it could not before: the answer set
+	// carries the path, so an export that was handed no bytes can say exactly what
+	// it was not handed rather than only that something was missing.
+	assert.match(out.lost.join(" "), /\/assets\/chair\.gltf/);
 	const json = parse(out.text);
 	// The stand-in is a box, so it has the same twelve triangles a box has.
 	const boxes = (json.meshes ?? []).filter((mesh) => mesh.name === "chair");
 	assert.equal(boxes.length, 1);
 });
 
-test("a model whose payload is handed over is its own geometry", async () => {
-	// The payload is what `importGltf` writes: one mesh, centred, in metres.
+test("a model whose file is handed over is its own geometry", async () => {
+	// A file in the tree, keyed by its path — the same shape `ExportOptions.images`
+	// takes in the other exporter. This used to be a resolver keyed by node id,
+	// which existed only because a `ModelScene` could not say which payload a
+	// model drew; it says so now, in `asset/2` and `meshpart/3`.
+	const out = exportViewportGltf(await solved(scene()), {
+		files: { [CHAIR]: oneTriangle() },
+	});
+	assert.doesNotMatch(out.lost.join(" "), /bounding box/);
+	const json = parse(out.text);
+	const chair = (json.meshes ?? []).find((m) => m.name === "chair");
+	assert.ok(chair);
+	// One triangle came in, one triangle went out — and it wears the *node's*
+	// material, `#0000ff`, rather than the file's (which has none).
+	const indices = json.accessors?.[chair.primitives[0]?.indices ?? -1];
+	assert.equal(indices?.count, 3);
+	const material = json.materials?.[chair.primitives[0]?.material ?? -1];
+	assert.deepEqual(material?.pbrMetallicRoughness?.baseColorFactor, [0, 0, 1, 1]);
+});
+
+test("a file with several parts exports the one the node draws, and no others", async () => {
+	// The regression `payloadParts` would reintroduce, and the reason it was
+	// deleted rather than adapted: it read every primitive of every mesh, which
+	// was right when a payload held one primitive and exports an entire chair for
+	// one of its ten parts now that the payload is the whole file the person
+	// imported.
+	const writer = gltfWriter();
+	const mesh = writer.meshOf(
+		[
+			// Primitive 0: two triangles, four metres across. Primitive 1: one
+			// triangle, two metres across. Either one is recognisable in the output
+			// by itself, which is what makes "only one of them" checkable.
+			{
+				triangles: {
+					positions: Float32Array.from([-2, -1, 0, 2, -1, 0, -2, 1, 0, 2, 1, 0]),
+					indices: Uint32Array.from([0, 1, 2, 1, 3, 2]),
+				},
+				material: undefined,
+			},
+			{
+				triangles: {
+					positions: Float32Array.from([-1, -1, 0, 1, -1, 0, 0, 1, 0]),
+					indices: Uint32Array.from([0, 1, 2]),
+				},
+				material: undefined,
+			},
+		],
+		"Chair",
+	);
+	writer.roots([writer.node({ mesh, name: "Chair" })]);
+
+	const document = scene();
+	const chairNode = viewportChild(document, "chair");
+	// The node draws the *second* primitive — a mesh in two materials is two
+	// document nodes, and this is the one that owns primitive 1.
+	chairNode.mesh = { ...chairNode.mesh!, part: { node: 0, primitive: 1 } };
+
+	const out = exportViewportGltf(await solved(document), {
+		files: { [CHAIR]: new TextEncoder().encode(writer.text()) },
+	});
+	const json = parse(out.text);
+	const chair = (json.meshes ?? []).find((m) => m.name === "chair");
+	assert.ok(chair);
+	assert.equal(chair.primitives.length, 1, "one primitive out, not the file's two");
+	const indices = json.accessors?.[chair.primitives[0]?.indices ?? -1];
+	assert.equal(indices?.count, 3, "the one-triangle part, not the two-triangle one");
+});
+
+test("a part the file no longer holds is a bounding box with the reason", async () => {
+	// The stale reference of `scene.ts`'s §2.1: somebody replaced the file at that
+	// path with a structurally different one. The node still has a real box the
+	// solver placed, so it draws and exports as that box — and the loss list says
+	// which chair and why, rather than reporting a missing file that is right
+	// there.
+	const document = scene();
+	const chairNode = viewportChild(document, "chair");
+	chairNode.mesh = { ...chairNode.mesh!, part: { node: 0, primitive: 4 } };
+	const out = exportViewportGltf(await solved(document), {
+		files: { [CHAIR]: oneTriangle() },
+	});
+	assert.match(out.lost.join(" "), /Model “chair” is in the file as its bounding box/);
+	assert.match(out.lost.join(" "), /has no part 4/);
+});
+
+/** A one-triangle glTF, which is the smallest thing a `model` can point at. */
+function oneTriangle(): Uint8Array {
 	const writer = gltfWriter();
 	const mesh = writer.mesh(
 		{
@@ -215,23 +326,16 @@ test("a model whose payload is handed over is its own geometry", async () => {
 		undefined,
 		"Chair",
 	);
-	writer.roots([writer.node({ mesh })]);
-	const payload = new TextEncoder().encode(writer.text());
+	writer.roots([writer.node({ mesh, name: "Chair" })]);
+	return new TextEncoder().encode(writer.text());
+}
 
-	const out = exportViewportGltf(await solved(scene()), {
-		geometry: (id) => (id === "chair" ? payload : undefined),
-	});
-	assert.doesNotMatch(out.lost.join(" "), /bounding box/);
-	const json = parse(out.text);
-	const chair = (json.meshes ?? []).find((m) => m.name === "chair");
-	assert.ok(chair);
-	// One triangle came in, one triangle went out — and it wears the *node's*
-	// material, `#0000ff`, rather than the payload's (which has none).
-	const indices = json.accessors?.[chair.primitives[0]?.indices ?? -1];
-	assert.equal(indices?.count, 3);
-	const material = json.materials?.[chair.primitives[0]?.material ?? -1];
-	assert.deepEqual(material?.pbrMetallicRoughness?.baseColorFactor, [0, 0, 1, 1]);
-});
+/** One of the viewport's own children, by id, for a test that edits it. */
+function viewportChild(document: Scene, id: string): SceneNode {
+	const found = document.nodes[0]?.children?.[0]?.children?.find((child) => child.id === id);
+	assert.ok(found, `the document holds ${id}`);
+	return found;
+}
 
 test("a flat document exports an empty scene rather than throwing", () => {
 	const empty: ModelScene = readModel([]);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
-import { putAsset, putNamedAsset } from "../projects/store";
+import { putNamedAsset } from "../projects/store";
 import {
 	CONSTRAINT_KINDS,
 	DEFAULT_EASING,
@@ -1302,22 +1302,38 @@ export function Studio({
 	);
 
 	/**
-	 * Bring a glTF into a view: pick a file, parse it, store the payloads, make
+	 * Bring a glTF into a view: pick a file, parse it, put it in the tree, make
 	 * the nodes.
 	 *
 	 * Here rather than in the inspector because every step but the last is
 	 * something a panel should not be holding — a file the person chooses, a
 	 * parser that pulls in three.js and therefore has to stay behind a dynamic
-	 * import so a flat document never downloads it, and a write to the asset
-	 * store. What the inspector gets is a button and a viewport id.
+	 * import so a flat document never downloads it, and a write to the project's
+	 * tree. What the inspector gets is a button and a viewport id.
 	 *
-	 * The payloads go to the store **before** the document is touched. That order
-	 * is the whole error story: a failed parse or a refused write leaves a
-	 * document that never heard of this file, where the other order would leave a
-	 * model node pointing at bytes nobody has. The reverse — bytes with no node —
-	 * is harmless and self-correcting, since `pruneAssets` drops the index entry
-	 * and a content-addressed payload nothing references is simply never asked
-	 * for.
+	 * **The four steps are in this order and the order is the error story.**
+	 * Parse, write, import, place:
+	 *
+	 *  - `parseGltfFile` is the only one of them that throws, and it throws
+	 *    *before* anything is written. Someone who drops a PDF on a viewport gets
+	 *    a sentence and a tree that never heard of it. That is the same shape the
+	 *    picture import has, where `createImageBitmap` validates before
+	 *    `putNamedAsset` writes, and it is why the importer takes a parsed file
+	 *    rather than bytes: the ordering is structural rather than remembered.
+	 *  - The file goes in **before** the document is touched, so a refused write
+	 *    cannot leave a `model` node pointing at a path nothing holds. The
+	 *    reverse — a file with no node — is harmless and self-correcting, since
+	 *    `pruneAssets` drops the index entry and nothing ever asks for it.
+	 *  - `importGltf` cannot run before the write, because `src` is not knowable
+	 *    until it has happened: `putNamedAsset` resolves a collision by renaming,
+	 *    so only it knows whether this chair became `chair.glb` or `chair-2.glb`,
+	 *    and every `MeshRef` the import mints is stamped with the answer.
+	 *
+	 * One index entry per **file**, not per part: `bytes` is the length of what
+	 * the person actually imported and `triangles` is the file's total, which is
+	 * the pair a project overview wants and which the per-primitive index could
+	 * not express. Each part's own count stays on its `MeshRef`, which is what
+	 * `tris/2` emits.
 	 */
 	const importModel = useCallback(
 		(viewport: string) => {
@@ -1333,26 +1349,34 @@ export function Studio({
 							file.arrayBuffer().then((b) => new Uint8Array(b)),
 							import("@clingo-design/canvas-3d"),
 						]);
-						const result = await mod.importGltf(bytes, {
-							source: file.name,
-							name: file.name.replace(/\.(glb|gltf)$/i, ""),
-						});
-						for (const asset of result.assets) {
-							await putAsset(asset.id, asset.payload);
-						}
-						const index = Object.fromEntries(
-							result.assets.map((a) => [a.id, a.info] as const),
-						);
+						const parsed = mod.parseGltfFile(bytes);
+						const src = await putNamedAsset(file.name, bytes);
+						const name = file.name.replace(/\.(glb|gltf)$/i, "");
+						const result = mod.importGltf(parsed, { src, name });
 						const landed = new Set(result.nodes.map((n) => n.id));
 						onSceneChange((prev) =>
-							addImport(prev, viewport, result.nodes, index),
+							addImport(prev, viewport, result.nodes, {
+								[src]: {
+									// From the name, which is the same reading `MeshRef.format`
+									// takes and has to be: nothing downstream is deceived by it
+									// (`parseGltfFile` sniffs the magic number and ignores the
+									// extension), so `format` is a *label* — what the tree shows
+									// and what a relink dialog offers — and there the name the
+									// person gave the file is the answer they mean.
+									format: src.toLowerCase().endsWith(".glb") ? "glb" : "gltf",
+									bytes: bytes.length,
+									triangles: result.triangles,
+									name: file.name,
+								},
+							}),
 						);
 						setSelection(landed);
 						setImported({ name: file.name, lost: result.lost });
 					} catch (error) {
-						// A file that is not a glTF at all is the only thing `importGltf`
-						// throws for, and it is a thing a person does by accident. It
-						// reports through the same channel as a loss, because from where
+						// A file that is not a glTF at all is the only thing this flow
+						// throws for — `parseGltfFile` refuses it and `importGltf` never
+						// refuses anything — and it is a thing a person does by accident.
+						// It reports through the same channel as a loss, because from where
 						// they are standing "this did not come in" and "this came in
 						// without its animation" are the same question.
 						setImported({

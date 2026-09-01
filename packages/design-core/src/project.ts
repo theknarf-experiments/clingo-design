@@ -391,24 +391,42 @@ export function normalizeScene(input: unknown): Scene {
  *
  * Returned as a fragment to spread rather than as a value, so that "no assets"
  * writes no key at all — see {@link Scene.assets}.
+ *
+ * **Keyed by tree path, and a key that is not one is migrated in place.** The
+ * index used to be keyed by content hash, one entry per *primitive*; it is now
+ * one entry per file, and `bytes` therefore means the size of the file a person
+ * imported rather than the size of a fragment nobody chose. A document written
+ * under the old scheme is rewritten here in the same pass that rewrites its
+ * refs, so the two halves of the migration cannot land separately — see
+ * `migrateMeshRef` for the geometry side and for the argument that the rewrite
+ * is exact.
+ *
+ * A path is told from a hash by its leading slash, which is not a heuristic in
+ * either direction: every path this index can legally hold comes from the
+ * project's tree and is absolute, and a SHA-256 rendered as hex has no slash in
+ * it at all. The alternative — a 64-hex-characters test — would be the same
+ * check written to be fooled by a shorter hash from some other scheme.
  */
 function normalizeAssets(value: unknown): { assets?: Record<string, AssetInfo> } {
 	if (!isRecord(value)) return {};
 	const out: Record<string, AssetInfo> = {};
-	for (const [hash, raw] of Object.entries(value)) {
+	for (const [key, raw] of Object.entries(value)) {
 		if (!isRecord(raw)) continue;
 		if (raw.format !== "gltf" && raw.format !== "glb") continue;
 		const bytes = Number(raw.bytes);
 		const triangles = Number(raw.triangles);
 		if (!Number.isFinite(bytes) || !Number.isFinite(triangles)) continue;
-		out[hash] = {
+		const src = key.startsWith("/") ? key : legacyAssetPath(key);
+		out[src] = {
 			format: raw.format,
 			bytes,
 			triangles,
 			// The name is what a person reads and nothing else reads it, so a
-			// missing one is not a reason to lose the entry. The hash is the honest
-			// fallback: it is what a relink dialogue would have to print anyway.
-			name: typeof raw.name === "string" ? raw.name : hash,
+			// missing one is not a reason to lose the entry. The key is the honest
+			// fallback: it is what a relink dialogue would have to print anyway, and
+			// now that the key is a path that fallback is something a person can go
+			// and look for rather than sixty-four characters of hex.
+			name: typeof raw.name === "string" ? raw.name : src,
 		};
 	}
 	return Object.keys(out).length > 0 ? { assets: out } : {};
@@ -1518,28 +1536,110 @@ function normalizeNodeStates(
 }
 
 /**
+ * The path a legacy payload's bytes are at, given its content hash.
+ *
+ * One expression in one place, so the two things that must agree — the ref
+ * {@link migrateMeshRef} builds and the key {@link normalizeAssets} rewrites the
+ * index to — cannot drift apart into two spellings of one directory name.
+ *
+ * `/assets/<hash>` is where `putAsset` wrote, and those files are still in the
+ * trees of documents that were made while it existed. Nothing writes there any
+ * more; everything still reads there, because this points at it.
+ *
+ * A `function` and not the `const` arrow this file's other one-liners are, for
+ * one reason: `normalizeAssets` calls it from four hundred lines above, and a
+ * module that normalised a scene while it was still evaluating — which a
+ * template built at import time would — would hit the temporal dead zone of a
+ * `const`. Hoisting here is not a style preference, it is the difference between
+ * working and not.
+ */
+function legacyAssetPath(hash: string): string {
+	return `/assets/${hash}`;
+}
+
+/**
  * True when a stored value is the whole of a {@link MeshRef}.
  *
- * Every field is required except `source`, and that is not strictness for its
- * own sake: the hash is the only way back to the bytes, the format decides which
- * parser reads them, the bounds are what the node draws as while the payload is
- * missing or being fetched, and the triangle count is what the budget rule and
- * the layer row are about. A reference missing any of them is a model that would
- * draw at no size from no file, which is the judgement a path with no usable
- * vertices already gets.
+ * Every field is required, and that is not strictness for its own sake: the
+ * path is the only way back to the bytes, the part is the only way to pick this
+ * node's geometry out of them, the format decides which parser reads them, the
+ * bounds are what the node draws as while the file is missing or being fetched,
+ * and the triangle count is what the budget rule and the layer row are about. A
+ * reference missing any of them is a model that would draw at no size from no
+ * file, which is the judgement a path with no usable vertices already gets.
+ *
+ * `part` is checked as a pair of whole, non-negative numbers rather than as
+ * merely present. They index the file's own arrays, and a fractional or negative
+ * index is not a subscript that misses — it is a value that came from somewhere
+ * other than an import, and a node carrying one would ask the loader a question
+ * with no answer on every frame. Zero is legal and is the overwhelmingly common
+ * case: a one-mesh file is node 0, primitive 0.
  *
  * What is deliberately *not* asked is whether {@link Scene.assets} knows the
- * hash. See the call site.
+ * path, or whether the project's tree holds a file there. See the call site.
  */
 function isMeshRef(value: unknown): value is MeshRef {
 	if (!isRecord(value)) return false;
-	if (typeof value.asset !== "string" || !value.asset) return false;
+	if (typeof value.src !== "string" || !value.src) return false;
 	if (value.format !== "gltf" && value.format !== "glb") return false;
 	if (!Number.isFinite(Number(value.triangles))) return false;
+	const part = value.part;
+	if (!isRecord(part)) return false;
+	for (const index of [part.node, part.primitive]) {
+		if (!Number.isInteger(index) || (index as number) < 0) return false;
+	}
 	const bounds = value.bounds;
 	if (!isRecord(bounds)) return false;
 	const axes: readonly (Dimension | Spatial)[] = [...DIMENSIONS, ...SPATIALS];
 	return axes.every((axis) => Number.isFinite(Number(bounds[axis])));
+}
+
+/**
+ * A `MeshRef` written before geometry was a file, rewritten as one.
+ *
+ * **The migration is exact, and that is a property of what the old payloads
+ * were.** An old ref is `{ asset: "<hash>", format, bounds, triangles, source? }`
+ * and its bytes are at `/assets/<hash>`: a standalone glTF holding *one node,
+ * one mesh, one primitive*, written by `gltfWriter` from geometry the importer
+ * had already scaled and already centred. So `{ node: 0, primitive: 0 }` is not
+ * a guess — it is the only part such a file has — and running the new loader's
+ * `meshPart` over it is the identity in all three of its steps: the derived
+ * scale chain is `[1,1,1]` because the writer emitted no scale, and
+ * `centreTriangles` returns its input untouched because it has an explicit early
+ * return for a box that is already centred.
+ *
+ * **The migrated node therefore draws the same vertices it drew before, through
+ * the new code path, with no legacy branch anywhere in the loader.** That is
+ * where invariant 4 is discharged for the third axis, and it is asserted rather
+ * than asserted-of: `gltfimport.test.ts`'s "a payload the old importer wrote
+ * normalises to itself" runs a `gltfWriter` file through `meshPart` and compares
+ * the positions.
+ *
+ * *Rejected: a `legacy` branch in `useAsset.ts` that reads a hash-shaped `asset`
+ * field.* It would have been fewer lines here and it would have put a second
+ * meaning for "where the geometry is" into the one function whose whole job is
+ * that there is one. A migration runs once per document on read; a branch in the
+ * loader runs on every frame of every document forever.
+ *
+ * `source` is dropped rather than carried: it was the free-form name of the file
+ * the geometry came from, and the path now *is* that, which is the argument
+ * {@link MeshRef.src} makes. Keeping it would leave two answers to one question
+ * with nothing keeping the second one true.
+ *
+ * Returns the value untouched when it is not the legacy shape, so this is safe
+ * to run over every mesh on every read: a ref already in the new shape has no
+ * string `asset` and falls straight through to {@link isMeshRef}.
+ */
+function migrateMeshRef(value: unknown): unknown {
+	if (!isRecord(value)) return value;
+	if (typeof value.asset !== "string" || !value.asset) return value;
+	if (value.src !== undefined) return value;
+	const { asset, source: _dropped, ...rest } = value;
+	return {
+		...rest,
+		src: legacyAssetPath(asset),
+		part: { node: 0, primitive: 0 },
+	};
 }
 
 /**
@@ -1681,17 +1781,33 @@ function pruneNodes(list: readonly unknown[], legacy: boolean): SceneNode[] {
 			const { camera: _dropped, ...rest } = fixed;
 			fixed = rest as SceneNode;
 		}
-		// Imported geometry. Dropped when it is not the shape a {@link MeshRef} is,
-		// because half a reference is a model that would draw at no size from no
-		// file — the judgement a path with no usable vertices gets. **Kept when the
-		// asset index has never heard of its hash**, because that is a missing file
-		// rather than a broken document: `spatialBudget` lists it, the export names
-		// it in `lost`, and the model draws as its own bounding box meanwhile. The
-		// difference is the difference between "relink this" and "your chair is
-		// gone", and only one of the two is ever true.
-		if (fixed.mesh !== undefined && !isMeshRef(fixed.mesh)) {
-			const { mesh: _dropped, ...rest } = fixed;
-			fixed = rest as SceneNode;
+		// Imported geometry. Migrated first, then checked: a document written while
+		// geometry was content-addressed carries `{asset: "<hash>"}` and becomes
+		// `{src: "/assets/<hash>", part: {node: 0, primitive: 0}}` here, which is an
+		// exact rewrite rather than a best effort — see `migrateMeshRef`, which
+		// argues why every step of the new loader is the identity on such a file.
+		// The order matters: checking first would drop every legacy model as
+		// malformed and take invariant 4 with it.
+		//
+		// Then dropped when it is not the shape a {@link MeshRef} is, because half a
+		// reference is a model that would draw at no size from no file — the
+		// judgement a path with no usable vertices gets. **Kept when the asset index
+		// has never heard of its path, and kept when the project's tree holds no
+		// file there**, because that is a missing file rather than a broken
+		// document: `spatialBudget` lists it, the export names it in `lost`, and the
+		// model draws as its own bounding box meanwhile. The difference is the
+		// difference between "relink this" and "your chair is gone", and only one of
+		// the two is ever true. This reader could not check the tree if it wanted to
+		// — it is handed a document and not a project — and that is the right shape:
+		// whether the bytes are there is a question that changes after this runs.
+		if (fixed.mesh !== undefined) {
+			const mesh = migrateMeshRef(fixed.mesh);
+			if (isMeshRef(mesh)) {
+				fixed = { ...fixed, mesh } as SceneNode;
+			} else {
+				const { mesh: _dropped, ...rest } = fixed;
+				fixed = rest as SceneNode;
+			}
 		}
 		out.push(
 			fixed.children

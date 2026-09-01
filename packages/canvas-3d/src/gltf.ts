@@ -508,6 +508,366 @@ export function scaleTriangles(
 }
 
 /* ------------------------------------------------------------------ */
+/* One part of a file, normalised                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * **The one normalisation**, and the reason the rest of this section exists.
+ *
+ * A `model` node used to reference a *payload*: a standalone single-primitive
+ * glTF the importer wrote, already scaled and already centred, addressed by the
+ * hash of its bytes. It references a **file and a part of it** instead — the
+ * file the person imported, under the name they gave it, in the project's tree
+ * — which is what makes replacing the file replace the chair everywhere it is
+ * drawn. `docs/model-files.md` §0 argues that trade and this is the bill for it:
+ *
+ * > The importer used to bake the normalisation into the bytes it stored. With
+ * > the original file in the tree, the loader has to reproduce that
+ * > normalisation exactly, or the geometry will not sit in the box the solver
+ * > placed.
+ *
+ * The two halves that must agree are in different packages, run at different
+ * times, and are exercised by different tests — so the rule is that they are not
+ * two halves. {@link meshPart} is the **only** place a primitive becomes
+ * geometry, and its three callers are `gltfimport.ts` (which measures the box),
+ * `useAsset.ts` (which draws it) and `gltfexport.ts` (which writes it back out).
+ * The half of that rule which is easy to lose is the importer's: it must
+ * **stop** scaling and centring on its own — it keeps threading `parentScale`,
+ * because it still needs that to place children and to name a shear, but the
+ * geometry comes back from here. Then "what the box was measured from" and "what
+ * the renderer draws" are the same array by construction rather than by
+ * agreement, which is the only kind of agreement that survives a year of edits
+ * to three files.
+ *
+ * ## What "normalised" means, exactly — three steps, in this order
+ *
+ * 1. {@link readTriangles} the primitive;
+ * 2. {@link scaleTriangles} by {@link partScale} — the product of the `scale`
+ *    components from the default scene's root down to this node **inclusive**,
+ *    with `scaleTriangles`'s own rule about normals under a non-uniform scale;
+ * 3. {@link centreTriangles}, and measure the box that results.
+ *
+ * The **translation and the rotation are not applied**, and that is not an
+ * omission. `gltfimport.ts` keeps them: a glTF node becomes a zero-sized `pivot`
+ * carrying its `T` and `R`, and a collapsed leaf carries `place + R·centre` and
+ * a `turn`. Baking the world transform into the vertices here would be a second,
+ * incompatible normalisation — and it would throw away the pivots, which are the
+ * part of an import a designer can actually grab hold of. The scale is the only
+ * component of a glTF transform a document node has no home for, because a
+ * document node's size *is* its box, so the scale is the only one that goes into
+ * the geometry.
+ *
+ * ## Where this lives
+ *
+ * `docs/model-files.md` §3 specifies a sibling module, `meshpart.ts`, on the
+ * argument that this is a *policy over* the codec rather than codec. The policy
+ * is here, in the codec, because it has exactly the codec's dependencies —
+ * none, not even three.js — and its three callers already import this module for
+ * `parseGltfFile` and `boundsOf`, so a second module would have bought a second
+ * import path and nothing else. Everything below is exported, so if it ever
+ * grows a dependency on the *document* — a `SceneNode`, a `Value`, a unit — that
+ * is the day it moves out, and moving it is a rename.
+ */
+
+/** Which part of a file: two indices into the file's own arrays, and nothing derived. */
+export interface PartRef {
+	/**
+	 * The **glTF node** index — not a document node id, and not a mesh index.
+	 *
+	 * The node rather than the mesh because the node is what the scale chain is
+	 * computed from: one mesh instanced by two nodes at two scales is two
+	 * different pieces of geometry, and a mesh index alone could not tell them
+	 * apart. The mesh is `json.nodes[node].mesh`, so storing it too would be a
+	 * second address for one thing and would spell `node.mesh.mesh`.
+	 */
+	node: number;
+	/** Which primitive of that node's mesh — a mesh in three materials has three. */
+	primitive: number;
+}
+
+/** One primitive, selected and normalised — everything a caller needs and no document in it. */
+export interface MeshPart {
+	/**
+	 * Scaled by the chain and centred on its own origin, in metres, in glTF's own
+	 * axes. The crossing into the document's y-down space happens on the node's
+	 * transform and never on the vertices — see {@link Triangles}.
+	 */
+	triangles: Triangles;
+	/** The box those triangles occupy: measured, and centred to within a float. */
+	bounds: MetreBounds;
+	/**
+	 * The offset {@link centreTriangles} took *out* of the vertices, in the glTF
+	 * node's own frame, in metres.
+	 *
+	 * Not in `docs/model-files.md` §3's list of fields, and it has to be: the
+	 * importer places a collapsed leaf at `place + R·centre`, which is the exact
+	 * bridge between glTF placing a mesh by its node's origin and the document
+	 * placing a `model` by the box its vertices occupy. Without this number here
+	 * the importer would have to re-derive it from the uncentred soup — which
+	 * means running two of the three steps a second time, on its own, which is
+	 * precisely the second implementation this function exists to prevent.
+	 */
+	centre: readonly [number, number, number];
+	/** What the importer calls the node — the file's name for the mesh, or the node's. */
+	name: string;
+	/** The file's material index for this primitive, for the importer's props. */
+	material?: number;
+	/** The accumulated scale, so a caller can name the mirror or the shear it implies. */
+	scale: readonly [number, number, number];
+}
+
+/** One primitive of one node, in the order the file lists them, refusals included. */
+export interface MeshPartEntry {
+	ref: PartRef;
+	part: MeshPart | { refused: string };
+}
+
+/**
+ * One part, normalised — or a refusal, in {@link readTriangles}'s own manner.
+ *
+ * Every refusal is a clause that completes "…is not in the document because
+ * ___", because that is the sentence the import report and the studio's relink
+ * list are both built out of. **Nothing here throws**, and that is load-bearing
+ * rather than tidy: a stale `MeshRef` — one whose file was replaced by a
+ * structurally different file at the same path — reaches this function in the
+ * wild, on a render, and a renderer that threw would take the viewport down over
+ * a chair that should have drawn its stand-in box.
+ */
+export function meshPart(file: GltfFile, ref: PartRef): MeshPart | { refused: string } {
+	const node = file.json.nodes?.[ref.node];
+	if (!node) return { refused: `the file has no node ${ref.node}` };
+	if (node.mesh === undefined) return { refused: `node ${ref.node} of the file draws no mesh` };
+	const mesh = file.json.meshes?.[node.mesh];
+	if (!mesh) return { refused: `the file has no mesh ${node.mesh}` };
+	const primitive = mesh.primitives?.[ref.primitive];
+	if (!primitive) {
+		return {
+			refused: `that mesh has no part ${ref.primitive} — the file has changed since this was imported`,
+		};
+	}
+	const read = readTriangles(file, primitive);
+	if ("refused" in read) return read;
+
+	const scale = partScale(file, ref.node);
+	const scaled = scaleTriangles(read.triangles, scale);
+	// Measured *before* centring, because this is the number the centring removes
+	// and the importer needs it to place the node. Both come off one measurement
+	// of one array, so they cannot disagree about where the middle is.
+	const box = boundsOf(scaled);
+	const triangles = centreTriangles(scaled);
+	return {
+		triangles,
+		// Measured again rather than asserted as ±half the extent: `boundsOf`'s own
+		// comment is that a stated box is a claim and a measured one is a fact, and
+		// the fact is what the renderer's fit has to be computed from.
+		bounds: boundsOf(triangles),
+		centre: [
+			(box.min[0] + box.max[0]) / 2,
+			(box.min[1] + box.max[1]) / 2,
+			(box.min[2] + box.max[2]) / 2,
+		],
+		name: partName(file, ref),
+		...(primitive.material === undefined ? {} : { material: primitive.material }),
+		scale,
+	};
+}
+
+/**
+ * Every part of one glTF node, in the file's own order, refusals in place.
+ *
+ * **Refusals stay in the list rather than being filtered out of it**, and that is
+ * the whole reason this returns a `{ ref, part }` pair instead of an array of
+ * parts. A mesh whose first primitive is a point cloud and whose second is
+ * triangles must produce a node addressing `primitive: 1`; a filtered list would
+ * hand the caller index `0` for it and the node would draw the point cloud —
+ * except that it cannot be drawn, so it would draw nothing, from a reference
+ * that looks perfectly well-formed. The caller also has an import report to fill
+ * in, and a part that vanished silently is a sentence it cannot write.
+ *
+ * An empty list for a node with no mesh, a mesh the file does not hold, or an
+ * index out of range: those are not refusals about a *part*, they are a node
+ * with no parts, which is most of a glTF's nodes.
+ */
+export function meshParts(file: GltfFile, node: number): MeshPartEntry[] {
+	const mesh = file.json.meshes?.[file.json.nodes?.[node]?.mesh ?? -1];
+	if (!mesh) return [];
+	return mesh.primitives.map((_, primitive) => {
+		const ref: PartRef = { node, primitive };
+		return { ref, part: meshPart(file, ref) };
+	});
+}
+
+/**
+ * The name the importer gives one part.
+ *
+ * The mesh's name, then the node's, then a word — and a suffix only where the
+ * mesh has more than one primitive, because a mesh drawn in three materials
+ * becomes three nodes and three rows in the layer list called the same thing is
+ * three rows nobody can tell apart. Numbered from one, because the layer list is
+ * read by a person.
+ */
+function partName(file: GltfFile, ref: PartRef): string {
+	const node = file.json.nodes?.[ref.node];
+	const mesh = file.json.meshes?.[node?.mesh ?? -1];
+	const name = mesh?.name?.trim() || node?.name?.trim() || "Model";
+	return (mesh?.primitives.length ?? 0) > 1 ? `${name} ${ref.primitive + 1}` : name;
+}
+
+/**
+ * The accumulated scale above and including one node — the chain the geometry
+ * is baked with.
+ *
+ * Derived from the file alone, and that is the point of it. The importer already
+ * knows this number: it threads `parentScale` down its own recursive walk, which
+ * it still needs for placing children and for naming a shear. But the *loader*
+ * has only a file and a `PartRef`, months later, in another package — so if the
+ * chain were only obtainable by walking the whole file the way the importer
+ * walks it, the loader would grow a second walk, and the two walks would drift
+ * exactly the way §0 says the two normalisations would. `gltfimport.test.ts`
+ * asserts the derived chain equals the threaded one, which is what keeps the
+ * importer's walk honest rather than authoritative.
+ *
+ * The product is taken **from the root down**, one multiplication per level,
+ * which is the order the threaded walk uses — so the two agree bit for bit and
+ * not merely to within a float.
+ */
+export function partScale(file: GltfFile, node: number): [number, number, number] {
+	const parents = parentIndex(file);
+	// Up to the root collecting, then down multiplying: a fold from the far end
+	// would be the same arithmetic in a different order, and float multiplication
+	// is not associative.
+	const chain: number[] = [];
+	const seen = new Set<number>();
+	for (let at: number | undefined = node; at !== undefined && !seen.has(at); ) {
+		seen.add(at);
+		chain.push(at);
+		at = parents.get(at);
+	}
+	const scale: [number, number, number] = [1, 1, 1];
+	for (let i = chain.length - 1; i >= 0; i--) {
+		const local = localScale(file.json.nodes?.[chain[i] ?? -1]);
+		scale[0] *= local[0];
+		scale[1] *= local[1];
+		scale[2] *= local[2];
+	}
+	return scale;
+}
+
+/**
+ * A node's own scale, however the file chose to spell its transform.
+ *
+ * The matrix case is three.js's `Matrix4.decompose` written out, deliberately to
+ * the letter: the scales are the lengths of the three basis columns and a
+ * negative determinant is charged to **x** alone. That last rule is arbitrary —
+ * a matrix that mirrors says nothing about *which* axis was flipped — so the
+ * only thing that matters is that everybody makes the same arbitrary choice, and
+ * `gltfimport.ts` decomposes with three.js. `Math.sqrt` of the sum of squares
+ * rather than `Math.hypot` for the same reason and it is not pedantry:
+ * `Vector3.length` is the former, the two differ in the last bit, and this
+ * number multiplies a million vertices.
+ *
+ * The determinant is the 3×3 one. A glTF node's matrix is required to be
+ * decomposable into TRS, so its bottom row is `0 0 0 1` and the 4×4 determinant
+ * three.js takes is equal to it.
+ */
+function localScale(node: GltfNode | undefined): readonly [number, number, number] {
+	if (!node) return [1, 1, 1];
+	const m = node.matrix;
+	if (m && m.length === 16) {
+		const length = (a: number, b: number, c: number): number =>
+			Math.sqrt(
+				(m[a] ?? 0) * (m[a] ?? 0) + (m[b] ?? 0) * (m[b] ?? 0) + (m[c] ?? 0) * (m[c] ?? 0),
+			);
+		const sx = length(0, 1, 2);
+		const sy = length(4, 5, 6);
+		const sz = length(8, 9, 10);
+		return [determinant3(m) < 0 ? -sx : sx, sy, sz];
+	}
+	const s = node.scale;
+	return s && s.length === 3 ? [s[0] ?? 1, s[1] ?? 1, s[2] ?? 1] : [1, 1, 1];
+}
+
+/** The determinant of a column-major 4×4's upper-left 3×3 — see {@link localScale}. */
+function determinant3(m: readonly number[]): number {
+	const a = m[0] ?? 0;
+	const b = m[4] ?? 0;
+	const c = m[8] ?? 0;
+	const d = m[1] ?? 0;
+	const e = m[5] ?? 0;
+	const f = m[9] ?? 0;
+	const g = m[2] ?? 0;
+	const h = m[6] ?? 0;
+	const i = m[10] ?? 0;
+	return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+}
+
+/**
+ * Child index to parent index, built once per parsed file.
+ *
+ * glTF states the hierarchy downwards — a node lists its `children` — and every
+ * question here is asked upwards, so the edges are inverted once. A node
+ * hierarchy is a strict tree by the specification: **first parent wins** where a
+ * malformed file lists a node under two, which is a choice rather than an error
+ * because a chair with a duplicated child should still import.
+ *
+ * Memoised on the parsed file rather than recomputed per part, because a
+ * document with ten parts of one chair calls {@link meshPart} ten times on one
+ * `GltfFile` and this walk is over every node in it. The staleness trap is named
+ * rather than guarded: the map is keyed by the `GltfFile` *object*, so a file
+ * that is parsed again gets a fresh entry and a file that is mutated after a
+ * part has been read does not. Nothing mutates a parsed file today — the one
+ * mutable `GltfJson` in this module belongs to {@link gltfWriter}, which nobody
+ * asks for a part of — and the day something does, this is the line that is
+ * wrong.
+ */
+const PARENTS = new WeakMap<GltfFile, Map<number, number>>();
+
+function parentIndex(file: GltfFile): Map<number, number> {
+	const known = PARENTS.get(file);
+	if (known) return known;
+	const parents = new Map<number, number>();
+	for (const [index, node] of (file.json.nodes ?? []).entries()) {
+		for (const child of node.children ?? []) {
+			if (!parents.has(child) && child !== index) parents.set(child, index);
+		}
+	}
+	PARENTS.set(file, parents);
+	return parents;
+}
+
+/**
+ * How much to scale a part's own box to fill a node's box, per axis.
+ *
+ * The geometry comes back from {@link meshPart} in **metres**, not in a unit
+ * box, so every consumer that draws it into a node's frame divides by its extent
+ * — and they all divide the same way, here, which is the point.
+ *
+ * *Rejected: normalising into a unit box inside `meshPart`.* It would delete
+ * this function and make a renderer's `scale = size` correct as written, but it
+ * bakes a division into the vertices: the exporter would then write a chair
+ * whose coordinates are nothing the file ever contained, and the day somebody
+ * wants the file's own numbers back there is nowhere to get them. The division
+ * belongs in the drawing, which is where the box is.
+ *
+ * `1` where either side is zero, which covers the two real cases — a flat part
+ * (a plane has no thickness and no scale makes it thick) and a node whose depth
+ * the document never stated. Dividing anyway gives `0` or `Infinity`, and both
+ * of those are a mesh nobody can see.
+ */
+export function fitScale(
+	bounds: MetreBounds,
+	size: readonly [number, number, number],
+): [number, number, number] {
+	const fit = (want: number, have: number): number =>
+		want === 0 || have === 0 ? 1 : want / have;
+	return [
+		fit(size[0], bounds.max[0] - bounds.min[0]),
+		fit(size[1], bounds.max[1] - bounds.min[1]),
+		fit(size[2], bounds.max[2] - bounds.min[2]),
+	];
+}
+
+/* ------------------------------------------------------------------ */
 /* Writing                                                             */
 /* ------------------------------------------------------------------ */
 

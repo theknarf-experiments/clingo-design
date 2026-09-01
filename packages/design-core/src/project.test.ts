@@ -1132,23 +1132,31 @@ test("an asset index survives whole, and one bad row is one row", () => {
 	const scene = normalizeScene(
 		staged({
 			assets: {
-				h1: { format: "glb", bytes: 2048, triangles: 900, name: "Chair" },
+				"/assets/chair.glb": { format: "glb", bytes: 2048, triangles: 900, name: "Chair" },
 				// No format nothing can parse, so nothing could ever read the bytes.
-				h2: { bytes: 1, triangles: 1, name: "Mystery" },
-				h3: { format: "gltf", bytes: 12, triangles: 4 },
+				"/assets/mystery.bin": { bytes: 1, triangles: 1, name: "Mystery" },
+				"/assets/unnamed.gltf": { format: "gltf", bytes: 12, triangles: 4 },
+				// A key with no leading slash is a content hash from before geometry
+				// was a file, and it is rewritten to where those bytes are rather than
+				// being dropped: an index this reader threw away would be every model
+				// in the document going unnamed and unsized at once.
+				h4: { format: "glb", bytes: 64, triangles: 2, name: "Legacy" },
 			},
 		}),
 	);
-	assert.deepEqual(scene.assets?.h1, {
+	assert.deepEqual(scene.assets?.["/assets/chair.glb"], {
 		format: "glb",
 		bytes: 2048,
 		triangles: 900,
 		name: "Chair",
 	});
-	assert.equal(scene.assets?.h2, undefined, "an unparseable row is dropped");
-	// A name is what a person reads and nothing else reads it, so the hash
-	// stands in rather than the entry being lost.
-	assert.equal(scene.assets?.h3.name, "h3");
+	assert.equal(scene.assets?.["/assets/mystery.bin"], undefined, "an unparseable row is dropped");
+	// A name is what a person reads and nothing else reads it, so the key stands
+	// in rather than the entry being lost — and now that the key is a path, the
+	// stand-in is something a person could go and look for.
+	assert.equal(scene.assets?.["/assets/unnamed.gltf"].name, "/assets/unnamed.gltf");
+	assert.equal(scene.assets?.h4, undefined, "a hash key is not left as a key");
+	assert.equal(scene.assets?.["/assets/h4"]?.name, "Legacy");
 });
 
 test("a third axis is sparse on the way in, and flat has one spelling", () => {
@@ -1242,10 +1250,16 @@ test("a camera a viewport no longer holds is kept, because deleting one must lea
 
 test("a model whose file is missing is a relink, and half a reference is not a model", () => {
 	const bounds = { x: 0, y: 0, width: 100, height: 100, z: 0, depth: 100 };
+	const part = { node: 0, primitive: 0 };
 	const scene = normalizeScene(
 		staged({
-			// The index has never heard of `gone`, which is a missing file.
-			assets: { here: { format: "glb", bytes: 4, triangles: 2, name: "Here" } },
+			// The index has never heard of `/assets/gone.glb`, which is a missing
+			// file. Note that the reader is not asked to check the project's *tree*
+			// either, and could not: it is handed a document, and whether the bytes
+			// are there is a question that changes after this runs.
+			assets: {
+				"/assets/here.glb": { format: "glb", bytes: 4, triangles: 2, name: "Here" },
+			},
 			nodes: [
 				{
 					id: "chair",
@@ -1253,7 +1267,7 @@ test("a model whose file is missing is a relink, and half a reference is not a m
 					name: "Chair",
 					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("100px")], height: [lit("100px")] },
 					props: {},
-					mesh: { asset: "gone", format: "glb", bounds, triangles: 900 },
+					mesh: { src: "/assets/gone.glb", format: "glb", part, bounds, triangles: 900 },
 				},
 				{
 					id: "half",
@@ -1261,19 +1275,111 @@ test("a model whose file is missing is a relink, and half a reference is not a m
 					name: "Half",
 					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("100px")], height: [lit("100px")] },
 					props: {},
-					// No bounds: nothing to draw while the payload is away, and the
-					// same judgement a path with no usable vertices gets.
-					mesh: { asset: "here", format: "glb", triangles: 4 },
+					// No bounds: nothing to draw while the file is away, and the same
+					// judgement a path with no usable vertices gets.
+					mesh: { src: "/assets/here.glb", format: "glb", part, triangles: 4 },
+				},
+				{
+					id: "partless",
+					kind: "model",
+					name: "Partless",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("100px")], height: [lit("100px")] },
+					props: {},
+					// A file and no part is the other half of the same judgement, and
+					// it is new: a path alone says which chair and never which leg, so
+					// the loader would have to guess `{0, 0}` on every frame — which
+					// is exactly the plausible-looking wrong answer `modelPart` refuses
+					// to give in the exporter.
+					mesh: { src: "/assets/here.glb", format: "glb", bounds, triangles: 4 },
+				},
+				{
+					id: "fractional",
+					kind: "model",
+					name: "Fractional",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("100px")], height: [lit("100px")] },
+					props: {},
+					// Indices into the file's own arrays. A fraction is not a
+					// subscript that misses, it is a number that came from somewhere
+					// other than an import.
+					mesh: {
+						src: "/assets/here.glb",
+						format: "glb",
+						part: { node: 0.5, primitive: 0 },
+						bounds,
+						triangles: 4,
+					},
 				},
 			],
 		}),
 	);
-	assert.equal(nodeAt(scene, "chair")?.mesh?.asset, "gone");
+	assert.equal(nodeAt(scene, "chair")?.mesh?.src, "/assets/gone.glb");
+	assert.deepEqual(nodeAt(scene, "chair")?.mesh?.part, part);
 	assert.equal(nodeAt(scene, "chair")?.mesh?.triangles, 900);
 	assert.ok(!Object.hasOwn(nodeAt(scene, "half") as SceneNode, "mesh"));
-	// And the node itself is never lost for either reason — "relink this" and
-	// "your chair is gone" are two sentences and only the first one is true.
+	assert.ok(!Object.hasOwn(nodeAt(scene, "partless") as SceneNode, "mesh"));
+	assert.ok(!Object.hasOwn(nodeAt(scene, "fractional") as SceneNode, "mesh"));
+	// And the node itself is never lost for any of those reasons — "relink this"
+	// and "your chair is gone" are two sentences and only the first one is true.
 	assert.ok(nodeAt(scene, "half"));
+	assert.ok(nodeAt(scene, "partless"));
+	assert.ok(nodeAt(scene, "fractional"));
+});
+
+test("a document written when geometry was a hash opens as one written today", () => {
+	// Invariant 4 for the third axis, and it is exact rather than approximate —
+	// which is a property of what the old payloads *were*. `putAsset` wrote each
+	// primitive to `/assets/<hash>` as a standalone glTF holding one node, one
+	// mesh, one primitive, already scaled and already centred, so `{node: 0,
+	// primitive: 0}` is not a guess: it is the only part such a file has. Every
+	// step of the new loader is then the identity on it — the derived scale chain
+	// is `[1,1,1]` because the writer emitted no scale, and `centreTriangles`
+	// returns its input untouched because it has an early return for a box that is
+	// already centred. `gltfimport.test.ts` proves that half against real bytes;
+	// this proves the document half, which is that the ref and the index arrive
+	// pointing at the same place.
+	const bounds = { x: 0, y: 0, width: 100, height: 100, z: 0, depth: 100 };
+	const hash = "9f2c4b8e";
+	const scene = normalizeScene(
+		staged({
+			assets: { [hash]: { format: "glb", bytes: 4096, triangles: 900, name: "Chair" } },
+			nodes: [
+				{
+					id: "chair",
+					kind: "model",
+					name: "Chair",
+					frame: { x: [lit("0px")], y: [lit("0px")], width: [lit("100px")], height: [lit("100px")] },
+					props: {},
+					// The shape a document saved before this change holds, `source`
+					// and all.
+					mesh: {
+						asset: hash,
+						format: "glb",
+						bounds,
+						triangles: 900,
+						source: "chair.glb",
+					},
+				},
+			],
+		}),
+	);
+	const mesh = nodeAt(scene, "chair")?.mesh;
+	assert.equal(mesh?.src, `/assets/${hash}`, "the ref points at where the bytes are");
+	assert.deepEqual(mesh?.part, { node: 0, primitive: 0 }, "the only part such a file has");
+	assert.equal(mesh?.triangles, 900, "and nothing else about it moved");
+	assert.deepEqual(mesh?.bounds, bounds);
+	// `source` is dropped rather than carried: it was a free-form second answer to
+	// "which file did this come from" and `src` is now the first one.
+	assert.ok(!Object.hasOwn(mesh as object, "source"));
+	assert.ok(!Object.hasOwn(mesh as object, "asset"));
+	// And the index is rekeyed in the same pass, so the two halves of the
+	// migration cannot land separately — a ref pointing at a path the index still
+	// held under a hash would be a model with no name and no size in every panel.
+	assert.deepEqual(Object.keys(scene.assets ?? {}), [`/assets/${hash}`]);
+	assert.equal(scene.assets?.[`/assets/${hash}`]?.name, "Chair");
+	// Idempotent: reading the migrated document again is not a second migration.
+	// `/assets/9f2c4b8e` already starts with a slash, so it is left as the path it
+	// is rather than becoming `/assets//assets/9f2c4b8e`.
+	assert.deepEqual(normalizeScene(scene), scene);
 });
 
 test("a mesh outside every viewport is kept, and says nothing", () => {

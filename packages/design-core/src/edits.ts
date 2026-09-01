@@ -3646,23 +3646,29 @@ export function addLight(scene: Scene, viewport: string, lamp: string): Scene {
 /**
  * Imported geometry, and the entry in the index that says what it is.
  *
- * **The bytes are not here.** The caller has already put them in the
- * content-addressed store and hands over the hash and the metadata, which is the
- * one place the third axis departs from the `path` precedent it otherwise
- * follows exactly: a glTF is megabytes, the document is edited by two people at
+ * **The bytes are not here.** The caller has already written the file into the
+ * project's tree and hands over the path, the part and the metadata. The
+ * document holds a reference for the reason every other big thing in it is held
+ * by reference: a glTF is megabytes, the document is edited by two people at
  * once, and a payload in the document is a payload in every diff, every undo
- * entry and every sync message.
+ * entry and every sync message. That is now exactly the `path` precedent an
+ * `image` follows rather than a departure from it, which it was when the
+ * reference was a content hash — see `docs/model-files.md` §0.
  *
- * **And there is no such caller, which is why this verb is reachable from
- * nothing but its own test while its five neighbours are wired into the studio.**
- * `design-core/src/assets.ts` and the `AssetStore` it was to define do not exist,
- * so nobody can put the bytes anywhere: a menu entry that called this would mint
- * a `model` node carrying a hash that nothing can load, `canvas-3d`'s `Model.tsx`
- * would draw its bounding box, and a glTF export of the view would write an empty
- * mesh where the geometry should be. A feature that appears to work and produces
- * nothing is worse than an absent one, so the verb waits for the store rather
- * than being given a front door — and this paragraph says so, because a reader
- * comparing it with `addMesh` is owed the difference.
+ * The ordering that implies is not a detail and is enforced by the signature
+ * taking a finished {@link MeshRef}: the file must be *written first*, because
+ * only the write knows the final path — `putNamedAsset` resolves a collision by
+ * suffixing, so a second `chair.glb` lands at `chair-2.glb` and a ref built
+ * before the write would point at the first person's chair. `Studio.tsx` does
+ * write, then import, then call this.
+ *
+ * The doc comment used to carry a paragraph here explaining that this verb was
+ * reachable from nothing but its own test, because there was no store to put
+ * bytes in and a model minted against a hash nothing could load would draw a
+ * bounding box and export an empty mesh. That paragraph is gone because the
+ * condition is: the tree is the store, `Studio.tsx` calls the import path from
+ * the viewport's own menu, and a browser has been shown a file going in and a
+ * node coming out with the path on it.
  *
  * The node's box is the model's own bounds, centred in the view, so an import
  * arrives at the size it really is rather than at a size this file invented — a
@@ -3676,6 +3682,31 @@ export function addModel(
 	viewport: string,
 	ref: MeshRef,
 	info: AssetInfo,
+	/**
+	 * The file's material as ordinary props — `fill`, `roughness`, `metalness`,
+	 * `opacity` — or nothing where the caller has none.
+	 *
+	 * **Optional and last, and it was found missing in a browser rather than in a
+	 * test.** `importGltf` turns a glTF material into exactly these four props on
+	 * the node it mints, which is the whole reason an imported chair is a chair a
+	 * designer can recolour with a token. {@link addImport} short-circuits a
+	 * one-part file to this verb, and this verb built its node from `ref` and
+	 * `info` alone — so a file holding a single mesh arrived **grey**, wearing
+	 * `Model.tsx`'s stand-in colour, while the same file with two meshes in it
+	 * came in wearing its own. One import path painted and the other did not, and
+	 * the difference was how many meshes the person happened to have modelled.
+	 *
+	 * Nothing headless caught it: the props were on a node the shortcut threw
+	 * away, so every assertion about materials was made against the multi-part
+	 * path that keeps them. It took looking at a viewport.
+	 *
+	 * A parameter rather than a `SceneNode` argument, because everything else the
+	 * imported node carries is something this verb deliberately decides for
+	 * itself: the name comes from `info`, and the frame is the view's centre and
+	 * the model's own bounds. The material is the one thing that belongs to the
+	 * file and to nobody else.
+	 */
+	props?: Partial<Record<PropName, Value>>,
 ): Scene {
 	const view = viewportNode(scene, viewport);
 	if (!view) return scene;
@@ -3695,17 +3726,41 @@ export function addModel(
 		{ depth },
 		info.name.trim() || KINDS.model.label,
 	);
-	const placed = appendChild(scene, viewport, { ...node, mesh: ref });
-	return { ...placed, assets: { ...placed.assets, [ref.asset]: info } };
+	const placed = appendChild(scene, viewport, {
+		...node,
+		// Merged over the kind's defaults rather than replacing them, which is what
+		// `spatialNode` already put in `props` and what every other add verb
+		// leaves alone. `KINDS.model` states no `fill` default on purpose — an
+		// imported material is the file's — so in practice there is nothing under
+		// these to overwrite, and spelling it as a merge is what keeps that a fact
+		// about the table rather than a thing this line depends on.
+		props: { ...node.props, ...props },
+		mesh: ref,
+	});
+	// Keyed by the file's path, which is one entry per *file* and not one per
+	// primitive: a chair whose six parts became six nodes has one index entry
+	// with one byte count, so `assetTotalBytes` totals what would actually be
+	// downloaded. See `assets.ts`, which argues that this is the whole of what
+	// re-keying the index bought.
+	return { ...placed, assets: { ...placed.assets, [ref.src]: info } };
 }
 
 /**
  * A whole glTF import, landed in one view — the edit half of `importGltf`.
  *
- * The importer hands back a subtree and a payload per primitive; the payloads go
- * to an {@link AssetStore}, which is the caller's business because it is I/O,
- * and this is everything else: the nodes into the tree and the metadata into
- * `Scene.assets`, in one edit so that one ⌘Z takes the whole chair back out.
+ * The importer hands back a subtree whose leaves reference one file by path; the
+ * file itself was written to the project's tree before the importer ran, which
+ * is the caller's business because it is I/O, and this is everything else: the
+ * nodes into the tree and the metadata into `Scene.assets`, in one edit so that
+ * one ⌘Z takes the whole chair back out.
+ *
+ * The ⌘Z is worth a second sentence now that the bytes are a file. Undoing this
+ * removes the nodes and the index entry and **leaves the file in the tree**,
+ * which is deliberate: an import a person took back is an arrangement they did
+ * not want, not a download they want to do again, and the next import of the
+ * same name would collide with it and land at `chair-2.glb`. That is the
+ * behaviour a person who re-imports actually wants to notice, and it is cheaper
+ * to notice than to have silently lost the bytes.
  *
  * **One primitive is centred; several keep their arrangement.** A file holding a
  * single mesh has no arrangement to preserve — its origin is wherever the person
@@ -3729,14 +3784,21 @@ export function addImport(
 	if (!viewportNode(scene, viewport) || nodes.length === 0) return scene;
 	const [only] = nodes;
 	if (nodes.length === 1 && only.mesh && !only.children?.length) {
-		const info = assets[only.mesh.asset];
-		if (info) return addModel(scene, viewport, only.mesh, info);
+		const info = assets[only.mesh.src];
+		// `only.props` and not `{}`: the file's material is on the node the
+		// importer minted, and dropping it here is what made a one-mesh file arrive
+		// grey while a two-mesh one arrived painted. See {@link addModel}'s fifth
+		// parameter, which is where that whole story is written down.
+		if (info) return addModel(scene, viewport, only.mesh, info, only.props);
 	}
 	let next = scene;
 	for (const node of nodes) next = appendChild(next, viewport, node);
-	// Merged rather than replaced: another model in another view may already have
-	// brought in a hash this import also uses, and content addressing means both
-	// entries describe the same bytes.
+	// Merged rather than replaced: another model in another view may already
+	// reference the path this import writes, and the later entry wins because it
+	// describes the file that is at that path *now*. Under content addressing the
+	// two entries were guaranteed to describe identical bytes and the merge
+	// direction did not matter; under paths it does, and this is the direction
+	// that matches "replacing the file replaces the picture".
 	return { ...next, assets: { ...next.assets, ...assets } };
 }
 
@@ -3979,15 +4041,31 @@ export function addPivot(
  * Called by {@link deleteNodes} and by nothing else, for the reason
  * {@link pruneMachines} is: a reference disappears when a node does, and every
  * path that deletes a node goes through there.
+ *
+ * **It drops the index entry and never the file.** That was invisible when the
+ * index was keyed by content hash and the payloads lived in a store nothing in
+ * the tree implemented; it is a real choice now that the key is a path into a
+ * tree a person can open. Deleting the last chair in a document does not delete
+ * `/assets/chair.glb`, because the file is a thing the person put in their
+ * project and the index is a thing this document remembers about it. Garbage
+ * collecting the tree is a decision for a person looking at a file browser, and
+ * an edit that quietly deleted megabytes on a ⌫ would be the kind of helpfulness
+ * nobody can undo.
+ *
+ * **And it still does not touch `node.image.src`**, which is deliberate rather
+ * than an oversight even now that both kinds are paths. An image's intrinsic
+ * size is on its own ref, no panel totals photographs, and there is no
+ * `AssetInfo` for one to prune. Widening the index to both kinds is a separate
+ * change with its own argument to make.
  */
 export function pruneAssets(scene: Scene): Scene {
 	if (scene.assets === undefined) return scene;
 	const used = new Set(
 		flatten(scene.nodes)
-			.map((node) => node.mesh?.asset)
-			.filter((hash): hash is string => hash !== undefined),
+			.map((node) => node.mesh?.src)
+			.filter((src): src is string => src !== undefined),
 	);
-	const kept = Object.entries(scene.assets).filter(([hash]) => used.has(hash));
+	const kept = Object.entries(scene.assets).filter(([src]) => used.has(src));
 	if (kept.length === Object.keys(scene.assets).length) return scene;
 	return kept.length > 0
 		? { ...scene, assets: Object.fromEntries(kept) }

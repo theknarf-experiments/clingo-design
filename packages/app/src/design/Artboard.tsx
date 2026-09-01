@@ -102,14 +102,19 @@ interface DocShape {
  * What a `viewport` node's content function is handed beyond the usual three.
  *
  * `docs/merged-plan.md`'s M18 row gives this argument as
- * `{ model, assets, onPickNode, live, scale }`. **`assets` is not here**, and
- * the absence is reported rather than stubbed: `design-core/src/assets.ts` and
- * the `AssetStore` it was to define do not exist in the tree, so there is
- * nothing to hand one through and no interface to code an app-side
- * implementation against. A `model` node consequently draws its bounding box
- * rather than its geometry — `canvas-3d/src/Model.tsx` is the whole story — and
- * inventing the store's shape here, in the one file that merely passes it along,
- * is exactly the kind of quiet redesign this work was told not to do.
+ * `{ model, assets, onPickNode, live, scale }`. **`assets` is still not here,
+ * and it is now an answered question rather than a reported absence.** That row
+ * was written when a payload lived in a content-addressed store, so a viewport
+ * would have had to be handed the store to draw a chair; there is no such store
+ * and there never was one in this tree. Geometry is a **file in the project's
+ * tree**, addressed by path exactly as an image is, and the thing a viewport
+ * needs is therefore the same one-argument function `Picture` two hundred lines
+ * below already uses — `resolve(path) -> bytes`. It goes through {@link View} as
+ * `resolve` and not through this record, because it is one function the whole
+ * artboard shares and not a per-kind argument.
+ *
+ * So the shape this comment used to say was missing turned out to be the wrong
+ * shape, which is the argument for having reported it rather than stubbing it.
  */
 interface ViewportContext {
 	/** The whole model of this universe, for `looks/2` and the state copies. */

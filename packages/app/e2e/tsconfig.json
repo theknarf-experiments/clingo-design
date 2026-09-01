@@ -1,0 +1,22 @@
+{
+	// The browser lane types itself.
+	//
+	// `../tsconfig.json` includes `src` and `vite.config.ts` and nothing else, and
+	// widening it was the rejected option: it is the config `pnpm build` runs, and
+	// pulling Playwright's types into the app build to typecheck a test is a real
+	// cost paid by every build for the benefit of one. A project of its own costs
+	// a file and is run by `pnpm typecheck:e2e`.
+	//
+	// It extends the app's config so the two cannot drift on strictness or on
+	// `allowImportingTsExtensions` — the lane writes `./server.ts` in its imports
+	// like every other local import in this repo, and Playwright's loader resolves
+	// it the same way Vite does.
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		// No DOM lib change: these files run in node but hand callbacks to
+		// `evaluate`, which are compiled here and executed in the page, so they
+		// need `getComputedStyle` and `Element` to be in scope.
+		"types": ["node"]
+	},
+	"include": [".", "../playwright.config.ts"]
+}

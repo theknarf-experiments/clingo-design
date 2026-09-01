@@ -701,6 +701,11 @@ const SPATIAL_RULES = [
 	"#defined looks/2.",
 	"#defined tris/2.",
 	"#defined asset/2.",
+	// Beside `asset/2` because it is the other half of one sentence: the file,
+	// and which part of it. Declared for the same reason as everything else in
+	// this list — a document with no model states neither, and a rule may read
+	// either without the program failing to ground.
+	"#defined meshpart/3.",
 	"#defined instance/2.",
 	"#defined cpart/2.",
 	"% ---- the third axis exists, or it does not ----",
@@ -2492,9 +2497,14 @@ export const CONTRACT = `% Predicates you can rely on:
 %   tris(N, K)                     model N holds K triangles. Emitted so you can
 %                                  hold an opinion about it:
 %                                    viol(mesh_budget) :- tris(_,K), K > 200000.
-%   asset(N, "hash")               ...and which payload it is. Quoted, because a
-%                                  content hash is arbitrary text and an ASP
-%                                  constant is not
+%   asset(N, "/assets/chair.glb")  ...and which file it draws: a path in the
+%                                  project's tree, the same predicate an image
+%                                  states. Quoted, because a path is arbitrary
+%                                  text and an ASP constant is not
+%   meshpart(N, I, P)              ...and which part of that file — glTF node I,
+%                                  primitive P. A file is a chair and a node is
+%                                  a leg. Two integers rather than a fragment on
+%                                  the path, so asset/2 stays a path
 %   spatial                        this document has a third axis at all
 %   zstated(N)                     the document gave N a z, a depth or a turn
 %   s3(N)                          derived: N is in it — a viewport, anything
@@ -2600,7 +2610,9 @@ export const CONTRACT = `% Predicates you can rely on:
 % makes — points live on the document node and never reach here — one scale up:
 % the frame is the geometry's bounding box, so snapping, layout, constraints and
 % grouping all work on a model unchanged, and the only facts about the payload
-% that reach a rule are tris/2 and asset/2.
+% that reach a rule are tris/2, asset/2 and meshpart/3 — a count, a file, and
+% which part of that file. Three facts about where geometry is, and none at all
+% about what it is.
 %
 % Constraints, as facts. The geometric ones speak of edges rather than
 % properties, and their dimension is resolved per universe, not stored:
@@ -4012,18 +4024,57 @@ export function compile(
 		// An imported mesh is a node and its vertices are not — the same trade a
 		// path makes with its points, one scale up. What reaches a rule is the
 		// count, so that `viol(mesh_budget) :- tris(_,K), K > 200000.` is a rule a
-		// team can write on day one, and the content hash, quoted because a hash is
-		// arbitrary text and an ASP constant is not.
+		// team can write on day one, and where the geometry lives, quoted because
+		// a path is arbitrary text and an ASP constant is not.
 		if (node.mesh !== undefined) {
 			nodeLines.push(
 				atom("tris", node.id, Math.max(0, Math.round(node.mesh.triangles))),
 			);
 			// A path in the project's tree, which is what `asset/2` carries for
-			// every kind that draws a payload — see the image case below. A mesh
-			// payload has no name a person chose, so its file is its hash; an
-			// image's is the file somebody imported. Both are files, and this is
-			// where each one lives.
-			nodeLines.push(atom("asset", node.id, quote(`/assets/${node.mesh.asset}`)));
+			// every kind that draws a payload — see the image case above. **One
+			// rule for both kinds, now with no exception to explain**: a model
+			// points at the file that was imported, under the name the person who
+			// imported it chose, exactly as an image does. It used to point at
+			// `/assets/<hash>` — a per-primitive payload the importer minted, which
+			// was a file in the tree in shape only: nobody named it, nothing else
+			// could open it, and replacing the chair meant re-importing every node
+			// that drew one. `quote(node.mesh.src)` is the whole of that change
+			// here, which is the tell that the path was the right shape for
+			// `asset/2` all along.
+			nodeLines.push(atom("asset", node.id, quote(node.mesh.src)));
+			// ...and *which part* of it, because a file is a chair and a node is a
+			// leg.
+			//
+			// Two plain integers rather than a fragment on the path
+			// (`"/assets/chair.glb#node=3&primitive=0"`), which was the tempting
+			// one-atom spelling and is exactly the trade `f2b6316` made in the
+			// other direction: `asset/2` would stop being a path, `resolveAsset`
+			// would need a strip before every read, and a rule asking which files a
+			// design uses would get back a string that is not one. Two atoms are
+			// cheaper to read and cheaper to write a rule against.
+			//
+			// The indices are the **file's own**: `node` indexes `json.nodes` — not
+			// a `SceneNode.id`, and not the mesh index, since one mesh instanced by
+			// two nodes at two scales is two different pieces of geometry — and
+			// `primitive` indexes that node's mesh's primitives, because a mesh
+			// drawn in three materials became three document nodes. See
+			// {@link MeshRef.part}, which argues both at length.
+			//
+			// Emitted so the **renderer** can read it, which is the rule this file
+			// keeps for everything drawn: what `Model.tsx` draws comes off the
+			// answer set and never off the document, so that a rule which mints a
+			// model gets its geometry drawn exactly as a rule which mints a rect
+			// gets its fill. A `#show` ships with it below — a reader without a
+			// directive is this file's known failure mode, and the note on
+			// `#show asset/2` records what it cost the last time.
+			nodeLines.push(
+				atom(
+					"meshpart",
+					node.id,
+					Math.max(0, Math.round(node.mesh.part.node)),
+					Math.max(0, Math.round(node.mesh.part.primitive)),
+				),
+			);
 		}
 		const parent = parents.get(node.id);
 		if (parent) nodeLines.push(atom("child", parent.id, node.id));
@@ -5099,6 +5150,7 @@ export function compile(
 			"#defined turn/3.",
 			"#defined tris/2.",
 			"#defined asset/2.",
+			"#defined meshpart/3.",
 			"#defined looks/2.",
 			"#defined vcam/2.",
 			"#show turn(N,R,V) : turn(N,R,V), scenery.",
@@ -5108,6 +5160,16 @@ export function compile(
 			// was empty on every document — a `model` fell back to its stand-in box
 			// for want of one line, which looked exactly like a missing asset.
 			"#show asset(N,P) : asset(N,P), scenery.",
+			// ...and which part of that file, for the kind whose file holds more
+			// than one thing. Written in the same commit as its reader, which is
+			// the whole lesson of the line above: `asset/2` was read for months and
+			// shown for none of them, and the symptom — every model drawing its
+			// stand-in box — is indistinguishable from a payload that never
+			// arrived, so nobody looked at the directives. A geometry that draws
+			// the file's node 0 for want of a `meshpart/3` would be the same bug
+			// wearing a plausible chair, which is why `gltfexport.ts` refuses to
+			// default a missing part rather than guessing `{0,0}`.
+			"#show meshpart(N,I,P) : meshpart(N,I,P), scenery.",
 			"#show looks(V,C) : looks(V,C), scenery.",
 			"#show vcam(V,C) : vcam(V,C), scenery.",
 			"% A rotation is a design decision like a position: an `angle` token with",

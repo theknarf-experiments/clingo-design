@@ -31,13 +31,36 @@
  *
  * Drawn from the answer set today: `mesh` (all six primitives, materials, the
  * transform chain and the rotation), `pivot`, `light` (all four lamps), `camera`
- * (the lens, and being looked through), and the framing fallback for a view that
- * names no camera.
+ * (the lens, and being looked through), the framing fallback for a view that
+ * names no camera — and a `model`'s imported geometry.
  *
- * **Not drawn: a `model`'s imported geometry.** It renders as its bounding box.
- * `design-core/src/assets.ts` and the `AssetStore` it defines do not exist in
- * the tree, so there is nothing to load a payload through and `useAsset.ts` is
- * deliberately unwritten rather than stubbed. `Model.tsx` is the whole story.
+ * **A `model` is drawn from the answer set too, and that is worth saying because
+ * it is the one kind whose picture is not entirely in there.** `asset/2` states
+ * the path of a file in the project's tree and `meshpart/3` states which glTF
+ * node and which primitive of it this node is; both come off the answer set like
+ * a fill or a frame, so a *rule* that mints a model gets its chair drawn. Only
+ * the vertices are elsewhere, because a chair is two megabytes and a document is
+ * a thing that gets diffed, undone and synced. `useAsset.ts` fetches them
+ * through the `AssetResolver` the host supplies — this package never learns
+ * whether the tree is IndexedDB, memory or a network — and `gltf.ts`'s
+ * `meshPart` is what turns the file plus the two indices into the one array the
+ * importer measured the box from and the exporter writes out.
+ *
+ * This section used to say the opposite — not drawn, no store, `useAsset.ts`
+ * deliberately unwritten — and what made that false was not this package. It was
+ * that
+ * the payload finally had somewhere to live — the project's own file tree,
+ * rather than the content-addressed `AssetStore` that never had an
+ * implementation and has since been deleted. The way in and the way out below
+ * tell that story where it belongs; it is not repeated here.
+ *
+ * **The bounding box did not go away, and is not a fallback graphic.** A model
+ * whose file the tree does not hold — a project copied without its assets, a
+ * store that was cleared, a file not yet synced — is still a node with a place
+ * and a size the solver decided, and its box is the honest picture of it. Which
+ * of the two is showing is not an error state and is not reported from a frame
+ * of rendering; `missingAssets` answers that where a person can act on it.
+ * `Model.tsx` is the whole story.
  */
 export {
 	ViewportCanvas,
@@ -159,38 +182,50 @@ export {
 // makes that sentence true.
 //
 // `importGltf` is the "Import…" button on a viewport's add row. It was
-// unreachable until recently and it was never a question of wiring: an import
-// has to *put the vertices somewhere*, and until `design-core/src/assets.ts`
-// defined what a store is there was nowhere to put them — an importer would have
-// minted `model` nodes carrying a content hash nothing could load, which is a
-// feature that appears to work and produces nothing. That piece exists now: the
-// app implements the store over IndexedDB, `Studio` puts the payloads before it
-// touches the document, and `useAsset` resolves them back into geometry for
-// `Model.tsx`, which draws its stand-in box only when the bytes are genuinely
-// absent — a relink rather than a failure.
+// unreachable for a long time and it was never a question of wiring: an import
+// has to *put the vertices somewhere*, and there was nowhere to put them — an
+// importer would have minted `model` nodes carrying a content hash nothing could
+// load, which is a feature that appears to work and produces nothing.
+//
+// The answer turned out not to be the content-addressed store that paragraph
+// used to promise. It is the project's own **file tree**, which was already
+// there for images: `Studio` writes the file with `putNamedAsset`, then imports
+// the parsed file at the path the write actually landed on — the ordering
+// matters, because a collision suffixes and only the write knows the final name
+// — and `useAsset` reads it back through the same `AssetResolver` an image goes
+// through. `Model.tsx` draws its stand-in box only when the file is genuinely
+// absent, which is a relink rather than a failure. See `docs/model-files.md`.
 export {
 	METRE_IN_EMU,
 	type GltfFile,
 	type GltfJson,
 	type GltfWriter,
 	type MaterialSpec,
+	type MeshPart,
+	type MeshPartEntry,
 	type MetreBounds,
+	type PartRef,
 	type Triangles,
 	boundsOf,
 	centreTriangles,
 	emuFromMetres,
+	fitScale,
 	gltfWriter,
+	// The normaliser, exported because it is the one answer to "what does this
+	// reference draw" and three packages must not each have their own. The
+	// importer measures a node's box from it, `useAsset` builds the geometry from
+	// it, and the exporter writes triangles from it — one array by construction,
+	// which is what stops the editor and the export from disagreeing about where
+	// a chair sits.
+	meshPart,
+	meshParts,
 	metresFromEmu,
 	parseGltfFile,
+	partScale,
 	readTriangles,
 	triangleCount,
 } from "./gltf.ts";
-export {
-	type GltfImport,
-	type GltfImportOptions,
-	type ImportedAsset,
-	importGltf,
-} from "./gltfimport.ts";
+export { type GltfImport, type GltfImportOptions, importGltf } from "./gltfimport.ts";
 export {
 	GLTF_TARGET,
 	SOLID_ARGS,

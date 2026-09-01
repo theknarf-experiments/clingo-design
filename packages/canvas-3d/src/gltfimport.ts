@@ -14,43 +14,47 @@
  * sentences is invariant 2 — *a 3D object is an ordinary scene node* — applied
  * to content that came from somewhere else, and none of them is true of a blob.
  *
- * ## Where the vertices go, and the one place this departs from its brief
+ * ## Where the vertices go
  *
- * The brief for this step says the vertex data should sit **on the node, the way
- * a path's points do**. It does not, and it cannot from this package:
- * `SceneNode` has no field for a triangle soup, `scene.ts` is not this step's to
- * edit, and the field it *does* have — `SceneNode.mesh`, a {@link MeshRef} — was
- * shipped with a written argument against exactly that idea: a path's points are
- * a few dozen numbers and a glTF is megabytes, the document is an Automerge
- * document two people edit at once, and a blob in it is a blob in every diff,
- * every undo entry and every sync message.
+ * In the project's tree, as **the file that was imported**, under the name the
+ * person who imported it chose — `/assets/chair.glb` — and every `model` node
+ * this returns references that path and one part of it. That is
+ * `docs/model-files.md` §0, and it is a change of subject rather than of
+ * plumbing: this used to write a standalone single-primitive payload per node,
+ * hash it, and put the hash on the ref. Nothing here writes bytes any more.
  *
- * So what this does is the nearest correct thing, and it is nearer than it
- * sounds: the payload is split **per node**. Each `model` node gets its own
- * content-addressed payload holding its own primitive and nothing else, so a
- * document with a hundred imported parts has a hundred separately addressed
- * geometries, each reachable from the node that draws it, and *none* of them is
- * the opaque whole-file blob the brief was written against. What is on the node
- * is the hash, the exact bounds and the triangle count; what is beside the
- * document is the soup. **This disagreement is reported rather than absorbed** —
- * see the return value of the step that ran this.
+ * The trade is argued in full in `scene.ts` on {@link MeshRef} and the bill for
+ * it is paid in `gltf.ts`'s `meshPart`: with the *original* file in the tree,
+ * the loader has to reproduce the normalisation this importer used to bake, or
+ * the geometry will not sit in the box the solver placed. So this module does
+ * not normalise. It asks `meshParts` for the scaled, centred triangles and
+ * measures the box off **that array** — the same array `useAsset.ts` builds a
+ * `BufferGeometry` from and `gltfexport.ts` writes back out. "What the box was
+ * measured from" and "what the renderer draws" agree by construction rather than
+ * by two implementations being kept in step.
  *
- ## Where the bytes go
+ * What the walk still threads for itself is `parentScale`, because it is needed
+ * for two things geometry cannot answer: where a child *stands* under a scaled
+ * parent, and whether a stretch above a rotation is a shear worth naming.
  *
- * Not here, and deliberately. {@link importGltf} returns the payloads with their
- * hashes already computed and puts none of them anywhere: storing is I/O, this
- * module is a parser, and a parser that wrote to a database could not be tested
- * without one. The seam is `store.put(id, bytes)`, and everything up to it is
- * done here.
+ * ## Where the bytes go, and why this is synchronous now
  *
- * `design-core/src/assets.ts` defines what a store is; the app implements one
- * over IndexedDB; `Studio.tsx` is the caller that puts the payloads and then
- * makes the nodes, in that order — a failed parse leaves a document that never
- * heard of the file, where the other order would leave a `model` pointing at
- * bytes nobody has.
+ * Not here, and deliberately — but the seam moved. This takes an already-parsed
+ * {@link GltfFile} and a `src` saying where the caller **has already written**
+ * it, which makes the ordering structural rather than remembered: `parseGltfFile`
+ * is the only thing in the two modules that throws, so a person who drops a PDF
+ * on a viewport gets an error with nothing left in their tree, and by the time
+ * this function runs the file is in the tree under a name only the writer knew
+ * (`putNamedAsset` resolves `chair-2.glb`, so `src` is not knowable in advance).
+ * It is the shape the image flow already has, where `createImageBitmap`
+ * validates before `putNamedAsset` writes.
+ *
+ * The `async` is gone with the hashing that was its only cause: `sha256` used
+ * `crypto.subtle.digest`, nothing else here awaited anything, and an importer
+ * that returns a promise for no reason makes every caller of it asynchronous
+ * too.
  */
 import {
-	type AssetInfo,
 	type MeshRef,
 	type PropName,
 	type SceneNode,
@@ -66,39 +70,16 @@ import {
 	type GltfFile,
 	type GltfLight,
 	type GltfNode,
-	type Triangles,
-	boundsOf,
-	centreTriangles,
+	type MeshPart,
+	type PartRef,
 	emuFromMetres,
-	gltfWriter,
-	parseGltfFile,
-	readTriangles,
-	scaleTriangles,
+	meshParts,
 	triangleCount,
 } from "./gltf.ts";
 
 /* ------------------------------------------------------------------ */
 /* What comes back                                                     */
 /* ------------------------------------------------------------------ */
-
-/** One payload, hashed, with what the document remembers about it. */
-export interface ImportedAsset {
-	/** The content hash — hex SHA-256, and the id a store keys it by. */
-	id: string;
-	info: AssetInfo;
-	/**
-	 * A standalone glTF holding **one primitive and no material**, centred on its
-	 * own origin, in metres, in glTF's own axes.
-	 *
-	 * No material, deliberately: the file's material became props on the node,
-	 * which is where a designer can change it and a token can drive it, and a
-	 * second copy inside the payload would be a second answer to what colour the
-	 * chair is. A loader mounts this geometry and paints it with
-	 * `materialOf(node.rendered)` — which is exactly what `Model.tsx` already
-	 * computes for the stand-in box it draws today.
-	 */
-	payload: Uint8Array;
-}
 
 export interface GltfImport {
 	/**
@@ -110,9 +91,15 @@ export interface GltfImport {
 	 * nothing to convert out of canvas coordinates.
 	 */
 	nodes: SceneNode[];
-	/** Every payload, hashed. The caller stores them and merges {@link Scene.assets}. */
-	assets: ImportedAsset[];
-	/** Total triangles across the import — for the budget and the status line. */
+	/**
+	 * Total triangles across everything this import drew — for the budget, the
+	 * status line and the file's one {@link AssetInfo}.
+	 *
+	 * The **file's** total rather than a per-node one, which is the number
+	 * `Scene.assets` now wants: one entry per file, because the tree holds one
+	 * file. Each part's own count is on its {@link MeshRef.triangles}, which is
+	 * what `tris/2` emits and what the layer list shows.
+	 */
 	triangles: number;
 	/**
 	 * What the file held and the document does not, in `ExportResult.lost`'s
@@ -127,9 +114,21 @@ export interface GltfImport {
 }
 
 export interface GltfImportOptions {
-	/** The file's name. Kept on every {@link MeshRef} so a relink has something to show. */
-	source?: string;
-	/** What to call the root in the layer list. Defaults to {@link source}. */
+	/**
+	 * Where the caller **has already written** the file in the project's tree —
+	 * `/assets/chair.glb`. Stamped on every {@link MeshRef.src}.
+	 *
+	 * Required, and not defaulted to the file's own name: a default would be a
+	 * path that is probably right, and a `MeshRef` whose path is probably right
+	 * is a chair that probably draws. Only the writer knows which name the file
+	 * actually got, because `putNamedAsset` resolves a collision by renaming.
+	 *
+	 * This is also the relink handle — there is no separate `source` field any
+	 * more. A second, free-form copy of the file's name was a second answer to
+	 * the same question that nothing kept true.
+	 */
+	src: string;
+	/** What to call the root in the layer list. Defaults to the file's own naming. */
 	name?: string;
 	/** Node ids, for a test that wants them stable. Defaults to `newNodeId`. */
 	id?: () => string;
@@ -140,27 +139,20 @@ export interface GltfImportOptions {
 /* ------------------------------------------------------------------ */
 
 /**
- * A `.gltf` or `.glb`, as nodes, payloads and a list of what was flattened.
+ * A parsed `.gltf` or `.glb`, as nodes and a list of what was flattened.
  *
- * Asynchronous for one reason and it is the same reason `AssetStore.put` is:
- * the id is a SHA-256 of the payload, `crypto.subtle.digest` is a promise, and
- * hashing by hand in a synchronous loop would be slower and would be a second
- * implementation of a primitive both platforms already ship.
- *
- * Throws only where the bytes are not a glTF at all — see {@link parseGltfFile}.
- * Everything else a file can hold and a document cannot comes back in `lost`.
+ * **Never throws.** The one thing that could — a container that is not a glTF —
+ * happened in `parseGltfFile` before the caller wrote the file, which is the
+ * whole reason this takes a {@link GltfFile} rather than bytes. Everything else
+ * a file can hold and a document cannot comes back in `lost`, and a part that
+ * cannot be read costs that part and nothing else.
  */
-export async function importGltf(
-	bytes: Uint8Array,
-	options: GltfImportOptions = {},
-): Promise<GltfImport> {
-	const file = parseGltfFile(bytes);
+export function importGltf(file: GltfFile, options: GltfImportOptions): GltfImport {
 	const state: Walk = {
 		file,
 		id: options.id ?? newNodeId,
-		source: options.source,
+		src: options.src,
 		lost: [],
-		payloads: [],
 		triangles: 0,
 	};
 
@@ -191,7 +183,7 @@ export async function importGltf(
 			? [
 					pivotNode(
 						state,
-						options.name ?? options.source ?? "Model",
+						options.name ?? fileName(options.src),
 						new Vector3(),
 						undefined,
 						nodes,
@@ -201,36 +193,26 @@ export async function importGltf(
 					options.name === undefined ? node : { ...node, name: options.name },
 				);
 
-	const assets = await Promise.all(
-		state.payloads.map(async (payload) => ({
-			id: await sha256(payload.bytes),
-			info: payload.info,
-			payload: payload.bytes,
-		})),
-	);
-	// The hash is the id, and the node holds it. The two are joined here rather
-	// than during the walk because hashing is the one asynchronous step and
-	// threading a promise through a recursive tree walk would have made the walk
-	// asynchronous for no other reason.
-	for (const [index, asset] of assets.entries()) {
-		state.payloads[index]?.attach(asset.id);
-	}
-
-	return { nodes: wrapped, assets, triangles: state.triangles, lost: state.lost };
+	return { nodes: wrapped, triangles: state.triangles, lost: state.lost };
 }
+
+/**
+ * The last segment of a tree path, for the one case that needs a name and was
+ * not given one: several roots wrapped under a pivot.
+ *
+ * The path rather than a separate "original file name", because the path *is*
+ * the name now — `/assets/chair.glb` shows "chair.glb" in the layer list and in
+ * the tree, and those being the same word is the point of §0.
+ */
+const fileName = (src: string): string => src.split("/").pop() || "Model";
 
 /** Everything the walk carries down and collects up. */
 interface Walk {
 	file: GltfFile;
 	id: () => string;
-	source: string | undefined;
+	/** The tree path every {@link MeshRef} this import writes points at. */
+	src: string;
 	lost: string[];
-	payloads: {
-		bytes: Uint8Array;
-		info: AssetInfo;
-		/** Writes the hash into the `MeshRef` that is waiting for it. */
-		attach: (id: string) => void;
-	}[];
 	triangles: number;
 }
 
@@ -369,7 +351,7 @@ function convert(
 		);
 	}
 
-	const parts = meshParts(state, node, scale);
+	const parts = partsOf(state, index);
 	const children: SceneNode[] = [];
 	for (const child of node.children ?? []) {
 		const converted = convert(state, child, scale);
@@ -382,20 +364,26 @@ function convert(
 	// the common shape by a wide margin — an exporter writes a node per object —
 	// and the two-node form would double the layer list for no information.
 	if (parts.length === 1 && children.length === 0 && !lens && !lamp) {
-		const part = parts[0];
-		if (!part) return undefined;
+		const only = parts[0];
+		if (!only) return undefined;
 		// The geometry's own centre, turned into the parent's frame: the document
 		// places a `model` by the box its vertices occupy, and glTF places it by
 		// the node's origin, which is usually not the same point. `place + R·c` is
 		// the exact bridge — the rotation then happens about the geometry's centre,
 		// which is what the document means by a turn, and the two agree vertex for
 		// vertex.
-		const centre = part.centre.clone().applyQuaternion(local.quaternion).add(place);
-		return modelNode(state, part, centre, local.quaternion);
+		//
+		// `c` comes off {@link MeshPart.centre} rather than being measured here,
+		// which is the same rule as the box: the offset the centring took out of
+		// the vertices is a fact about the array the renderer will draw, and this
+		// module measuring it again would be the second implementation `meshPart`
+		// exists to prevent.
+		const centre = centreOf(only.part).applyQuaternion(local.quaternion).add(place);
+		return modelNode(state, only, centre, local.quaternion);
 	}
 
 	const inside = [
-		...parts.map((part) => modelNode(state, part, part.centre, undefined)),
+		...parts.map((entry) => modelNode(state, entry, centreOf(entry.part), undefined)),
 		...(lens ? [lens] : []),
 		...(lamp ? [lamp] : []),
 		...children,
@@ -448,19 +436,15 @@ const nameOf = (node: GltfNode, index: number): string =>
 /* Geometry                                                            */
 /* ------------------------------------------------------------------ */
 
-/** One primitive, ready to become one `model` node. */
+/** One primitive of the file, normalised, with the reference that will address it. */
 interface Part {
-	name: string;
-	triangles: Triangles;
-	/** Where the geometry's box sits in its node's frame, in metres. */
-	centre: Vector3;
-	/** The box's size in metres, unsigned. */
-	size: [number, number, number];
-	props: Partial<Record<PropName, Value>>;
+	ref: PartRef;
+	part: MeshPart;
 }
 
 /**
- * A node's mesh, as one {@link Part} per primitive.
+ * A node's mesh, as one {@link Part} per primitive — through `meshPart`, which
+ * is the point.
  *
  * **Per primitive and not per mesh**, and the reason is the material. A glTF
  * mesh with three primitives is one object drawn in three materials, and a
@@ -470,46 +454,38 @@ interface Part {
  * makes each material an ordinary prop on an ordinary node, which is the whole
  * brief. The split is named in `lost` so that a designer who counted three
  * objects in Blender and found four in the layer list can see why.
+ *
+ * **The scale is not passed in.** It used to be — threaded down the walk and
+ * handed to `scaleTriangles` here — and now `gltf.ts` derives the same chain
+ * from the file alone, because the *loader* has only a file and two indices and
+ * cannot be given a walk's accumulator months later in another package. The walk
+ * still computes `scale` for the places and the shear, and
+ * `gltfimport.test.ts` asserts the two numbers are equal: this module's
+ * arithmetic is checked against the file's rather than trusted by it.
+ *
+ * Refusals arrive **in place**, keeping the file's own primitive indices, so a
+ * mesh whose first primitive is a point cloud produces a node addressing
+ * `primitive: 1` and not one addressing `0`. A filtered list would have handed
+ * back a perfectly well-formed reference to geometry that cannot be drawn.
  */
-function meshParts(
-	state: Walk,
-	node: GltfNode,
-	scale: readonly [number, number, number],
-): Part[] {
-	if (node.mesh === undefined) return [];
-	const mesh = state.file.json.meshes?.[node.mesh];
+function partsOf(state: Walk, index: number): Part[] {
+	const node = state.file.json.nodes?.[index];
+	const mesh = state.file.json.meshes?.[node?.mesh ?? -1];
 	if (!mesh) return [];
-	const name = mesh.name?.trim() || node.name?.trim() || "Model";
+	const name = mesh.name?.trim() || node?.name?.trim() || "Model";
 	const parts: Part[] = [];
-	for (const [index, primitive] of mesh.primitives.entries()) {
-		if ((primitive.targets?.length ?? 0) > 0) {
+	for (const entry of meshParts(state.file, index)) {
+		if ((mesh.primitives[entry.ref.primitive]?.targets?.length ?? 0) > 0) {
 			say(
 				state,
 				"Morph targets. A mesh's blend shapes are not imported; it comes in at its base shape.",
 			);
 		}
-		const read = readTriangles(state.file, primitive);
-		if ("refused" in read) {
-			say(state, `Part of “${name}” is not in the document because ${read.refused}.`);
+		if ("refused" in entry.part) {
+			say(state, `Part of “${name}” is not in the document because ${entry.part.refused}.`);
 			continue;
 		}
-		const scaled = scaleTriangles(read.triangles, scale);
-		const bounds = boundsOf(scaled);
-		parts.push({
-			name: mesh.primitives.length > 1 ? `${name} ${index + 1}` : name,
-			triangles: centreTriangles(scaled),
-			centre: new Vector3(
-				(bounds.min[0] + bounds.max[0]) / 2,
-				(bounds.min[1] + bounds.max[1]) / 2,
-				(bounds.min[2] + bounds.max[2]) / 2,
-			),
-			size: [
-				bounds.max[0] - bounds.min[0],
-				bounds.max[1] - bounds.min[1],
-				bounds.max[2] - bounds.min[2],
-			],
-			props: materialProps(state, primitive.material),
-		});
+		parts.push({ ref: entry.ref, part: entry.part });
 	}
 	if (parts.length > 1) {
 		say(
@@ -519,6 +495,17 @@ function meshParts(
 	}
 	return parts;
 }
+
+/** A part's centring offset as a three.js vector, which is what places it. */
+const centreOf = (part: MeshPart): Vector3 =>
+	new Vector3(part.centre[0], part.centre[1], part.centre[2]);
+
+/** The extents of a part's box, in metres — the three magnitudes a node's frame states. */
+const extentOf = (part: MeshPart): [number, number, number] => [
+	part.bounds.max[0] - part.bounds.min[0],
+	part.bounds.max[1] - part.bounds.min[1],
+	part.bounds.max[2] - part.bounds.min[2],
+];
 
 /**
  * A glTF material as ordinary props: `fill`, `roughness`, `metalness`,
@@ -682,34 +669,35 @@ const sizeOf = (metres: readonly [number, number, number]): EmuSize => ({
 });
 
 /**
- * The `model` node for one primitive, and the payload it addresses.
+ * The `model` node for one primitive, referencing the file and that primitive.
  *
- * The payload is written here rather than collected and written at the end
- * because the writer is cheap and the alternative — a second pass that has to
- * remember which soup belonged to which node — is exactly the bookkeeping that
- * goes wrong. What *is* deferred is the hash, which is asynchronous; the
- * `MeshRef` is built with an empty `asset` and `attach` fills it in, which is
- * the one mutation in this file and it is confined to one field of one object.
+ * Five fields and not one byte: the path the caller wrote the file to, the two
+ * indices that select this part of it, the box its vertices occupy and how many
+ * triangles they make. Everything that used to be here — a `gltfWriter` per
+ * primitive, a `TextEncoder`, a hash, a payload the caller had to store — is
+ * gone, and what replaces it is a reference to a file that already exists.
+ *
+ * The box is measured from {@link MeshPart.bounds}, which is `boundsOf` of the
+ * exact array `useAsset.ts` will draw. Not asserted as ±half the extent and not
+ * re-derived from the file: one measurement, one answer, and a `model` whose
+ * frame and whose vertices cannot disagree.
  */
 function modelNode(
 	state: Walk,
-	part: Part,
+	{ ref, part }: Part,
 	centre: Vector3,
 	rotation: Quaternion | undefined,
 ): SceneNode {
-	const writer = gltfWriter({ generator: "clingo-design import" });
-	const mesh = writer.mesh(part.triangles, undefined, part.name);
-	writer.roots([writer.node({ mesh, name: part.name })]);
-	const bytes = new TextEncoder().encode(writer.text(false));
 	const triangles = triangleCount(part.triangles);
 	state.triangles += triangles;
-	const size = sizeOf(part.size);
-	const ref: MeshRef = {
-		asset: "",
-		format: "gltf",
-		// The vertices were centred on their own origin on the way in, so the box
-		// they occupy is centred too. Six numbers in the model's own space, which
-		// is what `MeshRef.bounds` is defined to be.
+	const size = sizeOf(extentOf(part));
+	const mesh: MeshRef = {
+		src: state.src,
+		format: formatOf(state.src),
+		part: { node: ref.node, primitive: ref.primitive },
+		// `meshPart` centred the vertices on their own origin, so the box they
+		// occupy is centred too. Six numbers in the model's own space, which is
+		// what `MeshRef.bounds` is defined to be.
 		bounds: {
 			x: -size.width / 2,
 			y: -size.height / 2,
@@ -719,29 +707,31 @@ function modelNode(
 			depth: size.depth,
 		},
 		triangles,
-		...(state.source === undefined ? {} : { source: state.source }),
 	};
-	state.payloads.push({
-		bytes,
-		info: {
-			format: "gltf",
-			bytes: bytes.byteLength,
-			triangles,
-			name: part.name,
-		},
-		attach: (id) => {
-			ref.asset = id;
-		},
-	});
 	return {
 		id: state.id(),
 		kind: "model",
 		name: part.name,
 		...placed(centre, rotation, size),
-		props: part.props,
-		mesh: ref,
+		props: materialProps(state, part.material),
+		mesh,
 	};
 }
+
+/**
+ * Which of the two spellings the file in the tree is, from its name.
+ *
+ * From the **path** rather than from the bytes, which looks like the weaker
+ * source and is the right one here: `parseGltfFile` sniffs the magic number and
+ * ignores the extension entirely, so nothing downstream is deceived by a `.glb`
+ * that holds JSON. What `format` is for is the studio's own label — what the
+ * tree shows and what a relink dialog offers — and there the name the person
+ * gave the file is the answer they mean. A parsed {@link GltfFile} does not
+ * record which container it came out of anyway, and adding that flag to the
+ * codec to serve a label would be the codec learning about the tree.
+ */
+const formatOf = (src: string): "gltf" | "glb" =>
+	src.toLowerCase().endsWith(".glb") ? "glb" : "gltf";
 
 /** A `pivot`: a place, a rotation, no size, and everything under it. */
 function pivotNode(
@@ -874,22 +864,13 @@ const emptyFrame = (): SceneNode["frame"] => ({
 	height: single(formatLength(0)),
 });
 
-/* ------------------------------------------------------------------ */
-/* Hashing                                                             */
-/* ------------------------------------------------------------------ */
-
-/**
- * The content hash, hex — the id an asset store keys a payload by.
+/*
+ * There is no hashing section any more, and its absence is the point.
  *
- * SHA-256 through `crypto.subtle`, which is what `docs/three-d-spec.md` §5.2
- * specifies for `AssetStore.put` and is the reason that method is asynchronous.
- * Web Crypto rather than a hash written here: it is in every browser and in
- * Node, it is the same digest on both, and two implementations of a content
- * address is two documents that disagree about whether they hold the same chair.
+ * A payload used to be addressed by the SHA-256 of its bytes — which bought a
+ * store that could never hold the wrong bytes under a name, and bought it by
+ * making the reference untouchable: replacing a chair meant re-importing every
+ * node that drew one. The file in the tree is addressed by its path instead, so
+ * replacing the file replaces the chairs, and the one asynchronous step in this
+ * module went with the digest that caused it.
  */
-async function sha256(bytes: Uint8Array): Promise<string> {
-	const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
-	return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join(
-		"",
-	);
-}

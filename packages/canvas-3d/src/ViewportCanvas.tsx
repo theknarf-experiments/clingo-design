@@ -105,10 +105,16 @@ export interface ViewportCanvasProps {
 	 *     document would have been *wrong* rather than merely redundant: a `solid`
 	 *     token holding `[box, sphere]` is a design with two universes in it, and
 	 *     the document cannot say which one this is.
-	 *   - **a model's `MeshRef` is not reachable either way.** It needs an
-	 *     `AssetStore`, and `design-core/src/assets.ts` does not exist — see
-	 *     `Model.tsx`, which draws the bounding box and says so. A `Scene` prop
-	 *     here would have got the hash and still had nothing to load it with.
+	 *   - **a model's `MeshRef` is in the answer set too, and now entirely.** It
+	 *     was not when this paragraph was written: the ref was a content hash,
+	 *     nothing in the tree could turn one into bytes, and `Model.tsx` drew a
+	 *     bounding box and said so. Both halves are atoms now — `asset/2` carries
+	 *     the file's path and `meshpart/3` carries which part of it — and a
+	 *     {@link resolve} function turns the path into bytes without this package
+	 *     learning where they are kept. A `Scene` prop would have got the same two
+	 *     facts a solve later and would have got them from the wrong place: a rule
+	 *     that mints a model states its own `asset/2`, and the document has no
+	 *     record of that node at all.
 	 *
 	 * If a later step finds a real need for the document, it belongs behind a
 	 * narrower prop than the whole `Scene` — the thing actually wanted — because a
@@ -192,14 +198,17 @@ export interface ViewportCanvasProps {
 	/** Hands back a fresh poster. Costs a preserved drawing buffer — see below. */
 	onPoster?: (dataUrl: string) => void;
 	/**
-	 * Where a model's payload bytes come from — see design-core's `assets.ts`.
+	 * Where a model's bytes come from — one path in the project's tree in, the
+	 * file at it out. See design-core's `assets.ts`.
 	 *
-	 * A function and not the store, and the narrowing is the point: a renderer
-	 * that could `put` could change the document, and one that could `keys` could
-	 * decide what to draw by asking the database rather than the answer set.
+	 * A function and not a store object, and the narrowing is the point: a
+	 * renderer that could write could change the document, and one that could
+	 * enumerate could decide what to draw by asking the tree rather than the
+	 * answer set. There is no store interface left to hand over anyway — the five
+	 * methods this used to be one of are gone with the content-addressed payloads.
 	 *
 	 * Absent draws every model as its stand-in box, which is what a host with no
-	 * asset store — a test, a poster render — should get.
+	 * tree to read — a test, a poster render — should get.
 	 */
 	resolve?: AssetResolver;
 	/** The camera commands — see {@link ViewportHandle}. */

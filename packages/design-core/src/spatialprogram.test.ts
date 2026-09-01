@@ -32,6 +32,7 @@ import { PULL_ATOM, SCENERY_ATOM, compile, variableCounts } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
 import { exportUniverse } from "./export.ts";
 import { explore } from "./explore.ts";
+import { readModel } from "./model.ts";
 import {
 	type Constraint,
 	type Machine,
@@ -257,16 +258,19 @@ for (const template of TEMPLATES) {
  *
  * Every other template is a document written before the third axis existed, and
  * the loop below is the promise that they still are: not "mostly flat", not
- * "flat unless something opted in", but zero atoms of six predicates across
- * twelve documents and every universe of each.
+ * "flat unless something opted in", but zero atoms of every predicate the third
+ * axis owns, across twelve documents and every universe of each. The list is
+ * spelled out in the loop rather than counted here, because a count is a number
+ * that goes stale the first time the vocabulary grows and a reader who trusts it
+ * stops reading the assertions.
  */
 const SPATIAL_TEMPLATES = new Set(["solids"]);
 
 test("no template's atoms hold one word of the third axis", async () => {
 	// The gate, asserted where a designer could actually observe it: not by
 	// reading the rules — they are emitted always, like the geometry and machine
-	// rules and for the same reason — but by looking at what they ground to. Six
-	// predicates and nothing of them.
+	// rules and for the same reason — but by looking at what they ground to.
+	// Every predicate of the vocabulary, and nothing of any of them.
 	for (const template of TEMPLATES) {
 		const scene = template.create();
 		if (SPATIAL_TEMPLATES.has(template.id)) {
@@ -287,6 +291,12 @@ test("no template's atoms hold one word of the third axis", async () => {
 		assert.equal(of(atoms, "turn").length, 0, `${template.id} has a rotation`);
 		assert.equal(of(atoms, "vcam").length, 0, `${template.id} looks through a camera`);
 		assert.equal(of(atoms, "tris").length, 0, `${template.id} holds geometry`);
+		// The newest word of the vocabulary, in the list on the day it was added.
+		// `meshpart/3` is stated only for a node carrying a `MeshRef`, and no
+		// template holds a `model` — so this is zero for the same structural
+		// reason `tris/2` is, and the assertion is here so that it stays a reason
+		// rather than a coincidence.
+		assert.equal(of(atoms, "meshpart").length, 0, `${template.id} names a mesh part`);
 		for (const [, dim] of of(atoms, "frame")) {
 			assert.ok(
 				dim === "x" || dim === "y" || dim === "width" || dim === "height",
@@ -912,8 +922,14 @@ test("an imported mesh is a node and its vertices are not", async () => {
 				children: [
 					at("bust", "model", { x: 0, y: 0, w: 200, h: 200 }, {
 						mesh: {
-							asset: "9f2c",
+							src: "/assets/bust.glb",
 							format: "glb",
+							// The second and third integers of the sentence: which glTF node
+							// of that file, and which primitive of its mesh. Node 2 and
+							// primitive 1 rather than a pair of zeros, so a compiler that
+							// emitted a plausible default instead of reading the ref would
+							// fail here rather than pass.
+							part: { node: 2, primitive: 1 },
 							bounds: { x: 0, y: 0, width: px(200), height: px(200), z: 0, depth: px(200) },
 							triangles: 240_000,
 						},
@@ -929,10 +945,34 @@ test("an imported mesh is a node and its vertices are not", async () => {
 	// which is how that was noticed.
 	const atoms = await answer(scene);
 	assert.deepEqual(of(atoms, "tris"), [["bust", "240000"]]);
-	// A path in the project's tree, not a bare hash. `asset/2` says where a
-	// payload lives for every kind that draws one — a mesh's file is its content
-	// hash because nobody named it, an image's is the file somebody imported.
-	assert.deepEqual(of(atoms, "asset"), [["bust", '"/assets/9f2c"']]);
+	// A path in the project's tree — and now the path of the file *somebody
+	// imported*, under the name they chose, for both kinds. `asset/2` used to
+	// carry `/assets/<hash>` for a mesh, because the importer minted a payload
+	// per primitive and nobody had named those; a model references the imported
+	// file itself now, so the predicate means one thing rather than
+	// one-and-a-half.
+	assert.deepEqual(of(atoms, "asset"), [["bust", '"/assets/bust.glb"']]);
+	// ...and which part of that file, because a file is a chair and a node is a
+	// leg. Two plain integers, straight off `MeshRef.part`, and asserted here
+	// beside `asset/2` for the reason the comment above it in `compile.ts` gives:
+	// the reader in `model.ts` and the `#show` that feeds it must ship together
+	// or the atom is invisible, and an invisible `meshpart/3` looks exactly like
+	// a missing file — which is how `asset/2` went unshown for months.
+	assert.deepEqual(of(atoms, "meshpart"), [["bust", "2", "1"]]);
+	// And the third leg of that sentence, because two of the three have been
+	// shipped without the third twice now. `readModel` is what the renderer
+	// actually holds, and an atom nothing reads is exactly as invisible as an
+	// atom nothing shows — `Model.tsx` would draw its stand-in box either way,
+	// which is the failure that went unnoticed for months the last time.
+	const read = readModel(atoms);
+	assert.equal(read.assets.bust, "/assets/bust.glb", "the path reaches the renderer");
+	const bust = read.byId.bust;
+	assert.equal(bust?.asset, "/assets/bust.glb", "on the node as well as in the map");
+	// On the node and deliberately *not* in a second map beside `assets`: the map
+	// exists so a project can be audited without walking the tree, and a primitive
+	// index answers no question anybody asks of a project.
+	assert.deepEqual(bust?.part, { node: 2, primitive: 1 });
+	assert.ok(!("parts" in read), "no second map on the scene");
 	// The count is emitted for its own sake, and this is the cheapest useful
 	// thing the whole section buys: a budget is a rule a team writes on day one,
 	// with a name in the core, a switch and a `why`.

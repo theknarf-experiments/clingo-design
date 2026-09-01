@@ -2168,37 +2168,108 @@ export function rotationFrozen(
 /* ------------------------------------------------------------------ */
 
 /**
- * The reference to an imported mesh: small, diffable, and synced.
+ * The reference to imported geometry: a **file in the project's tree, and one
+ * part of it**.
  *
  * **The bytes are not here**, and that is the one place this departs from the
  * path precedent it otherwise follows exactly. A path's points are a few dozen
  * numbers and belong in the document; a glTF is megabytes, the document is an
  * Automerge document two people edit at once, and putting a binary blob in it
  * would put that blob in every diff, every undo entry and every sync message. So
- * the node holds the hash and the metadata — everything the *editor* needs to
- * draw a layer row, run a constraint and know what it is looking at — and the
- * payload lives in a content-addressed store beside the document.
+ * the node holds the reference, the box and the counts — everything the *editor*
+ * needs to draw a layer row, run a constraint and know what it is looking at —
+ * and the geometry stays in the file it was imported from.
  *
- * The cost of that split is one thing and it is stated rather than absorbed: an
- * export has to be handed a resolver, because a file cannot reach into an object
- * store.
+ * ## Addressed by path, not by a hash of the payload
+ *
+ * `/assets/chair.glb` is what the tree shows, what a clone writes to disk, what
+ * a colleague receives, and what this points at — so **replacing that file
+ * replaces the chairs everywhere they are used**, because the reference is to
+ * *the file* and not to bytes that happened to be there. That is the same
+ * sentence {@link ImageRef} already carries, and stating it of both kinds is
+ * what makes `asset/2` in the answer set mean one thing rather than
+ * one-and-a-half.
+ *
+ * What the old content hash bought was a store that can never hold the wrong
+ * bytes under a name, and it bought it by making the reference untouchable:
+ * replacing a chair meant re-importing every node that drew one, and the file a
+ * person had chosen and named was not in their project at all — only a hash was.
+ * That trades a guarantee nobody asked for against the operation everybody asks
+ * for.
+ *
+ * *Rejected: keeping a content hash of the file **beside** the path*, to make
+ * staleness exactly detectable. It would defeat the feature it was protecting: a
+ * reference that refuses when the bytes change is a hash reference wearing a
+ * path. This document deliberately does not know whether the file at its path is
+ * the one it was imported from, and the cheap witness where that matters is
+ * already here — {@link triangles}, against what the file's own primitive holds,
+ * which is a sentence in a relink list rather than a refusal to draw. A
+ * re-tessellated chair is still the chair.
+ *
+ * ## When the file changes underneath
+ *
+ * Re-saved at the same path, the new geometry is drawn in the old box: the fit
+ * is to {@link bounds}, so a chair that changed proportions looks stretched
+ * until somebody says otherwise. The repair is an **ordinary edit** — measure
+ * the file and rewrite these six numbers and the node's frame — and not a
+ * migration, because nothing about the document is wrong. Structurally
+ * different, {@link part} may address a primitive the file no longer holds; the
+ * loader refuses that reference and the node draws its stand-in box. Missing
+ * altogether, the same box, and the path in the relink list.
  */
 export interface MeshRef {
-	/** Content hash of the payload — the id the asset store keys it by. */
-	asset: string;
+	/**
+	 * Absolute path in the project's tree — `/assets/chair.glb`.
+	 *
+	 * This is also the relink handle. There is no separate "the file it came
+	 * from" field any more: the file it came from is the file it points at, and
+	 * a second, free-form copy of the name was a second answer to the same
+	 * question that nothing kept true.
+	 */
+	src: string;
 	format: "gltf" | "glb";
+	/**
+	 * Which part of that file — two indices into the file's own arrays, and
+	 * nothing derived from its bytes.
+	 *
+	 * **The glTF node index, not the mesh index.** The mesh is
+	 * `json.nodes[part.node].mesh`, so storing that too would be a second address
+	 * for one thing and would spell `node.mesh.mesh`. The *node* is what has to
+	 * be stored, because it is what the scale chain is computed from: one mesh
+	 * instanced by two nodes at two scales is two different pieces of geometry,
+	 * and a mesh index alone could not tell them apart.
+	 *
+	 * **Indices rather than names**, because glTF names are optional, non-unique
+	 * and routinely absent from an optimised export, while an index survives a
+	 * byte-identical re-import exactly — which is the case that matters, since
+	 * dropping the same file in twice must address the same geometry.
+	 *
+	 * `primitive` is the second index because a mesh drawn in three materials
+	 * arrives as three nodes — a node holds one fill — and each of them owns one
+	 * primitive of that mesh.
+	 */
+	part: {
+		/** Index into the file's `nodes` — **not** a {@link SceneNode.id}. */
+		node: number;
+		/** Index into that node's mesh's `primitives`. */
+		primitive: number;
+	};
 	/**
 	 * The box the vertices occupy, in the model's own space, in EMU.
 	 *
 	 * Six numbers — structurally `Box` from `geometry.ts`, which is
 	 * {@link Frame} and the third axis together. Spelled out here rather than
 	 * imported for the reason given on {@link spatialOf}.
+	 *
+	 * Here rather than measured from the file for {@link ImageRef}'s exact
+	 * reason: it is needed **before the payload arrives** — to place the node at
+	 * the size the geometry really is, and to keep a real box while the bytes are
+	 * loading, missing, or on the far end of a sync. A `model` with no file is
+	 * still a node the solver places, a rule aligns and a pivot turns.
 	 */
 	bounds: Frame & Record<Spatial, number>;
-	/** For the layer list, the budget rule and the status line. */
+	/** This part's own count — for the layer list, the budget rule and the status line. */
 	triangles: number;
-	/** The file it came from, so a relink has something to show. Free-form. */
-	source?: string;
 }
 
 /**
@@ -2447,9 +2518,10 @@ export interface SceneNode {
 	 * On a `model`: the imported geometry — see {@link MeshRef}.
 	 *
 	 * The vertices themselves are **not here**. This is the reference, the box
-	 * they occupy and the counts; the payload lives in the asset store, keyed by
-	 * {@link MeshRef.asset}. It is the third axis's answer to {@link points}, and
-	 * it sits beside it for that reason.
+	 * they occupy and the counts; the geometry is in the file at
+	 * {@link MeshRef.src}, in the project's tree, exactly as an `image`'s pixels
+	 * are. It is the third axis's answer to {@link points}, and it sits beside it
+	 * for that reason.
 	 */
 	mesh?: MeshRef;
 	/**

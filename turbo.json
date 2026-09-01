@@ -17,7 +17,23 @@
     "test": {
       "dependsOn": ["^build", "build:wasm"]
     },
+    "test:e2e": {
+      "dependsOn": ["^build", "build:wasm"],
+      "cache": false
+    },
+    // `typecheck:e2e` is a dependency of `typecheck` and not a task somebody has
+    // to remember. `e2e/` is outside the app's own tsconfig — it is Playwright's
+    // sources, typed against `@playwright/test` — so it needs a second `tsc`
+    // invocation, and a second *task name* is a second thing to type. CLAUDE.md's
+    // verification recipe says `pnpm turbo run typecheck`, and a task that recipe
+    // does not reach is a task that is green until the day it is not. Listed here
+    // rather than folded into the app's `typecheck` script so that it can still be
+    // run alone while it is being worked on; packages with no `typecheck:e2e`
+    // script are skipped by turbo rather than failed.
     "typecheck": {
+      "dependsOn": ["^build", "build:wasm", "typecheck:e2e"]
+    },
+    "typecheck:e2e": {
       "dependsOn": ["^build", "build:wasm"]
     }
   }
