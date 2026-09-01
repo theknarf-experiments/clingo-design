@@ -11,18 +11,19 @@
     "test": "node --test \"src/**/*.test.ts\""
   },
   "dependencies": {
-    "@automerge/automerge": "3.4.1",
     "@chenglou/pretext": "^0.0.8",
     "@clingo-design/canvas": "workspace:*",
     "@clingo-design/canvas-3d": "workspace:*",
     "@clingo-design/clingo-wasm": "workspace:*",
     "@clingo-design/design-core": "workspace:*",
+    "@clingo-design/vfs": "workspace:*",
     "@tanstack/react-hotkeys": "0.10.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "^8.3.0"
   },
   "devDependencies": {
+    "@automerge/automerge": "3.3.0-fragments.2",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

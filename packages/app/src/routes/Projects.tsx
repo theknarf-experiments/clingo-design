@@ -1,15 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import {
-	TEMPLATES,
-	type Template,
-	createProject,
-	sortProjects,
-	uniqueProjectName,
-} from "@clingo-design/design-core";
+import { TEMPLATES, type Template, uniqueName } from "@clingo-design/design-core";
 
 import {
-	addProject,
+	createProject,
 	deleteProject,
 	renameProject,
 	useProjects,
@@ -53,12 +47,14 @@ export function Projects() {
 	}, [renaming]);
 
 	function newFrom(template: Template) {
-		const project = createProject({
-			name: uniqueProjectName(projects, template.name),
-			scene: template.create(),
-		});
-		addProject(project);
-		navigate(`/p/${project.id}`);
+		// Asynchronous now: creating a project creates documents, and a document
+		// is ready when the repo says so. The navigation waits for the url
+		// because the url *is* the project — there is no id to route to before
+		// the directory document exists.
+		void createProject(
+			uniqueName(projects.map((p) => p.name), template.name),
+			template.create(),
+		).then((url) => navigate(`/p/${encodeURIComponent(url)}`));
 	}
 
 	function commitRename(id: string) {
@@ -66,7 +62,7 @@ export function Projects() {
 		setRenaming(null);
 	}
 
-	const ordered = sortProjects(projects);
+	const ordered = projects;
 
 	return (
 		<div className={styles.page}>
@@ -125,11 +121,11 @@ export function Projects() {
 						<ul className={styles.list}>
 							{ordered.map((project) => (
 								<li
-									key={project.id}
+									key={project.url}
 									className={styles.row}
-									data-project={project.id}
+									data-project={project.url}
 								>
-									{renaming === project.id ? (
+									{renaming === project.url ? (
 										<input
 											ref={renameInput}
 											className={styles.renameInput}
@@ -137,17 +133,17 @@ export function Projects() {
 											value={draft}
 											onChange={(e) => setDraft(e.target.value)}
 											onKeyDown={(e) => {
-												if (e.key === "Enter") commitRename(project.id);
+												if (e.key === "Enter") commitRename(project.url);
 												if (e.key === "Escape") setRenaming(null);
 											}}
-											onBlur={() => commitRename(project.id)}
+											onBlur={() => commitRename(project.url)}
 										/>
 									) : (
 										<button
 											type="button"
 											className={styles.open}
 											data-role="open"
-											onClick={() => navigate(`/p/${project.id}`)}
+											onClick={() => navigate(`/p/${encodeURIComponent(project.url)}`)}
 										>
 											<span className={styles.name}>{project.name}</span>
 											<span className={styles.when}>
@@ -157,7 +153,7 @@ export function Projects() {
 									)}
 
 									<div className={styles.actions}>
-										{renaming === project.id ? null : (
+										{renaming === project.url ? null : (
 											<button
 												type="button"
 												className={styles.action}
@@ -165,20 +161,20 @@ export function Projects() {
 												onClick={() => {
 													setDraft(project.name);
 													setConfirmDelete(null);
-													setRenaming(project.id);
+													setRenaming(project.url);
 												}}
 											>
 												Rename
 											</button>
 										)}
-										{confirmDelete === project.id ? (
+										{confirmDelete === project.url ? (
 											<>
 												<button
 													type="button"
 													className={`${styles.action} ${styles.danger}`}
 													data-role="confirm-delete"
 													onClick={() => {
-														deleteProject(project.id);
+														deleteProject(project.url);
 														setConfirmDelete(null);
 													}}
 												>
@@ -200,7 +196,7 @@ export function Projects() {
 												data-role="delete"
 												onClick={() => {
 													setRenaming(null);
-													setConfirmDelete(project.id);
+													setConfirmDelete(project.url);
 												}}
 											>
 												Delete

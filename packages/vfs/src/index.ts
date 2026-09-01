@@ -41,6 +41,13 @@ const initSubductionWasm = (subductionSlim as unknown as {
 // automerge-repo names the UI needs so nothing else has to depend on it.
 export { isValidAutomergeUrl } from '@automerge/automerge-repo'
 export type { DocHandle, AutomergeUrl } from '@automerge/automerge-repo'
+/** A point in a document's history — what `handle.heads()` answers with.
+ *
+ *  Re-exported for the same reason as the two above: this package is the app's
+ *  only door to Automerge, and a caller that imported this type from the repo
+ *  directly would be one `pnpm install` away from having two copies of the
+ *  library and two wasm instances in one page. */
+export type { UrlHeads } from '@automerge/automerge-repo'
 
 /** A project as the compiler and panels see it: absolute path → contents.
  *
@@ -269,10 +276,10 @@ import { CdnStorageAdapter } from './cdnStorage.ts'
 class ProxiedEndpoint implements WebSocketEndpointInterface {
   /** Read for the audience only. Its host is the name the server answers to. */
   readonly url: string
-  constructor(
-    audience: string,
-    private dial: string,
-  ) {
+  /** The address actually dialled, which is not the name asked for. */
+  private readonly dial: string
+  constructor(audience: string, dial: string) {
+    this.dial = dial
     // A bare host:port is not a url and `new URL` would reject it; the scheme here
     // is never dialled, only parsed for its host.
     this.url = /^[a-z]+:\/\//.test(audience) ? audience : `wss://${audience}`
@@ -317,17 +324,31 @@ export class VfsProject {
   /** Path prefixes whose writes are build output: in-memory only, never synced. */
   ephemeralRoots = ['/dist/', '/node_modules/', '/.vite/']
 
+  private readonly dir: DocHandle<DirDoc>
+  private readonly files: Map<string, DocHandle<LeafDoc>>
+  /** The repo this project's docs live in — the syncing one or the local one.
+   *  Held rather than looked up, because every doc a project creates later has
+   *  to land in the same one. */
+  private readonly repo: Repo
+  /** Where this project syncs, or null for nowhere. Mirrors which repo it is
+   *  in; kept so callers can ask a project rather than the registry. */
+  readonly target: SyncTarget
+
+  // Fields rather than parameter properties, which is the one shape of this
+  // class that had to change coming across. Parameter properties are not
+  // erasable — they *emit* assignments — so they fail this repo's
+  // `erasableSyntaxOnly`, and Node's own type stripping cannot run them either.
+  // Upstream is bundler-compiled and never meets either rule.
   constructor(
-    private dir: DocHandle<DirDoc>,
-    private files: Map<string, DocHandle<LeafDoc>>,
-    /** The repo this project's docs live in — the syncing one or the local one.
-     *  Held rather than looked up, because every doc a project creates later (a
-     *  new file, the canvas) has to land in the same one. */
-    private repo: Repo,
-    /** Where this project syncs, or null for nowhere. Mirrors which repo it is
-     *  in; kept so callers can ask a project rather than the registry. */
-    readonly target: SyncTarget,
+    dir: DocHandle<DirDoc>,
+    files: Map<string, DocHandle<LeafDoc>>,
+    repo: Repo,
+    target: SyncTarget,
   ) {
+    this.dir = dir
+    this.files = files
+    this.repo = repo
+    this.target = target
     this.url = dir.url
     dir.on('change', this.onDirChange)
     for (const fh of files.values()) fh.on('change', this.emit)

@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+// The one place in this package that imports Automerge directly, and it is a
+// **devDependency pinned to the version `@clingo-design/vfs` resolves**. The
+// app's rule is that vfs is its only door to the library, because two copies in
+// one page is two wasm instances and a document that will not open. A test is
+// the exception that does not breach it: this runs under `node --test`, never
+// reaches a bundle, and asserting what a real document does to a real scene is
+// worth more than asserting it against a mock of one.
 import { change, from, load, save } from "@automerge/automerge";
 import {
 	type Project,

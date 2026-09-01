@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
-import { assetStore } from "../projects/idb";
+import { putAsset } from "../projects/store";
 import {
 	CONSTRAINT_KINDS,
 	DEFAULT_EASING,
@@ -1336,7 +1336,7 @@ export function Studio({
 							name: file.name.replace(/\.(glb|gltf)$/i, ""),
 						});
 						for (const asset of result.assets) {
-							await assetStore.put(asset.id, asset.payload);
+							await putAsset(asset.id, asset.payload);
 						}
 						const index = Object.fromEntries(
 							result.assets.map((a) => [a.id, a.info] as const),

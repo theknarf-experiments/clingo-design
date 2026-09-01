@@ -1,4 +1,4 @@
-import { assetStore } from "../projects/idb";
+import { resolveAsset } from "../projects/store";
 import {
 	type CSSProperties,
 	type ReactNode,
@@ -8,7 +8,6 @@ import {
 	useMemo,
 } from "react";
 import {
-	type AssetResolver,
 	type Frame,
 	type Machine,
 	type ModelNode,
@@ -998,20 +997,3 @@ function lerp(from: number | undefined, to: number | undefined, t: number): numb
 	if (to === undefined) return from;
 	return from + (to - from) * t;
 }
-
-/**
- * Where a model's geometry comes from, bound once.
- *
- * `canvas-3d` takes a resolver rather than a store precisely so it can be handed
- * one by a test or left without one entirely, and this is the app supplying the
- * real one. Bound here rather than threaded down from `Studio` because it is not
- * a decision any of the three components in between get to make: there is one
- * asset store in a browser, every view reads from it, and a prop passed through
- * `Editor` and `Artboard` unchanged would be three signatures wider for no
- * choice anybody could exercise.
- *
- * A module-level constant, and it has to be: a fresh closure every render would
- * be a new dependency for `useAsset`'s effect, which would re-fetch and re-parse
- * every payload in the view on every frame.
- */
-const resolveAsset: AssetResolver = (id) => assetStore.get(id);
