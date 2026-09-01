@@ -96,6 +96,7 @@ import { Timeline, suspectKey } from "./Timeline";
 import { Transitions } from "./Transitions";
 import { ValueEditor, type WhyRow } from "./ValueEditor";
 import { cx } from "./cx";
+import { fontMenu } from "./fontFiles";
 import styles from "./Machines.module.css";
 
 export interface MachinesProps {
@@ -622,6 +623,10 @@ function StateDelta({
 					unit={unit}
 					fallback={fallback}
 					names={names}
+					// A state that changes the typeface is a delta on a font row, and it
+					// wants the same menu the node's own row has — a hover that switches
+					// to a family this page uploaded is the whole point of uploading one.
+					options={fontMenu(scene, type)}
 					active={variable ? picks[variable] : undefined}
 					varying={variable ? varying.has(variable) : undefined}
 					reachable={variable ? reach?.[variable] : undefined}

@@ -156,6 +156,67 @@ export function usePages(url: string | undefined): string[] {
 }
 
 /**
+ * Every file in the project's `/assets` directory, by path, sorted, with what
+ * each one weighs.
+ *
+ * **The studio's first listing of the tree**, and it is deliberately a listing
+ * of *paths* rather than a file browser. `Inspector.tsx` says at length why
+ * there is no relink button yet, and this does not become one: what asks for
+ * this is the Fonts panel, which needs to offer the font files a project already
+ * holds so that adding a family to a second page is a click rather than a second
+ * upload that `putNamedAsset` would suffix into `InterVariable-2.woff2`. The
+ * roster being per page is a real limitation and this is its whole mitigation.
+ *
+ * It is also what answers "is this file here at all", which is the question
+ * `fontNotes` is asked and which no amount of reading the document can settle.
+ *
+ * The size comes from the snapshot, which is already in memory: these are the
+ * bytes the project is holding, so `.length` on them is a property read and not
+ * a load. Sorted for the reason `assetPaths` is sorted — a caller keys an effect
+ * on the joined list, and an order that followed the tree's own iteration would
+ * churn it.
+ *
+ * Re-read on every structural change, exactly as {@link usePages} is: writing a
+ * file is a write to the project, and `subscribe` is what the vfs already fires
+ * for one.
+ */
+export function useAssetFiles(
+	url: string | undefined,
+): Array<{ path: string; bytes: number }> {
+	const [files, setFiles] = useState<Array<{ path: string; bytes: number }>>([]);
+
+	useEffect(() => {
+		if (!url) {
+			setFiles([]);
+			return;
+		}
+		let alive = true;
+		let stop: (() => void) | undefined;
+		void project(url).then((p) => {
+			if (!alive) return;
+			const read = () =>
+				setFiles(
+					Object.entries(p.snapshot())
+						.filter(
+							(entry): entry is [string, Uint8Array] =>
+								entry[0].startsWith("/assets/") && entry[1] instanceof Uint8Array,
+						)
+						.map(([path, content]) => ({ path, bytes: content.length }))
+						.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
+				);
+			read();
+			stop = p.subscribe(read);
+		});
+		return () => {
+			alive = false;
+			stop?.();
+		};
+	}, [url]);
+
+	return files;
+}
+
+/**
  * Add a page, and answer the name it actually got.
  *
  * Uniquified rather than refused, the way a new project's name is: two pages

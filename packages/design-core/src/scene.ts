@@ -2606,6 +2606,103 @@ export interface AssetInfo {
 	name: string;
 }
 
+/**
+ * One font file the project holds, and everything CSS has to be told about it.
+ *
+ * A file, not a family: a family is a *set* of these that agree on
+ * {@link FontFile.family}, which is what makes Regular and Bold one typeface
+ * that `weight` selects within rather than two entries in a menu. A variable
+ * face is the degenerate and now-usual case — one file whose `weight`
+ * descriptor is a range, and the family has one member.
+ *
+ * The descriptors are stored **verbatim as CSS writes them** — `"100 900"`,
+ * `"oblique -10deg 0deg"` — for the reason {@link ValueTypeSpec.options} gives
+ * about a shadow and a font stack: what the renderer wants is the declaration,
+ * and a structured `{min,max}` here would be a second spelling that
+ * `@font-face` would have to be taught to flatten and a panel would have to be
+ * taught to edit. One string, one box, one thing that can be wrong and one
+ * place to correct it.
+ *
+ * Nothing here reaches the generated program, and that is the whole shape of
+ * this feature rather than an omission: a `fontFamily` is already a
+ * {@link Value}, so it already arrives as `alt_literal/3` and comes back as
+ * `rendered/3`, and the join from a family name to a face is done in TypeScript
+ * where the bytes are. See `docs/framer-fonts-spec.md` §6.
+ */
+export interface FontFile {
+	/** Absolute path in the project's tree — `/assets/InterVariable.woff2`. */
+	src: string;
+	/**
+	 * What this document calls the face — the name in the `@font-face` rule, the
+	 * name a `fontFamily` value puts at the front of its stack, and the name the
+	 * studio hands `new FontFace(family, bytes)`.
+	 *
+	 * **Ours, not the file's.** `FontFace` takes the name as an argument; the
+	 * `name` table inside the file is a suggestion for a label and nothing more.
+	 * That is what makes the decision not to decompress a woff2 cost nothing that
+	 * matters: a family whose label reads wrong is one field in a panel, never a
+	 * design that does not paint.
+	 *
+	 * Two files with the same `family` are two faces of one family, and the
+	 * browser chooses between them by `font-weight` and `font-style` — which is
+	 * how a static Regular and a static Bold become a typeface the `weight`
+	 * property can actually move.
+	 */
+	family: string;
+	/**
+	 * The `font-weight` descriptor, verbatim: `"400"` for a static face,
+	 * `"100 900"` for a variable one.
+	 *
+	 * **This field is the whole of the variable-axis story.** Declared as a
+	 * single number, a variable face is clamped by the browser to its default
+	 * instance and a `weight` of 700 comes out as a synthesised faux bold.
+	 * Declared as a range, a static face claims weights it does not have and 700
+	 * renders as Regular with no synthesis at all. Both failures are silent and
+	 * they are in opposite directions, which is why the Fonts panel shows this
+	 * field beside a preview strip at 100/400/700/900: the one thing that can be
+	 * wrong is the one thing that is visibly wrong in five seconds.
+	 */
+	weight: string;
+	/** The `font-style` descriptor, verbatim: `"normal"`, `"italic"`. */
+	style: string;
+	/**
+	 * The `font-stretch` descriptor, verbatim — `"75% 125%"`. Absent where the
+	 * file has no width axis, which is nearly always, and absent rather than
+	 * `"100%"` so that "this file has no width axis" has one spelling.
+	 */
+	stretch?: string;
+	/**
+	 * Payload length in bytes, so the studio and the export can total the weight
+	 * of a design without loading a face. Exactly {@link AssetInfo.bytes}, for
+	 * exactly its reason.
+	 */
+	bytes: number;
+	/** The filename the person chose, for the panel and for a relink. */
+	name: string;
+	/**
+	 * The variation axes the file declares, where they could be read.
+	 *
+	 * **Nothing reads this but the panel**, and that is the honest scope of
+	 * variable-font support here: it prints `wght 100–900` beside the family so a
+	 * designer knows what numbers the `weight` property will do something with.
+	 * It is populated for `.ttf`/`.otf` and absent for `.woff2`, whose tables are
+	 * Brotli and whose reading would mean a decompressor in the bundle — and its
+	 * absence is not a degradation, because the `weight` descriptor above is what
+	 * makes the axis work and that is stored whether or not the axis was read.
+	 */
+	axes?: FontAxis[];
+}
+
+/** One variation axis, as the file's `fvar` table spells it. */
+export interface FontAxis {
+	/** The four-character tag, verbatim — `wght`, `wdth`, `opsz`, `slnt`. */
+	tag: string;
+	min: number;
+	max: number;
+	/** The default instance's value on this axis. */
+	def: number;
+}
+
 export interface SceneNode {
 	id: string;
 	kind: NodeKind;
@@ -5002,6 +5099,32 @@ export interface Scene {
 	 * {@link SceneNode.lines} keeps about an empty list.
 	 */
 	assets?: Record<string, AssetInfo>;
+	/**
+	 * The font files this page may set text in — see {@link FontFile}.
+	 *
+	 * Beside {@link Scene.tokens} rather than among {@link Scene.assets}, and the
+	 * difference is what each of the two *is*. `assets` is an **index of what the
+	 * nodes reference**: it is derived, `pruneAssets` sweeps an entry no node
+	 * points at, and an entry with no node is an orphan. This is a
+	 * **declaration**: a designer adds a font and then uses it, in that order, so
+	 * an entry nothing references yet is the normal state of a font somebody just
+	 * uploaded and not a leak. There is deliberately no `pruneFonts` — sweeping
+	 * an unreferenced entry on the next edit would delete a font between the
+	 * upload and the first use of it. Removal is explicit, in the Fonts panel,
+	 * and it leaves the file in the tree because another page may declare it.
+	 *
+	 * Per page, like the tokens and the styles, and that is a limitation rather
+	 * than a design: a font added on `main` is not in the menu on `about`. The
+	 * fix is a project-level document spliced at the edge, which is what
+	 * `composeLibrary` is for components and is a bigger change than fonts; the
+	 * mitigation that costs nothing is the Fonts panel listing the *project's*
+	 * font files, so adding one to a second page is a click rather than a second
+	 * upload.
+	 *
+	 * Absent rather than `[]` on a document that declares none, which is the same
+	 * rule {@link SceneNode.lines} and {@link Scene.assets} keep.
+	 */
+	fonts?: FontFile[];
 }
 
 /** The size the document's first frame is created at, in EMU. */

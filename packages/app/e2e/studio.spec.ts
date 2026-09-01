@@ -1,6 +1,7 @@
 import { chromium, expect, test, type BrowserContext, type Page } from "@playwright/test";
 
 import { BASE_URL } from "./server.ts";
+import { wideFont } from "./wideFont.ts";
 
 /**
  * The one walk.
@@ -215,6 +216,173 @@ async function expectAGradientPaints(page: Page): Promise<void> {
 	await direction.selectOption({ label: "Linear, down" });
 }
 
+/**
+ * The width of Typography's headline, in CSS pixels.
+ *
+ * **On that document rather than on Card, for a reason a failed run found.** A
+ * measured size reaches a frame only through a layout's own equations —
+ * `lask/3` is consumed by `&sum{ lsz(C,S) }` under `layout(C,_)` and by nothing
+ * else — so a text node sitting at absolute coordinates keeps the box it was
+ * drawn at however it is set, and an assertion against Card's title would have
+ * read 400 whatever the font engine did. Typography's page *is* a column, its
+ * children hug, and its whole stated point is that "the page reflows, rather
+ * than merely restyling, because the column is an automatic layout over text
+ * that hugs its words". A hugging child of a column takes its width from the
+ * cross-axis equation, which is `lask`, which is `measureScene`, which is a
+ * canvas measuring a string in a font string this app built. So this one number
+ * reads the whole chain.
+ */
+async function headlineWidth(page: Page): Promise<number> {
+	return page
+		.locator('[data-artboard] [data-node="title"]')
+		.evaluate((element) => element.getBoundingClientRect().width);
+}
+
+/** Open a project from the landing page by the name the app gave it. */
+async function openProject(page: Page, name: string): Promise<void> {
+	await page.goto(`${BASE_URL}/`, { waitUntil: "load" });
+	const saved = page.locator('[data-project] [data-role="open"]', { hasText: name });
+	await expect(saved).toHaveCount(1);
+	await saved.click();
+	await page.waitForURL(/\/p\//);
+	await expect(page.locator('[data-role="status"]')).toContainText(/\d+ universes/);
+}
+
+/**
+ * Upload a font, set text in it, and watch the solver refit the box.
+ *
+ * **This is the one claim about imported fonts that cannot be made headlessly**,
+ * and it is the reason the fonts step could not be finished without a browser.
+ * pretext measures against `new OffscreenCanvas(1,1).getContext('2d')`, built at
+ * module scope; an `OffscreenCanvas` created in a Window context is specified to
+ * take its font source from the associated document, so `document.fonts.add()`
+ * reaches it. That is two layers away from any code in this repo, and if it were
+ * false every box in the studio would be measured in the fallback under the real
+ * family's cache key — where it would stay for the life of the page, because
+ * pretext's own per-font cache is not on its export surface and cannot be
+ * cleared. The design answers that with `paintedStack`, which makes the font
+ * string a function of the loaded set so a stale width is unservable rather than
+ * merely unlikely; this asserts the premise the whole arrangement rests on.
+ *
+ * The assertion is a **width inequality against a threshold**, never a snapshot,
+ * and the fixture is built rather than grabbed so that the threshold is
+ * arithmetic instead of a guess about somebody's metrics: every glyph in it is
+ * exactly one em, so "Compact or comfortable" at 34px is twenty-two ems — 748
+ * pixels, and the run reads 748 — against 385 for whatever this machine calls
+ * `system-ui` at the same size and weight. The threshold sits between them with
+ * room on both sides, because the number on the left is a fact about the runner
+ * and the number on the right is arithmetic. See `wideFont.ts`.
+ *
+ * It also proves the four steps of the upload flow happened in the order they
+ * have to: the row appears only if the bytes were written *and* the declaration
+ * followed, and the box only moves if the face was registered before anything
+ * measured. A run in which `document.fonts.add` came before `load()` resolved
+ * would leave the family named, unusable, and measured in the fallback — the
+ * failure the ordering exists to remove — and it would show up here as a box
+ * that never moved.
+ */
+async function expectAFontChangesTheBox(page: Page): Promise<void> {
+	const before = await headlineWidth(page);
+	// Not pinned as a number — which face the machine calls `system-ui` is not
+	// this repo's business — but it has to be clear of the threshold below, or
+	// the inequality afterwards would say nothing at all.
+	expect(before, "the fixture has to be wider than whatever system-ui is here").toBeLessThan(
+		480,
+	);
+
+	await page.locator('[data-panel="fonts"]').click();
+	await expect(page.locator('[data-role="font-tally"]')).toContainText("no families declared");
+	await page.locator('[data-role="add-font"]').setInputFiles({
+		name: "WideFixture.ttf",
+		mimeType: "font/ttf",
+		buffer: Buffer.from(wideFont()),
+	});
+	// The row is the declaration, and the declaration is written last, so its
+	// arrival is the whole flow having succeeded rather than a file having been
+	// chosen.
+	const row = page.locator('[data-role="font"]');
+	await expect(row).toHaveCount(1);
+	// Read out of the file's own `name` table, which is a label and only a label:
+	// the family the studio uses is the one in this field, and `FontFace` takes it
+	// as an argument.
+	await expect(row.locator('[data-role="font-family"]')).toHaveValue("Wide Fixture");
+	// The class its `OS/2` declares. A `.ttf` with an `fvar` would have printed a
+	// range here instead, which is the difference between a weight the type
+	// designer drew and one the browser faked.
+	await expect(row.locator('[data-role="font-weight"]')).toHaveValue("400");
+	// Registered, not merely declared: the "not loaded" tag is what a face whose
+	// bytes never parsed would keep wearing.
+	await expect(row.locator('[data-role="font-waiting"]')).toHaveCount(0);
+	// **Registered with the descriptors the document declares**, which is the one
+	// thing about this flow no headless test can see and which was wrong the first
+	// time it was written. `new FontFace(family, bytes)` with no third argument
+	// does not mean "whatever the file says": it means `weight: normal`, so a
+	// variable face registered that way is pinned to its default instance and every
+	// other weight the design asks for is a synthesised faux bold — while the
+	// exported HTML, which writes the declaration verbatim into its `@font-face`,
+	// gets the real cut. Two pictures from one document, and the one on screen is
+	// the wrong one. So: what the panel says, and what the browser holds, once.
+	const faces = () =>
+		page.evaluate(() =>
+			[...document.fonts].map((f) => `${f.family} ${f.weight} ${f.style}`),
+		);
+	await expect.poll(faces).toEqual(["Wide Fixture 400 normal"]);
+	// A descriptor corrected afterwards reaches the browser too, and **replaces**
+	// the face rather than joining it. The single-element expectation is the whole
+	// assertion: two faces of one family at overlapping weights is a tie the
+	// browser breaks, and one of the two answers is the one nobody meant.
+	const weight = row.locator('[data-role="font-weight"]');
+	await weight.fill("100 900");
+	await expect.poll(faces).toEqual(["Wide Fixture 100 900 normal"]);
+
+	// The panel writes on every keystroke, so the way to a descriptor runs through
+	// strings that are not one — and Chrome rejects those in `load()` rather than
+	// in the constructor, which is *after* a working face is already in the
+	// document. A failed attempt therefore has to leave that face alone and go on
+	// reporting the family as paintable, or the design would be stripped to its
+	// fallback and re-solved for the frame between two keystrokes. This is the run
+	// that first came back with two faces in the set.
+	await weight.fill("nonsense");
+	await expect.poll(faces).toEqual(["Wide Fixture 100 900 normal"]);
+	await weight.fill("400");
+	await expect.poll(faces).toEqual(["Wide Fixture 400 normal"]);
+
+	// Now use it. Every node on this page takes its family from the Prose style,
+	// so the row on the headline is the *styled* twin — read-only, showing what
+	// each variant holds — and giving the node its own family is the override
+	// button beside it. Both halves are `font`-typed rows and both had to learn
+	// the project's menu.
+	await page.locator('[data-panel="properties"]').click();
+	await page.locator('[data-layer="title"]').click();
+	await expect(
+		page.locator('[data-prop="fontFamily"] select[data-role="literal"]'),
+	).toHaveCount(0);
+	await page.locator('[data-role="override-fontFamily"]').click();
+	const family = page.locator('[data-prop="fontFamily"] select[data-role="literal"]');
+	await expect(family).toHaveCount(1);
+	// The page's own families come first, because a designer who uploaded a font
+	// did it to use it.
+	await expect(family.locator("option").first()).toHaveText("Wide Fixture");
+	await family.selectOption({ label: "Wide Fixture" });
+
+	// Polled rather than read once: choosing a family is a document edit, it
+	// re-measures, and the box is whatever the *next* answer set fits.
+	await expect
+		.poll(() => headlineWidth(page), {
+			message: "the box never grew, so the face never reached the measuring canvas",
+		})
+		.toBeGreaterThan(560);
+
+	// And the panel now says so about the design rather than about the document:
+	// one family declared, one of them worn by the universe on screen. That count
+	// is read off the answer set, which is what makes it true of a family a rule
+	// put on a node the document never mentions.
+	await page.locator('[data-panel="fonts"]').click();
+	await expect(page.locator('[data-role="font-tally"]')).toContainText(
+		"1 family declared · 1 in the design on screen",
+	);
+}
+
 /** Make a project from the Card template and wait for the studio it opens. */
 async function createFromTemplate(page: Page): Promise<void> {
 	await page.goto(`${BASE_URL}/`, { waitUntil: "load" });
@@ -223,6 +391,21 @@ async function createFromTemplate(page: Page): Promise<void> {
 	// what forces the wasm and the repo.
 	await page.locator('[data-template="card"]').click();
 	await page.waitForURL(/\/p\//);
+}
+
+/**
+ * Make a second project from the Typography template and wait for its studio.
+ *
+ * The landing page is reached by navigating rather than by a back button, so
+ * this is also the one place the walk leaves a studio and returns to the app
+ * root — which is what the `@property` registrations being mounted there rather
+ * than in the studio is about.
+ */
+async function createTypography(page: Page): Promise<void> {
+	await page.goto(`${BASE_URL}/`, { waitUntil: "load" });
+	await page.locator('[data-template="typography"]').click();
+	await page.waitForURL(/\/p\//);
+	await expect(page.locator('[data-role="status"]')).toContainText(/\d+ universes/);
 }
 
 test("a template becomes a drawn studio, first on a clean profile and then on a returning one", async () => {
@@ -238,6 +421,16 @@ test("a template becomes a drawn studio, first on a clean profile and then on a 
 	// open. The app derives the name from the template and disambiguates, so this
 	// is what a first Card project in an empty list is called.
 	const projectName = "Card";
+	/**
+	 * A second project, for the one assertion Card cannot carry.
+	 *
+	 * A measured box reaches the frame only through a layout's own equations, and
+	 * Card places every node at absolute coordinates — so the font check has to be
+	 * on the one template that reflows. It is a second document rather than a
+	 * layout wrapped around Card's title mid-walk, because wrapping is a studio
+	 * action with its own failure modes and this test is not about that one.
+	 */
+	const typographyProject = "Two typographies";
 
 	const firstVisit = async (): Promise<void> => {
 		// `launchPersistentContext` rather than `browser.newContext()`, and this
@@ -251,6 +444,8 @@ test("a template becomes a drawn studio, first on a clean profile and then on a 
 			await createFromTemplate(page);
 			await expectDrawnStudio(page);
 			await expectAGradientPaints(page);
+			await createTypography(page);
+			await expectAFontChangesTheBox(page);
 			expect(trouble, "the first visit logged errors").toEqual([]);
 		} finally {
 			// Closed, not merely navigated away from. The database has to be
@@ -281,6 +476,25 @@ test("a template becomes a drawn studio, first on a clean profile and then on a 
 			// The same assertions, and they mean more here: these nodes are being
 			// read back out of storage rather than created in memory a moment ago.
 			await expectDrawnStudio(page);
+
+			// And the typography survived, which is a stronger statement than the
+			// nodes surviving. Nothing about this box is in the document: the face
+			// had to come back out of the project's tree, be loaded and registered
+			// by `useDocumentFonts` — the half of the story the uploader's own tab
+			// never exercises, because there the upload flow had already done it —
+			// and be measured in before the solver could fit the headline to it. A
+			// studio that opened with the declaration and without the bytes would
+			// draw this on one line and look entirely healthy doing it.
+			await openProject(page, typographyProject);
+			await page.locator('[data-panel="fonts"]').click();
+			await expect(page.locator('[data-role="font"]')).toHaveCount(1);
+			await expect(page.locator('[data-role="font-waiting"]')).toHaveCount(0);
+			await expect
+				.poll(() => headlineWidth(page), {
+					message: "the face did not come back out of the project",
+				})
+				.toBeGreaterThan(560);
+
 			expect(trouble, "the returning visit logged errors").toEqual([]);
 		} finally {
 			await context.close();

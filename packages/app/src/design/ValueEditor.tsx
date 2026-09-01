@@ -7,11 +7,13 @@ import {
 	type Unit,
 	VALUE_TYPES,
 	type Value,
+	type ValueOption,
 	type ValueType,
 	type Verdict,
 	angleUnitOf,
 	derive,
 	durationUnitOf,
+	familyLabel,
 	isAngleType,
 	isLengthType,
 	isTimeType,
@@ -113,6 +115,24 @@ export interface ValueEditorProps {
 	fallback: string;
 	/** Layer names, so a derivation from another node reads as its name. */
 	names?: Readonly<Record<string, string>>;
+	/**
+	 * The menu for this row, where the caller knows a longer one than the value
+	 * table does. Undefined means the type's own list, which is every row but one.
+	 *
+	 * Today that one is the `font` type, whose roster is partly a fact about the
+	 * open project: `VALUE_TYPES.font.options` is the four system stacks, and the
+	 * families this page uploaded are neither static nor pure. They are merged in
+	 * front of the four by `fontOptions` in the app and arrive here as a prop,
+	 * rather than `VALUE_TYPES` becoming a function of a scene — a table that
+	 * varied per project is a table `compile.ts`, `scene.ts`, `edits.ts` and four
+	 * components would each have to be handed, and `LAYOUT_OPTIONS` writes that
+	 * table into the generated program at module scope.
+	 *
+	 * The stored value is unaffected and is still the CSS stack it always was,
+	 * which is what keeps the branch below — the one that keeps a value the menu
+	 * has never seen selectable — doing exactly what its comment says.
+	 */
+	options?: readonly ValueOption[];
 	testId?: string;
 }
 
@@ -398,6 +418,7 @@ export function ValueEditor({
 	unit = DEFAULT_UNIT,
 	fallback,
 	names,
+	options: extraOptions,
 	testId,
 }: ValueEditorProps) {
 	// Which alternative the solver calls this one. For a document value the
@@ -414,11 +435,23 @@ export function ValueEditor({
 	 * resolved-value tag beside a token cannot drift apart.
 	 */
 	const shown = (text: string) =>
-		isLength ? shownLength(text, unit) : optionLabel(type, text);
+		isLength
+			? shownLength(text, unit)
+			: optionLabel(type, text, extraOptions, type === "font" ? familyLabel : undefined);
 	const multiline = VALUE_TYPES[type].multiline === true;
 	// A closed set of choices is a menu. Typing a font stack or a box-shadow by
 	// hand is not editing, it is remembering.
-	const options = VALUE_TYPES[type].options;
+	//
+	// The caller's list wins where there is one, because the only caller that has
+	// one knows something this module cannot: which families the open project
+	// holds. What that list does *not* change is the branch below that keeps an
+	// unknown value selectable — a stack written before the roster existed, or
+	// pasted from a page that declared the family, is still a value the row shows
+	// and offers. `familyLabel` above is what stops it being shown as forty
+	// characters of CSS: it is the last resort for a `font` and for nothing else,
+	// because a stack is the one stored value in this system that a person did not
+	// type and cannot read.
+	const options = extraOptions ?? VALUE_TYPES[type].options;
 	// A derivation only makes sense where it reads and writes the same type —
 	// the contrast of a font weight is not a thing.
 	const derivations = (Object.keys(DERIVATIONS) as Derivation[]).filter(
@@ -538,9 +571,13 @@ export function ValueEditor({
 								>
 									{/* Anything written before the list existed — an older
 									    document, a hand-edited value — stays selectable
-									    rather than silently becoming the first option. */}
+									    rather than silently becoming the first option.
+									    Through `shown`, so the one type whose stored value
+									    is unreadable prints as the family a designer would
+									    call it: a menu should never show a raw font stack,
+									    and this is the only row that could. */}
 									{options.some((o) => o.value === term.value) ? null : (
-										<option value={term.value}>{term.value}</option>
+										<option value={term.value}>{shown(term.value)}</option>
 									)}
 									{options.map((option) => (
 										<option key={option.value} value={option.value}>

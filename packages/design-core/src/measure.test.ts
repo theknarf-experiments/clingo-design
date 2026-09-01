@@ -24,6 +24,7 @@ import {
 	askedSize,
 	autoSizes,
 	capAxes,
+	fontNotes,
 	fontString,
 	lineHeightEmu,
 	lineHeightPx,
@@ -51,6 +52,7 @@ import {
 	emptyScene,
 	makeLayout,
 } from "./scene.ts";
+import { paintedStack } from "./fonts.ts";
 import { findInTree, mapTree, propValues } from "./tree.ts";
 import { EMU_PER_PX, type Emu, cssPxFromEmu, emuOf } from "./units.ts";
 
@@ -301,6 +303,36 @@ test("a font shorthand is what a canvas asks for", () => {
 		fontString({ family: georgia, size: "large", weight: "600" }),
 		`600 ${PROPS.size.fallback} ${georgia}`,
 	);
+});
+
+test("the font shorthand is built from the stack the host can actually paint", () => {
+	const stack = '"Inter Var", system-ui, sans-serif';
+	const unloaded = new Set(["Inter Var"]);
+	assert.equal(
+		fontString({ family: paintedStack(stack, unloaded), size: "16px", weight: "400" }),
+		"400 16px system-ui, sans-serif",
+	);
+});
+
+test("the same words in the same design get two different font strings before and after a face lands", () => {
+	// The direct assertion that neither cache can serve a stale width, and it is
+	// a claim about a *string* because that is what both caches key on: ours in
+	// `prepareCached` and pretext's in `segmentMetricCaches`, which the package
+	// publishes no way to clear. Measure in the real family and re-measure on load
+	// and the second pass has the same key, gets the same wrong widths, and looks
+	// correct — which is the bug this inequality exists to make impossible.
+	const stack = '"Inter Var", system-ui, sans-serif';
+	const before = fontString({
+		family: paintedStack(stack, new Set(["Inter Var"])),
+		size: "16px",
+		weight: "400",
+	});
+	const after = fontString({
+		family: paintedStack(stack, new Set()),
+		size: "16px",
+		weight: "400",
+	});
+	assert.notEqual(before, after);
 });
 
 test("line height is a multiple of the font size unless it carries a unit", () => {
@@ -1240,6 +1272,75 @@ test("a delta a style would have decided drops the style as an axis", () => {
 		other.rows.map((row) => `${row.text}/${row.weight}`),
 		["Now/400", "Now/800"],
 	);
+});
+
+test("a state copy's row goes through the same strip", () => {
+	// A state that changes the family hands back a `TextRow` carrying the
+	// *document's* stack: `stateMeasures` is pure and deliberately knows nothing
+	// about what a browser has loaded — "the fallbacks are the host's to supply
+	// and not this side's to guess", which is exactly what a loaded font set is.
+	// So the strip happens at the host's own boundary, on the row, the same way it
+	// happens on the node's own value, and this asserts the row is shaped so that
+	// it can.
+	const stack = '"Inter Var", system-ui, sans-serif';
+	const scene = component({
+		states: [
+			{ id: "rest" },
+			{ id: "hover", parts: { label: { props: { fontFamily: single(stack) } } } },
+		],
+	});
+	const rows = stateMeasures(scene).flatMap((m) => m.rows);
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0].family, stack, "the document's stack, unjudged");
+	const unloaded = new Set(["Inter Var"]);
+	assert.equal(
+		fontString({
+			family: paintedStack(rows[0].family ?? "", unloaded),
+			size: rows[0].size ?? "16px",
+			weight: rows[0].weight ?? "400",
+		}),
+		"400 14px system-ui, sans-serif",
+	);
+});
+
+test("a font that is not in the project is one note, whatever wears it", () => {
+	const stack = '"Inter Var", system-ui, sans-serif';
+	const face = {
+		src: "/assets/InterVariable.woff2",
+		family: "Inter Var",
+		weight: "100 900",
+		style: "normal",
+		bytes: 253_000,
+		name: "InterVariable.woff2",
+	};
+	// Two wearers and two ways of wearing it — a node's own value and a machine
+	// state's delta — because the note is about a *file*, and repeating it per
+	// node would be a list nobody finishes.
+	const scene: Scene = {
+		...component({
+			label: {
+				text: single("Go"),
+				size: single("14px"),
+				weight: single("400"),
+				fontFamily: single(stack),
+			},
+			states: [
+				{ id: "rest" },
+				{ id: "hover", parts: { label: { props: { fontFamily: single(stack) } } } },
+			],
+		}),
+		fonts: [face],
+	};
+	const notes = fontNotes(scene, []);
+	assert.equal(notes.length, 1);
+	assert.match(notes[0], /^info: /);
+	assert.match(notes[0], /Inter Var/);
+	assert.match(notes[0], /\/assets\/InterVariable\.woff2/);
+	// The file is in the tree: nothing to say.
+	assert.deepEqual(fontNotes(scene, ["/assets/InterVariable.woff2"]), []);
+	// And declared-but-unused is not a note either — a font somebody uploaded and
+	// has not reached for yet is the feature working, not a leak.
+	assert.deepEqual(fontNotes({ ...component({}), fonts: [face] }, []), []);
 });
 
 test("the copies share one budget, and the node they copy keeps its own whole", () => {

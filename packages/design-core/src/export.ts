@@ -105,6 +105,7 @@ import {
 	trackTerm,
 	transitionExit,
 } from "./machines.ts";
+import { fontFamilies, quoteFamily, usedFamilies } from "./fonts.ts";
 import type { ModelNode, ModelScene, ModelState } from "./model.ts";
 import {
 	CUSTOM_PROPERTY_RULES,
@@ -225,7 +226,13 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 		mime: "text/html",
 		language: "html",
 		loses: [
-			"Text is placed in a fixed box: it wraps the way the canvas measured it, and will re-wrap if a font is missing.",
+			// Was one sentence ending "…and will re-wrap if a font is missing." That
+			// is no longer true of a font this project holds — it is *in* the file —
+			// and it is still true of a family the design only names. The sentence is
+			// split along exactly that line, because "which of my fonts travel" is
+			// the question a designer opening this panel is actually asking.
+			"Text is placed in a fixed box: it wraps the way the canvas measured it. A font you imported travels in this file, so it wraps the same everywhere; a system family — Georgia, system-ui — is whatever the reader's machine has, and text set in one re-wraps where it differs.",
+			"A font you imported is written into this file as base64, which is a third larger than the file itself: a 250 kB woff2 adds about 330 kB, and a variable .ttf of 800 kB adds about 1.1 MB. Once per family, however many nodes wear it, and nothing is fetched — the file needs no network at all.",
 		],
 	},
 	svg: {
@@ -241,6 +248,16 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 			// lie as dropping it.
 			"Gradients are flattened to the colour they start from. An SVG shape has no background, and carrying the gradient would mean a gradient definition per node, built by reading the recipe back into an angle and two stops — a second description of the same picture.",
 			"Blur is dropped. A blur here is a CSS `filter`, and the CSS filter functions are not SVG filters: a browser opening this file would blur, and a rasteriser reading the same attribute would not, which makes the file two pictures depending on who opened it. A backdrop blur has no SVG reading at all — an element here has no backdrop to reach behind.",
+			// Unconditional, like its neighbours, and the trade is stated rather than
+			// made silently: a third of a megabyte of base64 per family, in a format
+			// whose selling point is that it is small and text, is not what this
+			// target is for — it exists to be pasted into a deck, a README or an
+			// issue. And it would only sometimes work: an SVG loaded as a document or
+			// inlined into HTML honours `@font-face`, while one used as `<img src>`
+			// is in a resource-restricted mode whose treatment of `data:` font
+			// sources differs between engines. A feature that works in the paste and
+			// not in the `<img>` is worse than one that is absent and documented.
+			"A font you imported is not in this file. An SVG names the family and leaves the face to whatever opens it, so text set in a font of yours is drawn in the rest of its stack — and because the geometry here was measured in the real face, the words will not fill the box they were fitted to. Export HTML if the typography is the point, or outline the text in a vector editor.",
 			"Text does not wrap. Each line of the document's own text becomes a tspan; a line the canvas broke because the box was narrow comes out unbroken.",
 			"A text baseline is computed from the font size rather than measured, so a face with unusual metrics sits a pixel or two off.",
 			// Unconditional, unlike the machine losses the HTML target adds, and the
@@ -441,6 +458,21 @@ export interface ExportOptions {
 	 * not in it.
 	 */
 	images?: Readonly<Record<string, Uint8Array>>;
+	/**
+	 * The bytes behind every font the design sets text in, by the tree path
+	 * {@link FontFile.src} names.
+	 *
+	 * A second map beside {@link ExportOptions.images} rather than one merged
+	 * one, for the reason `assetPaths(scene, kind)` takes a kind: the panel knows
+	 * which target is selected and therefore which payloads that target can
+	 * possibly use, and the SVG target wants the pictures and none of the faces.
+	 * One map would make choosing the light target fetch a megabyte of type.
+	 *
+	 * A family whose bytes are absent is a design that comes out in its fallback
+	 * stack, named in `lost` rather than left to be discovered by a reader whose
+	 * headline does not fit.
+	 */
+	fonts?: Readonly<Record<string, Uint8Array>>;
 	/**
 	 * Emit `var(--accent)` where a value named a token, with the definitions at
 	 * the top. Off inlines the literal everywhere, which is what a paste into
@@ -1375,10 +1407,11 @@ function declarationsFor(
  * prevent.
  */
 function dataUrl(
-	images: Readonly<Record<string, Uint8Array>>,
+	payloads: Readonly<Record<string, Uint8Array>>,
 	path: string,
+	unknown = "image/png",
 ): string | undefined {
-	const bytes = images[path];
+	const bytes = payloads[path];
 	if (!bytes || bytes.length === 0) return undefined;
 	let binary = "";
 	const CHUNK = 0x8000;
@@ -1386,12 +1419,22 @@ function dataUrl(
 		binary += String.fromCharCode(...bytes.subarray(at, at + CHUNK));
 	}
 	const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
-	const type = IMAGE_TYPES[ext];
-	return `data:${type ?? "image/png"};base64,${btoa(binary)}`;
+	const type = MEDIA_TYPES[ext];
+	return `data:${type ?? unknown};base64,${btoa(binary)}`;
 }
 
-/** What an extension means, for the handful a design tool actually places. */
-const IMAGE_TYPES: Record<string, string> = {
+/**
+ * What an extension means, for the handful a design tool actually places.
+ *
+ * The four font types are here rather than in a table of their own, and a second
+ * `fontDataUrl` beside `dataUrl` was rejected for the reason `store.ts`
+ * congratulates itself on: two functions that turn a path and some bytes into a
+ * data URI are two answers to "what is at this path". What is *not* shared is
+ * the guess for an extension neither table knows — "an unknown extension is a
+ * PNG" is a reasonable thing to assume about a picture and a nonsense one about
+ * a face — which is why the fallback became a parameter above.
+ */
+const MEDIA_TYPES: Record<string, string> = {
 	png: "image/png",
 	jpg: "image/jpeg",
 	jpeg: "image/jpeg",
@@ -1399,7 +1442,161 @@ const IMAGE_TYPES: Record<string, string> = {
 	webp: "image/webp",
 	avif: "image/avif",
 	svg: "image/svg+xml",
+	woff2: "font/woff2",
+	woff: "font/woff",
+	ttf: "font/ttf",
+	otf: "font/otf",
 };
+
+/**
+ * What `src: url(…) format(…)` should say, per extension.
+ *
+ * The `format()` hint is what browsers actually dispatch on, and it is why a
+ * wrong MIME in a `data:` URI is survivable. An extension not in this table gets
+ * the data URI with `application/octet-stream` and **no** `format()` clause at
+ * all, so the browser sniffs rather than being told something false — which is
+ * the same call `dataUrl` makes one function up about an unknown picture.
+ */
+const FONT_FORMATS: Record<string, string> = {
+	woff2: "woff2",
+	woff: "woff",
+	ttf: "truetype",
+	otf: "opentype",
+};
+
+/**
+ * The `@font-face` rules an artefact needs, one per declared file the design
+ * actually sets text in.
+ *
+ * Unshifted before `BASE_CSS` by the caller, so a face is declared before
+ * `.design` sets a family on anything.
+ *
+ * **The join is `usedFamilies` ∩ `scene.fonts`, and both halves earn their
+ * place.** The used set is read off the *answer set* — a rule that mints a text
+ * node and gives it a family is a design that uses that family, and a walk of
+ * the document would miss it — unioned over every layer the artefact carries, so
+ * a `collapseSpace` export holding three universes carries the faces all three
+ * need and no more. The declared side is what turns a family name into bytes,
+ * and it is why a system stack contributes nothing: `Georgia` is in no roster,
+ * so no rule is written for it and the reader's own copy is used, which is what
+ * naming a system family has always meant.
+ *
+ * A family whose bytes the caller did not hand over gets **no rule at all**
+ * rather than a rule with an empty `src`, and is named in `lost` by
+ * {@link missingFaces} instead. An `@font-face` pointing at nothing is worse
+ * than none: it is a declaration the browser spends a moment on and then falls
+ * back from, with `font-display: block` making that moment visible.
+ */
+export function fontFaces(
+	scene: Scene,
+	families: ReadonlySet<string>,
+	fonts: Readonly<Record<string, Uint8Array>>,
+): string[] {
+	const out: string[] = [];
+	for (const [family, files] of fontFamilies(scene)) {
+		if (!families.has(family)) continue;
+		for (const file of files) {
+			const url = dataUrl(fonts, file.src, "application/octet-stream");
+			if (url === undefined) continue;
+			const ext = file.src.slice(file.src.lastIndexOf(".") + 1).toLowerCase();
+			const format = FONT_FORMATS[ext];
+			const lines = [
+				`\tfont-family: ${quoteFamily(family)};`,
+				`\tsrc: url(${url})${format ? ` format("${format}")` : ""};`,
+				`\tfont-weight: ${file.weight};`,
+				`\tfont-style: ${file.style};`,
+			];
+			if (file.stretch !== undefined) lines.push(`\tfont-stretch: ${file.stretch};`);
+			// `block`, not `swap`, and it is the one non-obvious descriptor here. The
+			// geometry in an exported file is literal pixels measured in the real
+			// face — `ALWAYS_LOST` says so — and `swap` paints the fallback into boxes
+			// fitted to Inter, which overflows them, and then reflows. `block` shows
+			// nothing for a moment and then shows the design. The face is a data URI
+			// in this same file, so "a moment" is a parse and not a round trip: an
+			// export is a picture of a design, not a page with a paint budget, and a
+			// picture that is briefly blank beats one that is briefly wrong.
+			lines.push("\tfont-display: block;");
+			out.push(`@font-face {\n${lines.join("\n")}\n}`);
+		}
+	}
+	return out;
+}
+
+/**
+ * Faces the caller did not hand over, one sentence each — `missingImages`'
+ * typographic twin, and the second clause is what earns it a sentence of its
+ * own.
+ *
+ * For an image, a missing payload is an empty box at the right size. For a font
+ * it is text at the *wrong* size in a box that does not fit it, because the
+ * geometry was measured for the face and the words come out in the rest of their
+ * stack — a worse artefact and a much harder one to diagnose from the file.
+ *
+ * Named by family and by path, once per family however many nodes wear it, for
+ * the reason `missingImages` names a path: it is the thing a person can go and
+ * find.
+ */
+function missingFaces(
+	scene: Scene,
+	families: ReadonlySet<string>,
+	fonts: Readonly<Record<string, Uint8Array>>,
+): string[] {
+	const out: string[] = [];
+	for (const [family, files] of fontFamilies(scene)) {
+		if (!families.has(family)) continue;
+		const absent = files.filter((f) => {
+			const bytes = fonts[f.src];
+			return bytes === undefined || bytes.length === 0;
+		});
+		if (absent.length === 0) continue;
+		out.push(
+			`This design sets text in “${family}”, and ${absent.length === files.length ? "those bytes were" : `the bytes behind ${absent.map((f) => `“${f.src}”`).join(", ")} were`} not available when this file was written — so the words come out in the rest of their stack, in a box that was measured for the face. A project still syncing its assets, or opened without them, exports this way.`,
+		);
+	}
+	return out;
+}
+
+/** A byte count as a person reads it, for a sentence about a file's weight. */
+const kb = (bytes: number): string => `${Math.round(bytes / 1024)} kB`;
+
+/**
+ * What the faces in this file weigh, said about *this document* rather than
+ * about the format.
+ *
+ * The asymmetry is the file's own — `EXPORT_TARGETS` carries the unconditional
+ * sentences and `GRID_LOST`/`missingImages` carry the conditional ones — and
+ * here both halves have something different to say, so both are said: the target
+ * sentence is true of every HTML export of every design with an uploaded font,
+ * and this one names the families and the kilobytes a designer is actually
+ * about to send somebody.
+ *
+ * Base64 is four characters per three bytes, so the inlined size is a third
+ * larger than the payload. Reported as the payload plus that third rather than
+ * as the payload, because the question being answered is "how big is this file".
+ */
+function fontWeightNote(
+	scene: Scene,
+	families: ReadonlySet<string>,
+	fonts: Readonly<Record<string, Uint8Array>>,
+): string[] {
+	const named: string[] = [];
+	let total = 0;
+	for (const [family, files] of fontFamilies(scene)) {
+		if (!families.has(family)) continue;
+		let sum = 0;
+		for (const file of files) {
+			const bytes = fonts[file.src];
+			if (bytes && bytes.length > 0) sum += bytes.length;
+		}
+		if (sum === 0) continue;
+		total += sum;
+		named.push(`“${family}” (${kb(sum)})`);
+	}
+	if (named.length === 0) return [];
+	return [
+		`The fonts are in this file. ${named.join(" and ")} ${named.length === 1 ? "is" : "are"} inlined as base64, which is about ${kb(Math.round(total * 4 / 3))} of it.`,
+	];
+}
 
 /** The markup a kind draws inside its box, as a string. */
 function htmlContent(
@@ -1715,7 +1912,23 @@ function htmlExport(
 		paced.set(selector, { ...(paced.get(selector) ?? {}), ...declarations });
 	}
 
-	const css: string[] = [BASE_CSS];
+	// Every family every layer sets text in, which is more than the base layer's:
+	// a collapsed space is one file standing for several designs, and a family
+	// only the dark theme uses is a face the file still has to carry. Collected
+	// during the walk that is happening anyway rather than by a scan afterwards.
+	const families = new Set<string>();
+	for (const layer of layers) {
+		for (const family of usedFamilies(layer.universe.model)) families.add(family);
+	}
+	// Unshifted before everything, so a face is declared before `.design` sets a
+	// family on anything — see the stylesheet order in `docs/framer-parity-plan.md`
+	// §5.6. An `@font-face` is not a rule and takes no part in the cascade, so its
+	// position is legibility rather than correctness; a reader looking for what
+	// this file weighs finds it at the top, which is where the weight is.
+	const css: string[] = [
+		...fontFaces(index.scene, families, options.fonts ?? {}),
+		BASE_CSS,
+	];
 	for (const [selector, declarations] of baseRules) {
 		const extra = paced.get(selector);
 		const block = rule(selector, extra ? { ...declarations, ...extra } : declarations, "");
@@ -1781,6 +1994,11 @@ function htmlExport(
 	}
 	if (depthOf(base.universe.model).turned) spatialLost.push(TURNED_LOST);
 	spatialLost.push(...missingImages(index, base.universe.model, options.images ?? {}));
+	// The typographic pair, in the order a designer reads them: what did not come
+	// out, then what did and what it cost. Both are facts about this document
+	// rather than about the format, which is why neither is in `EXPORT_TARGETS`.
+	spatialLost.push(...missingFaces(index.scene, families, options.fonts ?? {}));
+	spatialLost.push(...fontWeightNote(index.scene, families, options.fonts ?? {}));
 
 	const title = escapeText(options.title ?? "Design");
 	// At the end of the body, where a script that reads the document has to be:

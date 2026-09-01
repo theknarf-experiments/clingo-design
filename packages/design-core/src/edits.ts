@@ -67,6 +67,7 @@ import {
 	EDGES,
 	type Easing,
 	type Edge,
+	type FontFile,
 	type Guide,
 	type GuideProp,
 	INPUT_KINDS,
@@ -4111,6 +4112,71 @@ export function pruneAssets(scene: Scene): Scene {
 	return kept.length > 0
 		? { ...scene, assets: Object.fromEntries(kept) }
 		: without(scene, "assets");
+}
+
+/* ------------------------------------------------------------------ */
+/* Fonts                                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * **A font declaration is not a design-space one.** Neither edit below can add a
+ * universe, and — unlike an input, which had to be argued into that shape — this
+ * one is structural: `Scene.fonts` is a list of records the compiler never
+ * opens. A `font` *token* holding two families is two universes and always was,
+ * which is the value system working and is the only way fonts branch the space.
+ */
+
+/**
+ * Declare a face this page may set text in.
+ *
+ * Idempotent on `src`: adding the same file twice replaces the declaration
+ * rather than doubling it, because the second add is either the panel's "add to
+ * this page" pressed twice or an upload that landed on a path the page already
+ * names, and two entries for one file would emit two `@font-face` rules and
+ * total the bytes twice. Replacing rather than ignoring is what makes the panel's
+ * descriptor fields writable through this one door.
+ *
+ * The declaration goes in **last**, in the order faces were added, and the panel
+ * sorts for display. Two faces of one family therefore keep the order somebody
+ * uploaded them in, which is the order the `@font-face` rules come out in and so
+ * the order a browser resolves a tie in — a fact worth having be the designer's
+ * rather than a sort's.
+ */
+export function addFont(scene: Scene, file: FontFile): Scene {
+	const before = scene.fonts ?? [];
+	const at = before.findIndex((f) => f.src === file.src);
+	const fonts =
+		at === -1
+			? [...before, file]
+			: before.map((f, i) => (i === at ? file : f));
+	return { ...scene, fonts };
+}
+
+/**
+ * Stop declaring the face at one path.
+ *
+ * **It does not delete the file**, and that is the whole difference between this
+ * and every other removal in this module. Another page may declare the same
+ * bytes — that is the mitigation for the roster being per page — and
+ * `putNamedAsset` has no counterpart that removes anyway. So "remove from page"
+ * is what the button says and what this does.
+ *
+ * Nor does it repair the values that named the family, which `deleteToken` would
+ * have done. A `fontFamily` is a CSS stack with a real fallback tail behind it,
+ * so a value whose face has gone paints the rest of its stack — which is exactly
+ * what a collaborator without the assets already sees, and is a design that is
+ * different rather than broken. Rewriting every stack in the document on a
+ * removal would be an edit nobody asked for, in return for a state the tool has
+ * to handle correctly regardless.
+ *
+ * The key goes away rather than becoming `[]`, so "this document declares no
+ * fonts" keeps one spelling — see {@link Scene.fonts}.
+ */
+export function removeFont(scene: Scene, src: string): Scene {
+	const before = scene.fonts ?? [];
+	const fonts = before.filter((f) => f.src !== src);
+	if (fonts.length === before.length) return scene;
+	return fonts.length > 0 ? { ...scene, fonts } : without(scene, "fonts");
 }
 
 /* ------------------------------------------------------------------ */

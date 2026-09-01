@@ -69,6 +69,8 @@ import {
 	DEFAULT_FRAME,
 	type Dimension,
 	type Easing,
+	type FontAxis,
+	type FontFile,
 	type FrameValue,
 	KINDS,
 	type Machine,
@@ -377,7 +379,89 @@ export function normalizeScene(input: unknown): Scene {
 		// make opening a file a destructive act. `pruneAssets` drops them on an
 		// edit, which is where a person is present to have meant it.
 		...normalizeAssets(input.assets),
+		// Beside the assets and read the same way, and absent for the same reason:
+		// a document that declares no fonts writes no key. Every document written
+		// before this field existed is one of those, and reads exactly as it always
+		// did — which is the whole of what "a font is a declaration the compiler
+		// never hears about" buys on the way in.
+		...normalizeFonts(input.fonts),
 	};
+}
+
+/**
+ * The font roster, or nothing where the document declares none.
+ *
+ * Filtered rather than rejected wholesale, like the styles and the machines and
+ * for their reason: one unreadable entry is one face the page cannot set text
+ * in, and every value that named it still paints the rest of its stack — which
+ * is exactly what a page opened without its assets already does. Losing the
+ * whole roster would turn one bad row into a document that had never heard of
+ * any of its typefaces.
+ *
+ * Four fields are required and three of them are strings a person edits: a
+ * declaration with no `src` names no bytes, one with no `family` names nothing a
+ * value could point at, and one whose `weight` or `style` is missing would emit
+ * an `@font-face` with a hole in it. They are **defaulted rather than rejected**
+ * where a default is honest — `"400"` and `"normal"` are what a face with no
+ * descriptor means to CSS — and the two that cannot be guessed drop the entry.
+ *
+ * `bytes` falls back to zero rather than dropping the row, because it is a
+ * number for a panel to print and nothing reads it to decide anything: a roster
+ * that lost a face over an unreadable size would be a design that stopped
+ * painting because a total was wrong.
+ */
+function normalizeFonts(value: unknown): { fonts?: FontFile[] } {
+	if (!Array.isArray(value)) return {};
+	const out: FontFile[] = [];
+	for (const raw of value) {
+		if (!isRecord(raw)) continue;
+		if (typeof raw.src !== "string" || raw.src === "") continue;
+		if (typeof raw.family !== "string" || raw.family === "") continue;
+		const bytes = Number(raw.bytes);
+		const axes = Array.isArray(raw.axes)
+			? raw.axes.map(fontAxis).filter((a): a is FontAxis => a !== undefined)
+			: undefined;
+		out.push({
+			src: raw.src,
+			family: raw.family,
+			weight: typeof raw.weight === "string" && raw.weight !== "" ? raw.weight : "400",
+			style: typeof raw.style === "string" && raw.style !== "" ? raw.style : "normal",
+			...(typeof raw.stretch === "string" && raw.stretch !== ""
+				? { stretch: raw.stretch }
+				: {}),
+			bytes: Number.isFinite(bytes) ? bytes : 0,
+			// The name is what a person reads and nothing else reads it, so a missing
+			// one is not a reason to lose the entry. The path is the honest fallback,
+			// as it is for an asset, and for the same reason: it is something a person
+			// can go and look for.
+			name: typeof raw.name === "string" && raw.name !== "" ? raw.name : raw.src,
+			...(axes && axes.length > 0 ? { axes } : {}),
+		});
+	}
+	return out.length > 0 ? { fonts: out } : {};
+}
+
+/**
+ * An axis is three finite numbers and a tag, or it is nothing.
+ *
+ * A reader rather than a type guard, which is the difference between checking a
+ * row and *having* one. A guard that asked `Number.isFinite(Number(raw.min))`
+ * and then let the row through by reference would admit `min: "100"` — finite,
+ * and a string — into a field typed `number`, and the lie would surface as
+ * `wght 100–900` printing correctly right up until somebody did arithmetic on
+ * it. The whole point of a normalizer is that what comes out is the type it
+ * claims to be, so the numbers are converted here and not merely tested.
+ */
+function fontAxis(value: unknown): FontAxis | undefined {
+	if (!isRecord(value)) return undefined;
+	if (typeof value.tag !== "string" || value.tag === "") return undefined;
+	const min = Number(value.min);
+	const max = Number(value.max);
+	const def = Number(value.def);
+	if (!Number.isFinite(min) || !Number.isFinite(max) || !Number.isFinite(def)) {
+		return undefined;
+	}
+	return { tag: value.tag, min, max, def };
 }
 
 /**

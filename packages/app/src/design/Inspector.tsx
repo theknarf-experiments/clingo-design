@@ -142,6 +142,7 @@ import { NOTHING } from "./Styles";
 import { StateStrip } from "./StateStrip";
 import { LengthInput, ValueEditor, type WhyRow } from "./ValueEditor";
 import { cx } from "./cx";
+import { fontMenu } from "./fontFiles";
 import {
 	MARGIN_FIELDS,
 	TRACK_FIELDS,
@@ -550,6 +551,12 @@ function DerivedPanel({
 				tokens={[]}
 				unit={unit}
 				fallback={spec.fallback}
+				// No `options` here, and it is not an omission: a read-only row prints
+				// its literal through the same `shown` the menu rows label with, and
+				// that already falls through to `familyLabel` for a `font`. So a rule
+				// that gave a derived node a family reads as "Inter Var" rather than as
+				// forty characters of CSS, with no roster in scope — which is as well,
+				// because this panel is handed an answer set and never a document.
 				active={picks[variable]}
 				varying={(reachable?.size ?? alternatives.length) > 1}
 				reachable={reachable}
@@ -1412,6 +1419,7 @@ function StateDeltaSection({
 						unit={unit}
 						fallback={fallback}
 						names={names}
+						options={fontMenu(scene, type)}
 						preview={(term: Term) => resolveValue(context, [term], variable)}
 						onChange={(next) => onWrite(next)}
 					/>
@@ -2560,6 +2568,7 @@ export function Inspector({
 						unit={unit}
 						fallback={spec.fallback}
 						names={names}
+						options={fontMenu(scene, spec.type)}
 						active={picks[svar]}
 						varying={varying.has(svar)}
 						reachable={reach?.[svar]}
@@ -2600,6 +2609,7 @@ export function Inspector({
 				unit={unit}
 				fallback={spec.fallback}
 				names={names}
+				options={fontMenu(scene, spec.type)}
 				active={picks[variable]}
 				varying={varying.has(variable)}
 				reachable={reach?.[variable]}

@@ -137,8 +137,21 @@ export interface ValueTypeSpec {
 }
 
 /**
- * No webfonts are available offline, so the roster is system stacks — a small
- * curated set rather than a free text field nobody can spell correctly.
+ * The fonts every document has, whoever opened it: the machine's own families.
+ *
+ * A curated set rather than a free text field, because typing a font stack by
+ * hand is not editing, it is remembering. It used to be the *whole* roster, on
+ * the grounds that no webfonts are available offline — which is still true of
+ * webfonts and was never true of a font file in the project. A `.woff2` sitting
+ * in `/assets` beside a photograph and a chair is neither a webfont nor a system
+ * stack; it is the third thing, and the tree has been able to hold one since the
+ * day it could hold a chair.
+ *
+ * So a page that declares its own fonts offers those as well, merged in the
+ * *app* by `fontOptions` — see {@link Scene.fonts} and `fonts.ts`. This list is
+ * what is offered when a page declares none, and what is always offered
+ * underneath, because a system stack is the fallback tail every uploaded family
+ * is written in front of.
  */
 const FONTS: ValueOption[] = [
 	{
@@ -507,10 +520,49 @@ export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
 
 export const VALUE_TYPE_NAMES = Object.keys(VALUE_TYPES) as ValueType[];
 
-/** What a menu calls a stored value, or the value itself if it is not on one. */
-export function optionLabel(type: ValueType, value: string): string {
+/**
+ * The four system stacks, under the name the rest of the app asks for them by.
+ *
+ * An alias rather than a second list: {@link VALUE_TYPES}.font already reads
+ * `FONTS`, and a menu the app builds by merging a page's own families in front
+ * of these has to be merging in front of *the same* four. Named `SYSTEM_FONTS`
+ * at the boundary because that is what the distinction is at the boundary — the
+ * families the host supplies, as against the files this project holds.
+ */
+export const SYSTEM_FONTS: readonly ValueOption[] = FONTS;
+
+/**
+ * What a menu calls a stored value, or the value itself if it is not on one.
+ *
+ * `extra` is a roster the *caller* knows about and this module cannot: a page's
+ * uploaded fonts are neither static nor pure, so they arrive as an argument
+ * rather than as a row in {@link VALUE_TYPES}. Searched first, so a project that
+ * names a family the built-in list also names gets its own label.
+ *
+ * `fallback` is what to call a value that is on neither list. It exists because
+ * of exactly one case and is written as a parameter rather than as a branch
+ * inside the caller: a `font` value the menu has never seen is a forty-character
+ * CSS stack, and printing that in a `<select>` is the failure this whole
+ * argument list is here to prevent. Three ways to get one — a `fonts` entry
+ * removed, a node pasted from a page that declared the family, a hand-edited
+ * value — and one answer for all three, which is `familyLabel` in `fonts.ts`.
+ *
+ * A fourth parameter rather than a nested ternary at the one call site that
+ * needs it: `ValueEditor` is shared by five panels, and a second dialect of
+ * "what does this row call its value" in one of them is how two rows come to
+ * disagree about the same document.
+ */
+export function optionLabel(
+	type: ValueType,
+	value: string,
+	extra?: readonly ValueOption[],
+	fallback?: (value: string) => string,
+): string {
 	return (
-		VALUE_TYPES[type].options?.find((o) => o.value === value)?.label ?? value
+		extra?.find((o) => o.value === value)?.label ??
+		VALUE_TYPES[type].options?.find((o) => o.value === value)?.label ??
+		fallback?.(value) ??
+		value
 	);
 }
 

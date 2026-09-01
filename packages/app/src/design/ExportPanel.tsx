@@ -9,6 +9,7 @@ import {
 	collapseSpace,
 	exportSpace,
 	exportUniverse,
+	fontPaths,
 	viewports,
 } from "@clingo-design/design-core";
 import type { GltfExport } from "@clingo-design/canvas-3d";
@@ -111,6 +112,25 @@ export function ExportPanel({
 			[scene, target],
 		),
 	);
+	/**
+	 * The faces, for the one target that carries them.
+	 *
+	 * Gated exactly as the pictures and the chairs are, and for a sharper version
+	 * of their reason: an SVG names the family and leaves the face to whatever
+	 * opens it, and a glTF has no text at all, so fetching a megabyte of type to
+	 * open the panel on either would be reading bytes nothing could ever write.
+	 * The empty list is how a hook is skipped without being called conditionally.
+	 *
+	 * A face the roster declares and the design does not wear is fetched and not
+	 * written: `fontPaths` is the *declaration*, and `fontFaces` intersects it with
+	 * what the answer set actually came out wearing. That asymmetry is deliberate —
+	 * which families a universe uses is a question about a solve, and the panel
+	 * would have to walk every universe's model to ask it before it could decide
+	 * what to read.
+	 */
+	const fonts = usePathBytes(
+		useMemo(() => (target === "html" ? fontPaths(scene) : []), [scene, target]),
+	);
 
 	const collapse = useMemo(
 		() => collapseSpace(scene, universes),
@@ -208,7 +228,7 @@ export function ExportPanel({
 						: `Design ${gltfUniverse + 1} of ${universes.length}. A glTF holds one arrangement of one set of objects, so the whole space cannot collapse into it the way a stylesheet can.`,
 			};
 		}
-		const options = { target, tokens, title: projectName, posters, images };
+		const options = { target, tokens, title: projectName, posters, images, fonts };
 		return one === null
 			? exportSpace(scene, universes, options)
 			: exportUniverse(scene, universes[one], options);
@@ -221,6 +241,7 @@ export function ExportPanel({
 		projectName,
 		images,
 		files,
+		fonts,
 		writer,
 		view,
 		gltfUniverse,

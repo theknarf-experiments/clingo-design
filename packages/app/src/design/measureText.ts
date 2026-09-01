@@ -37,9 +37,11 @@ import {
 	type Size,
 	capAxes,
 	cssPxFromEmu,
+	fontFamilies,
 	fontString,
 	lineHeightEmu,
 	measureAxes,
+	paintedStack,
 	propValueOf,
 	propValues,
 	propVar,
@@ -154,12 +156,38 @@ export function measureText(
  * whatever it is stretched to, and its measured height is then only what it
  * asked for.
  */
-export function measureScene(scene: Scene): Measurements {
+export function measureScene(
+	scene: Scene,
+	/**
+	 * The families the browser has actually loaded — the host's fact, exactly like
+	 * the canvas itself.
+	 *
+	 * Every stack is put through `paintedStack` against its complement, so the
+	 * engine is asked for a font string that is *true of the font set that answers
+	 * it*. That is the whole of `docs/framer-fonts-spec.md` §5 and the reason it
+	 * is a parameter rather than a lookup: a box measured in a face the host has
+	 * not loaded is wrong geometry — it reaches `lask/3` and can go unsat — and it
+	 * is sticky, because both the cache below and pretext's own key on the font
+	 * string and the second of those cannot be cleared from here. Making the
+	 * string a function of the loaded set is what makes a stale width unservable
+	 * rather than merely unlikely.
+	 *
+	 * Defaulted to empty, which is the honest reading for a caller with no
+	 * document fonts in hand: nothing declared is loaded, so nothing is stripped
+	 * unless the document declares it.
+	 */
+	ready: ReadonlySet<string> = new Set(),
+): Measurements {
 	const base = {
 		tokens: scene.tokens,
 		picks: {},
 		props: propValues(scene.nodes),
 	};
+	// Computed once per pass rather than per node: it is a fact about the document
+	// and the host, and neither changes while this loop runs.
+	const unloaded = new Set(
+		[...fontFamilies(scene).keys()].filter((family) => !ready.has(family)),
+	);
 	const out: Record<string, Measured> = {};
 	for (const node of toMeasure(scene.nodes)) {
 		const { axes, dropped } = capAxes(measureAxes(scene, node));
@@ -178,7 +206,7 @@ export function measureScene(scene: Scene): Measurements {
 					propVar(node.id, name),
 				);
 			const font = fontString({
-				family: prop("fontFamily") ?? ARTBOARD_FONT,
+				family: paintedStack(prop("fontFamily") ?? ARTBOARD_FONT, unloaded),
 				size: prop("size") ?? PROPS.size.fallback,
 				weight: prop("weight") ?? PROPS.weight.fallback,
 			});
@@ -192,7 +220,7 @@ export function measureScene(scene: Scene): Measurements {
 		}
 		out[node.id] = dropped.length > 0 ? { axes, sizes, dropped } : { axes, sizes };
 	}
-	measureStates(scene, out);
+	measureStates(scene, out, unloaded);
 	return out;
 }
 
@@ -221,13 +249,17 @@ export function measureScene(scene: Scene): Measurements {
  * tables — so capping again here would drop a second axis for no reason and
  * report it twice.
  */
-function measureStates(scene: Scene, out: Record<string, Measured>): void {
+function measureStates(
+	scene: Scene,
+	out: Record<string, Measured>,
+	unloaded: ReadonlySet<string>,
+): void {
 	for (const measure of stateMeasures(scene)) {
 		const sizes = measure.rows.map((row) =>
 			measureText(
 				row.text,
 				fontString({
-					family: row.family ?? ARTBOARD_FONT,
+					family: paintedStack(row.family ?? ARTBOARD_FONT, unloaded),
 					size: row.size ?? PROPS.size.fallback,
 					weight: row.weight ?? PROPS.weight.fallback,
 				}),

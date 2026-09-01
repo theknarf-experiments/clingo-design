@@ -14,6 +14,7 @@ import {
 	addStyleVariant,
 	deleteStyle,
 	deleteStyleVariant,
+	familyLabel,
 	flatten,
 	lit,
 	optionLabel,
@@ -32,6 +33,7 @@ import {
 
 import { optionValue, termFor, type WhyRow } from "./ValueEditor";
 import { cx } from "./cx";
+import { fontMenu } from "./fontFiles";
 import styles from "./Styles.module.css";
 
 /**
@@ -96,7 +98,11 @@ function PartCell({
 	onChange: (next: Term | undefined) => void;
 }) {
 	const spec = PROPS[prop];
-	const options = VALUE_TYPES[spec.type].options;
+	// The project's own families in front of the four system stacks for a `font`
+	// row, and the type's own list for everything else — the same one question
+	// every other panel's font row asks, asked through the same helper so that a
+	// style variant can say "the display treatment is set in Fraunces" at all.
+	const options = fontMenu(scene, spec.type) ?? VALUE_TYPES[spec.type].options;
 	const tokens = tokensFor(scene, prop);
 	const variable = stylePartVar(style.id, variant, prop);
 	const context = { tokens: scene.tokens, picks, props: propValues(scene.nodes) };
@@ -127,7 +133,9 @@ function PartCell({
 				<span className={styles.linked} data-role="part-ref">
 					{termLabel(scene.tokens, term)}
 					{resolved ? (
-						<span className={styles.resolved}>{optionLabel(spec.type, resolved)}</span>
+						<span className={styles.resolved}>
+							{optionLabel(spec.type, resolved, options, spec.type === "font" ? familyLabel : undefined)}
+						</span>
 					) : (
 						<span className={styles.broken}>unresolved</span>
 					)}
@@ -139,8 +147,13 @@ function PartCell({
 					value={term.value}
 					onChange={(e) => onChange(lit(e.target.value))}
 				>
+					{/* A stack the menu has never seen stays selectable and reads as
+					    the family a designer would call it — see `ValueEditor`, whose
+					    branch this one mirrors and must keep mirroring. */}
 					{options.some((o) => o.value === term.value) ? null : (
-						<option value={term.value}>{term.value}</option>
+						<option value={term.value}>
+							{optionLabel(spec.type, term.value, options, spec.type === "font" ? familyLabel : undefined)}
+						</option>
 					)}
 					{options.map((option) => (
 						<option key={option.value} value={option.value}>

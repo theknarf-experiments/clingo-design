@@ -103,6 +103,43 @@ function flow(): Scene {
 	};
 }
 
+/* ------------------------------------------------------------------ */
+/* Faces in the file                                                   */
+/* ------------------------------------------------------------------ */
+
+/** The stack a designer's uploaded family becomes in a value. */
+const INTER = '"Inter Var", system-ui, sans-serif';
+
+/** One declared face, and enough bytes to be inlined. */
+const INTER_FILE = {
+	src: "/assets/InterVariable.woff2",
+	family: "Inter Var",
+	weight: "100 900",
+	style: "normal",
+	bytes: 4,
+	name: "InterVariable.woff2",
+};
+
+/** Bytes that are not a font and do not have to be: the emitter never looks. */
+const FACE = new Uint8Array([0x77, 0x4f, 0x46, 0x32]);
+
+/** A page whose headline is set in an uploaded family. */
+function typeset(props: SceneNode["props"] = { fontFamily: single(INTER) }): Scene {
+	return {
+		styles: [],
+		machines: [],
+		tokens: starterTokens(),
+		fonts: [INTER_FILE],
+		nodes: [
+			frame("page", "Page", [0, 0, 520, 360], { fill: [ref("surface")] }, [
+				text("head", "Head", [24, 24, 400, 40], "Typography", props),
+			]),
+		],
+		constraints: [],
+		rules: RULES_HEADER,
+	};
+}
+
 /** A document whose panel's width is a token, so a dimension is parametric. */
 function parametric(): Scene {
 	const tokens = withToken(
@@ -3005,4 +3042,130 @@ test("a style can own the whole sheen", async () => {
 	// a correlation the picture has and the file has not.
 	assert.equal(out.text.match(/--gfrom: var\(--accent\);/g)?.length, 1);
 	assert.equal(out.text.match(/filter: blur\(2px\);/g)?.length, 1);
+});
+
+/* ------------------------------------------------------------------ */
+/* The face travels in the file                                        */
+/* ------------------------------------------------------------------ */
+
+test("a design that sets text in an imported font carries the face", async () => {
+	const { out } = await exported(typeset(), { fonts: { [INTER_FILE.src]: FACE } });
+	assert.match(out.text, /@font-face \{/);
+	assert.match(out.text, /font-family: "Inter Var";/);
+	assert.match(out.text, /src: url\(data:font\/woff2;base64,/);
+	// The `format()` hint is what a browser dispatches on, which is why a wrong
+	// MIME in a data URI is survivable and a wrong hint is not.
+	assert.match(out.text, /format\("woff2"\)/);
+	// Verbatim from the declaration: a range, because the face is variable, and
+	// declaring a single number would clamp it to its default instance and make
+	// every other weight a synthesised faux bold.
+	assert.match(out.text, /font-weight: 100 900;/);
+	// `block`, not `swap` — the boxes were measured in this face.
+	assert.match(out.text, /font-display: block;/);
+	// Declared before `.design` sets a family on anything.
+	assert.ok(
+		out.text.indexOf("@font-face") < out.text.indexOf(".design {"),
+		"a face has to be declared before anything asks for it",
+	);
+	// And the design still names the family, which is what joins the two.
+	assert.match(out.text, /font-family: "Inter Var", system-ui, sans-serif;/);
+});
+
+test("a family the design declares and does not use is not in the file", async () => {
+	// The roster is a declaration and not an index — a font somebody uploaded and
+	// has not reached for yet is the normal state of one — so "declared" is not
+	// "used", and a third of a megabyte of nothing does not travel.
+	const { out } = await exported(typeset({}), { fonts: { [INTER_FILE.src]: FACE } });
+	assert.doesNotMatch(out.text, /@font-face/);
+	assert.equal(
+		out.lost.some((line) => line.includes("Inter Var")),
+		false,
+		"nothing is missing: nothing was wanted",
+	);
+});
+
+test("a family used only in the second collapsed universe is still in the file", async () => {
+	// The union over layers, and it is the case a base-layer-only walk gets
+	// wrong: one artefact standing for two designs has to carry the faces both
+	// need, or the media query switches to a treatment whose face is not here.
+	const base = typography();
+	const styled: Scene = {
+		...base,
+		fonts: [INTER_FILE],
+		styles: base.styles.map((style) =>
+			style.id === "prose"
+				? {
+						...style,
+						variants: style.variants.map((variant, i) =>
+							i === 1 ? { ...variant, parts: { ...variant.parts, fontFamily: lit(INTER) } } : variant,
+						),
+					}
+				: style,
+		),
+	};
+	const exploration = await explore(styled, directSolver, { limit: 8 });
+	assert.ok(exploration.universes.length > 1);
+	const whole = exportSpace(styled, exploration.universes, {
+		target: "html",
+		fonts: { [INTER_FILE.src]: FACE },
+	});
+	assert.match(whole.text, /@font-face/);
+	assert.match(whole.text, /font-family: "Inter Var";/);
+	// Exactly one rule, however many layers reached for it: one face is one
+	// download, and `@font-face` takes no part in the cascade.
+	assert.equal(whole.text.match(/@font-face/g)?.length, 1);
+});
+
+test("a face whose bytes the caller did not hand over is named, not silently absent", async () => {
+	const { out } = await exported(typeset());
+	assert.doesNotMatch(out.text, /@font-face/);
+	const sentence = out.lost.find((line) => line.includes("Inter Var"));
+	assert.ok(sentence, "a missing face has to be a sentence");
+	// The second clause is what earns it one of its own: for an image a missing
+	// payload is an empty box at the right size, and for a face it is text at the
+	// wrong size in a box that does not fit it.
+	assert.match(sentence, /box that was measured for the face/);
+	// And the design still names the family, so the words come out in the tail.
+	assert.match(out.text, /system-ui, sans-serif/);
+});
+
+test("the size note names the families and the kilobytes", async () => {
+	const big = new Uint8Array(120 * 1024);
+	const { out } = await exported(typeset(), { fonts: { [INTER_FILE.src]: big } });
+	const note = out.lost.find((line) => line.startsWith("The fonts are in this file."));
+	assert.ok(note, "a file that gained a megabyte should say so");
+	assert.match(note, /“Inter Var” \(120 kB\)/);
+	// Base64 is four characters per three bytes, and the question being answered
+	// is how big the *file* is rather than how big the payload was.
+	assert.match(note, /160 kB/);
+});
+
+test("an SVG names the family and carries no face", async () => {
+	const { out } = await exported(typeset(), {
+		target: "svg",
+		fonts: { [INTER_FILE.src]: FACE },
+	});
+	assert.doesNotMatch(out.text, /@font-face/);
+	assert.doesNotMatch(out.text, /base64/);
+	assert.match(out.text, /Inter Var/, "the family is named; the face is not here");
+	assert.ok(
+		out.lost.some((line) => line.startsWith("A font you imported is not in this file.")),
+		"the format's own sentence, unconditional like its neighbours",
+	);
+});
+
+test("a document with no imported fonts exports exactly what it exported before", async () => {
+	// The regression that keeps the four system stacks where they were: a scene
+	// with no roster must not gain a byte, whichever way the option is spelled.
+	const scene = typography();
+	const exploration = await explore(scene, directSolver, { limit: 1 });
+	const universe = exploration.universes[0];
+	const bare = exportUniverse(scene, universe, { target: "html" });
+	const offered = exportUniverse(scene, universe, {
+		target: "html",
+		fonts: { "/assets/InterVariable.woff2": FACE },
+	});
+	assert.equal(offered.text, bare.text);
+	assert.deepEqual(offered.lost, bare.lost);
+	assert.doesNotMatch(bare.text, /@font-face/);
 });

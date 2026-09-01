@@ -37,6 +37,7 @@
  * lookup both kinds of table are read by.
  */
 import { componentDef, instanceNodes, instanceVariable } from "./components.ts";
+import { familiesOf, missingFonts } from "./fonts.ts";
 import {
 	machineForNode,
 	materializedParts,
@@ -1101,6 +1102,97 @@ export function measurementNotes(
 			` the document gives ${one ? "it" : "them"}, not the treatment's.`
 		);
 	});
+}
+
+/**
+ * Every font stack this document could set text in, wherever one is written.
+ *
+ * A walk of the *document* and not of an answer set, which is the difference
+ * between this and `usedFamilies` in `fonts.ts` and is why the two exist: that
+ * one asks what a universe came out wearing, and this one asks what a designer
+ * has typed anywhere at all. The note below is about the project's tree rather
+ * than about a solve, so it must be answerable with no solver in hand — a page
+ * opened without its assets should say so before it has finished thinking.
+ *
+ * Every place a `fontFamily` can be spelled, and the list is closed because
+ * `PROPS` is: a node's own value, a style variant's part, a machine state's
+ * delta, a keyframe on a `fontFamily` track, and a `font` token that any of them
+ * may point at. Literals only — a term that names a token is followed by
+ * including the token's own alternatives here, which is coarser than resolving
+ * and is the right coarseness: a note about a missing file should not depend on
+ * which universe is on screen.
+ */
+function writtenStacks(scene: Scene): string[] {
+	const out: string[] = [];
+	const read = (value: Value | undefined): void => {
+		for (const term of value ?? []) {
+			if (term.kind === "literal") out.push(term.value);
+		}
+	};
+	for (const node of flatten(scene.nodes)) read(node.props.fontFamily);
+	for (const style of scene.styles) {
+		for (const variant of style.variants) {
+			const part = variant.parts.fontFamily;
+			if (part) read([part]);
+		}
+	}
+	for (const machine of scene.machines) {
+		for (const state of machine.states) {
+			for (const part of Object.values(state.parts)) {
+				read(part.props?.fontFamily);
+			}
+		}
+		for (const timeline of machine.timelines ?? []) {
+			for (const track of timeline.tracks) {
+				if (track.prop !== "fontFamily") continue;
+				for (const key of track.keys) read(key.value);
+			}
+		}
+	}
+	for (const token of scene.tokens) {
+		if (token.type === "font") read(token.value);
+	}
+	return out;
+}
+
+/**
+ * Families this page sets text in whose file the project does not hold.
+ *
+ * The typographic twin of {@link measurementNotes}, and the same kind of
+ * approximation: nothing was dropped and no axis was given up, the boxes are
+ * simply hugging a different face than the document names. Unlike that one it is
+ * answerable from the document plus the tree, so it needs no answer set — which
+ * is also why it is a walk of what was *written* rather than of what was
+ * rendered.
+ *
+ * Reported per **family and file**, never per node, because the path is the
+ * thing a person can go and find — the same call {@link missingAssets} makes,
+ * and the reason a path beats a hash was better said there.
+ *
+ * Takes the paths the project holds rather than the loaded set, deliberately: a
+ * face that is merely still loading resolves in a frame, and a note that flickers
+ * once per page open is noise. What is worth a sentence is a file that is not
+ * coming.
+ *
+ * A declared family nothing sets text in gets no note at all, which is the whole
+ * of why {@link Scene.fonts} is a declaration rather than an index: uploading a
+ * font and not having used it yet is the normal state of a font somebody just
+ * uploaded, and a panel that complained about it would be complaining about the
+ * feature working.
+ */
+export function fontNotes(scene: Scene, held: Iterable<string>): string[] {
+	const missing = missingFonts(scene, held);
+	if (missing.length === 0) return [];
+	const named = new Set(writtenStacks(scene).flatMap(familiesOf));
+	return missing
+		.filter((file) => named.has(file.family))
+		.map(
+			(file) =>
+				`info: this page sets text in “${file.family}”, whose file “${file.src}” is` +
+				" not in this project — so those boxes hug the fallback in the stack" +
+				" rather than the face. A page opened without its assets, or still" +
+				" syncing them, reads this way.",
+		);
 }
 
 /* ------------------------------------------------------------------ */

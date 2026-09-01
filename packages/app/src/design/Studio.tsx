@@ -52,6 +52,8 @@ import {
 	guideAtIn,
 	type Dimension,
 	findStyle,
+	fontNotes,
+	usedFamilies,
 	variantLabel,
 	drawGuideAt,
 	flatten,
@@ -103,6 +105,7 @@ import { Artboard } from "./Artboard";
 import { Constraints } from "./Constraints";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Editor, type Tool } from "./Editor";
+import { Fonts } from "./Fonts";
 import { Guides } from "./Guides";
 import { Inspector } from "./Inspector";
 import { LayerList } from "./LayerList";
@@ -113,6 +116,7 @@ import { Rulers } from "./Rulers";
 import {
 	componentDefinition,
 	extractComponent,
+	useAssetFiles,
 	useComponents,
 } from "../projects/store";
 import { Components } from "./Components";
@@ -127,6 +131,7 @@ import { cx } from "./cx";
 import { layoutArtboards } from "./layout";
 import { measureScene } from "./measureText";
 import { useCulling } from "./useCulling";
+import { useDocumentFonts } from "./useDocumentFonts";
 import { useExploration } from "./useExploration";
 import { firstLayerOf, layerHolding, useMachinePlayback } from "./useMachinePlayback";
 import { canvasPx, canvasRect } from "./viewport";
@@ -189,6 +194,12 @@ const PANELS = [
 	// bookkeeping that connects them. The panel edits both; the tab is named for
 	// the half somebody goes looking for.
 	{ id: "machines", label: "States" },
+	// After Variables and before Rules, which is where the roster sits in the
+	// dependency order a designer walks: a font is a file the project holds, a
+	// `font` token is a variable that may name two of them, and a rule reasons
+	// about neither. It is a fifth panel rather than a section inside Variables
+	// because a face and a variable are different things — see `Fonts.tsx`.
+	{ id: "fonts", label: "Fonts" },
 	{ id: "constraints", label: "Rules" },
 ] as const;
 
@@ -478,10 +489,41 @@ export function Studio({
 	>(undefined);
 	const [leftWidth, setLeftWidth] = usePanelWidth("clingo-design.panel.left", 190);
 	const [rightWidth, setRightWidth] = usePanelWidth("clingo-design.panel.right", 260);
+	/**
+	 * The project's own files, and the faces of them the browser has loaded.
+	 *
+	 * `held` answers "is this file here at all", which is what a missing-face
+	 * sentence and the Fonts panel's middle group both need and which no amount of
+	 * reading the document can settle. `ready` is a different question with a
+	 * different answer — "can the engine paint in this family *now*" — and it is
+	 * what makes the measurement below honest.
+	 */
+	const held = useAssetFiles(projectUrl);
+	const heldPaths = useMemo(() => held.map((f) => f.path), [held]);
+	const ready = useDocumentFonts(scene, heldPaths);
+	/**
+	 * The typographic note, beside the ones clingo writes and the ones the tool
+	 * writes about its own arithmetic.
+	 *
+	 * A walk of what the document has *written* rather than of what a universe
+	 * rendered, and memoised because it is one: it has to be answerable with no
+	 * solver in hand, since a page opened without its assets should say so before
+	 * it has finished thinking.
+	 */
+	const faceNotes = useMemo(() => fontNotes(scene, heldPaths), [scene, heldPaths]);
 	// Text sizes itself, and only something with a canvas can say how big it
 	// is. Measuring here rather than in the compiler is what keeps design-core
 	// runnable outside a browser.
-	const measurements = useMemo(() => measureScene(scene), [scene]);
+	//
+	// Keyed on the *contents* of `ready` rather than on the set, because the hook
+	// hands back a new set whenever it re-runs and re-measuring the whole document
+	// for an unchanged font set would be a solve per render. Which families are
+	// loaded is threaded all the way down to the two places a font string is
+	// built: a box measured in a face the host has not loaded is wrong geometry —
+	// it reaches `lask/3` and can go unsat — and it is sticky, because both this
+	// app's cache and pretext's own key on that string. See `paintedStack`.
+	const readyKey = useMemo(() => [...ready].sort().join("\n"), [ready]);
+	const measurements = useMemo(() => measureScene(scene, ready), [scene, readyKey]);
 	// Sorted so the same selection reached two different ways is the same
 	// question, and the probe is not repeated for it.
 	const probeIds = useMemo(() => [...selection].sort(), [selection]);
@@ -649,6 +691,20 @@ export function Studio({
 		if (primary) setRemembered(primary.model);
 	}, [primary]);
 	const answer = primary?.model ?? remembered;
+	/**
+	 * The families the design on screen actually came out wearing.
+	 *
+	 * Off the answer set rather than off a walk of the document, which is the rule
+	 * this repo keeps for everything drawn: a rule that mints a text node and
+	 * gives it a family is a design that uses that family, and reading the
+	 * document would miss it. It buys the Fonts panel one sentence — "two of your
+	 * four families are in this design" — which is the 90% of the `wearsfont/2`
+	 * predicate that was priced and left out, delivered with no atoms.
+	 */
+	const usedFaces = useMemo(
+		() => (answer ? usedFamilies(answer) : undefined),
+		[answer],
+	);
 
 	/**
 	 * True when the canvas is showing the ways *out* of a conflict rather than
@@ -2592,7 +2648,14 @@ export function Studio({
 												// states would make one four-state button read the same
 												// as four machines.
 												scene.machines.length
-											: scene.constraints.length;
+											: p.id === "fonts"
+												? // Files, not families: the panel lists one row per
+													// file, and a Regular and a Bold are two rows and one
+													// typeface. Counting families would put a badge of 1
+													// over two rows, which is the badge disagreeing with
+													// the panel it sits on.
+													(scene.fonts?.length ?? 0)
+												: scene.constraints.length;
 							return (
 								<button
 									key={p.id}
@@ -2656,6 +2719,27 @@ export function Studio({
 								why={whyFor}
 								onSelectionChange={selectionIds}
 								derivedWears={answer?.wears}
+							/>
+						) : panel === "fonts" ? (
+							/*
+							 * The roster, and the one panel in the studio that takes no
+							 * picks, no pins and no why-probe — because there is nothing here
+							 * for any of them to be about. A font declaration reaches no
+							 * program: `Scene.fonts` is a list of records `compile.ts` never
+							 * opens, so adding a face mints no `alt/2`, no `pick/2` and zero
+							 * universes. What it takes instead is the two facts about the
+							 * *host* that no document can answer — which files the project
+							 * holds and which faces the browser has loaded — and the one fact
+							 * about the answer set that is worth a sentence rather than a
+							 * predicate.
+							 */
+							<Fonts
+								scene={scene}
+								onSceneChange={onSceneChange}
+								held={held}
+								ready={ready}
+								used={usedFaces}
+								onImported={setImported}
 							/>
 						) : panel === "machines" ? (
 							/*
@@ -2755,7 +2839,17 @@ export function Studio({
 					onChange={(next) => onSceneChange(() => next)}
 					error={error}
 					diagnostics={exploration?.diagnostics ?? ""}
-					approximations={exploration?.approximations ?? []}
+					// One band, three sources now. The tool's remarks about its own
+					// arithmetic, and beside them the typographic one: a family this page
+					// sets text in whose file the project does not hold. Same `info:`
+					// voice and same count, because a reader's question is the same one —
+					// is anything about this design quietly not what it looks like — and
+					// this one has the sharpest answer of the three: those boxes are
+					// hugging a face the document does not name.
+					approximations={[
+						...(exploration?.approximations ?? []),
+						...faceNotes,
+					]}
 					universes={universes}
 					projectName={projectName}
 					posters={posters}

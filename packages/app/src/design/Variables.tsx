@@ -17,6 +17,7 @@ import {
 
 import { Styles } from "./Styles";
 import { ValueEditor, type WhyRow } from "./ValueEditor";
+import { fontMenu } from "./fontFiles";
 import { documentUnit } from "./lengths";
 import styles from "./Variables.module.css";
 
@@ -184,6 +185,11 @@ export function Variables({
 							// other length the editor shows — see `lengths.ts`.
 							unit={documentUnit(scene)}
 							fallback={VALUE_TYPES[token.type].fallback}
+							// A `font` token's own definition is a font row like any other:
+							// "the display face is Inter or Fraunces" is two families this
+							// project holds, and a menu that offered only the four system
+							// stacks would be the one place a designer could not spell it.
+							options={fontMenu(scene, token.type)}
 							active={picks[variable]}
 							varying={varying.has(variable)}
 							reachable={reach?.[variable]}

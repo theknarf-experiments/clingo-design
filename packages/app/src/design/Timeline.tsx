@@ -54,6 +54,7 @@ import {
 
 import { ValueEditor } from "./ValueEditor";
 import { cx } from "./cx";
+import { fontMenu } from "./fontFiles";
 import styles from "./Timeline.module.css";
 
 /**
@@ -267,6 +268,10 @@ function KeyRow({
 					unit={unit}
 					fallback={fallback}
 					names={names}
+					// A keyframe on a `fontFamily` track holds a stack, so it gets the
+					// project's menu for the reason every other font row does: the value
+					// a designer wants to tween to is one of the families this page has.
+					options={fontMenu(scene, type)}
 					active={picks[valueVar]}
 					varying={varying.has(valueVar)}
 					pinned={pins[valueVar]}

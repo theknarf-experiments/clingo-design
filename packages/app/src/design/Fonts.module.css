@@ -1,0 +1,234 @@
+.fonts {
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+}
+
+/* Three groups, and each one is a different question — what this page may use,
+   what the project already holds, and how to add one — so each gets a heading
+   rather than being run into one list. Matched to `Variables.module.css`'s
+   section head, because two panels' headings that are nearly the same read as a
+   mistake. */
+.section {
+	margin: 0.5rem 0 0;
+	font-size: 0.7rem;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	opacity: 0.5;
+}
+
+.tally {
+	margin: 0;
+	font-size: 0.68rem;
+	opacity: 0.45;
+}
+
+.empty {
+	margin: 0;
+	font-size: 0.78rem;
+	line-height: 1.4;
+	opacity: 0.5;
+}
+
+.hint {
+	margin: 0;
+	font-size: 0.72rem;
+	line-height: 1.45;
+	opacity: 0.5;
+}
+
+.face {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding: 0.35rem;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 6px;
+}
+
+.faceHead {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.family {
+	flex: 1;
+	min-width: 0;
+	padding: 0.15rem 0.3rem;
+	font: inherit;
+	font-size: 0.78rem;
+	color: inherit;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+}
+
+.family:focus {
+	background: var(--dc-sunken, transparent);
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+.remove {
+	flex: none;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	font: inherit;
+	line-height: 1;
+	color: inherit;
+	opacity: 0.4;
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.remove:hover {
+	opacity: 1;
+	color: #dc2626;
+}
+
+.fileLine {
+	display: flex;
+	align-items: baseline;
+	gap: 0.35rem;
+	font-size: 0.66rem;
+	opacity: 0.6;
+}
+
+.fileName {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.bytes {
+	flex: none;
+	font-variant-numeric: tabular-nums;
+}
+
+.tag {
+	flex: none;
+	opacity: 0.7;
+}
+
+/* A file that is not coming, said where somebody can do something about it.
+   The same red the delete button takes on hover, because both are "this is the
+   part that is wrong". */
+.bad {
+	flex: none;
+	color: #dc2626;
+	opacity: 0.9;
+}
+
+.note {
+	margin: 0;
+	font-size: 0.7rem;
+	line-height: 1.45;
+	opacity: 0.6;
+}
+
+.descriptors {
+	display: flex;
+	gap: 0.35rem;
+}
+
+.field {
+	display: flex;
+	flex: 1;
+	align-items: center;
+	gap: 0.25rem;
+	min-width: 0;
+}
+
+.fieldLabel {
+	flex: none;
+	font-size: 0.62rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.45;
+}
+
+.text,
+.choice {
+	flex: 1;
+	min-width: 0;
+	padding: 0.1rem 0.25rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	background: transparent;
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.text:focus,
+.choice:focus {
+	border-color: var(--dc-accent);
+	outline: none;
+}
+
+.axes {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.64rem;
+	opacity: 0.5;
+}
+
+/* The strip is the whole argument for the weight field being editable: four
+   weights of the family's own name, in the stack a value would write, so a
+   descriptor that is wrong in either direction is wrong on screen. It wraps
+   rather than scrolling, because a family name can be long and a strip that
+   scrolled sideways would hide the very weight somebody was checking. */
+.preview {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem;
+	align-items: baseline;
+	padding-top: 2px;
+}
+
+.sample {
+	font-size: 0.95rem;
+	line-height: 1.3;
+}
+
+.spare {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+	font-size: 0.7rem;
+}
+
+.add {
+	flex: none;
+	padding: 0.1rem 0.3rem;
+	font: inherit;
+	font-size: 0.68rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.add:disabled {
+	cursor: default;
+	opacity: 0.4;
+}
+
+.upload {
+	display: block;
+}
+
+.file {
+	width: 100%;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+}
