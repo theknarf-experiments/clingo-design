@@ -478,6 +478,47 @@ export function addImage(
 	return addNodeTo(scene, parentId, node, picks);
 }
 
+/**
+ * Place an instance of a component that lives in its own document.
+ *
+ * The twin of {@link addInstance}, which places beside the definition because
+ * the definition is a subtree of the same page. A definition kept in its own
+ * document is on nobody's page — it is spliced in hidden — so there is nothing
+ * to place beside, and the instance goes where the person is looking instead.
+ *
+ * `instanceOf` is the **path**, not the id the composition derives. The document
+ * stores which component this is; the id is a fact about one composed scene and
+ * would be a reference that broke the moment the file was renamed.
+ *
+ * Sized from the definition's own box, so an instance arrives the size the
+ * component is rather than a size this file invented — the same rule an imported
+ * image and an imported mesh follow.
+ */
+export function placeInstance(
+	scene: Scene,
+	path: string,
+	definition: SceneNode,
+	at: Point,
+	parentId: string | null,
+	picks: Picks = {},
+): { scene: Scene; id: string } {
+	const box = frameOf(definition, sceneContext(scene, picks));
+	const node: SceneNode = {
+		...makeNode(
+			"instance",
+			{
+				x: at.x - box.width / 2,
+				y: at.y - box.height / 2,
+				width: box.width,
+				height: box.height,
+			},
+			{ name: definition.name },
+		),
+		instanceOf: path,
+	};
+	return { scene: addNodeTo(scene, parentId, node, picks), id: node.id };
+}
+
 export function addNode(scene: Scene, node: SceneNode): Scene {
 	return { ...scene, nodes: [...scene.nodes, node] };
 }

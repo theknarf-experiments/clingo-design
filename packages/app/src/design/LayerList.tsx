@@ -18,6 +18,21 @@ import { cx } from "./cx";
 
 export interface LayerListProps {
 	scene: Scene;
+	/**
+	 * Node ids to leave out of the list entirely.
+	 *
+	 * One caller and one reason: a component that lives in its own document is
+	 * spliced into the scene so the compiler can see it, and it is not part of
+	 * this page. It is drawn on nobody's canvas and it belongs in the Components
+	 * panel, so listing it here would put a layer in every page that uses the
+	 * component and invite somebody to drag it.
+	 *
+	 * Ids rather than a predicate on the node, because "is this one of ours" is a
+	 * question only the store can answer — it composed the scene and knows which
+	 * ids it derived. A `component === true` test here would also hide the
+	 * definitions three templates draw on purpose.
+	 */
+	skip?: ReadonlySet<string>;
 	selection: ReadonlySet<string>;
 	onSelectionChange: (ids: string[]) => void;
 	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
@@ -112,6 +127,7 @@ interface Drop {
  */
 export function LayerList({
 	scene,
+	skip,
 	selection,
 	onSelectionChange,
 	onSceneChange,
@@ -169,7 +185,13 @@ export function LayerList({
 			collectDerived(node.id, depth + 1);
 		});
 	};
-	collect(scene.nodes, 0, null);
+	collect(
+		skip && skip.size > 0
+			? scene.nodes.filter((n) => !skip.has(n.id))
+			: scene.nodes,
+		0,
+		null,
+	);
 	collectDerived(null, 0);
 
 	const defs = componentDefs(scene);

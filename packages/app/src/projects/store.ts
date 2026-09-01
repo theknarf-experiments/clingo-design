@@ -11,7 +11,14 @@ import {
 	serverConnected,
 } from "@clingo-design/vfs";
 import {
+	COMPONENT_TYPE,
 	type Scene,
+	type SceneNode,
+	componentIdOf,
+	componentName,
+	componentPath,
+	composeLibrary,
+	decomposeLibrary,
 	emptyScene,
 	normalizeScene,
 	reconcile,
@@ -276,6 +283,45 @@ entries = listProjects();
 ready = true;
 
 /* ------------------------------------------------------------------ */
+/* The component library                                               */
+/* ------------------------------------------------------------------ */
+
+/** What a component document holds, beside the datatype tag the vfs writes. */
+interface ComponentDoc {
+	node: SceneNode;
+}
+
+/**
+ * Every component document a project holds, by path.
+ *
+ * Read fresh from the handles rather than cached, because it is read on the way
+ * to *and* from every edit — see the compose/decompose pair — and a cache with
+ * two readers on a hot path is a cache that has to be invalidated correctly on
+ * a structural change. The handles are already loaded and `doc()` is a property
+ * read; the walk is over the number of components a project has.
+ */
+/**
+ * Projects open this session, synchronously.
+ *
+ * `open` holds promises because opening is asynchronous; this holds the results,
+ * because {@link saveScene} runs on every keystroke and cannot await. Filled in
+ * as each one resolves — the same split `pages` makes and for the same reason.
+ */
+const opened = new Map<string, VfsProject>();
+
+function libraryOf(p: VfsProject): Record<string, SceneNode> {
+	const out: Record<string, SceneNode> = {};
+	for (const path of p.pathsOfType(COMPONENT_TYPE)) {
+		const node = p.docAt<ComponentDoc>(path)?.doc()?.node;
+		// A document with no definition in it is one being created, or one written
+		// by something else. It is skipped rather than defaulted: a component with
+		// no root would splice an undefined node into the scene.
+		if (node) out[path] = node;
+	}
+	return out;
+}
+
+/* ------------------------------------------------------------------ */
 /* Opening                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -323,6 +369,7 @@ function project(url: string): Promise<VfsProject> {
 	const existing = open.get(url);
 	if (existing) return existing;
 	const opening = openProject(url, targetFor(url)).then((p) => {
+		opened.set(url, p);
 		// The document's title is authoritative; the registry caches it. Opening a
 		// url someone shared is also what adds it to this device's list.
 		upsertProject(url, { name: p.name() });
@@ -473,7 +520,12 @@ export function useProject(
 					// with two people, is an edit that conflicts with theirs.
 					const doc = handle.doc();
 					setState({
-						scene: normalizeScene(doc?.scene),
+						// Composed on the way out: the definitions live in their own
+						// documents and everything downstream — the compiler, the
+						// canvas, the layer list — expects them to be nodes in the
+						// scene. `saveScene` takes them back out again, and the pair is
+						// the whole of how a component is shared between pages.
+						scene: composeLibrary(normalizeScene(doc?.scene), libraryOf(p)),
 						name: p.name(),
 					});
 				};
@@ -556,9 +608,36 @@ export function deleteProject(url: string): void {
 export function saveScene(url: string, scene: Scene, path = MAIN_PAGE): void {
 	const handle = pages.get(pageKey(url, path));
 	if (!handle) return;
+	const p = opened.get(url);
+	const library = p ? libraryOf(p) : {};
 	let changed = false;
+
+	// An edit to a spliced definition goes back to **its own document**, not to
+	// the page the person happened to be looking at. That is what makes a
+	// component one thing: editing it from any page changes it everywhere, which
+	// is the behaviour, and writing it into the page instead would be the silent
+	// copy the compose/decompose pair exists to prevent.
+	//
+	// Before the page is written, so that a save which touches both leaves the
+	// two documents agreeing rather than half-updated if the second throws.
+	if (p) {
+		for (const [componentPathOf, definition] of Object.entries(library)) {
+			const id = componentIdOf(componentPathOf);
+			const edited = scene.nodes.find((n) => n.id === id && n.component === true);
+			if (!edited) continue;
+			const doc = p.docAt<ComponentDoc>(componentPathOf);
+			doc?.change((draft) => {
+				// Reconciled against the definition as its document holds it — with
+				// the id and the `hidden` the composition added stripped back off,
+				// since both are derived and neither belongs in the document.
+				const { id: _spliced, hidden: _added, ...rest } = edited;
+				if (reconcile(draft.node, { ...rest, id: definition.id })) changed = true;
+			});
+		}
+	}
+
 	handle.change((draft) => {
-		changed = reconcile(draft.scene, scene);
+		if (reconcile(draft.scene, decomposeLibrary(scene, library))) changed = true;
 	});
 	// The registry's timestamp, not the document's: "edited 20 minutes ago" is a
 	// fact about this device's list and the document has no field for it.
@@ -596,7 +675,16 @@ export function sameHeads(a: Heads | null, b: Heads | null): boolean {
 /** The scene as its document currently holds it. */
 export function sceneOf(url: string, path = MAIN_PAGE): Scene | null {
 	const doc = pages.get(pageKey(url, path))?.doc();
-	return doc?.scene ? normalizeScene(doc.scene) : null;
+	if (!doc?.scene) return null;
+	// Composed, like `useProject` — and this is the one that is easy to forget,
+	// because it is not what anybody *looks* at. It is the base every edit is
+	// applied to: `useProjectHistory` reads it, hands it to the caller's function
+	// and saves the result. Left uncomposed, an edit would be computed against a
+	// scene with no component definitions in it while the canvas showed one with
+	// them, so anything referring to a definition would silently do nothing —
+	// which is exactly how placing an instance failed.
+	const p = opened.get(url);
+	return composeLibrary(normalizeScene(doc.scene), p ? libraryOf(p) : {});
 }
 
 export function headsOf(url: string, path = MAIN_PAGE): Heads | null {
@@ -608,12 +696,127 @@ export function sceneAt(url: string, heads: Heads, path = MAIN_PAGE): Scene | nu
 	const handle = pages.get(pageKey(url, path));
 	if (!handle) return null;
 	try {
-		return normalizeScene(handle.view(heads).doc()?.scene);
+		const p = opened.get(url);
+		// Composed for the reason `sceneOf` is: undo writes an old scene forward as
+		// a new change, so what comes back here is saved, and a scene that lost its
+		// definitions on the way through undo would lose the instances' meaning
+		// with it.
+		return composeLibrary(
+			normalizeScene(handle.view(heads).doc()?.scene),
+			p ? libraryOf(p) : {},
+		);
 	} catch {
 		// Heads from a document this page no longer is — a project reopened, or a
 		// view asked for after the handle was dropped.
 		return null;
 	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Components                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Every component in the project, by name.
+ *
+ * Read off the tree like the pages are, and for the same reason: the documents
+ * are the list, so an index beside them would be a second answer that could
+ * disagree.
+ */
+export function useComponents(url: string | undefined): string[] {
+	const [names, setNames] = useState<string[]>([]);
+
+	useEffect(() => {
+		if (!url) {
+			setNames([]);
+			return;
+		}
+		let alive = true;
+		let stop: (() => void) | undefined;
+		void project(url).then((p) => {
+			if (!alive) return;
+			const read = () =>
+				setNames(p.pathsOfType(COMPONENT_TYPE).map(componentName).sort());
+			read();
+			stop = p.subscribe(read);
+		});
+		return () => {
+			alive = false;
+			stop?.();
+		};
+	}, [url]);
+
+	return names;
+}
+
+/**
+ * One component's definition, as its document holds it.
+ *
+ * Synchronous, and read straight from the library rather than from a composed
+ * scene — because the caller that needs it is *placing the first instance*, and
+ * `composeLibrary` splices only what a scene already references. A component
+ * nobody has used yet is in no scene, which is exactly when this is asked.
+ *
+ * That laziness is deliberate and worth keeping: a design system with fifty
+ * components would otherwise put fifty hidden definitions into every page's
+ * program, and grounding would pay for all of them on every solve.
+ */
+export function componentDefinition(
+	url: string,
+	path: string,
+): SceneNode | undefined {
+	const p = opened.get(url);
+	return p ? libraryOf(p)[path] : undefined;
+}
+
+/**
+ * Turn a node into a component of its own, and answer where it went.
+ *
+ * The subtree is **moved**, not copied: it leaves the page and becomes the
+ * document, and what stays behind is an instance of it in the same place. That
+ * is what "make this a component" means everywhere else, and the alternative —
+ * leaving the original behind beside a new instance — is two of the thing on the
+ * canvas and a designer wondering which one is real.
+ *
+ * Uniquified like a page, because two components at one path are one document
+ * and `createDoc` refuses to overwrite, so the second would silently not be
+ * created.
+ */
+export async function extractComponent(
+	url: string,
+	node: SceneNode,
+	name = node.name,
+): Promise<string> {
+	const p = await project(url);
+	const taken = new Set(p.pathsOfType(COMPONENT_TYPE).map(componentName));
+	let chosen = name.trim() || "Component";
+	for (let n = 2; taken.has(chosen); n++) chosen = `${name} ${n}`;
+	const path = componentPath(chosen);
+	// The definition keeps the node's own id inside its document: it is the root
+	// of its own tree there, and the id the composition gives it on the way into a
+	// scene is derived from the path rather than from this.
+	p.createDoc<ComponentDoc>(path, COMPONENT_TYPE, {
+		node: { ...node, component: true },
+	});
+	upsertProject(url, { updatedAt: Date.now() });
+	publish();
+	return path;
+}
+
+/**
+ * Delete a component document.
+ *
+ * The uses are left alone, dangling, and that is deliberate: a dangling
+ * `instanceOf` derives nothing, so the pages that used it still open and the
+ * instances are still there to be repointed or removed. Silently deleting
+ * somebody's instances because they deleted a definition would be a much larger
+ * edit than the one they asked for.
+ */
+export async function deleteComponent(url: string, name: string): Promise<void> {
+	const p = await project(url);
+	p.deletePath(componentPath(name));
+	upsertProject(url, { updatedAt: Date.now() });
+	publish();
 }
 
 /* ------------------------------------------------------------------ */

@@ -25,13 +25,15 @@ import {
 	type RuledLine,
 	ruledLines,
 	type Scene,
+	type SceneNode,
 	type Universe,
 	addConstraint,
 	addInstance,
 	addImage,
+	componentIdOf,
+	componentPath,
 	addImport,
 	addPivot,
-	defineComponent,
 	deleteNodes,
 	distributeNodes,
 	duplicateNodes,
@@ -64,6 +66,9 @@ import {
 	placedNodes,
 	reachableAlternatives,
 	frameAt,
+	frameOf,
+	findInTree,
+	placeInstance,
 	sceneContext,
 	shownState,
 	shownStates,
@@ -105,6 +110,12 @@ import { Machines } from "./Machines";
 import { ProgramPanel } from "./ProgramPanel";
 import { PanelResizer, usePanelWidth } from "./PanelResizer";
 import { Rulers } from "./Rulers";
+import {
+	componentDefinition,
+	extractComponent,
+	useComponents,
+} from "../projects/store";
+import { Components } from "./Components";
 import { Pages } from "./Pages";
 import { ShapePicker } from "./ShapePicker";
 import { SyncSettings } from "./SyncSettings";
@@ -1316,6 +1327,7 @@ export function Studio({
 	const [imported, setImported] = useState<{ name: string; lost: string[] } | null>(
 		null,
 	);
+	const componentNames = useComponents(projectUrl);
 
 	/**
 	 * Bring a glTF into a view: pick a file, parse it, put it in the tree, make
@@ -1472,6 +1484,92 @@ export function Studio({
 		input.click();
 	}, [onSceneChange, picks, region, context, primary?.solved]);
 
+	/**
+	 * Move the selected node into its own document and leave an instance of it.
+	 *
+	 * Moved rather than copied, which is what "make this a component" means
+	 * everywhere else: leaving the original beside a new instance would be two of
+	 * the thing on the canvas and nobody able to say which is real.
+	 *
+	 * The order matters and is the same order the two imports use. The document
+	 * is written first, then the page is edited — so a failure leaves a component
+	 * nothing points at, which is inert and gets tidied, rather than an instance
+	 * pointing at a document that was never created, which draws nothing and
+	 * looks like a bug.
+	 */
+	const extractInto = useCallback(
+		(node: SceneNode) => {
+			// A definition already in its own document is spliced in hidden, and one
+			// drawn on a page is a definition already. Neither is something to
+			// extract again.
+			if (!projectUrl || node.component === true) return;
+			void extractComponent(projectUrl, node).then((path) => {
+				onSceneChange((prev) => {
+					const at = frameOf(node, sceneContext(prev, picks));
+					const parent = parentOf(prev.nodes, node.id)?.id ?? null;
+					const without = deleteNodes(prev, [node.id]);
+					return placeInstance(
+						without,
+						path,
+						node,
+						{ x: at.x + at.width / 2, y: at.y + at.height / 2 },
+						parent,
+						picks,
+					).scene;
+				});
+			});
+		},
+		[projectUrl, picks, onSceneChange],
+	);
+
+	/** The panel's +, which acts on the selection rather than on a right-click. */
+	const extractSelection = useCallback(() => {
+		if (selection.size !== 1) return;
+		const node = findInTree(scene.nodes, [...selection][0]);
+		if (node) extractInto(node);
+	}, [selection, scene, extractInto]);
+
+	/** Put an instance of a component in the middle of what is on screen. */
+	const placeComponentHere = useCallback(
+		(path: string) => {
+			const centre = {
+				x: region.x + region.width / 2,
+				y: region.y + region.height / 2,
+			};
+			// From the library rather than from the scene: composition splices only
+			// what a scene already references, so the first instance of a component
+			// is placed at a moment when its definition is in no scene at all.
+			const definition = projectUrl
+				? componentDefinition(projectUrl, path)
+				: undefined;
+			if (!definition) return;
+			onSceneChange((prev) => {
+				return placeInstance(
+					prev,
+					path,
+					definition,
+					centre,
+					frameAt(prev.nodes, centre, primary?.solved ?? {}, context)?.node.id ?? null,
+					picks,
+				).scene;
+			});
+		},
+		[onSceneChange, picks, region, context, primary?.solved, projectUrl],
+	);
+
+	/**
+	 * The ids `composeLibrary` spliced into this scene.
+	 *
+	 * Derived from the component list rather than sniffed out of the scene,
+	 * because the derivation is the store's and a second reading of it here could
+	 * disagree — and the way it would disagree is by hiding a definition a
+	 * template drew on purpose.
+	 */
+	const librarySplices = useMemo(
+		() => new Set(componentNames.map((name) => componentIdOf(componentPath(name)))),
+		[componentNames],
+	);
+
 	const selectedGroups = [...selection].filter((id) => {
 		const node = byId.get(id);
 		return node !== undefined && wrapsChildren(node);
@@ -1503,9 +1601,21 @@ export function Studio({
 		KINDS[componentTarget.kind].container &&
 		!componentTarget.component;
 
+	/**
+	 * The context menu's route to the same thing the panel's + does.
+	 *
+	 * It used to call `defineComponent`, which marks a subtree `component: true`
+	 * where it stands — a definition that belongs to the page it was drawn on and
+	 * can only be used there. A component is its own document now, so both routes
+	 * lead to `extractComponent` and there is one meaning of the word in the app.
+	 *
+	 * `defineComponent` is still in `edits.ts` and still what three templates
+	 * ship: a definition drawn on a page remains legal and still resolves. What
+	 * changed is what this button makes.
+	 */
 	function makeComponent() {
 		if (!componentTarget) return;
-		onSceneChange((prev) => defineComponent(prev, componentTarget.id));
+		extractInto(componentTarget);
 	}
 
 	function menuItems(): Array<MenuItem | "separator"> {
@@ -1912,8 +2022,17 @@ export function Studio({
 					{projectUrl && onOpenPage ? (
 						<Pages url={projectUrl} active={activePage} onOpen={onOpenPage} />
 					) : null}
+					{projectUrl ? (
+						<Components
+							url={projectUrl}
+							canExtract={selection.size === 1}
+							onExtract={extractSelection}
+							onPlace={placeComponentHere}
+						/>
+					) : null}
 					<LayerList
 						scene={scene}
+						skip={librarySplices}
 						selection={selection}
 						onSelectionChange={selectionIds}
 						onSceneChange={onSceneChange}
