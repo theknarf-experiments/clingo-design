@@ -6,6 +6,14 @@
 	/* A document never inherits the app's theme. What it does inherit is
 	   DOCUMENT_BASE, applied inline — the exporter needs the same declarations
 	   and a stylesheet is not somewhere it can read them from. */
+
+	/* And it never composites against the app either. A mix mode blends with
+	   everything painted below it in the nearest isolation group, and without one
+	   that group is the studio: a multiplying card would darken against the
+	   canvas's own background, which is not in the design and not in the exported
+	   file. `.design` in BASE_CSS carries the same declaration for the same
+	   sentence — the export's group is the page it was pasted into. */
+	isolation: isolate;
 }
 
 .node {
@@ -33,10 +41,19 @@
 	 * writing a translate here would mean keeping a second account of where every
 	 * node is. Listing it costs nothing and means the two files agree about what
 	 * a state may move.
+	 *
+	 * The two gradient colours are in the list and the gradient's *direction* is
+	 * not, which is the same split the exported file makes in `tweenedKeys`:
+	 * `--gfrom` and `--gto` are registered custom properties with a `<color>`
+	 * syntax, so a browser interpolates them, while CSS swaps one background
+	 * image for another at the halfway point however long the transition says.
+	 * Listing `background-image` would spend frames on a cut. A change of colour
+	 * is smooth here and in the file; a change of direction is a cut in both.
 	 */
 	transition-property: left, top, width, height, transform, background-color,
 		color, border-color, border-width, border-radius, opacity, box-shadow,
-		font-size, font-weight, letter-spacing;
+		font-size, font-weight, letter-spacing, filter, backdrop-filter, --gfrom,
+		--gto;
 	transition-duration: var(--dc-play-duration, 0ms);
 	/* No clamp, deliberately: a negative delay starts the move partway through,
 	   which is the one motion setting a document may legitimately write negative

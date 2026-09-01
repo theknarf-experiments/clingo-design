@@ -32,6 +32,8 @@ import {
 	unitOf,
 } from "./units.ts";
 import {
+	GRADIENT_FROM,
+	GRADIENT_TO,
 	type Picks,
 	type ResolveContext,
 	type Token,
@@ -129,6 +131,29 @@ export type PropName =
 	| "weight"
 	| "lineHeight"
 	| "align"
+	// The paint layer above a fill. Four features, six names, and every one of
+	// them an ordinary property holding an ordinary Value — see
+	// `docs/framer-paint-spec.md`. What makes them work is that CSS already
+	// composes a colour, an image, a filter and a blend mode on one box, so four
+	// independent one-property-to-declarations entries produce a layered result
+	// that no single property could, and nothing in `compile.ts` had to hear
+	// about any of it.
+	//
+	// `mix` is deliberately not called `blend`: `Blend`, `BlendKind`,
+	// `BLEND_KINDS`, `BlendStop` and `mblend/3` are the machine model's mixing of
+	// *timelines* by a number input, and they were here first; one word for two
+	// unrelated things is a word that stops meaning either. `blur`, on the other
+	// hand, *is* shared with {@link Trigger}'s eighth member, and that is allowed
+	// because the two can never occupy the same argument position —
+	// `rendered(N,blur,L)` against `mtrigger(M,T,blur)` — and because the one
+	// screen that could have shown both words is fixed by a label rather than by
+	// a rename: this row reads "Layer blur" and the trigger reads "Blurred".
+	| "gradient"
+	| "gradientFrom"
+	| "gradientTo"
+	| "blur"
+	| "backdropBlur"
+	| "mix"
 	// From here down: the properties of a thing in three dimensions, plus the
 	// one CSS number that has nothing to do with the scene. See §1.2 of
 	// `docs/three-d-spec.md`, and note that colour is *reused* rather than
@@ -179,6 +204,32 @@ export interface PropSpec {
 	 * the answer is a fact about the property and belongs beside it.
 	 */
 	inherited: boolean;
+	/**
+	 * The property this one is a detail of: the inspector shows this row only
+	 * when the node holds a value for that one.
+	 *
+	 * **Optional, unlike {@link styleable} and {@link inherited}, and the
+	 * asymmetry is the point.** Those two are required because every property has
+	 * an answer and a missing one is a decision nobody made. This one has a
+	 * default that *is* an answer — a property that stands on its own stands on
+	 * its own — so absent means something, and forcing twenty-odd entries to say
+	 * `needs: undefined` would be noise that taught nothing.
+	 *
+	 * It exists for one shape and says so: {@link PROPS.gradientFrom} and
+	 * {@link PROPS.gradientTo} are two colours that paint nothing at all until a
+	 * direction has been chosen, and a rect's Appearance list is twelve rows long
+	 * without them being two of the twelve on every box ever drawn.
+	 *
+	 * **A claim about the inspector's layout and nothing else.** The value stays
+	 * in the document when the row goes away, a style may still decide it, a
+	 * machine state may still repaint it, a rule may still name it, and the
+	 * exporter still writes it. A hidden row is a row not shown, not a property
+	 * switched off — which is why the test is "does the node hold a value for
+	 * `needs`" rather than "does that value resolve to something": a designer
+	 * flipping between directions and `none` must not have the two colour rows
+	 * blink out from under the cursor.
+	 */
+	needs?: PropName;
 }
 
 export const PROPS: Record<PropName, PropSpec> = {
@@ -296,6 +347,190 @@ export const PROPS: Record<PropName, PropSpec> = {
 		fallback: VALUE_TYPES.align.fallback,
 		styleable: true,
 		inherited: true,
+	},
+	/**
+	 * Which way a gradient runs, as the whole `background-image` it becomes.
+	 *
+	 * The direction is a closed menu and the colours are two properties of their
+	 * own, which is the split the whole feature turns on — see §1 of
+	 * `docs/framer-paint-spec.md`. A roster of complete gradient strings, the way
+	 * {@link shadow} is a roster of complete declarations, would have frozen
+	 * somebody else's palette into the menu: a gradient is made of the design's
+	 * own colours, and a shadow is not made of anything.
+	 *
+	 * `styleable` because a gradient is treatment in the plainest sense — "the
+	 * cards all carry the brand sheen" is one decision several nodes wear, and it
+	 * is precisely a style's job to hold it. `inherited` false because
+	 * `background-image` does not inherit in CSS, so a node that says nothing
+	 * about it takes nothing from its surroundings and the document has no
+	 * obligation to declare it. (The two custom properties it *reads* are a
+	 * different question, answered on {@link gradientFrom} below.)
+	 */
+	gradient: {
+		label: "Gradient",
+		type: "gradient",
+		fallback: VALUE_TYPES.gradient.fallback,
+		styleable: true,
+		inherited: false,
+	},
+	/**
+	 * The colour a gradient starts from, and the colour it ends at.
+	 *
+	 * Ordinary `color` properties, which is the entire point: they take a token,
+	 * they hold alternatives, they follow a style variant, a state repaints them
+	 * and a keyframe tweens them, and none of that needed a line of new code.
+	 * What they paint is a *custom property* rather than a declaration —
+	 * `--gfrom` and `--gto`, which the recipes in `VALUE_TYPES.gradient` name —
+	 * because CSS has no way to say "the second colour of the background image"
+	 * and this is the way it has instead.
+	 *
+	 * `styleable` for {@link gradient}'s reason. `inherited` **false**, and this
+	 * is the one entry in the table where that claim needed something built to
+	 * make it true: an *unregistered* custom property inherits, so `--gfrom` set
+	 * on a frame would silently become the starting colour of every gradient
+	 * inside it, and `unset` in a state layer would resolve to the parent's
+	 * colour rather than to the default. `CUSTOM_PROPERTY_RULES` in `paint.ts`
+	 * registers both with `inherits: false`, which makes this column honest and —
+	 * a second win, and the reason the registration is worth its four lines —
+	 * makes the two colours *animatable*, since only a registered custom property
+	 * with a `<color>` syntax can be interpolated by a transition or a keyframe.
+	 *
+	 * Had it been `true`, the test that walks the inherited properties would have
+	 * demanded `--gfrom` in `DOCUMENT_BASE` — which declares it at the root and
+	 * does nothing whatsoever about a frame leaking its gradient colour into a
+	 * rect inside it. The registration is the mechanism; the column is the claim.
+	 *
+	 * The fallbacks are `GRADIENT_FROM` and `GRADIENT_TO`, which are the same two
+	 * constants the recipes and the registrations use. Three spellings of white
+	 * would be an inspector row that shows one colour beside a box that paints
+	 * another.
+	 */
+	gradientFrom: {
+		label: "Gradient from",
+		type: "color",
+		fallback: GRADIENT_FROM,
+		styleable: true,
+		inherited: false,
+		needs: "gradient",
+	},
+	gradientTo: {
+		label: "Gradient to",
+		type: "color",
+		fallback: GRADIENT_TO,
+		styleable: true,
+		inherited: false,
+		needs: "gradient",
+	},
+	/**
+	 * How far the node's own pixels are smeared — the CSS `filter`.
+	 *
+	 * Labelled "Layer blur" rather than "Blur", and that is not decoration:
+	 * `blur` is also {@link Trigger}'s eighth member, whose row reads "Blurred",
+	 * and a machine state's delta rows sit one screen from its trigger menu. Two
+	 * things may share a word when they can never occupy the same argument
+	 * position of the same predicate — which `rendered(N,blur,L)` and
+	 * `mtrigger(M,T,blur)` cannot, and this property's value is a length so
+	 * `word(L,blur)` is unreachable from it — and when no one panel shows both
+	 * words. The second half is what the label buys, for one string, and it pairs
+	 * with "Backdrop blur" besides.
+	 *
+	 * A `length`, so it is EMU like every other one: written with
+	 * {@link writeLength}, read with `emuOf`, shown in the document's unit by the
+	 * one length input, and reaching the program as a `numeral/2` in EMU so a
+	 * rule can say a blur is at most eight pixels — `:- rendered(N,blur,L),
+	 * numeral(L,V), V > 76200.` grounds today. A bare `number` was the tempting
+	 * alternative and is wrong: a blur radius is a distance on the page, it
+	 * should follow a `length` token beside a gap and a radius, and a document
+	 * measured in millimetres should read it out in millimetres.
+	 *
+	 * It blurs the node **and everything inside it**, because that is what a CSS
+	 * filter does, and it is also what a designer means by "blur this card". A
+	 * frame is the unit of "blur these things together"; a group is not, because
+	 * a group holds no properties at all — blurring several things together means
+	 * putting them in a frame, and giving a group paint would need an answer for
+	 * what happens to that paint when the group dissolves.
+	 *
+	 * It changes no layout and no hit area, and neither of those is a promise:
+	 * `MEASURED_PROPS` is a whitelist this is not on, and `hitTestTree` never
+	 * opens `props` at all. A filter does not change an element's border box by a
+	 * hair — the smear is painted outside it and participates in no layout — so
+	 * the canvas and the export agree about the box for free, because both are
+	 * asking a browser the same question.
+	 *
+	 * `styleable`: a frosted treatment is a treatment. `inherited` false: `filter`
+	 * does not inherit — it applies to the subtree by *painting* it, which is a
+	 * different mechanism and not one `DOCUMENT_BASE` has anything to say about.
+	 *
+	 * Clamped at zero where it is read, not here, for the reason {@link roughness}
+	 * is: see `blurFilter` in `paint.ts`, which is the one place both renderers
+	 * cross.
+	 */
+	blur: {
+		label: "Layer blur",
+		type: "length",
+		fallback: pxLength(8),
+		styleable: true,
+		inherited: false,
+	},
+	/**
+	 * How far *what is behind* the node is smeared — `backdrop-filter`, and the
+	 * whole of frosted glass.
+	 *
+	 * A separate property rather than a mode of {@link blur}, because they are two
+	 * CSS properties that compose: a card can blur its own contents *and* the
+	 * page behind it, and a boolean beside one number could not say that. They are
+	 * also offered on different kinds — a backdrop is the element's *box*, so on a
+	 * diagonal, a polygon or a paragraph it would frost a rectangle the document
+	 * does not contain, which is the argument `shadow` already makes — and a mode
+	 * would have had to be offered wherever either was legal.
+	 *
+	 * It shows nothing at all through an opaque node, which is a fact about CSS
+	 * and not a fault: something has to be see-through for there to be a backdrop.
+	 * Left as a fact rather than papered over with an automatic transparency,
+	 * because inventing an opacity nobody asked for is how a design tool starts
+	 * lying about the document.
+	 *
+	 * `styleable` and `inherited` as {@link blur}.
+	 */
+	backdropBlur: {
+		label: "Backdrop blur",
+		type: "length",
+		fallback: pxLength(12),
+		styleable: true,
+		inherited: false,
+	},
+	/**
+	 * How this node's colours meet what is painted behind it — `mix-blend-mode`.
+	 *
+	 * **Not `blend`.** `Blend`, `BlendKind`, `BLEND_KINDS` and `mblend/3` are the
+	 * machine model's mixing of timelines, and they were here first; one word for
+	 * two unrelated things is a word that stops meaning either. Rejected with it:
+	 * `blendMode` (still the taken word, and the machine panel would have "Blend"
+	 * and "Blend mode" three inches apart) and `composite` (the correct graphics
+	 * term and nobody's design vocabulary).
+	 *
+	 * `styleable` **true**, and the interesting comparison is with `opacity`,
+	 * which is not. The note on {@link PropSpec.styleable} rules `opacity` out
+	 * because it is a state a node is *in* rather than part of how it is drawn,
+	 * so a style that owned it would have to be duplicated to say "the same
+	 * treatment at half strength". A mix mode fails that test in both halves. It
+	 * is not a strength — there is no half a multiply — so no style ever has to
+	 * be duplicated for it; and "these chips all multiply over whatever they sit
+	 * on" is one sentence about how a family of things is drawn, which is a
+	 * style's definition.
+	 *
+	 * `inherited` false: `mix-blend-mode` does not inherit. What it *does* is form
+	 * a stacking context and blend within its isolation group, which is why both
+	 * renderers isolate the document: without an isolation group of its own, a
+	 * multiply near the top of the picture blends against the page the file was
+	 * pasted into.
+	 */
+	mix: {
+		label: "Mix",
+		type: "mix",
+		fallback: VALUE_TYPES.mix.fallback,
+		styleable: true,
+		inherited: false,
 	},
 	/**
 	 * Which primitive a `mesh` is.
@@ -589,12 +824,25 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		// a `rotateY` on a child mean anything, so it belongs to the surface the
 		// turned children sit on and nowhere else. Nothing on the canvas and
 		// nothing in the program reads it — see `PROPS.perspective`.
+		//
+		// **The gradient's three parts sit immediately after `fill`, and that is
+		// load-bearing rather than tidy.** `Declarations` is a plain object and
+		// `cssText` writes it in insertion order, and every walk that builds one
+		// iterates this list — so the order here *is* the declaration order in
+		// both renderers. `background-color` under `background-image` is CSS's own
+		// layering and is the whole of "two fills" this tool offers.
 		props: [
 			"fill",
+			"gradient",
+			"gradientFrom",
+			"gradientTo",
 			"radius",
 			"stroke",
 			"strokeWidth",
 			"shadow",
+			"blur",
+			"backdropBlur",
+			"mix",
 			"opacity",
 			"perspective",
 		],
@@ -614,7 +862,20 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	},
 	rect: {
 		label: "Rectangle",
-		props: ["fill", "radius", "stroke", "strokeWidth", "shadow", "opacity"],
+		props: [
+			"fill",
+			"gradient",
+			"gradientFrom",
+			"gradientTo",
+			"radius",
+			"stroke",
+			"strokeWidth",
+			"shadow",
+			"blur",
+			"backdropBlur",
+			"mix",
+			"opacity",
+		],
 		defaults: {
 			fill: [lit(PROPS.fill.fallback)],
 			radius: [lit(PROPS.radius.fallback)],
@@ -636,7 +897,19 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		// A corner radius on something with no corners says nothing, so fill is
 		// the whole of an ellipse's appearance.
 		label: "Ellipse",
-		props: ["fill", "stroke", "strokeWidth", "shadow", "opacity"],
+		props: [
+			"fill",
+			"gradient",
+			"gradientFrom",
+			"gradientTo",
+			"stroke",
+			"strokeWidth",
+			"shadow",
+			"blur",
+			"backdropBlur",
+			"mix",
+			"opacity",
+		],
 		defaults: { fill: [lit(PROPS.fill.fallback)] },
 		defaultSize: { width: fromPx(140), height: fromPx(140) },
 		drawable: true,
@@ -654,9 +927,13 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	line: {
 		// No shadow: a box-shadow follows the node's box, and for a stroked kind
 		// the box is only the rectangle the stroke happens to span — the shadow
-		// would outline a shape the document does not contain.
+		// would outline a shape the document does not contain. `backdropBlur` and
+		// `gradient` are out for exactly that argument and `blur` is in despite
+		// it: `filter: blur()` smears *the pixels the element painted*, so a
+		// blurred diagonal is a blurred diagonal, while a backdrop and a
+		// background are both the box.
 		label: "Line",
-		props: ["stroke", "strokeWidth", "opacity"],
+		props: ["stroke", "strokeWidth", "blur", "mix", "opacity"],
 		defaults: {
 			stroke: [lit(PROPS.stroke.fallback)],
 			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
@@ -676,7 +953,7 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	},
 	arrow: {
 		label: "Arrow",
-		props: ["stroke", "strokeWidth", "opacity"],
+		props: ["stroke", "strokeWidth", "blur", "mix", "opacity"],
 		defaults: {
 			stroke: [lit(PROPS.stroke.fallback)],
 			strokeWidth: [lit(PROPS.strokeWidth.fallback)],
@@ -698,8 +975,12 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		// Not a `shape`: the pen is a mode you stay in for several clicks, and
 		// hiding it behind the shape menu would hide the only tool that needs
 		// explaining.
+		// No gradient, and this is the one exclusion whose reason is a redirect
+		// rather than a box: a path's `fill` is taken to the polygon by
+		// `SHAPE_PAINT`, so a `background-image` on the box would paint a
+		// rectangle behind a shape the document does not contain.
 		label: "Path",
-		props: ["fill", "stroke", "strokeWidth", "opacity"],
+		props: ["fill", "stroke", "strokeWidth", "blur", "mix", "opacity"],
 		defaults: {
 			fill: [lit(PROPS.fill.fallback)],
 			stroke: [lit(PROPS.stroke.fallback)],
@@ -722,6 +1003,13 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 	},
 	text: {
 		label: "Text",
+		// `blur` and `mix` and no gradient: a filter smears the glyphs the node
+		// painted, which is a blurred paragraph, and a mix mode composites them,
+		// which is a paragraph knocked out of what is behind it. A gradient would
+		// need `background-clip: text` and a transparent `color` — two more
+		// declarations and a third property to switch them on, breaking the moment
+		// anything selects the text — and a backdrop is the box rather than the
+		// ink, so it would frost a rectangle the document does not contain.
 		props: [
 			"text",
 			"ink",
@@ -730,6 +1018,8 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 			"weight",
 			"lineHeight",
 			"align",
+			"blur",
+			"mix",
 			"opacity",
 		],
 		defaults: {
@@ -913,7 +1203,12 @@ export const KINDS: Record<NodeKind, KindSpec> = {
 		// never the aspect of the picture in it. No `fill` — an image *is* its
 		// pixels, and a colour behind them would only be seen through the
 		// letterboxing, which is a thing to notice rather than a thing to offer.
-		props: ["fit", "radius", "opacity"],
+		// No gradient for the same reason twice over, and no `backdropBlur`
+		// because a picture is opaque and covers its own backdrop — that row would
+		// be a control that changes the file and never the picture. `blur` and
+		// `mix` do both: a blurred photograph is a blurred photograph, and a
+		// multiplied one composites with the page.
+		props: ["fit", "radius", "blur", "mix", "opacity"],
 		defaults: {},
 		// Only ever seen by a node whose file went missing before it was placed:
 		// an import sizes the node to the picture's own dimensions.

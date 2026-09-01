@@ -23,7 +23,7 @@
 import type { Frame } from "./geometry.ts";
 import { KINDS, type Kinded, type NodeKind, PROPS, type PropName } from "./scene.ts";
 import { type Emu, cssPxFromEmu, emuOf } from "./units.ts";
-import { isLengthType } from "./values.ts";
+import { GRADIENT_FROM, GRADIENT_TO, isLengthType } from "./values.ts";
 
 /** CSS declarations, keyed the way the DOM keys them: `borderRadius`. */
 export type Declarations = Record<string, string>;
@@ -61,13 +61,108 @@ export const DOCUMENT_BASE: Declarations = {
 };
 
 /**
+ * A blur radius on its way into a filter function, never negative.
+ *
+ * `blur(-4px)` is not a length the function accepts, and an unparsable argument
+ * invalidates the *whole* declaration — so a designer who typed a minus sign
+ * would lose the blur rather than get none of it, which are two different
+ * pictures and only one of them is explicable. Clamping to zero says "no blur",
+ * which is what a negative radius means if it means anything.
+ *
+ * It arrives here already through {@link cssValue}, so it is pixels or it is a
+ * `var()`. A `var()` is passed through untouched and deliberately: what a token
+ * holds is not known here, it is resolved by the browser at computed-value time,
+ * and a wrapper that tried to guard it would have to invent a second
+ * substitution engine. A `length` token holding a negative number costs exactly
+ * this one declaration, on one node, and nothing else.
+ *
+ * The empty string is a caller and not a mistake: `tweenedKeys` calls every
+ * paint function with `""` purely to read back which CSS keys it writes, and
+ * `blur()` is a perfectly good nonsense value to throw away.
+ */
+const blurFilter = (value: string): string => {
+	if (value.startsWith("var(")) return value;
+	const n = Number.parseFloat(value);
+	return Number.isFinite(n) && n < 0 ? "0px" : value;
+};
+
+/**
+ * The two custom properties a gradient is made of, registered.
+ *
+ * Three things follow from `@property` and every one of them is load-bearing:
+ *
+ *   - **`inherits: false`.** An unregistered custom property inherits, which
+ *     would make a frame's gradient colour the starting colour of every gradient
+ *     inside it — a leak with no symptom, since the picture would simply be a
+ *     colour nobody chose. It is also what makes `PROPS.gradientFrom.inherited`
+ *     an honest `false` rather than a claim the table makes and the CSS breaks.
+ *   - **`initial-value`.** `diff` writes `unset` for a declaration a state layer
+ *     does not make, and `unset` on an *inheriting* custom property means
+ *     inherit — so without a registration, a state that stopped saying anything
+ *     about a gradient colour would take its parent's rather than the default's.
+ *   - **`syntax: "<color>"`.** Only a registered property with a real syntax can
+ *     be interpolated, so this is the line that makes a gradient's colours
+ *     genuinely *tween* through a transition or a `@keyframes` instead of
+ *     snapping at the halfway point. Its direction cannot, which is the loss the
+ *     export says out loud.
+ *
+ * A string rather than a rule in each renderer's stylesheet, for
+ * {@link DOCUMENT_BASE}'s reason exactly: the exporter needs these declarations
+ * and a CSS module is not somewhere it can read them from. The app renders it
+ * into a `<style>` at its *root* — not the studio's, because a presentation is a
+ * different route and would otherwise paint a gradient nobody chose — and the
+ * exporter concatenates it into `BASE_CSS`. One copy of the two initial colours,
+ * in `values.ts`, read by both.
+ */
+export const CUSTOM_PROPERTY_RULES = `@property --gfrom {
+	syntax: "<color>";
+	inherits: false;
+	initial-value: ${GRADIENT_FROM};
+}
+@property --gto {
+	syntax: "<color>";
+	inherits: false;
+	initial-value: ${GRADIENT_TO};
+}`;
+
+/**
  * How each property reaches CSS.
  *
  * Keyed by property rather than by node kind, so a renderer follows
  * `KINDS[kind].props` and a new kind needs no change here at all.
  */
 export const PAINT: Partial<Record<PropName, (value: string) => Declarations>> = {
-	fill: (value) => ({ background: value }),
+	/**
+	 * A longhand, and it used to be the `background` shorthand.
+	 *
+	 * That was harmless for exactly as long as nothing else wrote a
+	 * `background-image`, because a shorthand resets every longhand it covers. A
+	 * gradient writes one, and the reset then has three ways to erase it, only
+	 * the first of which an ordering could fix: `paintOf` walks
+	 * `KINDS[kind].props` so the fill lands before the image and the gradient
+	 * survives — until somebody sorts the list — but `diff` and `copyPaint`
+	 * cannot be fixed that way at all. A machine state that repaints *only* the
+	 * fill emits the single declaration `background: #1d4ed8`, it cascades after
+	 * the base rule, and the card's sheen vanishes on hover and comes back on the
+	 * way out. Nothing about that reads as a shorthand.
+	 *
+	 * Nothing was lost with it: no entry in this table ever set a background
+	 * position, repeat or size, and `transition: background-color` is what a
+	 * browser wants to interpolate anyway.
+	 */
+	fill: (value) => ({ backgroundColor: value }),
+	// The gradient's three parts. `background-image` over the fill's
+	// `background-color` is CSS's own layering, and it is the whole of "two
+	// fills" this tool offers — `docs/framer-paint-spec.md` §9 recommends against
+	// the general case and says what this buys instead.
+	gradient: (value) => ({ backgroundImage: value }),
+	// A custom property, because CSS has no name for "the second colour of the
+	// background image". {@link cssName} already leaves a `--custom` alone and
+	// React already writes one out of a style object, so this needed nothing
+	// built — and `--gfrom: var(--brand)` is the design system reaching the file
+	// rather than a number that used to be one.
+	gradientFrom: (value) => ({ "--gfrom": value }),
+	gradientTo: (value) => ({ "--gto": value }),
 	radius: (value) => ({ borderRadius: value }),
 	// A stroke on a box is a border. The stroked kinds draw an SVG instead and
 	// override this — see {@link INHERITED_STROKE}. Both halves declare the
@@ -75,6 +170,12 @@ export const PAINT: Partial<Record<PropName, (value: string) => Declarations>> =
 	stroke: (value) => ({ borderColor: value, borderStyle: "solid" }),
 	strokeWidth: (value) => ({ borderWidth: value, borderStyle: "solid" }),
 	shadow: (value) => ({ boxShadow: value }),
+	// The two blurs. The clamp is inside {@link blurFilter} rather than at each
+	// call site for `roughness`' reason: two clamps is two answers, and only one
+	// of them can be checked headless.
+	blur: (value) => ({ filter: `blur(${blurFilter(value)})` }),
+	backdropBlur: (value) => ({ backdropFilter: `blur(${blurFilter(value)})` }),
+	mix: (value) => ({ mixBlendMode: value }),
 	opacity: (value) => ({ opacity: value }),
 	ink: (value) => ({ color: value }),
 	fontFamily: (value) => ({ fontFamily: value }),
@@ -140,7 +241,11 @@ export const SHAPE_PAINT: Partial<Record<NodeKind, ShapePaint>> = {
  * named here, so a new surface kind needs no entry.
  */
 export const SURFACE_BOX: Declarations = {
-	background: "#ffffff",
+	// A longhand for {@link PAINT}'s `fill` reason and one more of its own: a
+	// surface's ground has to sit *under* a gradient rather than reset it, and
+	// the shorthand would have wiped the `background-image` of every surface that
+	// paints one before the node's own properties ever ran.
+	backgroundColor: "#ffffff",
 	overflow: "hidden",
 };
 

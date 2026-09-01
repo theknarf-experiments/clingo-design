@@ -19,6 +19,7 @@ import { directSolver } from "./directSolver.ts";
 import { makeNode } from "./edits.ts";
 import { explore } from "./explore.ts";
 import {
+	EXPORT_TARGETS,
 	EXPORT_TARGET_NAMES,
 	type ExportOptions,
 	collapseSpace,
@@ -65,7 +66,16 @@ import {
 	formatLength,
 	nearestEmu,
 } from "./units.ts";
-import { type Value, isLengthType, lit, ref, single } from "./values.ts";
+import {
+	GRADIENT_FROM,
+	GRADIENT_TO,
+	VALUE_TYPES,
+	type Value,
+	isLengthType,
+	lit,
+	ref,
+	single,
+} from "./values.ts";
 
 /** A document whose universes differ only by a container's direction. */
 function flow(): Scene {
@@ -233,7 +243,7 @@ test("a fill that names accent comes out as var(--accent)", async () => {
 	const exploration = await explore(scene, directSolver, { limit: 1 });
 	const universe = exploration.universes[0];
 	const out = exportUniverse(scene, universe, { target: "html", title: "card" });
-	assert.match(out.text, /background: var\(--accent\);/);
+	assert.match(out.text, /background-color: var\(--accent\);/);
 	// And the definition is the colour the answer set actually rendered.
 	const drawn = universe.model.byId.badge?.rendered.fill;
 	assert.ok(drawn);
@@ -244,7 +254,7 @@ test("a fill that names accent comes out as var(--accent)", async () => {
 		tokens: false,
 	});
 	assert.doesNotMatch(plain.text, /var\(--/);
-	assert.match(plain.text, new RegExp(`background: ${drawn};`));
+	assert.match(plain.text, new RegExp(`background-color: ${drawn};`));
 });
 
 test("a dimension driven by a token comes out as the token", async () => {
@@ -715,8 +725,8 @@ test("a class carries only what every wearer draws", async () => {
 	};
 	const exploration = await explore(scene, directSolver, { limit: 4 });
 	const out = exportUniverse(scene, exploration.universes[0], { target: "html" });
-	assert.equal(block(out.text, ":where(.both)"), "\tbackground: #abcdef;");
-	assert.equal(out.text.match(/background: #abcdef;/g)?.length, 1, "the fill is shared");
+	assert.equal(block(out.text, ":where(.both)"), "\tbackground-color: #abcdef;");
+	assert.equal(out.text.match(/background-color: #abcdef;/g)?.length, 1, "the fill is shared");
 	assert.equal(out.text.match(/border-radius: 12px;/g)?.length, 1, "the radius is not");
 	assert.match(out.text, /border-radius: 50%;/, "and the ellipse is still an ellipse");
 
@@ -736,7 +746,7 @@ test("a class carries only what every wearer draws", async () => {
 	const bare = exportUniverse(apart, second.universes[0], { target: "html" });
 	assert.equal(block(bare.text, ":where(.apart)"), undefined);
 	assert.doesNotMatch(bare.text, / apart"/);
-	assert.match(bare.text, /background: #abcdef;/, "the rectangle still takes its fill");
+	assert.match(bare.text, /background-color: #abcdef;/, "the rectangle still takes its fill");
 });
 
 test("a wearer only the answer set names shares the class too", async () => {
@@ -1324,7 +1334,7 @@ test("a hover pair is a pseudo-class and no script at all", async () => {
 	const part = className(out.text, "inst(b1,btn)");
 	const state = block(out.text, `.${host}:hover .${part}`);
 	assert.ok(state, "expected a :hover rule on the instance");
-	assert.match(state, /background: #1d4ed8;/);
+	assert.match(state, /background-color: #1d4ed8;/);
 
 	assert.doesNotMatch(out.text, /<script/, "a hover pair needs no behaviour");
 	assert.doesNotMatch(out.text, /data-state/, "and no attribute either");
@@ -1332,7 +1342,7 @@ test("a hover pair is a pseudo-class and no script at all", async () => {
 	// And the base rule is what paces it, so the move works in both directions.
 	const base = block(out.text, `.${part}`);
 	assert.ok(base);
-	assert.match(base, /transition: background 200ms ease-out 0ms;/);
+	assert.match(base, /transition: background-color 200ms ease-out 0ms;/);
 });
 
 test("a click toggle drives data-state, and the runtime comes with it", async () => {
@@ -1363,7 +1373,7 @@ test("a click toggle drives data-state, and the runtime comes with it", async ()
 	const panel = className(out.text, "inst(b1,panel)");
 	const state = block(out.text, `.${host}[data-state="open"] .${panel}`);
 	assert.ok(state, "expected a data-state rule");
-	assert.match(state, /background: #f8fafc;/);
+	assert.match(state, /background-color: #f8fafc;/);
 
 	// The script is in the file, and it is the table the studio steps.
 	assert.match(out.text, /<script>/);
@@ -1719,7 +1729,7 @@ test("press and focus have their own pseudo-classes, read off the trigger table"
 			`.${className(out.text, "b1")}${expected} .${className(out.text, "inst(b1,btn)")}`,
 		);
 		assert.ok(state, `expected ${expected} for ${into}/${back}`);
-		assert.match(state, /background: #1d4ed8;/);
+		assert.match(state, /background-color: #1d4ed8;/);
 		assert.doesNotMatch(out.text, /<script/, `${expected} needs no behaviour`);
 	}
 });
@@ -1856,7 +1866,7 @@ test("two layers that paint one part are resolved by the cascade the way mwriter
 	assert.equal(composed, "#22c55e", "the later layer owns the fill in the answer set");
 	const base = block(out.text, `.${className(out.text, "inst(b1,btn)")}`);
 	assert.ok(base);
-	assert.match(base, /background: #22c55e;/, "and the file draws what the answer set said");
+	assert.match(base, /background-color: #22c55e;/, "and the file draws what the answer set said");
 
 	// The same fight as two selectors: both rules match when both layers are in
 	// their painting state, so the one that wins is the one written later — and
@@ -2319,7 +2329,7 @@ test("a 3D view exports as its own box, and the page exports around it", async (
 	// The box is there, with its own fill, and it is selectable like anything else.
 	const view = className(out.text, "view");
 	assert.match(out.text, new RegExp(`<div class="${view}" data-node="view" data-kind="viewport">`));
-	assert.match(block(out.text, `.${view}`) ?? "", /background: #0b1020;/);
+	assert.match(block(out.text, `.${view}`) ?? "", /background-color: #0b1020;/);
 	// And nothing inside it is markup, because a subtree of empty divs is not a
 	// partial answer to a scene.
 	assert.doesNotMatch(out.text, /data-node="cube"/);
@@ -2362,7 +2372,7 @@ test("a poster puts the frame the canvas drew behind the view's own fill", async
 	assert.ok(view);
 	// The shorthand first and the image after it, so the fill shows through a
 	// scene rendered against nothing.
-	assert.ok(view.indexOf("background: #0b1020;") < view.indexOf("background-image:"));
+	assert.ok(view.indexOf("background-color: #0b1020;") < view.indexOf("background-image:"));
 	assert.match(view, /background-image: url\("data:image\/png;base64,iVBORw0KGgo="\);/);
 	assert.match(view, /background-size: cover;/);
 	assert.ok(
@@ -2615,4 +2625,384 @@ test("a picture whose bytes were not handed over says so rather than going blank
 	const named = out.lost.filter((l) => l.includes(SRC));
 	assert.equal(named.length, 1, "named once, by the path to go and find");
 	assert.match(named[0], /Hero/);
+});
+
+/* ------------------------------------------------------------------ */
+/* The paint layer                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The direction a gradient runs, as the whole `background-image` it becomes.
+ *
+ * Read off the menu rather than typed out, because the recipe strings name
+ * `--gfrom` and `--gto` with fallbacks and there is exactly one place in this
+ * repo those two colours are spelled. A literal here would be a fourth spelling
+ * of white, and the failure it caused would look like the picture rather than
+ * like a bug.
+ */
+const LINEAR_DOWN = VALUE_TYPES.gradient.options?.[1].value ?? "none";
+
+/** One rectangle, painted however the caller asks, on a page of its own. */
+function painted(props: SceneNode["props"]): Scene {
+	return {
+		styles: [],
+		machines: [],
+		tokens: starterTokens(),
+		constraints: [],
+		rules: RULES_HEADER,
+		nodes: [
+			frame("page", "Page", [0, 0, 300, 200], { fill: [ref("surface")] }, [
+				rect("chip", "Chip", [20, 20, 160, 80], props),
+			]),
+		],
+	};
+}
+
+test("a gradient reaches the file over the fill, with both names kept", async () => {
+	// The whole of the split in one rule: a colour underneath, an image over it,
+	// and the image's two stops written as custom properties that still name the
+	// tokens the document named. Nothing here is a gradient-shaped mechanism —
+	// it is three ordinary properties and CSS's own layering.
+	const scene = painted({
+		fill: [ref("muted")],
+		gradient: single(LINEAR_DOWN),
+		gradientFrom: [ref("accent")],
+		gradientTo: single("#0f172a"),
+	});
+	const { out } = await exported(scene);
+	const chip = block(out.text, `.${className(out.text, "chip")}`);
+	assert.ok(chip);
+
+	// In this order, because the order of `KINDS.rect.props` is the order of the
+	// declarations and the fill has to be underneath.
+	assert.ok(
+		chip.indexOf("background-color: var(--muted);") <
+			chip.indexOf("background-image: linear-gradient(180deg,"),
+		"the fill is painted under the gradient, not over it",
+	);
+	assert.match(chip, /--gfrom: var\(--accent\);/);
+	assert.match(chip, /--gto: #0f172a;/);
+
+	// And the registrations are in the file, which is what makes `--gfrom` a
+	// colour that does not inherit and does interpolate.
+	assert.match(out.text, /@property --gfrom \{/);
+	assert.match(out.text, /@property --gto \{/);
+	assert.equal(out.text.match(/inherits: false;/g)?.length, 2);
+	assert.match(out.text, new RegExp(`initial-value: ${GRADIENT_FROM};`));
+	assert.match(out.text, new RegExp(`initial-value: ${GRADIENT_TO};`));
+
+	// And with the names turned off it is the colour the answer set drew, which
+	// is the promise `"a token export is the plain export with names put in"`
+	// makes for every template and cannot make for this one: `--gfrom` is the
+	// first *node-level* custom property in the codebase, and that test's
+	// `inline()` strips every `--name:` line it finds on the way to comparing the
+	// two exports — a helper written when the only such lines were `:root`'s
+	// definitions. Asserted directly rather than by widening the helper, because
+	// what is worth knowing here is one thing: a declaration whose CSS key begins
+	// with two dashes goes through the same substitution every other value does,
+	// and is not a hole in the round trip.
+	const { out: plain } = await exported(scene, { tokens: false });
+	const flat = block(plain.text, `.${className(plain.text, "chip")}`);
+	assert.ok(flat);
+	assert.match(flat, /--gfrom: #[0-9a-f]{6};/);
+	assert.doesNotMatch(plain.text, /var\(--accent\)/);
+});
+
+test("a direction on its own reaches the file, and writes no colour nobody chose", async () => {
+	// The half of "a gradient paints even when only its direction is set" that
+	// the *file* keeps — the roster's half is asserted on `GRADIENTS` itself, in
+	// `props.test.ts`. The recipe carries both `var()` fallbacks, so the
+	// declaration is valid at computed-value time with the two colour properties
+	// never written. A custom property with no value makes the whole declaration
+	// invalid in CSS, which means the gradient silently disappears — the exact
+	// failure the fallback exists to prevent.
+	const { out } = await exported(painted({ gradient: single(LINEAR_DOWN) }));
+	const chip = block(out.text, `.${className(out.text, "chip")}`);
+	assert.ok(chip);
+	assert.match(chip, new RegExp(`var\\(--gfrom, ${GRADIENT_FROM}\\)`));
+	assert.match(chip, new RegExp(`var\\(--gto, ${GRADIENT_TO}\\)`));
+	assert.doesNotMatch(chip, /--gfrom:/, "and it wrote no colour nobody chose");
+});
+
+test("the document isolates itself", async () => {
+	// A mix mode blends against everything painted below it in the nearest
+	// isolation group, and without one that group is whatever page the file was
+	// pasted into. Both targets carry it and both carry it unconditionally: a
+	// document with no mix mode in it composites identically either way, and a
+	// declaration that appeared only sometimes would be a file whose shape
+	// depended on a property nobody can see in it.
+	const scene = painted({ fill: single("#abcdef"), mix: single("multiply") });
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+
+	const html = exportUniverse(scene, universe, { target: "html" }).text;
+	assert.match(block(html, ".design") ?? "", /isolation: isolate;/);
+
+	const svg = exportUniverse(scene, universe, { target: "svg" }).text;
+	assert.match(svg, /<svg [^>]*style="isolation: isolate"/);
+});
+
+test("an SVG keeps a mix mode", async () => {
+	// Carried rather than dropped, because CSS Compositing applies to SVG and the
+	// rasterisers this target is written for implement it. Dropping something
+	// that works would be the same lie as approximating something that does not,
+	// in the other direction — which is why `svg.loses` has no sentence about it.
+	const scene = painted({ fill: single("#abcdef"), mix: single("multiply") });
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+	const out = exportUniverse(scene, universe, { target: "svg" });
+	assert.match(out.text, /mix-blend-mode: multiply/);
+	assert.equal(
+		out.lost.some((l) => /blend/i.test(l)),
+		false,
+		"nothing was lost, so nothing is claimed to have been",
+	);
+});
+
+test("an SVG flattens a gradient rather than losing the shape", async () => {
+	// **The guard against a black rectangle.** A rect whose fill has been cleared
+	// and whose whole paint is a gradient would, if the gradient were simply
+	// dropped, emit no `fill` at all — and an SVG shape with no fill is black.
+	// That is not a loss, it is a wrong picture, and it is the class of failure
+	// this repo has already paid for once.
+	const scene = painted({
+		gradient: single(LINEAR_DOWN),
+		gradientFrom: single("#7c3aed"),
+		gradientTo: single("#0f172a"),
+		blur: single("6px"),
+		backdropBlur: single("10px"),
+	});
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+	const svg = exportUniverse(scene, universe, { target: "svg" }).text;
+
+	assert.match(svg, /fill: #7c3aed/, "flattened to the colour it starts from");
+	assert.doesNotMatch(svg, /linear-gradient/);
+	assert.doesNotMatch(svg, /filter:/);
+	assert.doesNotMatch(svg, /backdrop-filter:/);
+
+	// And a direction set back to None leaves the flat fill alone, which is what
+	// the canvas shows: the guard is on the recipe, not on the colours.
+	const off = painted({
+		fill: single("#abcdef"),
+		gradient: single("none"),
+		gradientFrom: single("#7c3aed"),
+	});
+	const flat = (await explore(off, directSolver, { limit: 1 })).universes[0];
+	assert.match(
+		exportUniverse(off, flat, { target: "svg" }).text,
+		/fill: #abcdef/,
+	);
+
+	// And a gradient whose first colour names a token flattens to the colour
+	// rather than to the token, which makes it the one value in this target
+	// written as what the answer set drew instead of as what the document said.
+	// The difference is not tidiness: naming the token here would claim the file
+	// carries a gradient, and what it carries is a flat fill.
+	const named = painted({
+		gradient: single(LINEAR_DOWN),
+		gradientFrom: [ref("accent")],
+	});
+	const chosen = (await explore(named, directSolver, { limit: 1 })).universes[0];
+	const drawn = chosen.model.byId.chip?.rendered.gradientFrom;
+	assert.ok(drawn, "expected the answer set to have chosen a colour");
+	const svgNamed = exportUniverse(named, chosen, { target: "svg" }).text;
+	assert.match(svgNamed, new RegExp(`fill: ${drawn}`));
+	assert.doesNotMatch(svgNamed, /fill: var\(--accent\)/);
+});
+
+test("the SVG target says what it dropped", () => {
+	const svg = EXPORT_TARGETS.svg.loses;
+	assert.equal(svg.filter((l) => /[Gg]radients are flattened/.test(l)).length, 1);
+	assert.equal(svg.filter((l) => /[Bb]lur is dropped/.test(l)).length, 1);
+	// And the HTML target gained nothing, because it carries all four features
+	// exactly. A loss list that pads itself is one nobody finishes reading.
+	assert.equal(
+		EXPORT_TARGETS.html.loses.some((l) => /gradient|blur|blend/i.test(l)),
+		false,
+	);
+});
+
+test("blur is a length like any other, so no EMU escapes", async () => {
+	// The `EMU stays inside` promise, extended to the two properties that arrived
+	// last. A blur is a `length`, so it crosses through the same `cssValue` a
+	// radius does — which is the concrete argument for `length` over `number`,
+	// and it is also what makes `numeral/2` carry the blur in EMU so a rule can
+	// say a blur is at most eight pixels.
+	const scene = painted({
+		fill: single("#abcdef"),
+		blur: single("0.25in"),
+		backdropBlur: single("12px"),
+	});
+	const { out } = await exported(scene);
+	const chip = block(out.text, `.${className(out.text, "chip")}`);
+	assert.ok(chip);
+	assert.match(chip, /filter: blur\(24px\);/, "a quarter inch is 24 pixels");
+	assert.match(chip, /backdrop-filter: blur\(12px\);/);
+	assert.doesNotMatch(out.text, /emu|0\.25in/);
+
+	// And the clamp survives the whole crossing, which is what the unit test on
+	// `PAINT.blur` in `props.test.ts` cannot say: a designer types a minus sign,
+	// it is stored as a negative EMU like any other length, and what reaches the
+	// file is `blur(0px)` rather than a `blur(-4px)` that would invalidate the
+	// declaration and lose the blur instead of producing none of it.
+	const back = painted({ fill: single("#abcdef"), blur: single("-4px") });
+	const negative = await exported(back);
+	const clamped = block(negative.out.text, `.${className(negative.out.text, "chip")}`);
+	assert.ok(clamped);
+	assert.match(clamped, /filter: blur\(0px\);/);
+});
+
+test("a state that repaints the fill does not erase the gradient", async () => {
+	// **The §4.1 regression, driven end to end.** `fill` used to write the
+	// `background` shorthand, and a shorthand resets every longhand it covers. A
+	// hover state that repaints only the fill emits one declaration; it cascades
+	// after the base rule; and with the shorthand it erased the base rule's
+	// `background-image`. The card has a sheen, you hover it, the sheen vanishes
+	// and comes back on the way out — and nothing about that reads as a
+	// shorthand. An ordering inside `KINDS[kind].props` cannot fix it, because
+	// the state layer is a separate rule.
+	const scene = machined({
+		machines: [hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } })],
+	});
+	const btn = findInTree(scene.nodes, "btn");
+	assert.ok(btn);
+	btn.props.gradient = single(LINEAR_DOWN);
+	btn.props.gradientFrom = single("#7c3aed");
+
+	const { out } = await exported(scene);
+	const host = className(out.text, "b1");
+	const part = className(out.text, "inst(b1,btn)");
+
+	const base = block(out.text, `.${part}`);
+	assert.ok(base);
+	assert.match(base, /background-image: linear-gradient\(180deg,/);
+	assert.match(base, /--gfrom: #7c3aed;/);
+
+	const state = block(out.text, `.${host}:hover .${part}`);
+	assert.ok(state, "expected a :hover rule on the instance");
+	assert.match(state, /background-color: #1d4ed8;/);
+	assert.doesNotMatch(state, /background-image/, "the sheen survives the hover");
+	assert.doesNotMatch(state, /background:/, "and no shorthand came back");
+});
+
+test("a gradient's direction is not tweened, and the file says so", async () => {
+	// CSS does not interpolate one background image into another: it swaps them
+	// at the halfway point, however long the transition says. So `background-image`
+	// is struck out of the transition list for `display`'s reason exactly — a
+	// declaration a browser accepts, does nothing visible with, and a reader
+	// believes — and the absence is explained out loud, because an absence
+	// explains nothing on its own.
+	const scene = machined({
+		machines: [
+			hoverMachine({
+				btn: {
+					props: {
+						gradient: single(VALUE_TYPES.gradient.options?.[3].value ?? "none"),
+						gradientFrom: single("#22c55e"),
+					},
+				},
+			}),
+		],
+	});
+	const btn = findInTree(scene.nodes, "btn");
+	assert.ok(btn);
+	btn.props.gradient = single(LINEAR_DOWN);
+	btn.props.gradientFrom = single("#7c3aed");
+
+	const { out } = await exported(scene);
+	const base = block(out.text, `.${className(out.text, "inst(b1,btn)")}`);
+	assert.ok(base);
+	const transition = /transition: ([^;]+);/.exec(base)?.[1];
+	assert.ok(transition, "expected a transition on the base rule");
+	assert.doesNotMatch(transition, /background-image/);
+	// The colour is in it, because a registered custom property with a `<color>`
+	// syntax genuinely interpolates. A change of colour is smooth and a change of
+	// direction is a cut, which is the whole of the split stated as a limitation.
+	assert.match(transition, /--gfrom/);
+
+	const said = out.lost.filter((l) => /direction of a gradient does not tween/.test(l));
+	assert.equal(said.length, 1, "said once, naming the state and the node");
+	assert.match(said[0], /Hover/);
+});
+
+test("a gradient's colours are tweened, because they are registered", async () => {
+	// The other half of the sentence the test above ends on, and the half the
+	// four lines of `CUSTOM_PROPERTY_RULES` were written for: only a registered
+	// custom property with a real syntax can be interpolated, so `--gfrom` is a
+	// colour a browser walks through rather than a string it swaps. A keyframe
+	// track on it is therefore an ordinary colour animation — it needed nothing
+	// from the keyframe writer, which reaches a custom property through the same
+	// `PAINT` entry every other declaration comes out of.
+	const scene = machined({
+		machines: [
+			timelined({
+				length: single("600ms"),
+				tracks: [
+					{
+						part: "panel",
+						prop: "gradientFrom",
+						keys: [
+							{ at: single("0ms"), value: single("#7c3aed") },
+							{ at: single("600ms"), value: single("#22c55e") },
+						],
+					},
+				],
+			}),
+		],
+	});
+	const panel = findInTree(scene.nodes, "panel");
+	assert.ok(panel);
+	panel.props.gradient = single(LINEAR_DOWN);
+
+	const { out } = await exported(scene);
+	assert.ok(out.text.includes("@keyframes k-b1-w1-panel {"), "the block is in the file");
+	assert.match(out.text, /\n\t0% \{\n\t\t--gfrom: #7c3aed;/);
+	assert.match(out.text, /\n\t100% \{\n\t\t--gfrom: #22c55e;/);
+});
+
+test("a style can own the whole sheen", async () => {
+	// "The cards all carry the brand sheen" is one decision several nodes wear,
+	// which is a style's definition and the reason all six of the new properties
+	// are `styleable`. Nothing here is gradient-shaped: a variant holds one term
+	// per property, and a gradient is three of them, so the recipe, its two
+	// colours and a blur hoist into the single shared rule exactly as a fill and
+	// a radius already do.
+	const style: Style = {
+		id: "sheen",
+		name: "Sheen",
+		variants: [
+			{
+				parts: {
+					gradient: lit(LINEAR_DOWN),
+					gradientFrom: ref("accent"),
+					gradientTo: lit("#0f172a"),
+					blur: lit("2px"),
+				},
+			},
+		],
+	};
+	const scene: Scene = {
+		styles: [style],
+		machines: [],
+		tokens: starterTokens(),
+		constraints: [],
+		rules: RULES_HEADER,
+		nodes: [
+			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, [
+				wearing(rect("a", "A", [20, 20, 80, 40], {}), style.id),
+				wearing(rect("b", "B", [20, 80, 80, 40], {}), style.id),
+			]),
+		],
+	};
+	const { out } = await exported(scene);
+	const shared = block(out.text, ":where(.sheen)");
+	assert.ok(shared, "expected one rule for the treatment");
+	assert.match(shared, /background-image: linear-gradient\(180deg,/);
+	// The token survives into the class, which is the design system reaching the
+	// file rather than a number that used to be one.
+	assert.match(shared, /--gfrom: var\(--accent\);/);
+	assert.match(shared, /--gto: #0f172a;/);
+	assert.match(shared, /filter: blur\(2px\);/);
+	// Written once, for two wearers. A treatment that appeared per node would be
+	// a correlation the picture has and the file has not.
+	assert.equal(out.text.match(/--gfrom: var\(--accent\);/g)?.length, 1);
+	assert.equal(out.text.match(/filter: blur\(2px\);/g)?.length, 1);
 });

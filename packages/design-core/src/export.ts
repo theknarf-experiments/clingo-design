@@ -107,6 +107,7 @@ import {
 } from "./machines.ts";
 import type { ModelNode, ModelScene, ModelState } from "./model.ts";
 import {
+	CUSTOM_PROPERTY_RULES,
 	DOCUMENT_BASE,
 	PAINT,
 	SHAPE_PAINT,
@@ -235,6 +236,11 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 		loses: [
 			"A style is not a class here. An SVG is read by things that apply the presentation attributes and skip the stylesheet, so every wearer carries the treatment inlined: the correlation is in the picture, but it is not in the file.",
 			"Shadows are dropped — SVG needs a filter per elevation, and a filter is not the declaration a designer wrote.",
+			// Two sentences and no third: a mix mode is *carried* here, because CSS
+			// Compositing applies to SVG, and saying it was lost would be the same
+			// lie as dropping it.
+			"Gradients are flattened to the colour they start from. An SVG shape has no background, and carrying the gradient would mean a gradient definition per node, built by reading the recipe back into an angle and two stops — a second description of the same picture.",
+			"Blur is dropped. A blur here is a CSS `filter`, and the CSS filter functions are not SVG filters: a browser opening this file would blur, and a rasteriser reading the same attribute would not, which makes the file two pictures depending on who opened it. A backdrop blur has no SVG reading at all — an element here has no backdrop to reach behind.",
 			"Text does not wrap. Each line of the document's own text becomes a tspan; a line the canvas broke because the box was narrow comes out unbroken.",
 			"A text baseline is computed from the font size rather than measured, so a face with unusual metrics sits a pixel or two off.",
 			// Unconditional, unlike the machine losses the HTML target adds, and the
@@ -1493,10 +1499,18 @@ function diff(base: Declarations, next: Declarations): Declarations {
 	return out;
 }
 
-const BASE_CSS = `*, *::before, *::after { box-sizing: border-box; }
+const BASE_CSS = `${CUSTOM_PROPERTY_RULES}
+*, *::before, *::after { box-sizing: border-box; }
 body { margin: 0; background: #f1f5f9; }
 .design {
 	position: relative;
+	/* A mix mode blends against everything painted below it in the nearest
+	   isolation group, and without one that group is the page this file was
+	   pasted into. A design defines its own appearance and never borrows the
+	   host's — the same sentence DOCUMENT_BASE makes about inheritance, made
+	   about compositing. Not *in* DOCUMENT_BASE, which is by its own definition
+	   the properties CSS inherits, and isolation is not one of them. */
+	isolation: isolate;
 	/* A document defines its own appearance; it never inherits the page's —
 	   the same declarations the canvas puts on an artboard. */
 ${cssText(DOCUMENT_BASE, "\t")}
@@ -1830,8 +1844,24 @@ const SVG_PAINT: Partial<Record<PropName, (value: string) => Declarations>> = {
 	size: (value) => ({ fontSize: value }),
 	weight: (value) => ({ fontWeight: value }),
 	align: (value) => ({ textAnchor: ANCHOR[value] ?? "start" }),
+	// SVG has compositing: `mix-blend-mode` is a CSS Compositing property that
+	// applies to SVG elements and that the rasterisers this target is written for
+	// implement, unlike the CSS filter functions. Carried rather than dropped,
+	// because dropping something that works would be the same lie in the other
+	// direction, and it is why the svg.loses list has no sentence about mixing.
+	mix: (value) => ({ mixBlendMode: value }),
 	// shadow: an SVG shadow is a filter, and a filter is not the declaration
 	// anyone wrote. Named in EXPORT_TARGETS.svg.loses rather than approximated.
+	//
+	// blur and backdropBlur: absent for the same reason and a sharper one. A CSS
+	// `filter: blur()` is not an SVG filter, so a browser opening this file would
+	// blur and a rasteriser reading the same attribute would not — one file, two
+	// pictures, decided by who opened it. A backdrop has no SVG reading at all.
+	//
+	// gradient, gradientFrom, gradientTo: absent from the table and handled after
+	// the loop in {@link svgPaint}, because dropping them outright is the one
+	// omission in this target that would produce a *wrong* picture rather than a
+	// simpler one.
 };
 
 /** A shape's own attributes, before anything is painted on it. */
@@ -1883,6 +1913,47 @@ function svgPaint(
 			box,
 			paint(token ? `var(--${index.custom.get(token.id)})` : cssValue(prop, value)),
 		);
+	}
+	// A gradient flattens to the colour it starts from.
+	//
+	// An SVG shape has no background, so the CSS `background-image` a gradient
+	// becomes says nothing here. Carrying it properly would mean a
+	// `<linearGradient>` def per node, built by reading the recipe the designer
+	// chose back into an angle and two stops — a second description of the same
+	// picture, in a file whose whole promise is that the file *is* the picture,
+	// and two descriptions drift the day somebody adds a recipe and forgets the
+	// twin.
+	//
+	// Flattened rather than dropped, and the difference is not tidiness: a node
+	// whose fill was cleared and whose paint is entirely a gradient would leave
+	// this element with no `fill` at all, and an SVG shape with no fill is
+	// **black**. A recognisably wrong colour is a worse answer than a
+	// recognisably simpler one, and the loss list says which happened.
+	//
+	// After the loop, so it beats the node's own fill — the gradient is what you
+	// see — and guarded on the recipe, so a node carrying gradient colours with
+	// its direction set back to `none` paints its flat fill, which is what the
+	// canvas shows.
+	//
+	// Written as the colour rather than as the `var()` the document named, and it
+	// is the one value in this target that is: this is a *flattening* rather than
+	// a translation, and naming the token here would claim the file carries a
+	// gradient the picture has not got.
+	//
+	// Guarded on the *kind* as well as on the recipe, which the property loop
+	// above gets for free and this does not: `rendered/3` is whatever the answer
+	// set says, and a rule or a style variant may put a `gradient` on a text node
+	// that has no such row. The loop skips it because it walks
+	// `KINDS[kind].props`; here the same list has to be asked, or a paragraph
+	// would flatten its ink to a colour it never painted with.
+	const recipe = node.rendered.gradient;
+	if (
+		recipe !== undefined &&
+		recipe !== "none" &&
+		KINDS[node.kind].props.includes("gradient")
+	) {
+		const from = node.rendered.gradientFrom;
+		if (from !== undefined) box.fill = cssValue("gradientFrom", from);
 	}
 	return box;
 }
@@ -2071,7 +2142,14 @@ function svgExport(
 		// every machine, so it is one unconditional sentence in `EXPORT_TARGETS`
 		// rather than a list assembled per document.
 		lost: [],
-		text: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" fill="#0f172a">${title}${style}${defs}
+		// `isolation: isolate` unconditionally, and on the root for the reason
+		// `.design` carries it: a multiply near the top of the picture must blend
+		// against the design and not against whatever this file was pasted over.
+		// Unconditional because a document with no mix mode in it is isolated from
+		// a page it composites identically with either way, and a rule that
+		// appeared only sometimes would be a file whose shape depended on a
+		// property nobody can see in it.
+		text: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" fill="#0f172a" style="isolation: isolate">${title}${style}${defs}
 ${body}
 </svg>
 `,
@@ -2980,8 +3058,17 @@ function tweenedKeys(
 	// not a value between two states, it is a *schedule*, and `transition:
 	// animation` is a declaration a browser ignores and a reader believes. What
 	// paces a timeline is the timeline.
+	//
+	// `background-image` is the third, and it is the gradient's own limitation:
+	// CSS does not interpolate one background image into another, it swaps them
+	// at the halfway point however long the transition says. Naming it would be a
+	// declaration a browser accepts, does nothing visible with, and a reader
+	// believes — `display`'s reason exactly. The gradient's two *colours* are not
+	// struck out, because they are registered custom properties with a `<color>`
+	// syntax and genuinely tween: a change of colour is smooth and a change of
+	// direction is a cut, which is what the loss beside this says out loud.
 	const keys = Object.keys(changed).filter(
-		(key) => key !== "display" && key !== "animation",
+		(key) => key !== "display" && key !== "animation" && key !== "backgroundImage",
 	);
 	if (only === undefined) return keys.map(cssName);
 	const allowed = new Set<string>();
@@ -3514,6 +3601,22 @@ function transitionsFor(
 		}
 	}
 	if (duration <= 0) return out;
+
+	// The gradient's cut, said out loud, in the shape of the `display:none`
+	// sentence one function up and for the same reason: the declaration a reader
+	// would look for is *absent* from the file — `tweenedKeys` struck it — and an
+	// absence explains nothing on its own. Conditional on the state actually
+	// repainting a `background-image`, because a document whose gradients never
+	// move loses nothing and a list of losses that pads itself is one nobody
+	// finishes reading.
+	const cut = [...changed]
+		.filter(([, declarations]) => declarations.backgroundImage !== undefined)
+		.map(([id]) => nodeLabel(index, id));
+	if (cut.length > 0) {
+		say(
+			`${stateName(machine, state.id)} changes the gradient on ${cut.join(", ")}. The direction of a gradient does not tween: CSS swaps one background image for the other at the halfway point, however long the transition says. The gradient's two colours do tween, because they are registered custom properties — so a change of colour is smooth and a change of direction is a cut.`,
+		);
+	}
 
 	const ordered = [...changed.keys()].sort((a, b) => {
 		const x = model.byId[a];

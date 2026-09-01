@@ -88,8 +88,14 @@ test("a rule can mint a variable, and the answer set reports its alternatives", 
 	// And the group's members are text nodes, so a rule over them can be about
 	// anything a text node holds.
 	assert.ok(groupProps(model, model.groups.all).includes("text"));
-	// A frame and a text node share only what both actually hold.
-	assert.deepEqual(groupProps(model, ["page", ...model.groups.all]), ["opacity"]);
+	// A frame and a text node share only what both actually hold: the three
+	// properties that are about pixels rather than about a box — a smear, a
+	// compositing mode and a strength.
+	assert.deepEqual(groupProps(model, ["page", ...model.groups.all]), [
+		"blur",
+		"mix",
+		"opacity",
+	]);
 });
 
 test("nine members the document never enumerated obey one rule", async () => {

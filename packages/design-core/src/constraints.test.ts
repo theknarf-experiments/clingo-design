@@ -118,10 +118,16 @@ test("sharedProps only offers what every selected node exposes", () => {
 	scene = addNode(scene, makeNode("text", { x: 0, y: 0, width: 9, height: 9 }, { id: "t" }));
 	assert.deepEqual(sharedProps(scene, ["r"]), [
 		"fill",
+		"gradient",
+		"gradientFrom",
+		"gradientTo",
 		"radius",
 		"stroke",
 		"strokeWidth",
 		"shadow",
+		"blur",
+		"backdropBlur",
+		"mix",
 		"opacity",
 	]);
 	assert.deepEqual(sharedProps(scene, ["t"]), [
@@ -133,11 +139,16 @@ test("sharedProps only offers what every selected node exposes", () => {
 		"weight",
 		"lineHeight",
 		"align",
+		"blur",
+		"mix",
 		"opacity",
 	]);
-	// Opacity is the one thing everything drawable has, so a rule can range
-	// across kinds that otherwise share nothing.
-	assert.deepEqual(sharedProps(scene, ["r", "t"]), ["opacity"]);
+	// What a box and a paragraph have in common, which used to be opacity alone
+	// and is now the three things that are true of *pixels* rather than of a box:
+	// a smear, a compositing mode and a strength. A rule can still range across
+	// kinds that otherwise share nothing, and it can now say "these two blur
+	// together" as well as "these two fade together".
+	assert.deepEqual(sharedProps(scene, ["r", "t"]), ["blur", "mix", "opacity"]);
 });
 
 test("deleting a node drops the constraints that ranged over it", () => {

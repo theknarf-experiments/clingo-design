@@ -210,6 +210,46 @@ test("a hugging container grows to the text it actually holds", async () => {
 	assert.equal(fitted.r.x, px(251), "the sibling moves along with it");
 });
 
+/**
+ * A smear is painted outside the border box and participates in no layout.
+ *
+ * `MEASURED_PROPS` is a whitelist and `blur` is not on it, so a blur cannot
+ * enter measurement by accident; this says it must not enter deliberately
+ * either, and the reason is CSS rather than convenience. A `filter` does not
+ * change an element's layout box by a hair — so a hugging container hugs the
+ * same box either way, and the canvas and the export agree about it *for free*,
+ * because both are asking a browser the same question.
+ *
+ * The version this rules out is the plausible one: inflating the measured box by
+ * three sigma so a blurred node "took up its halo". That number would be one
+ * this repo invented, it would appear in `frame/3`, it would move the blurred
+ * node's laid-out siblings, and it would disagree with every browser that ever
+ * rendered the file.
+ *
+ * Asserted twice over, because the two halves fail differently. The asking facts
+ * are what the *program* is handed, and a blur that reached them would have
+ * grown `MEASURED_PROPS` behind somebody's back; the solved geometry is what the
+ * picture is, and a blur that reached it would have moved a sibling.
+ */
+test("a blur changes no box", async () => {
+	const plain = row();
+	const smeared = setProp(plain, ["r"], "blur", single("40px"));
+
+	const asked = (scene: Scene): string[] =>
+		compile(scene)
+			.program.split("\n")
+			.filter((line) => /^(lask|lrow|lrowif|laskdef)\(/.test(line));
+	assert.ok(asked(plain).length > 0, "and there was something there to compare");
+	assert.deepEqual(asked(smeared), asked(plain));
+
+	const solved = async (scene: Scene) => {
+		const result = await explore(scene, directSolver, { sample: "first" });
+		assert.equal(result.count, 1, "a blur must not multiply the universes either");
+		return result.universes[0].solved;
+	};
+	assert.deepEqual(await solved(smeared), await solved(plain));
+});
+
 test("a hugging container asks for what its contents come to, not its frame", () => {
 	const box = findInTree(row().nodes, "box");
 	assert.ok(box);

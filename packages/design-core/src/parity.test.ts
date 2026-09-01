@@ -25,6 +25,7 @@ import { test } from "node:test";
 import { PULL_ATOM, SCENERY_ATOM, compile } from "./compile.ts";
 import { derivedNodes, documentIds } from "./derived.ts";
 import { directSolver } from "./directSolver.ts";
+import { setProp } from "./edits.ts";
 import { explore } from "./explore.ts";
 import { readModel, type ModelNode, type ModelScene } from "./model.ts";
 import {
@@ -40,7 +41,7 @@ import {
 import { card } from "./templates/card.ts";
 import { TEMPLATES } from "./templates/index.ts";
 import { flatten, placedNodes, propValues } from "./tree.ts";
-import { propVar, resolveValue } from "./values.ts";
+import { VALUE_TYPES, propVar, resolveValue, single } from "./values.ts";
 
 /** Every answer set for a scene, capped so a wide template stays quick. */
 async function models(scene: Scene, limit: number): Promise<string[][]> {
@@ -231,6 +232,196 @@ for (const template of TEMPLATES) {
 		);
 	});
 }
+
+/* ------------------------------------------------------------------ */
+/* The paint layer, and the compiler it did not touch                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The same document with every paint property this tool has just learned set on
+ * every node whose kind offers one.
+ *
+ * Six properties over thirteen templates, which is the widest form of "a
+ * document that uses the whole feature" available without inventing a fixture
+ * that would need updating every time a template does.
+ */
+function painted(scene: Scene): Scene {
+	let out = scene;
+	const recipe = VALUE_TYPES.gradient.options?.[1].value ?? "none";
+	for (const node of flatten(scene.nodes)) {
+		for (const [prop, value] of [
+			["gradient", recipe],
+			["gradientFrom", "#7c3aed"],
+			["gradientTo", "#0f172a"],
+			["blur", "4px"],
+			["backdropBlur", "12px"],
+			["mix", "multiply"],
+		] as const) {
+			if (!KINDS[node.kind].props.includes(prop)) continue;
+			out = setProp(out, [node.id], prop, single(value));
+		}
+	}
+	return out;
+}
+
+/**
+ * Every predicate name a program mentions, head or body, once each.
+ *
+ * The quoted strings come out first, and that is not tidiness: a gradient
+ * recipe *is* `linear-gradient(180deg, …)`, so a scan that read inside a literal
+ * would report `gradient` and `var` as predicates of the program and this whole
+ * assertion would pass for the wrong reason — or, here, fail for one.
+ */
+function predicates(program: string): string[] {
+	const bare = program.replace(/"(\\.|[^"\\])*"/g, '""');
+	const found = new Set<string>();
+	for (const [, name] of bare.matchAll(/\b([a-z][A-Za-z0-9_]*)\(/g)) found.add(name);
+	return [...found].sort();
+}
+
+/**
+ * A program's facts with every literal id replaced by the text it interns.
+ *
+ * `LiteralTable` numbers by interning order, so a document that interns one more
+ * value renumbers every id after it — and an atom that merely *names* a literal,
+ * `derived_of(contrast,l10,l1)`, then differs without anything about it having
+ * changed. Comparing the texts rather than the ids is what tells a renumbering
+ * apart from a new fact, which is the distinction this assertion is about.
+ */
+function factsByText(scene: Scene): Set<string> {
+	const generated = compile(scene).generated;
+	const text = new Map<string, string>();
+	for (const [, id, body] of generated.matchAll(/^literal\((l\d+),"((?:\\.|[^"\\])*)"\)\.$/gm)) {
+		text.set(id, body);
+	}
+	return new Set(
+		generated
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line !== "" && !line.startsWith("%"))
+			.map((line) => line.replace(/\bl(\d+)\b/g, (id) => `«${text.get(id) ?? id}»`)),
+	);
+}
+
+/**
+ * The six shipped readings of a literal's text, which are nobody's feature.
+ *
+ * A bridge is emitted by one generic loop over `literals.texts()`, keyed by what
+ * the text *is* and never by who wrote it: `"multiply"` is a constant so it
+ * carries `word/2`, `"4px"` is a length so it carries `numeral/2`. So a document
+ * whose every literal happened to be a colour or a length mentions `word` for
+ * the first time the moment any property anywhere stores a bare lower-case word
+ * — a `fit` of `cover` would have done it exactly as a mix mode does.
+ *
+ * Named here and subtracted below so that the assertion says *paint added no
+ * predicate of its own* rather than *the program's vocabulary did not grow*. The
+ * second sentence is not true and never was; pretending otherwise would mean
+ * either a fixture rigged to reuse a word every template already holds, or an
+ * assertion loosened later by somebody who could not see why it failed.
+ */
+const LITERAL_BRIDGES = new Set([
+	"numeral",
+	"tally",
+	"word",
+	"millis",
+	"mdeg",
+	"permille",
+]);
+
+/**
+ * **The standing form of "paint did not touch the compiler".**
+ *
+ * The obvious assertion — `compile(scene).program` is byte-identical before and
+ * after — is a claim about a git diff. It is true the day it lands and false
+ * from the next feature onward, because a later step emits facts for every
+ * document with a machine in it whether or not anybody asked for a curve; so it
+ * would be deleted by that step, or worse, weakened by it. (It was run once, as
+ * a one-off, inside the commit that landed this: captured before the first line
+ * and asserted after the last.)
+ *
+ * This is what paint actually claims, and it survives everything: a gradient, a
+ * blur and a mix mode are *ordinary properties holding ordinary Values*, so they
+ * reach the program through the same generic loop a fill does and add no
+ * predicate of their own. If somebody ever adds a `gstop/4` — the shape a
+ * draggable gradient stop would need — this fails loudly, which is the whole
+ * point of writing it down.
+ *
+ * Two halves rather than one equality, and the asymmetry is deliberate. Nothing
+ * may be **lost**, ever, and that half is exact: a program that stopped
+ * mentioning a predicate because a node grew a gradient would mean paint had
+ * reached a rule. What may be **gained** is a literal bridge and nothing else —
+ * see {@link LITERAL_BRIDGES} for why that is the value system rather than this
+ * feature.
+ */
+test("paint adds no predicate", () => {
+	for (const template of TEMPLATES) {
+		const plain = predicates(compile(template.create()).program);
+		const full = predicates(compile(painted(template.create())).program);
+		assert.deepEqual(
+			plain.filter((name) => !full.includes(name)),
+			[],
+			`"${template.id}" stopped mentioning a predicate when it grew a gradient`,
+		);
+		assert.deepEqual(
+			full.filter((name) => !plain.includes(name) && !LITERAL_BRIDGES.has(name)),
+			[],
+			`"${template.id}" grew a predicate when it grew a gradient`,
+		);
+	}
+});
+
+/**
+ * The same claim one grain finer, and it is what makes "a gradient recipe
+ * carries no bridge at all" checkable.
+ *
+ * A property becomes `alt/2`, `alt_literal/3` and an interned `literal/2`, plus
+ * whichever of the six bridges its *text* admits — chosen by what the value is
+ * and never by who is asking. A mix mode is one lower-case word so it picks up
+ * `word/2`; a blur is a length so it picks up `numeral/2` in EMU, which is what
+ * makes `:- rendered(N,blur,L), numeral(L,V), V > 76200.` ground with nothing
+ * added; and a gradient recipe has parentheses, commas and hashes in it, so it
+ * picks up nothing, which is the same company a colour and a `box-shadow`
+ * already keep.
+ *
+ * `docvar/1` is in the allowed set because it is one per variable and a new
+ * property is a new variable — the editor cannot offer alternatives it cannot
+ * read. `derived_of/3` is in it for the same shape one step out: a derivation is
+ * compiled to a lookup table over *every literal in the document*, so a new
+ * colour is a new row of it — `derived_of(contrast,«#7c3aed»,«#ffffff»)` — for
+ * precisely the reason a new colour is a new `literal/2`, and a fill set to the
+ * same purple would have added the identical fact. It is an atom about paint's
+ * literal, which is what this test's name allows, rather than an atom about the
+ * scene, which is what it forbids. Everything else in a generated program is a
+ * fact about the scene, the geometry or the rules, and none of those heard about
+ * any of this.
+ */
+test("paint changes no atom but its own literals", () => {
+	const mine = new Set([
+		"alt",
+		"alt_literal",
+		"alt_token",
+		"derived_of",
+		"docvar",
+		"literal",
+		...LITERAL_BRIDGES,
+	]);
+	for (const template of TEMPLATES) {
+		const plain = factsByText(template.create());
+		const full = factsByText(painted(template.create()));
+		const moved = [
+			...[...full].filter((line) => !plain.has(line)),
+			...[...plain].filter((line) => !full.has(line)),
+		];
+		assert.ok(moved.length > 0, `"${template.id}" did not paint anything at all`);
+		for (const line of moved) {
+			const name = /^([a-z][A-Za-z0-9_]*)\(/.exec(line)?.[1];
+			assert.ok(
+				name !== undefined && mine.has(name),
+				`"${template.id}" moved an atom paint has no business moving: ${line}`,
+			);
+		}
+	}
+});
 
 test("a universe carries the picture it decided on, built once", async () => {
 	// What the renderer actually reads. `model` is lazy — a sampling run

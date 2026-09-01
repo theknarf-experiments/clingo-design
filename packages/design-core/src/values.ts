@@ -31,7 +31,14 @@ export type ValueType =
 	| "fit"
 	| "growth"
 	| "solid"
-	| "lamp";
+	| "lamp"
+	// The paint layer above a fill — see `docs/framer-paint-spec.md` §2.1.
+	// Neither is a {@link Quantity}: a gradient recipe is a CSS string and a mix
+	// mode is a word, and neither has a reader that turns it into a number. The
+	// literal bridges are therefore untouched by this pair, which is what lets
+	// the whole feature land without a line of `compile.ts`.
+	| "gradient"
+	| "mix";
 
 /** One entry of a closed menu — see {@link ValueTypeSpec.options}. */
 export interface ValueOption {
@@ -167,6 +174,127 @@ const SHADOWS: ValueOption[] = [
 	{ value: "0 2px 8px rgba(15,23,42,0.14)", label: "Soft" },
 	{ value: "0 8px 24px rgba(15,23,42,0.18)", label: "Raised" },
 	{ value: "0 20px 48px rgba(15,23,42,0.24)", label: "Floating" },
+];
+
+/**
+ * What a gradient is made of when nobody has said.
+ *
+ * Exported and named rather than typed out, because the same pair of colours has
+ * to be spelled in three places that cannot be allowed to disagree: the `var()`
+ * fallbacks inside every recipe in {@link GRADIENTS}, the `fallback` of
+ * `PROPS.gradientFrom` and `PROPS.gradientTo` — which is what the inspector row
+ * shows before anybody types — and the `initial-value` of the registered custom
+ * properties in `CUSTOM_PROPERTY_RULES`. Three copies of `#ffffff` is a design
+ * where the row says one colour and the box paints another, and nothing about
+ * that failure looks like a bug: it looks like the picture.
+ *
+ * White to slate, because a gradient a designer has only chosen the *direction*
+ * of should read as a gradient at a glance — a pair that differed by a hair
+ * would look like a rendering fault, and a pair that differed by a hue would be
+ * an opinion about somebody's palette.
+ */
+export const GRADIENT_FROM = "#ffffff";
+export const GRADIENT_TO = "#94a3b8";
+
+/** Both ends, as the two `var()`s every recipe below shares. */
+const STOPS = `var(--gfrom, ${GRADIENT_FROM}), var(--gto, ${GRADIENT_TO})`;
+
+/**
+ * A direction, not a picture.
+ *
+ * This is the half of a gradient that genuinely *is* a closed menu, and
+ * separating it from the half that is not is the whole design. Which way a
+ * gradient runs is a small, finite, colour-free decision — the same kind of
+ * thing {@link FITS} and {@link PLACEMENTS} are — while what colours it runs
+ * between is the design's own palette, and belongs to two `color` properties
+ * that can name a token. A roster of complete gradient strings would have been
+ * the {@link SHADOWS} move, and it fails here for the reason it succeeds there:
+ * a shadow is colourless and a gradient is nothing *but* colour. A frozen roster
+ * would be somebody else's palette, unable to name a token, unable to branch,
+ * unable to follow a style variant or be repainted by a machine state — every
+ * single thing this document model is for, switched off for the one property
+ * where a designer most wants it.
+ *
+ * Every entry names both `--gfrom` and `--gto` with a literal fallback, so a
+ * node that has chosen a direction and nothing else still paints a gradient
+ * rather than nothing at all. A missing custom property makes the whole
+ * declaration invalid at computed-value time, which in CSS means the gradient
+ * silently disappears — the exact failure a `var()` fallback exists to prevent.
+ *
+ * `none` first and as the fallback, unlike {@link SHADOWS}, whose fallback is
+ * its second entry: a shadow is an elevation and "no shadow" is a rung on that
+ * ladder, while a gradient is a flourish and the great majority of boxes do not
+ * want one. A new alternative on this row should start at "no gradient".
+ *
+ * Rejected: an eighth `gradientAngle` property, so the angle could name an
+ * `angle` token. It was the closest thing to being in, and it is out because the
+ * row would be live for a third of this menu and inert for the rest — a radial
+ * and a conic gradient do not read an angle the way a linear one does — and the
+ * inspector has no mechanism for a row that greys itself out on another row's
+ * *value*. `PropSpec.needs` tests presence, not content, deliberately.
+ */
+const GRADIENTS: ValueOption[] = [
+	{ value: "none", label: "None" },
+	{ value: `linear-gradient(180deg, ${STOPS})`, label: "Linear, down" },
+	{ value: `linear-gradient(0deg, ${STOPS})`, label: "Linear, up" },
+	{ value: `linear-gradient(90deg, ${STOPS})`, label: "Linear, right" },
+	{
+		value: `linear-gradient(135deg, ${STOPS})`,
+		label: "Linear, down and right",
+	},
+	{
+		value: `radial-gradient(circle at 50% 50%, ${STOPS})`,
+		label: "Radial, from the centre",
+	},
+	{
+		value: `radial-gradient(circle at 0% 0%, ${STOPS})`,
+		label: "Radial, from the corner",
+	},
+	{ value: `conic-gradient(from 180deg at 50% 50%, ${STOPS})`, label: "Conic" },
+];
+
+/**
+ * How a layer's colours meet what is painted behind it — CSS `mix-blend-mode`.
+ *
+ * **Every value here is one lower-case word, and that is a constraint rather
+ * than a coincidence.** {@link wordOf} accepts `/^[a-z][A-Za-z0-9_]*$/` and
+ * nothing else, so a value with a dash in it reaches the program as a quoted
+ * string and emits no `word/2` beside it. That is perfectly legal — a colour and
+ * a shadow are exactly that — but it would make this the first *enumerated*
+ * roster in the file where half the entries carry a word and half do not, and a
+ * rule that reads `word(L,multiply)` and finds nothing for `soft-light` is a
+ * rule that is right about eight modes and quietly wrong about four.
+ *
+ * So the four CSS modes whose names are hyphenated — `color-dodge`,
+ * `color-burn`, `hard-light` and `soft-light` — are **out**, and this is the one
+ * place in this feature where something real is given up. Soft light in
+ * particular is a mode designers reach for. Two things make it bearable: a
+ * curated roster is what this file already does everywhere (four font stacks out
+ * of thousands, five elevations out of infinity), and the alternative — storing
+ * `softLight` and translating it in `PAINT` the way `fit` translates `stretch`
+ * to `fill` — buys the four modes at the price of the rule that an enumerated
+ * value *is* the CSS it paints with, which is what makes an enumerated type cost
+ * the renderer nothing and what makes a value written before the menu existed
+ * still paint. `fit` is the exception because `fill` was already taken in this
+ * vocabulary by the colour a box is painted; there is no such collision here,
+ * only a hyphen. Four modes is a cheaper thing to lose than that rule.
+ *
+ * `normal` first and as the fallback, because it is CSS's initial value: a row
+ * that has never been touched must mean "composite the ordinary way".
+ */
+const MIXES: ValueOption[] = [
+	{ value: "normal", label: "Normal" },
+	{ value: "multiply", label: "Multiply" },
+	{ value: "screen", label: "Screen" },
+	{ value: "overlay", label: "Overlay" },
+	{ value: "darken", label: "Darken" },
+	{ value: "lighten", label: "Lighten" },
+	{ value: "difference", label: "Difference" },
+	{ value: "exclusion", label: "Exclusion" },
+	{ value: "hue", label: "Hue" },
+	{ value: "saturation", label: "Saturation" },
+	{ value: "color", label: "Colour" },
+	{ value: "luminosity", label: "Luminosity" },
 ];
 
 const ALIGNS: ValueOption[] = [
@@ -350,6 +478,31 @@ export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
 	growth: { label: "Growth", fallback: GROWTH[0].value, options: GROWTH },
 	solid: { label: "Solid", fallback: SOLIDS[0].value, options: SOLIDS },
 	lamp: { label: "Lamp", fallback: LAMPS[1].value, options: LAMPS },
+	/**
+	 * Which way a gradient runs, as the whole `background-image` it becomes.
+	 *
+	 * An enumerated type with no quantity, so no reader turns it into a number
+	 * and no literal bridge carries it: a recipe has parentheses, commas and
+	 * hashes in it, all of which {@link wordOf} refuses, so it reaches the
+	 * program as a quoted string and nothing else — the same company a colour and
+	 * a `box-shadow` already keep. A rule that wants to say something about
+	 * gradients compares literal identity, which is how `differ` and `match`
+	 * already work on a fill.
+	 */
+	gradient: {
+		label: "Gradient",
+		fallback: GRADIENTS[0].value,
+		options: GRADIENTS,
+	},
+	/**
+	 * How a node's colours meet what is painted behind it.
+	 *
+	 * Every inhabitant is a legal ASP constant, which is the payoff of the roster
+	 * decision in {@link MIXES}: `mword(N,M) :- rendered(N,mix,L), word(L,M).`
+	 * grounds, and a rule can reason about the mode by name with nothing added to
+	 * the compiler.
+	 */
+	mix: { label: "Mix", fallback: MIXES[0].value, options: MIXES },
 };
 
 export const VALUE_TYPE_NAMES = Object.keys(VALUE_TYPES) as ValueType[];

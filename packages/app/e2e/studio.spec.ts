@@ -149,6 +149,72 @@ async function expectDrawnStudio(page: Page): Promise<void> {
 	expect(painted.background).toMatch(/^rgb\(\d+, \d+, \d+\)$/);
 }
 
+/**
+ * Paint a gradient from the inspector, and watch it arrive on the canvas.
+ *
+ * The one thing this walk gains for the paint layer, and it is here rather than
+ * in a `node --test` because **every** step of it is unavailable headless. A
+ * gradient is three ordinary properties and the file that proves that is
+ * `props.test.ts`; what no test in `design-core` can reach is the two ends of
+ * the chain those properties hang between:
+ *
+ *   - **React writing `--gfrom` out of a style object.** `PAINT.gradientFrom`
+ *     returns `{ "--gfrom": … }`, which is a key no `Declarations` had before
+ *     and which React writes only because it starts with two dashes. A unit test
+ *     asserts the object; only a browser asserts the attribute.
+ *   - **`@property` reaching the page.** The registration is a string in
+ *     `paint.ts`, rendered into a `<style>` at the *app* root — not the studio's,
+ *     because a presentation is a different route — and the whole failure mode is
+ *     invisible: a gradient still paints without it, because every recipe carries
+ *     `var()` fallbacks. So it is checked the one way that tells the difference,
+ *     by reading `--gfrom` back off the element. A registered custom property
+ *     computes to its `initial-value`; an unregistered one computes to nothing at
+ *     all, and the picture is identical either way.
+ *
+ * The inspector half rides along for free and is worth the three lines: the two
+ * colour rows are absent until the node holds a direction, present the moment it
+ * does, and — the part a `PropSpec.needs` that tested *resolution* rather than
+ * *presence* would get wrong — still present when the direction goes back to
+ * None, because a designer flipping between directions must not have rows
+ * blinking out from under the cursor.
+ *
+ * It leaves the gradient on, deliberately: the returning visit reads this very
+ * document back out of IndexedDB, so a property invented after the store was
+ * written is a property the store is proved to carry.
+ */
+async function expectAGradientPaints(page: Page): Promise<void> {
+	// The badge is a rect, so its Appearance list offers all six of the paint
+	// properties; it is also the node the walk already watches the solver paint.
+	await page.locator('[data-layer="badge"]').click();
+	const direction = page.locator('[data-prop="gradient"] select[data-role="literal"]');
+	await expect(direction).toHaveCount(1);
+	await expect(page.locator('[data-prop="gradientFrom"]')).toHaveCount(0);
+	await expect(page.locator('[data-prop="gradientTo"]')).toHaveCount(0);
+	// "Layer blur" rather than "Blur", because `blur` is also a trigger and the
+	// two words would otherwise be one screen apart.
+	await expect(page.locator('[data-prop="blur"]')).toContainText("Layer blur");
+	await expect(page.locator('[data-prop="mix"] select[data-role="literal"]')).toHaveCount(1);
+
+	await direction.selectOption({ label: "Linear, down" });
+	await expect(page.locator('[data-prop="gradientFrom"]')).toHaveCount(1);
+	await expect(page.locator('[data-prop="gradientTo"]')).toHaveCount(1);
+
+	// Retried rather than read once: choosing a direction is a document edit, and
+	// what the canvas paints is whatever the *next* answer set renders.
+	const badge = page.locator('[data-artboard] [data-node="badge"]');
+	await expect(badge).toHaveCSS("background-image", /linear-gradient/);
+	const registered = await badge.evaluate((element) =>
+		getComputedStyle(element).getPropertyValue("--gfrom").trim(),
+	);
+	expect(registered, "--gfrom computed to nothing, so @property never reached the page").not.toBe(
+		"",
+	);
+
+	await direction.selectOption({ label: "None" });
+	await expect(page.locator('[data-prop="gradientFrom"]')).toHaveCount(1);
+	await direction.selectOption({ label: "Linear, down" });
+}
+
 /** Make a project from the Card template and wait for the studio it opens. */
 async function createFromTemplate(page: Page): Promise<void> {
 	await page.goto(`${BASE_URL}/`, { waitUntil: "load" });
@@ -184,6 +250,7 @@ test("a template becomes a drawn studio, first on a clean profile and then on a 
 			const trouble = watchForTrouble(page);
 			await createFromTemplate(page);
 			await expectDrawnStudio(page);
+			await expectAGradientPaints(page);
 			expect(trouble, "the first visit logged errors").toEqual([]);
 		} finally {
 			// Closed, not merely navigated away from. The database has to be

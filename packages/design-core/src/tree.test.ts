@@ -17,6 +17,7 @@ import {
 import { type Frame } from "./geometry.ts";
 import { type Scene, emptyScene, frameOf, makeFrame } from "./scene.ts";
 import { EMU_PER_PX } from "./units.ts";
+import { single } from "./values.ts";
 import {
 	ancestorsOf,
 	findInTree,
@@ -282,6 +283,40 @@ test("hit testing works in canvas coordinates through nesting", () => {
 	assert.equal(hitTestTree(scene.nodes, at(50, 50)), undefined);
 
 	assert.deepEqual(worldFrame(scene.nodes, "box"), box(120, 120, 60, 60));
+});
+
+/**
+ * A halo is not a hit area, and the reason is that the file agrees.
+ *
+ * "Click the blurry bit" is a plausible-sounding request and it is wrong three
+ * times over. The frame is what the editor draws — handles, snaps, alignment and
+ * the marquee are all the frame — so a hit area bigger than it would make a node
+ * selectable where nothing on screen says it is. The browser hit-tests the
+ * unblurred border box, so in the exported file a pointer over the halo is over
+ * whatever is behind it, and extending the canvas's reach would make the editor
+ * and the file disagree about what you are pointing at, which is the one thing
+ * `paint.ts` exists to prevent. And the halo is mostly transparent: picking a
+ * node by a pixel that is four percent opaque is worse than not picking it.
+ *
+ * Asserted rather than argued because `hitTestTree` never opens `props` at all,
+ * and this is the test that says that is a decision rather than an omission a
+ * later blur-aware version would be free to fix.
+ */
+test("a blur does not widen what you can click", () => {
+	const blurred: Scene = {
+		...emptyScene(),
+		nodes: [
+			{
+				...makeNode("rect", box(100, 100, 60, 60), { id: "box" }),
+				props: { blur: single("40px") },
+			},
+		],
+	};
+
+	assert.equal(hitTestTree(blurred.nodes, at(130, 130))?.node.id, "box");
+	// Two pixels outside the frame, well inside a forty-pixel smear.
+	assert.equal(hitTestTree(blurred.nodes, at(162, 130)), undefined);
+	assert.equal(hitTestTree(blurred.nodes, at(130, 98)), undefined);
 });
 
 test("clicking inside a frame selects the child, not the frame", () => {

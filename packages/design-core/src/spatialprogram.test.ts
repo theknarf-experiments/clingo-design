@@ -228,6 +228,19 @@ function summarise(template: (typeof TEMPLATES)[number], result: {
  * into a document that has none — which is the one failure this whole track
  * promised could not happen.
  *
+ * The `html` and `svg` digests of every universe of every template moved once,
+ * with the paint step, and that is the one regeneration this fixture has taken.
+ * It was not optional and it was not a repair: a fill stopped being the
+ * `background` shorthand and became `background-color`, and every exported file
+ * gained the two `@property` registrations and an `isolation`, so the bytes of
+ * every document this repo has ever exported changed by construction. What the
+ * regeneration had to prove — and did, field by field, before a byte was written
+ * — is that `count`, `total`, `ids`, `nodes`, `frames` and `rendered` did **not**
+ * move for any universe of any template, and that `html` and `svg` moved for
+ * *every* one of them. A paint change that left an export alone would mean the
+ * property never reached the file; a paint change that moved a frame would mean
+ * it reached the geometry, which is the thing `MEASURED_PROPS` exists to stop.
+ *
  * Two ids were **added** later and neither is a regeneration: `deck` and
  * `solids` are the templates written after the ladder and the third axis
  * shipped, so they have no "before" to have moved away from. What they get out

@@ -2508,6 +2508,26 @@ export function Inspector({
 	 */
 	function appearanceRow(prop: PropName) {
 		const spec = PROPS[prop];
+		/**
+		 * A detail row waits for the property it is a detail of.
+		 *
+		 * Twelve rows on a rect is a wall and ten is a list, and the two gradient
+		 * colours paint nothing at all until a direction has been chosen — so they
+		 * are hidden until the node holds a `gradient`, which is the one shape
+		 * {@link PropSpec.needs} exists for.
+		 *
+		 * The test is *presence*, not resolution: choosing None in the gradient
+		 * menu leaves the two colour rows on screen, because a designer flipping
+		 * between directions must not have rows blinking out from under the
+		 * cursor. And it is a claim about this list and nothing else — the value
+		 * stays in the document, a style may still decide it, a state may still
+		 * repaint it and the exporter still writes it. The style-variant editor
+		 * below deliberately does not apply it: a variant has no gradient of its
+		 * own to test unless it sets one, and hiding a field a variant could
+		 * legitimately fill would make a style unable to say something a node can.
+		 */
+		const needs = spec.needs;
+		if (needs !== undefined && node.props[needs] === undefined) return null;
 		const variable = propVar(node.id, prop);
 		/**
 		 * The two appearance rows the frozen DOM contract names by a role of their
