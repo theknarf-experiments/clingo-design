@@ -1578,6 +1578,18 @@ export function Studio({
 	 * disagree — and the way it would disagree is by hiding a definition a
 	 * template drew on purpose.
 	 */
+	/**
+	 * The definition, when what is open is a component rather than a page.
+	 *
+	 * A component document holds one scene whose single root is the definition, so
+	 * this is that root — and everything drawn while it is open goes inside it.
+	 * Without that, a node drawn beside the definition is saved into the document
+	 * and read by nothing: `libraryOf` takes the first root, because a component
+	 * is one object, so a second one is neither lost nor used.
+	 */
+	const definitionRoot =
+		activeComponent === undefined ? undefined : scene.nodes[0]?.id;
+
 	const librarySplices = useMemo(
 		() => new Set(componentNames.map((name) => componentIdOf(componentPath(name)))),
 		[componentNames],
@@ -2117,6 +2129,7 @@ export function Studio({
 											onSceneChange={onSceneChange}
 											tool={tool}
 											onToolChange={setTool}
+											confineTo={definitionRoot}
 											getScale={() => camera.get().scale}
 											origin={{ x: region.x, y: region.y }}
 											varying={unsettled}

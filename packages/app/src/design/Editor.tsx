@@ -247,6 +247,21 @@ export interface EditorProps {
 	onPoster?: (viewport: string, dataUrl: string) => void;
 	tool: Tool;
 	onToolChange: (tool: Tool) => void;
+	/**
+	 * A node every new node must land inside, when the canvas is showing one
+	 * document that *is* one object.
+	 *
+	 * Set only while a component is open. A component document holds one
+	 * definition, and `libraryOf` reads exactly that one root — so a node drawn
+	 * beside it rather than inside it is saved, kept, listed in the layer list,
+	 * and part of no component. Not lost, not used, and nothing saying which.
+	 *
+	 * So the host is not a question here: it is this, always. A surface drawn on a
+	 * page becomes a root; a surface drawn in a component becomes a child of the
+	 * definition like everything else, because a component with two roots is not a
+	 * thing this document model has.
+	 */
+	confineTo?: string;
 	/** Camera scale, so a screen distance converts to a canvas one. */
 	getScale: () => number;
 	/**
@@ -392,6 +407,7 @@ export function Editor({
 	onSceneChange,
 	tool,
 	onToolChange,
+	confineTo,
 	getScale,
 	origin,
 	varying,
@@ -825,14 +841,16 @@ export function Editor({
 		// because a keypress can end a path several renders after the last one
 		// this closure saw.
 		const now = live.current;
-		const host = bounds
-			? (frameAt(
-					now.scene.nodes,
-					{ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
-					now.universe.solved,
-					now.context,
-				)?.node.id ?? null)
-			: null;
+		const host =
+			confineTo ??
+			(bounds
+				? (frameAt(
+						now.scene.nodes,
+						{ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
+						now.universe.solved,
+						now.context,
+					)?.node.id ?? null)
+				: null);
 		onSceneChange((prev) => addNodeTo(prev, host, node, universe.pick));
 		onSelectionChange([node.id]);
 	}
@@ -1508,14 +1526,16 @@ export function Editor({
 
 				// A surface is drawn on the canvas; anything else lands inside
 				// whichever surface it was drawn over.
-				const host = KINDS[gesture.nodeKind].surface
-					? null
-					: (frameAt(
-							now.scene.nodes,
-							{ x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
-							now.universe.solved,
-							now.context,
-						)?.node.id ?? null);
+				const host =
+					confineTo ??
+					(KINDS[gesture.nodeKind].surface
+						? null
+						: (frameAt(
+								now.scene.nodes,
+								{ x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
+								now.universe.solved,
+								now.context,
+							)?.node.id ?? null));
 
 				/**
 				 * A 3D view is drawn like any other rectangle and arrives with a

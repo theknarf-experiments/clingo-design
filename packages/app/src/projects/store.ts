@@ -16,6 +16,7 @@ import {
 	type SceneNode,
 	componentName,
 	componentPath,
+	asDefinition,
 	composeLibrary,
 	decomposeLibrary,
 	emptyScene,
@@ -797,7 +798,9 @@ export async function extractComponent(
 	p.createDoc<ComponentDoc>(path, COMPONENT_TYPE, {
 		// A scene of its own, with the definition as its only root — so the
 		// component opens in the studio like a page and needs nothing else.
-		scene: { ...emptyScene(), nodes: [{ ...node, component: true }] },
+		// Through `asDefinition`, so the root can hold children: a component is a
+		// thing you go on to edit, and a leaf root has nowhere for an edit to go.
+		scene: { ...emptyScene(), nodes: [asDefinition(node)] },
 	});
 	upsertProject(url, { updatedAt: Date.now() });
 	publish();

@@ -56,6 +56,7 @@ import {
 	type Value,
 	propVar,
 	resolveValue,
+	single,
 	termLabel,
 } from "./values.ts";
 
@@ -610,5 +611,45 @@ export function decomposeLibrary(
 				return path === undefined ? node : { ...node, instanceOf: path };
 			},
 		),
+	};
+}
+
+/**
+ * A node, as the root of a component document.
+ *
+ * A component is a thing you go on to edit, and editing means putting things
+ * inside it — so its root has to be able to hold children. Most nodes cannot: a
+ * rect, a piece of text and an image are leaves, and `children` is documented as
+ * present on the container kinds only.
+ *
+ * So a leaf is wrapped in a frame of its own size, with the leaf at the origin
+ * inside it. That is what every design tool does when you make a component of a
+ * rectangle, and here it is load-bearing rather than conventional: without it,
+ * drawing in the component editor has nowhere legal to go. Confining new nodes
+ * to a leaf root silently swallows them — they are added to a `children` the
+ * renderer and the layer list do not read — and *not* confining them makes
+ * second roots that `libraryOf` ignores. Wrapping removes both cases instead of
+ * choosing between them.
+ *
+ * A node that can already contain is returned as it is, so making a component of
+ * a frame does not add a frame around a frame.
+ */
+export function asDefinition(node: SceneNode): SceneNode {
+	if (KINDS[node.kind].container || KINDS[node.kind].surface) {
+		return { ...node, component: true };
+	}
+	return {
+		...node,
+		id: `${node.id}_of`,
+		kind: "frame",
+		name: node.name,
+		component: true,
+		// The frame takes the node's box and the node sits at its origin inside,
+		// so the component occupies exactly the space the thing did and an instance
+		// arrives the same size.
+		children: [{ ...node, frame: { ...node.frame, x: single("0"), y: single("0") } }],
+		// The wrapper is scaffolding, not a design decision: it paints nothing, so
+		// what the component looks like is still entirely what was in it.
+		props: {},
 	};
 }
