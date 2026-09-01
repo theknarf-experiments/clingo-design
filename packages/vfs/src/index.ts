@@ -52,13 +52,35 @@ export type Files = Record<string, string | Uint8Array>
 
 // --- The pushwork vfs doc shapes ---
 type DirDoc = Record<string, unknown> // { '@patchwork': {type:'directory', title?}, '<relpath>': '<file-url>' }
-interface FileDoc {
+
+/** Any document in the tree. Patchwork's rule, and the whole of it: a doc's
+ *  datatype is `doc['@patchwork'].type`, and `file` is simply one of them —
+ *  `folder` is another, and an app declares its own the same way. */
+interface LeafDoc {
+  '@patchwork': { type: string }
+}
+
+/** The `file` datatype: bytes or text, with the metadata a filesystem needs. */
+interface FileDoc extends LeafDoc {
   '@patchwork': { type: 'file' }
   content: string | Uint8Array
   extension: string
   mimeType: string
   name: string
 }
+
+/** The datatype of a doc, or `''` for one that declares none.
+ *
+ *  Absent is not an error and not assumed to be `file`: a leaf written by
+ *  something that did not set it is a leaf we do not know how to read, and
+ *  guessing would put `String(undefined)` into a snapshot as though it were a
+ *  file's contents. */
+const typeOf = (h: DocHandle<LeafDoc>): string =>
+  (h.doc() as LeafDoc | undefined)?.['@patchwork']?.type ?? ''
+
+/** The datatype every path in the tree used to be, before this repo put its own
+ *  documents in there beside the files. */
+export const FILE_TYPE = 'file' 
 
 import { MIME } from './files.ts'
 export { extOf, isBinaryPath, mimeOf, dataUrl } from './files.ts'
@@ -75,7 +97,7 @@ function makeFileEntry(rel: string, content: string | Uint8Array): FileDoc {
 }
 
 /** Read a file doc's contents: bytes as bytes, anything else as text. */
-function contentOf(h: DocHandle<FileDoc>): string | Uint8Array {
+function contentOf(h: DocHandle<LeafDoc>): string | Uint8Array {
   const raw = (h.doc() as { content?: unknown })?.content
   if (raw instanceof Uint8Array) return raw
   return isImmutableString(raw) ? String(raw) : typeof raw === 'string' ? raw : String(raw ?? '')
@@ -297,7 +319,7 @@ export class VfsProject {
 
   constructor(
     private dir: DocHandle<DirDoc>,
-    private files: Map<string, DocHandle<FileDoc>>,
+    private files: Map<string, DocHandle<LeafDoc>>,
     /** The repo this project's docs live in — the syncing one or the local one.
      *  Held rather than looked up, because every doc a project creates later (a
      *  new file, the canvas) has to land in the same one. */
@@ -363,7 +385,7 @@ export class VfsProject {
     if (added.length) {
       await Promise.all(
         added.map(async ([r, u]) => {
-          const fh = await this.repo.find<FileDoc>(u)
+          const fh = await this.repo.find<LeafDoc>(u)
           await fh.whenReady()
           fh.on('change', this.emit)
           this.files.set(r, fh)
@@ -420,12 +442,76 @@ export class VfsProject {
     })
   }
 
-  /** The whole project as absolute path → text. Synchronous: every file handle
-   *  is kept loaded. */
+  /** The whole project as absolute path → contents. Synchronous: every handle
+   *  is kept loaded.
+   *
+   *  **`file` leaves only.** The tree also carries this app's own datatypes — a
+   *  scene is a document, not a serialised blob — and those have no `content`
+   *  to report. Including them would put `String(undefined)` in here under a
+   *  path, which every reader would treat as a file whose text is the word
+   *  "undefined". Ask {@link docAt} for those instead. */
   snapshot(): Files {
     const out: Files = {}
-    for (const [r, fh] of this.files) out[abs(r)] = contentOf(fh)
+    for (const [r, fh] of this.files) {
+      if (typeOf(fh) === FILE_TYPE) out[abs(r)] = contentOf(fh)
+    }
     return out
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Documents in the tree that are not files                          */
+  /* ---------------------------------------------------------------- */
+
+  /** The handle at a path, whatever datatype it holds.
+   *
+   *  The one thing `snapshot()` cannot give you, and the reason this exists: a
+   *  scene is edited *as a document* — structurally, so two people changing two
+   *  different nodes both land, and so its history is the document's own.
+   *  Handing out contents would mean serialising it, which is the single
+   *  decision this arrangement exists to avoid. */
+  docAt<T>(path: string): DocHandle<T> | undefined {
+    return this.files.get(rel(path)) as DocHandle<T> | undefined
+  }
+
+  /** Every path holding a document of this datatype, sorted.
+   *
+   *  Sorted because the tree is a map and has no order of its own, and a list of
+   *  pages that renders in a different order each time is a list nobody can
+   *  point at. */
+  pathsOfType(type: string): string[] {
+    const out: string[] = []
+    for (const [r, fh] of this.files) if (typeOf(fh) === type) out.push(abs(r))
+    return out.sort()
+  }
+
+  /** What datatype lives at a path, or `undefined` where nothing does. */
+  typeAt(path: string): string | undefined {
+    const fh = this.files.get(rel(path))
+    return fh ? typeOf(fh) : undefined
+  }
+
+  /** Put a document of some datatype in the tree.
+   *
+   *  The twin of {@link writeFile} for everything that is not a file. The
+   *  datatype goes *in the doc* rather than being inferred from the extension,
+   *  because that is where Patchwork keeps it and because a path is a name
+   *  rather than a claim about contents.
+   *
+   *  Returns the existing handle rather than overwriting: replacing a document
+   *  with a fresh one throws away its history, which for a scene is the undo
+   *  stack. Editing one is `docAt(path)!.change(...)`. */
+  createDoc<T extends object>(path: string, type: string, initial: T): DocHandle<T> {
+    const r = rel(path)
+    const existing = this.files.get(r)
+    if (existing) return existing as unknown as DocHandle<T>
+    const handle = this.repo.create<T>({
+      ...initial,
+      '@patchwork': { type },
+    } as T)
+    this.files.set(r, handle as unknown as DocHandle<LeafDoc>)
+    handle.on('change', this.emit)
+    this.dir.change((d) => { d[r] = handle.url })
+    return handle
   }
 
   writeFile(path: string, text: string | Uint8Array): void {
@@ -434,11 +520,17 @@ export class VfsProject {
     const r = rel(path)
     const existing = this.files.get(r)
     if (existing) {
-      existing.change((d) => { d.content = text as string })
+      // Writing contents to a path that holds one of this app's own datatypes
+      // would put a string where a document is — silently, and only noticed
+      // when the scene failed to load. A path holds one kind of thing.
+      if (typeOf(existing) !== FILE_TYPE) {
+        throw new Error(`${abs(r)} holds a ${typeOf(existing)} document, not a file.`)
+      }
+      ;(existing as unknown as DocHandle<FileDoc>).change((d) => { d.content = text as string })
       return
     }
     const fh = this.repo.create<FileDoc>(makeFileEntry(r, text))
-    this.files.set(r, fh)
+    this.files.set(r, fh as unknown as DocHandle<LeafDoc>)
     fh.on('change', this.emit)
     this.dir.change((d) => { d[r] = fh.url })
   }
@@ -450,8 +542,18 @@ export class VfsProject {
     const move = (oldR: string, newR: string) => {
       const fh = this.files.get(oldR)
       if (!fh) return
-      const meta = makeFileEntry(newR, '')
-      fh.change((d) => { d.name = meta.name; d.extension = meta.extension; d.mimeType = meta.mimeType })
+      // The file datatype carries its own name, extension and mime type, so a
+      // rename has to update them or the doc disagrees with the path it hangs
+      // from. Every other datatype carries none of that — a scene is named by
+      // where it sits — so for those the move is the key and nothing else.
+      if (typeOf(fh) === FILE_TYPE) {
+        const meta = makeFileEntry(newR, '')
+        ;(fh as unknown as DocHandle<FileDoc>).change((d) => {
+          d.name = meta.name
+          d.extension = meta.extension
+          d.mimeType = meta.mimeType
+        })
+      }
       this.files.delete(oldR)
       this.files.set(newR, fh)
       this.dir.change((d) => { d[newR] = fh.url; delete d[oldR] })
@@ -551,11 +653,11 @@ export async function openProject(
   if (meta?.type !== 'directory') {
     throw new Error('This project is in an old format and can no longer be opened.')
   }
-  const files = new Map<string, DocHandle<FileDoc>>()
+  const files = new Map<string, DocHandle<LeafDoc>>()
   const leaves = Object.entries(doc).filter(([k, v]) => !k.startsWith('@') && isLeaf(v)) as [string, AutomergeUrl][]
   await Promise.all(
     leaves.map(async ([r, u]) => {
-      const fh = await repo.find<FileDoc>(u)
+      const fh = await repo.find<LeafDoc>(u)
       await fh.whenReady()
       files.set(r, fh)
     }),
@@ -660,7 +762,7 @@ export async function watchRepo(url: string, onChange: () => void): Promise<() =
   if (!isValidAutomergeUrl(url)) return () => {}
   const dir = await repo.find<DirDoc>(url as AutomergeUrl)
   await dir.whenReady()
-  const files = new Map<string, DocHandle<FileDoc>>()
+  const files = new Map<string, DocHandle<LeafDoc>>()
   const fileCb = () => onChange()
   const reconcile = async () => {
     const leaves = new Map(Object.entries(dir.doc() as DirDoc).filter(([k, v]) => !k.startsWith('@') && isLeaf(v)) as [string, AutomergeUrl][])
@@ -668,7 +770,7 @@ export async function watchRepo(url: string, onChange: () => void): Promise<() =
     await Promise.all(
       [...leaves].filter(([k]) => !files.has(k)).map(async ([k, u]) => {
         try {
-          const fh = await repo.find<FileDoc>(u)
+          const fh = await repo.find<LeafDoc>(u)
           await fh.whenReady()
           fh.on('change', fileCb)
           files.set(k, fh)
@@ -744,13 +846,21 @@ export async function cloneTemplate(
     const leaves = Object.entries(dir).filter(([k, v]) => !k.startsWith('@') && isLeaf(v)) as [string, AutomergeUrl][]
     const entries = await Promise.all(
       leaves.map(async ([path, fileUrl]) => {
-        const fh = await repo.find<FileDoc>(fileUrl)
+        const fh = await repo.find<LeafDoc>(fileUrl)
         await fh.whenReady()
+        // Only `file` leaves have contents to read. A tree holding one of this
+        // app's own datatypes reports it as absent here rather than as the text
+        // "undefined" — this is the read behind template cloning, and a template
+        // is files.
+        if (typeOf(fh) !== FILE_TYPE) return null
         // Lead every path with a slash so it matches the compiler's resolver.
         return [path.startsWith('/') ? path : '/' + path, contentOf(fh)] as const
       }),
     )
-    return { url: root.url, files: Object.fromEntries(entries) }
+    return {
+      url: root.url,
+      files: Object.fromEntries(entries.filter((e): e is readonly [string, string | Uint8Array] => e !== null)),
+    }
   })
   return found.ok ? { ok: true, ...found.value } : { ok: false, error: found.error }
 }
