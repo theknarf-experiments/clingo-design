@@ -3,7 +3,13 @@ import { Link, useNavigate, useParams } from "react-router";
 
 import { Studio } from "../design/Studio";
 import { useProjectHistory } from "../design/useProjectHistory";
-import { pagePath, useProject, useProjectsError, usePages } from "../projects/store";
+import {
+	pagePath,
+	useProject,
+	useProjectsError,
+	usePages,
+} from "../projects/store";
+import { componentPath } from "@clingo-design/design-core";
 import styles from "./Project.module.css";
 
 /**
@@ -20,7 +26,7 @@ import styles from "./Project.module.css";
  * of ours that would have needed mapping to one.
  */
 export function Project() {
-	const { id, page: named } = useParams();
+	const { id, page: named, component: editing } = useParams();
 	const navigate = useNavigate();
 	const error = useProjectsError();
 	const names = usePages(id);
@@ -31,7 +37,15 @@ export function Project() {
 	// which is what asking for a document at a path nothing lives at would do.
 	const known = named !== undefined && names.includes(named);
 	const active = known ? named : names[0];
-	const path = active === undefined ? undefined : pagePath(active);
+	// A component is edited exactly as a page is — its document holds a scene, so
+	// everything below this line is the same code for both. Which document is the
+	// only difference, and it is one line.
+	const path =
+		editing !== undefined
+			? componentPath(editing)
+			: active === undefined
+				? undefined
+				: pagePath(active);
 
 	const page = useProject(id, path);
 	const history = useProjectHistory(id, path);
@@ -40,11 +54,12 @@ export function Project() {
 	// than left in the address bar saying something untrue. Replace, not push, so
 	// the back button does not land on the broken address again.
 	useEffect(() => {
+		if (editing !== undefined) return;
 		if (!id || named === undefined || known || names.length === 0) return;
 		navigate(`/p/${encodeURIComponent(id)}/${encodeURIComponent(names[0])}`, {
 			replace: true,
 		});
-	}, [id, named, known, names, navigate]);
+	}, [id, named, known, names, navigate, editing]);
 
 	// Undefined is "still opening" and null is "cannot be opened", and the two
 	// must not render alike: a synced project waits on a network, and showing
@@ -86,7 +101,13 @@ export function Project() {
 			}
 			projectName={page.name}
 			projectUrl={id}
-			activePage={active}
+			activePage={editing === undefined ? active : undefined}
+			activeComponent={editing}
+			onOpenComponent={(name) =>
+				navigate(
+					`/p/${encodeURIComponent(id ?? "")}/component/${encodeURIComponent(name)}`,
+				)
+			}
 			onOpenPage={(name) =>
 				navigate(`/p/${encodeURIComponent(id ?? "")}/${encodeURIComponent(name)}`)
 			}

@@ -291,6 +291,17 @@ export interface StudioProps {
 	/** Which page is being shown, and how to go to another. */
 	activePage?: string;
 	onOpenPage?: (name: string) => void;
+	/**
+	 * The component being edited, when what is open is a component rather than a
+	 * page — and how to open one.
+	 *
+	 * Exactly one of {@link activePage} and this is set, because the studio is
+	 * showing one document. A component's document holds a scene, so everything
+	 * below here treats the two the same; what differs is which list highlights a
+	 * row and what the toolbar says you are looking at.
+	 */
+	activeComponent?: string;
+	onOpenComponent?: (name: string) => void;
 	undo: () => void;
 	redo: () => void;
 	canUndo: boolean;
@@ -304,6 +315,8 @@ export function Studio({
 	projectUrl,
 	activePage,
 	onOpenPage,
+	activeComponent,
+	onOpenComponent,
 	undo,
 	redo,
 	canUndo,
@@ -2025,8 +2038,10 @@ export function Studio({
 					{projectUrl ? (
 						<Components
 							url={projectUrl}
-							canExtract={selection.size === 1}
+							active={activeComponent}
+							canExtract={selection.size === 1 && activeComponent === undefined}
 							onExtract={extractSelection}
+							onOpen={onOpenComponent}
 							onPlace={placeComponentHere}
 						/>
 					) : null}

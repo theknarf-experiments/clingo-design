@@ -136,3 +136,39 @@
 	line-height: 1.5;
 	color: var(--dc-muted, #64748b);
 }
+
+/*
+ * Place, beside delete. Hidden until the row is hovered like the delete is, and
+ * disabled while a component is the thing being edited — placing an instance of
+ * a component inside its own definition is a component that contains itself, and
+ * the compiler would ground it until it ran out of room.
+ */
+.place {
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: none;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--dc-muted, #64748b);
+	font: inherit;
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0;
+}
+
+.row:hover .place,
+.row[data-active] .place {
+	opacity: 1;
+}
+
+.place:hover:not(:disabled) {
+	background: var(--dc-raised-hover, rgb(0 0 0 / 0.06));
+	color: inherit;
+}
+
+.place:disabled {
+	opacity: 0.25;
+	cursor: default;
+}

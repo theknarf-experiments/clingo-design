@@ -14,7 +14,6 @@ import {
 	COMPONENT_TYPE,
 	type Scene,
 	type SceneNode,
-	componentIdOf,
 	componentName,
 	componentPath,
 	composeLibrary,
@@ -286,10 +285,24 @@ ready = true;
 /* The component library                                               */
 /* ------------------------------------------------------------------ */
 
-/** What a component document holds, beside the datatype tag the vfs writes. */
-interface ComponentDoc {
-	node: SceneNode;
-}
+/**
+ * What a component document holds.
+ *
+ * A **scene**, exactly like a page — not a bare node, which is what it held when
+ * only the compiler read it. The moment a component has to be *edited*, holding
+ * a scene is what makes that free: `useProject` opens it, `useProjectHistory`
+ * steps it, `saveScene` writes it, and the studio draws it, all unchanged. A
+ * bare node would have needed a second reader, a second writer and a second
+ * undo stack, for a document that is edited in precisely the same way.
+ *
+ * Its single root is the definition. One root because a component is one thing;
+ * the scene is what it is drawn on.
+ */
+type ComponentDoc = SceneDoc;
+
+/** The definition inside a component document, or nothing where it has none. */
+const definitionIn = (doc: ComponentDoc | undefined): SceneNode | undefined =>
+	doc?.scene?.nodes?.[0];
 
 /**
  * Every component document a project holds, by path.
@@ -312,7 +325,7 @@ const opened = new Map<string, VfsProject>();
 function libraryOf(p: VfsProject): Record<string, SceneNode> {
 	const out: Record<string, SceneNode> = {};
 	for (const path of p.pathsOfType(COMPONENT_TYPE)) {
-		const node = p.docAt<ComponentDoc>(path)?.doc()?.node;
+		const node = definitionIn(p.docAt<ComponentDoc>(path)?.doc());
 		// A document with no definition in it is one being created, or one written
 		// by something else. It is skipped rather than defaulted: a component with
 		// no root would splice an undefined node into the scene.
@@ -612,30 +625,16 @@ export function saveScene(url: string, scene: Scene, path = MAIN_PAGE): void {
 	const library = p ? libraryOf(p) : {};
 	let changed = false;
 
-	// An edit to a spliced definition goes back to **its own document**, not to
-	// the page the person happened to be looking at. That is what makes a
-	// component one thing: editing it from any page changes it everywhere, which
-	// is the behaviour, and writing it into the page instead would be the silent
-	// copy the compose/decompose pair exists to prevent.
+	// **No write-back for spliced definitions, and that is not an omission.** A
+	// definition composed into a page is hidden and left out of the layer list,
+	// so nothing on a page can select one, and no edit can reach it. A component
+	// is edited by opening its own document — which is a page-shaped edit through
+	// this same function, at the component's path. Code here to reconcile an edit
+	// that cannot happen would be a feature nobody could reach and a second writer
+	// for the same document.
 	//
-	// Before the page is written, so that a save which touches both leaves the
-	// two documents agreeing rather than half-updated if the second throws.
-	if (p) {
-		for (const [componentPathOf, definition] of Object.entries(library)) {
-			const id = componentIdOf(componentPathOf);
-			const edited = scene.nodes.find((n) => n.id === id && n.component === true);
-			if (!edited) continue;
-			const doc = p.docAt<ComponentDoc>(componentPathOf);
-			doc?.change((draft) => {
-				// Reconciled against the definition as its document holds it — with
-				// the id and the `hidden` the composition added stripped back off,
-				// since both are derived and neither belongs in the document.
-				const { id: _spliced, hidden: _added, ...rest } = edited;
-				if (reconcile(draft.node, { ...rest, id: definition.id })) changed = true;
-			});
-		}
-	}
-
+	// `decomposeLibrary` below is still needed and is a different thing: it stops
+	// the *composition* being written into the page, which happens on every save.
 	handle.change((draft) => {
 		if (reconcile(draft.scene, decomposeLibrary(scene, library))) changed = true;
 	});
@@ -796,7 +795,9 @@ export async function extractComponent(
 	// of its own tree there, and the id the composition gives it on the way into a
 	// scene is derived from the path rather than from this.
 	p.createDoc<ComponentDoc>(path, COMPONENT_TYPE, {
-		node: { ...node, component: true },
+		// A scene of its own, with the definition as its only root — so the
+		// component opens in the studio like a page and needs nothing else.
+		scene: { ...emptyScene(), nodes: [{ ...node, component: true }] },
 	});
 	upsertProject(url, { updatedAt: Date.now() });
 	publish();

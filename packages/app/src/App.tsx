@@ -17,6 +17,14 @@ export function App() {
 			  */}
 			<Route path="p/:id" element={<Project />} />
 			<Route path="p/:id/:page" element={<Project />} />
+			{/*
+			  * A component is a document of the project like a page, so it gets an
+			  * address like one. The extra segment is what keeps the two apart
+			  * without forbidding anything: a page called "component" is still
+			  * `/p/:id/component`, and only the three-segment form names a
+			  * component — so no page name is unreachable.
+			  */}
+			<Route path="p/:id/component/:component" element={<Project />} />
 			<Route path="*" element={<NotFound />} />
 		</Routes>
 	);

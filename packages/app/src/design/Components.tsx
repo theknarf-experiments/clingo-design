@@ -5,9 +5,13 @@ import styles from "./Components.module.css";
 
 export interface ComponentsProps {
 	url: string;
+	/** The component being edited, when one is open rather than a page. */
+	active?: string;
 	/** Make a component out of what is selected, if anything is. */
 	canExtract: boolean;
 	onExtract: () => void;
+	/** Open a component's own document to edit it. */
+	onOpen?: (name: string) => void;
 	/** Put an instance of one on the page being shown. */
 	onPlace: (path: string) => void;
 }
@@ -20,10 +24,24 @@ export interface ComponentsProps {
  * be looking at. It belongs to the project, every page can use it, and editing
  * it from any of them changes it everywhere.
  *
- * That is also why there is no "open" here yet, and its absence is a decision
- * rather than an omission — see the note on the header.
+ * So clicking one **opens** it: a component's document holds a scene, exactly as
+ * a page's does, and the studio edits it with the same canvas, the same layer
+ * list and the same undo stack. That is the whole of why editing a component
+ * needed no editor of its own — the shape of the document decided it.
+ *
+ * Placing gets its own control rather than a double-click, and it is disabled
+ * while a component is the thing open: an instance of a component inside its own
+ * definition is a component that contains itself, and the compiler would ground
+ * it until it ran out of room.
  */
-export function Components({ url, canExtract, onExtract, onPlace }: ComponentsProps) {
+export function Components({
+	url,
+	active,
+	canExtract,
+	onExtract,
+	onOpen,
+	onPlace,
+}: ComponentsProps) {
 	const names = useComponents(url);
 
 	return (
@@ -61,14 +79,37 @@ export function Components({ url, canExtract, onExtract, onPlace }: ComponentsPr
 				<ul className={styles.list}>
 					{names.map((name) => (
 						<li key={name}>
-							<div className={styles.row} data-component={name}>
+							<div
+								className={styles.row}
+								data-component={name}
+								data-active={name === active ? "" : undefined}
+							>
+								{/*
+								  * Click opens it, and the arrow places one. That way round
+								  * because a component is a document: clicking its name in a
+								  * list of documents should show it, the way clicking a page
+								  * does. Placing is the other verb and gets its own control
+								  * rather than a double-click nobody discovers.
+								  */}
 								<button
 									type="button"
 									className={styles.name}
-									title="Place an instance on this page"
-									onClick={() => onPlace(componentPath(name))}
+									data-role="open-component"
+									title="Edit this component. Changes reach every use of it."
+									onClick={() => onOpen?.(name)}
 								>
 									{name}
+								</button>
+								<button
+									type="button"
+									className={styles.place}
+									data-role="place-component"
+									aria-label={`Place an instance of ${name}`}
+									title="Put an instance of it on the page you were on"
+									disabled={active !== undefined}
+									onClick={() => onPlace(componentPath(name))}
+								>
+									+
 								</button>
 								<button
 									type="button"
