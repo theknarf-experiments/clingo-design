@@ -86,6 +86,7 @@ import {
 } from "./measure.ts";
 import {
 	blendWeights,
+	easingOf,
 	findState,
 	keyEasing,
 	layerOf,
@@ -172,10 +173,12 @@ import { runtimeScript } from "./runtime.ts";
 import { flatten } from "./tree.ts";
 import { type Emu, cssPxFromEmu, emuOf } from "./units.ts";
 import {
+	EASING_NAMES,
 	type Picks,
 	type Token,
 	type Value,
 	activeTerm,
+	cssEasing,
 	findToken,
 	frameVar,
 	guideAtIn,
@@ -187,6 +190,7 @@ import {
 	parseVariable,
 	propVar,
 	resolveValue,
+	springOf,
 	tokenVar,
 	writeAngle,
 } from "./values.ts";
@@ -233,6 +237,13 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 			// the question a designer opening this panel is actually asking.
 			"Text is placed in a fixed box: it wraps the way the canvas measured it. A font you imported travels in this file, so it wraps the same everywhere; a system family — Georgia, system-ui — is whatever the reader's machine has, and text set in one re-wraps where it differs.",
 			"A font you imported is written into this file as base64, which is a third larger than the file itself: a 250 kB woff2 adds about 330 kB, and a variable .ttf of 800 kB adds about 1.1 MB. Once per family, however many nodes wear it, and nothing is fetched — the file needs no network at all.",
+			// Appended by the easing step. Conditional would have been better and is
+			// not available: this list is a property of the *target*, read by the
+			// panel before a document is chosen, while whether a spring is in the file
+			// is a property of a universe. So it is written as a sentence that is true
+			// either way — it says what a browser without `linear()` gets, which for a
+			// document with no spring in it is "nothing to get".
+			"A spring is a sampled curve, and a browser too old to parse `linear()` gets the nearest `cubic-bezier` instead — the same speed and direction, without the overshoot. That is a fallback rather than a loss: the file defines both and the browser picks, so the state still tweens over the duration you set. Nothing else about the pacing changes.",
 		],
 	},
 	svg: {
@@ -1935,6 +1946,17 @@ function htmlExport(
 		if (block) css.push(block);
 	}
 
+	// After the `:root` block that carries the token custom properties — which is
+	// the last thing `baseRules` writes — and before the layer blocks, which is
+	// the stylesheet order `docs/framer-parity-plan.md` §5.6 fixes so that four
+	// steps writing one array do not each have to rediscover it. Position is
+	// legibility rather than correctness here: `--dc-ease-*` is defined on `:root`
+	// and referred to from a `transition` shorthand, and a custom property is
+	// substituted at use rather than at definition, so a later `:root` would work
+	// as well. A reader looking for "what curve is this" should find it beside the
+	// other things the document named once.
+	css.push(...springRules(machines.springs));
+
 	for (const layer of layers.slice(1)) {
 		const rules = readLayer(layer);
 		const inner: string[] = [];
@@ -3127,6 +3149,35 @@ export interface MachineExport {
 	runtime: string | null;
 	/** What the file does not carry — appended to {@link ExportResult.lost}. */
 	lost: string[];
+	/**
+	 * The springs any emitted declaration referred to, so the stylesheet can
+	 * define their custom properties and the `@supports` block that upgrades
+	 * them.
+	 *
+	 * A spring is a `linear()` with sixty-five stops in it, and it cannot be
+	 * written inline. `linear()` is Baseline 2023, and a browser that cannot parse
+	 * it treats the whole declaration as invalid and **drops it** — which, because
+	 * this file writes the `transition` *shorthand*, takes the duration and the
+	 * delay with it, so the state would not tween at all, it would snap. That is a
+	 * worse failure than an approximate curve, so a fallback is mandatory.
+	 *
+	 * The obvious idiom — two `transition` declarations, one plain and one inside
+	 * `@supports` — cannot be written here: {@link Declarations} is
+	 * `Record<string, string>` and one key is one property, so two `transition`
+	 * declarations for one node would be one declaration, the later of the two.
+	 * Rewriting that record into a list of pairs is a change to every emitter in
+	 * this file for the sake of three curves. So the curve goes into a custom
+	 * property defined twice, and the declaration says `var(--dc-ease-…)`, which
+	 * substitutes *before* the shorthand is parsed and is therefore one key.
+	 *
+	 * A **set collected during the walk** rather than a scan of the document
+	 * afterwards, for the reason `used` is a single set: a spring named by a
+	 * `curve` token in a hover state has to reach `:root` like any other named
+	 * thing, and a second collection reconciled later is how one goes missing.
+	 * Only springs are in here; a plain curve and a custom bezier are written
+	 * inline, because they are short and every browser parses them.
+	 */
+	springs: Set<Easing>;
 }
 
 /**
@@ -3308,6 +3359,14 @@ const ms = (n: number): string => `${Math.round(n)}ms`;
  * solver picked between, and `mdur/3` is that pick resolved. The document reader
  * is the fallback for an answer set that was asked for without `scenery` — the
  * same reading, arrived at without the solver — rather than a second opinion.
+ *
+ * The curve is read the same way round and for the same reason, which is new:
+ * it used to be a bare word on the transition and a lookup in `EASINGS`, so
+ * there was nothing for a universe to have an opinion about. `measing/3` is the
+ * pick resolved, and an easing that names a `curve` token the solver chose
+ * between resolves to nothing without a context — which is the bug
+ * `machineTable`'s own `context` parameter was added to close, arriving one
+ * field over.
  */
 function pacing(
 	model: ModelScene,
@@ -3315,17 +3374,78 @@ function pacing(
 	transition: Transition,
 	picks: Picks,
 	tokens: readonly Token[],
-): { duration: number; delay: number; stagger: number; easing: string } {
+): {
+	duration: number;
+	delay: number;
+	stagger: number;
+	/** Ready to write: a timing function, or `var(--dc-ease-<spring>)`. */
+	easing: string;
+	/** The spring the caller must add to {@link MachineExport.springs}, if any. */
+	spring?: Easing;
+} {
 	const said = model.machines[machine.id];
 	const context = { tokens, picks };
 	const read = (prop: "duration" | "delay" | "stagger"): number =>
 		said?.[prop][transition.id] ?? motionMs(machine, transition, prop, context);
+	const curve = said?.easing[transition.id] ?? easingOf(machine, transition, context);
 	return {
 		duration: read("duration"),
 		delay: read("delay"),
 		stagger: read("stagger"),
-		easing: EASINGS[transition.easing ?? DEFAULT_EASING].css,
+		...timingFunction(curve),
 	};
+}
+
+/**
+ * A resolved curve as the two things a caller writing a declaration needs: the
+ * text to put in the shorthand, and the spring to remember.
+ *
+ * One function and two call sites — a transition's `transition:` and a
+ * keyframe's `animation-timing-function` — because "a spring is a `var()` and
+ * everything else is itself" is one sentence and two copies of it would drift
+ * the first time a fourth spelling arrived. A curve neither reader knows takes
+ * the default, which is the same answer `measing/3` gives through
+ * `not mreadsease(M,T)`.
+ */
+function timingFunction(curve: string): { easing: string; spring?: Easing } {
+	const spring = springOf(curve);
+	if (spring !== undefined) {
+		return { easing: `var(--dc-ease-${curve})`, spring: curve as Easing };
+	}
+	return { easing: cssEasing(curve) ?? EASINGS[DEFAULT_EASING].css };
+}
+
+/**
+ * The two blocks a document with springs in it needs at the top of its
+ * stylesheet, or nothing at all where it has none.
+ *
+ * Two definitions of one custom property: the plain one every browser takes, and
+ * the sampled `linear()` inside `@supports`, which every browser that can parse
+ * it prefers because it is later and equally specific. Emitted once per document
+ * after the `:root` block that carries the token custom properties and before the
+ * layer blocks — see the stylesheet order in `docs/framer-parity-plan.md` §5.6.
+ *
+ * Written as text rather than as a {@link Declarations} record for the reason
+ * {@link MachineExport.springs} gives at length: a rule split across an
+ * `@supports` boundary cannot live in a `Record<string, string>` where one key
+ * is one property. A document that uses no spring emits **neither block** and is
+ * byte-identical to what it exported before this feature existed, which is the
+ * no-regression claim and is asserted by name.
+ */
+function springRules(springs: ReadonlySet<Easing>): string[] {
+	if (springs.size === 0) return [];
+	// In menu order rather than in the order the walk found them: a stylesheet is
+	// a thing people diff, and "the order two states happened to be visited in" is
+	// not an order anybody asked for.
+	const named = EASING_NAMES.filter((id) => springs.has(id));
+	const fallback = named.map(
+		(id) => `\t--dc-ease-${id}: ${EASINGS[id].spring?.fallback ?? EASINGS[DEFAULT_EASING].css};`,
+	);
+	const sampled = named.map((id) => `\t\t--dc-ease-${id}: ${EASINGS[id].css};`);
+	return [
+		`:root {\n${fallback.join("\n")}\n}`,
+		`@supports (transition-timing-function: linear(0, 1)) {\n\t:root {\n${sampled.join("\n")}\n\t}\n}`,
+	];
 }
 
 /**
@@ -3380,6 +3500,12 @@ function planMachines(
 	const say = (line: string): void => {
 		if (!lost.includes(line)) lost.push(line);
 	};
+	// Beside `used` and threaded exactly as `used` is, because it is the same kind
+	// of thing: a name an emitted declaration referred to, which the stylesheet
+	// then has to define at the top of the file. Collected during the walk rather
+	// than scanned for afterwards, for `used`'s reason — a spring a `curve` token
+	// named in a hover state is a spring only the walk ever sees.
+	const springs = new Set<Easing>();
 	let scripted = false;
 	const context = { tokens: index.scene.tokens, picks: base.universe.pick };
 
@@ -3420,7 +3546,7 @@ function planMachines(
 				// declaration on the same elements the delta paints — so it is one more
 				// thing this state changes, and a state that changes *only* an
 				// animation is still a state the file has to be able to select.
-				const played_ = playTimelines(base, machine, node, state, context, played, say);
+				const played_ = playTimelines(base, machine, node, state, context, played, springs, say);
 				if (state.id === drawnIn) {
 					// The state the picture is in has no selector of its own — it is what
 					// the base rules are — so an animation it plays goes on the base rule
@@ -3441,6 +3567,7 @@ function planMachines(
 					state,
 					useTokens,
 					used,
+					springs,
 					say,
 					played_,
 				);
@@ -3468,6 +3595,7 @@ function planMachines(
 		// One reading, one answer.
 		runtime: scripted ? runtimeScript(machineTable(index.scene, context)) : null,
 		lost,
+		springs,
 	};
 }
 
@@ -3514,6 +3642,8 @@ function stateLayerFor(
 	state: MachineState,
 	useTokens: boolean,
 	used: Set<string>,
+	/** The springs this state's own pacing named — see {@link MachineExport.springs}. */
+	springs: Set<Easing>,
 	say: (line: string) => void,
 	/** The `animation:` this state's timeline turns on, by node id — see {@link playTimelines}. */
 	animations: ReadonlyMap<string, Declarations>,
@@ -3676,7 +3806,7 @@ function stateLayerFor(
 		layer: stratum,
 		on,
 		changed,
-		transitions: transitionsFor(index, base, machine, drawnIn, state, changed, say),
+		transitions: transitionsFor(index, base, machine, drawnIn, state, changed, springs, say),
 		label: `${machine.name} · ${stateName(machine, state.id)} on “${instance.name}”, as ${on}`,
 	};
 }
@@ -3776,6 +3906,7 @@ function transitionsFor(
 	drawnIn: string,
 	state: MachineState,
 	changed: ReadonlyMap<string, Declarations>,
+	springs: Set<Easing>,
 	say: (line: string) => void,
 ): Map<string, Declarations> {
 	const out = new Map<string, Declarations>();
@@ -3800,7 +3931,7 @@ function transitionsFor(
 			`The ${ms(held)} “${stateName(machine, state.id)}” has to be waited for. An exit time is a gate the script checks before it writes the attribute, so it is in the file and it works — but it is not in the CSS, and a reader of the stylesheet alone will not see it.`,
 		);
 	}
-	const { duration, delay, stagger, easing } = pacing(
+	const { duration, delay, stagger, easing, spring } = pacing(
 		model,
 		machine,
 		edge,
@@ -3846,6 +3977,18 @@ function transitionsFor(
 		if (!kind) return;
 		const keys = tweenedKeys(kind, edge.only, changed.get(id) ?? {});
 		if (keys.length === 0) return;
+		// Remembered **here**, beside the declaration that names it, rather than
+		// where `pacing` answered — which is where it was written first, and which
+		// was wrong in a way only a file could show. Three of the paths out of this
+		// function reach no declaration at all: a transition whose duration resolved
+		// to zero returns above, a state that changes nothing a browser tweens
+		// returns on the line above this one, and the `leaving` edge is read only to
+		// *compare* the two directions. A spring collected on any of those puts a
+		// `:root` block and five hundred characters of `@supports` into a file that
+		// refers to neither — and `springRules` cannot tell, because a set of names
+		// carries no record of who asked. The declaration is the only place that
+		// knows, so it is the place that says so.
+		if (spring !== undefined) springs.add(spring);
 		out.set(id, {
 			transition: `${keys.join(", ")} ${ms(duration)} ${easing} ${ms(delay + i * stagger)}`,
 		});
@@ -3897,7 +4040,11 @@ interface PlayedKey {
 	at: number;
 	/** The literal the value resolved to, or nothing where it resolved to nothing. */
 	value: string | undefined;
-	easing: Easing;
+	/**
+	 * The literal the *curve* resolved to — a menu word or a `cubicBezier(…)`, and
+	 * text rather than an {@link Easing} for `easingOf`'s reason.
+	 */
+	easing: string;
 }
 
 interface PlayedTrack {
@@ -3922,7 +4069,7 @@ function playedTracks(
 				solved.key.value,
 				keyValueVar(machine.id, timeline.id, term, solved.index),
 			),
-			easing: keyEasing(solved.key),
+			easing: keyEasing(machine, timeline, term, solved.index, solved.key, context),
 		}));
 		if (keys.length > 0) out.push({ track, keys });
 	}
@@ -4008,6 +4155,8 @@ function playTimelines(
 	state: MachineState,
 	context: { tokens: readonly Token[]; picks: Picks },
 	out: Played,
+	/** The springs this state's keyframes named — see {@link MachineExport.springs}. */
+	springs: Set<Easing>,
 	say: (line: string) => void,
 ): Map<string, Declarations> {
 	const model = base.universe.model;
@@ -4066,6 +4215,7 @@ function playTimelines(
 				length,
 				tracks.filter((t) => t.track.part === part),
 				drawn,
+				springs,
 				say,
 			);
 			if (block === undefined) continue;
@@ -4114,6 +4264,7 @@ function keyframeBlock(
 	length: number,
 	tracks: readonly PlayedTrack[],
 	drawn: ModelNode,
+	springs: Set<Easing>,
 	say: (line: string) => void,
 ): string | undefined {
 	const moving = tracks.filter((t) => movesTransform(t.track));
@@ -4168,7 +4319,7 @@ function keyframeBlock(
 				const paint = paintFor(drawn.kind, track.prop);
 				if (paint) Object.assign(at, paint(cssValue(track.prop, key.value)));
 			}
-			Object.assign(at, easingAt(played, key));
+			Object.assign(at, easingAt(played, key, springs));
 		}
 	}
 
@@ -4195,7 +4346,7 @@ function keyframeBlock(
 		stop.transform = transformOf(dx, dy, z, turn) ?? "none";
 		for (const played of moving) {
 			const key = played.keys.find((k) => k.at === at);
-			if (key) Object.assign(stop, easingAt(played, key));
+			if (key) Object.assign(stop, easingAt(played, key, springs));
 		}
 	}
 
@@ -4239,12 +4390,21 @@ const turnKeys = (tracks: readonly PlayedTrack[], turn: Turn): PlayedKey[] =>
  * default is left out rather than written: `ease-out` on every stop of every
  * block is the same animation and several hundred more bytes.
  */
-function easingAt(played: PlayedTrack, key: PlayedKey): Declarations {
+function easingAt(
+	played: PlayedTrack,
+	key: PlayedKey,
+	springs: Set<Easing>,
+): Declarations {
 	const last = played.keys[played.keys.length - 1];
 	if (key === last) return {};
-	return key.easing === DEFAULT_EASING
-		? {}
-		: { animationTimingFunction: EASINGS[key.easing].css };
+	if (key.easing === DEFAULT_EASING) return {};
+	// The same `var()`-or-itself decision a transition's curve gets, through the
+	// same function: a keyframe may name a spring exactly as a transition may, and
+	// a sixty-five-stop `linear()` written into every stop of every block would be
+	// several hundred bytes per keyframe rather than per document.
+	const { easing, spring } = timingFunction(key.easing);
+	if (spring !== undefined) springs.add(spring);
+	return { animationTimingFunction: easing };
 }
 
 /**

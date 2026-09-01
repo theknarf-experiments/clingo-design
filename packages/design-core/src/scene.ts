@@ -4184,31 +4184,33 @@ export const TRIGGERS: Record<Trigger, TriggerSpec> = {
 export const TRIGGER_NAMES = Object.keys(TRIGGERS) as Trigger[];
 
 /**
- * How a transition is paced.
+ * The curve menu, which **lives in `values.ts`** and is re-exported from here.
  *
- * The keys are ASP constants and reach the program as themselves, the way
- * `spaceBetween` does — the words a human reads are the `label`s.
- */
-export type Easing = "linear" | "ease" | "easeIn" | "easeOut" | "easeInOut";
-
-export const EASINGS: Record<Easing, { label: string; css: string }> = {
-	linear: { label: "Linear", css: "linear" },
-	ease: { label: "Ease", css: "ease" },
-	easeIn: { label: "Ease in", css: "ease-in" },
-	easeOut: { label: "Ease out", css: "ease-out" },
-	easeInOut: { label: "Ease in-out", css: "ease-in-out" },
-};
-
-export const EASING_NAMES = Object.keys(EASINGS) as Easing[];
-
-/**
- * What a transition eases by default.
+ * It was written in this file and moved when an easing became a
+ * {@link Value}: `VALUE_TYPES.easing.options` has to read `EASING_NAMES`, and
+ * `values.ts` is imported by this file rather than the other way round. The
+ * alternative was writing the eight labels twice, in two tables that would
+ * disagree the first time somebody added a ninth curve.
  *
- * `easeOut` rather than `ease`, because a state machine's transitions are
- * responses to a person: the interesting half of the curve is the beginning,
- * and a response that starts slowly reads as lag.
+ * Re-exported rather than left for callers to find, because `scene.ts` is where
+ * every reader of a transition already looks and a moved symbol that changes
+ * nobody's import is a move that costs nothing. It is the same arrangement
+ * `FONTS`/`SYSTEM_FONTS` already has, one table over.
  */
-export const DEFAULT_EASING: Easing = "easeOut";
+export {
+	DEFAULT_EASING,
+	EASINGS,
+	EASING_NAMES,
+	SPRING_STOPS,
+	type Easing,
+	type EasingSpec,
+	type SpringSpec,
+	bezierOf,
+	cssEasing,
+	curveOf,
+	sampleSpring,
+	springOf,
+} from "./values.ts";
 
 /**
  * One of the three numbers that pace a transition.
@@ -4515,11 +4517,26 @@ export interface Keyframe {
 	/** What the track's property, dimension or rotation is at that moment. */
 	value: Value;
 	/**
-	 * How the segment *leaving* this keyframe is paced. The last keyframe's
-	 * easing is read by nothing, and is kept rather than refused, because a
-	 * keyframe that stops being last should not lose what somebody typed.
+	 * How the segment *leaving* this keyframe is paced, as an `easing`
+	 * {@link Value} — so it may name a token, and a `curve` token holding two
+	 * alternatives really is two designs.
+	 *
+	 * Widened together with {@link Transition.easing} rather than left behind,
+	 * because half a change is a new asymmetry replacing an old one: a document
+	 * where the hover curve could name a token and the overshoot curve could not
+	 * would be a feel scale with a hole in it, which is exactly the sentence
+	 * {@link Transition.exit} already makes about a motion scale.
+	 *
+	 * It costs a keyframe **one variable, and only where somebody typed
+	 * something** — `machineValues` guards on `easing.length > 0` exactly as it
+	 * guards on `at.length > 0` — so a timeline whose keyframes say nothing about
+	 * their curves mints nothing at all.
+	 *
+	 * The last keyframe's easing is read by nothing, and is kept rather than
+	 * refused, because a keyframe that stops being last should not lose what
+	 * somebody typed.
 	 */
-	easing?: Easing;
+	easing?: Value;
 }
 
 /**
@@ -4830,7 +4847,27 @@ export interface Transition {
 	delay?: Value;
 	/** How much later each subsequent part moves, in `order/2` sequence. */
 	stagger?: Value;
-	easing?: Easing;
+	/**
+	 * The shape of the curve, as an `easing` {@link Value} — so it may name a
+	 * token, and a `curve` token holding `["easeOut", "springSnappy"]` really is
+	 * two designs, the crisp one and the playful one.
+	 *
+	 * A {@link Value} and not the bare `Easing` word it used to be, and the change
+	 * is a correction rather than a widening. The old reader argued that an easing
+	 * is "a closed menu of five curves with no arithmetic in it, nothing scales
+	 * it" — which is equally true of `direction`, `align`, `fit`, `placement`,
+	 * `justify`, `sizing`, `growth`, `solid` and `lamp`, every one of which is a
+	 * Value, and `#project l_value/3` exists so that a `direction` token holding
+	 * `row` and `column` is two designs rather than one. A duration token is a
+	 * motion *scale*; a curve token is a *feel*; both are one decision a design
+	 * system makes once.
+	 *
+	 * Absent takes `DEFAULT_EASING`, which is what the program's own `mdefease/1`
+	 * rule says too. What resolves to a word the menu has not got takes it as
+	 * well, in both readers — `measeopt/1` is that menu, moved into ASP so that
+	 * the file and the program cannot disagree about which curve is playing.
+	 */
+	easing?: Value;
 	/**
 	 * Only tween these properties; everything else in the state's delta snaps.
 	 *
@@ -5011,20 +5048,15 @@ export function motionMs(
 	return MOTION_PROPS[prop].signed ? ms : Math.max(0, ms);
 }
 
-/**
- * How a transition is paced, falling back to {@link DEFAULT_EASING}.
- *
- * A word rather than a {@link Value}, so this is a lookup rather than a
- * resolution: an easing is a closed menu of five curves with no arithmetic in
- * it, nothing scales it, and a `duration` token is where a document says "all
- * my motion moves together". A stored word the table does not know falls back
- * rather than being carried, exactly as an unknown {@link Scene.unit} does —
- * the emitter would otherwise write a CSS timing function no browser parses.
+/*
+ * `easingOf` used to be here, beside {@link motionMs}, and is now in
+ * `machines.ts` beside `keyEasing`. It moved because it stopped being a lookup:
+ * an easing is a {@link Value} now, so the reader takes a machine and a
+ * {@link ResolveContext} and answers per universe, which is the same shape
+ * `keyEasing` takes over a keyframe. Two readers of one menu in two files is how
+ * one of them comes to disagree with the other about what a curve the menu has
+ * not got means.
  */
-export const easingOf = (transition: Transition): Easing =>
-	transition.easing !== undefined && Object.hasOwn(EASINGS, transition.easing)
-		? transition.easing
-		: DEFAULT_EASING;
 
 export interface Scene {
 	/** Named values, referenced from anywhere. Like CSS custom properties. */

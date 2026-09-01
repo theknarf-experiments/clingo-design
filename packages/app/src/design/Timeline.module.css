@@ -204,6 +204,18 @@
 	gap: 1px;
 }
 
+/* The curve out of a keyframe: the value row and the picture of it, stacked, on
+   their own line under the time and the value. A `<select>` used to sit inline
+   beside them and a row that varies, greys, pins and takes a token does not fit
+   there — the same widening the transition's easing took, one panel over. */
+.easing {
+	flex-basis: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+}
+
 .empty {
 	margin: 0;
 	font-size: 0.66rem;

@@ -67,8 +67,10 @@ import {
 	nearestEmu,
 } from "./units.ts";
 import {
+	EASINGS,
 	GRADIENT_FROM,
 	GRADIENT_TO,
+	SPRING_STOPS,
 	VALUE_TYPES,
 	type Value,
 	isLengthType,
@@ -1442,7 +1444,7 @@ test("the transition names only what changes, and takes the duration it resolved
 						to: "hover",
 						trigger: "pointerenter",
 						duration: single("0.12s"),
-						easing: "easeInOut",
+						easing: single("easeInOut"),
 					}),
 					edge({
 						id: "out",
@@ -1450,7 +1452,7 @@ test("the transition names only what changes, and takes the duration it resolved
 						to: "rest",
 						trigger: "pointerleave",
 						duration: single("0.12s"),
-						easing: "easeInOut",
+						easing: single("easeInOut"),
 					}),
 				],
 			},
@@ -1966,6 +1968,248 @@ test("a second layer that is a clean hover pair still needs no script", async ()
 	assert.ok(block(out.text, `.${host}:focus-visible .${part}`));
 	assert.doesNotMatch(out.text, /<script/, "two pseudo-classes are still no behaviour");
 	assert.doesNotMatch(out.text, /data-state/, "and no attribute either");
+});
+
+test("a spring exports as a custom property with a curve in front of it", async () => {
+	// A spring is a `linear()` with sixty-five stops and it cannot be written
+	// inline, because `linear()` is Baseline 2023 and a browser that cannot parse
+	// it drops the **whole declaration** — which, since this file writes the
+	// `transition` shorthand, takes the duration and the delay with it and makes
+	// the state snap rather than tween. That is a worse failure than an
+	// approximate curve, so both spellings are in the file and the browser picks:
+	// a `cubic-bezier` on `:root`, and the sample inside `@supports`, which is
+	// later and equally specific so every browser that parses it prefers it.
+	//
+	// Two declarations of `transition` — one plain, one gated — was the obvious
+	// idiom and is unavailable: `Declarations` is `Record<string, string>` and one
+	// key is one property. `var()` substitutes before the shorthand is parsed, so
+	// this is one key.
+	const scene = machined({
+		machines: [
+			{
+				...hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } }),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						easing: single("springSnappy"),
+					}),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const part = className(out.text, "inst(b1,btn)");
+
+	assert.ok(
+		out.text.includes("--dc-ease-springSnappy: cubic-bezier(0.2, 0, 0, 1);"),
+		"the fallback every browser takes",
+	);
+	assert.match(out.text, /@supports \(transition-timing-function: linear\(0, 1\)\) \{/);
+	const upgrade = /@supports[^{]*\{\n\t:root \{\n\t\t--dc-ease-springSnappy: (linear\([^)]*\));/.exec(
+		out.text,
+	);
+	assert.ok(upgrade, "expected the sample inside @supports");
+	assert.equal(upgrade[1], EASINGS.springSnappy.css, "and it is the checked-in string");
+	assert.equal(
+		upgrade[1].split(",").length,
+		SPRING_STOPS,
+		"sixty-five stops, which is what makes the polyline invisible",
+	);
+
+	// And the declaration refers to it rather than carrying it, which is the whole
+	// reason for the hoist: the sample is ~500 characters paid once per document
+	// rather than once per node.
+	const base = block(out.text, `.${part}`);
+	assert.ok(base);
+	assert.match(base, /transition: background-color 200ms var\(--dc-ease-springSnappy\) 0ms;/);
+});
+
+test("a document with no spring emits neither block", async () => {
+	// **The no-regression assertion.** Every document written before curves were
+	// values paces with a menu word, and a menu word is short and parses
+	// everywhere, so it is written inline and nothing is hoisted. A file that grew
+	// a `:root` block and an `@supports` block for a feature it does not use would
+	// be this rung charging every document for three curves.
+	const scene = machined({
+		machines: [hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } })],
+	});
+	const { out } = await exported(scene);
+	assert.doesNotMatch(out.text, /--dc-ease-/);
+	assert.doesNotMatch(out.text, /@supports/);
+	// And a custom bezier is inline for the same reason: it is short and every
+	// browser has parsed `cubic-bezier` for fifteen years.
+	const bespoke = machined({
+		machines: [
+			{
+				...hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } }),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						easing: single("cubicBezier(340,1560,640,1000)"),
+					}),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const two = await exported(bespoke);
+	assert.doesNotMatch(two.out.text, /--dc-ease-/);
+	const base = block(two.out.text, `.${className(two.out.text, "inst(b1,btn)")}`);
+	assert.ok(base);
+	assert.match(base, /transition: .* cubic-bezier\(0\.34, 1\.56, 0\.64, 1\) 0ms;/);
+
+	// And the case that made the collection move down beside the declaration: a
+	// spring on a transition that resolves to **no duration at all**. There is
+	// nothing to tween over zero milliseconds, so the file writes no `transition`
+	// — and a `:root` block plus five hundred characters of `@supports` for a
+	// curve nothing refers to is the whole of what the hoist was supposed to
+	// avoid. A set of names cannot tell who asked for one; only the line that
+	// writes the declaration can, so that is the line that remembers.
+	const instant = machined({
+		machines: [
+			{
+				...hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } }),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						duration: single("0ms"),
+						easing: single("springBouncy"),
+					}),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const three = await exported(instant);
+	assert.doesNotMatch(three.out.text, /transition: /, "nothing tweens over zero");
+	assert.doesNotMatch(three.out.text, /--dc-ease-/, "so no curve is hoisted either");
+	assert.doesNotMatch(three.out.text, /@supports/);
+});
+
+test("a rest/hover pair with a spring still collapses to :hover", async () => {
+	// **A curve is not a trigger**, and this is the promise worth protecting
+	// hardest: `pseudoClassFor` is untouched by this rung, so the pair that
+	// exported as a stylesheet with no script in it still does. The day a curve
+	// starts deciding *whether* a state is selectable is the day the export's
+	// header stops being true.
+	const scene = machined({
+		machines: [
+			{
+				...hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } }),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						easing: single("springBouncy"),
+					}),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const machines = exportMachines(scene, {
+		universe: exploration.universes[0],
+		media: null,
+		under: null,
+		label: "The design",
+	});
+	assert.equal(machines.runtime, null, "no script at all");
+	assert.deepEqual(machines.layers.map((l) => l.on), [":hover"]);
+	assert.deepEqual([...machines.springs], ["springBouncy"]);
+});
+
+test("a keyframe's spring is hoisted too, and only the springs a rule mentions are", async () => {
+	// The same `var()`-or-itself decision through the same function, because a
+	// keyframe may name a spring exactly as a transition may — and a sixty-five
+	// stop `linear()` written into every stop of every block would be several
+	// hundred bytes per keyframe rather than per document.
+	const scene = machined({
+		machines: [
+			timelined({
+				length: single("600ms"),
+				tracks: [
+					{
+						part: "panel",
+						prop: "opacity",
+						keys: [
+							{ at: single("0ms"), value: single("0.2"), easing: single("springGentle") },
+							{ at: single("600ms"), value: single("1") },
+						],
+					},
+				],
+			}),
+		],
+	});
+	const { out } = await exported(scene);
+	assert.match(out.text, /animation-timing-function: var\(--dc-ease-springGentle\);/);
+	assert.ok(out.text.includes("--dc-ease-springGentle: ease-out;"));
+	// The other two springs are not in the file, which is what "a set collected
+	// during the walk" buys over a scan of the table.
+	assert.doesNotMatch(out.text, /--dc-ease-springSnappy/);
+	assert.doesNotMatch(out.text, /--dc-ease-springBouncy/);
+	// And the last keyframe's curve is still read by nothing: there is no segment
+	// leaving it.
+	assert.equal((out.text.match(/animation-timing-function/g) ?? []).length, 1);
+});
+
+test("a curve token's two alternatives are two files", async () => {
+	// The end of the chain the projection starts: two universes, two `transition`
+	// declarations, two designs a person can tell apart by looking at them. This
+	// is what a feel token *is*, and it is why the curve had to be a Value rather
+	// than a word.
+	const scene = machined({
+		tokens: [
+			...starterTokens(),
+			{
+				id: "feel",
+				name: "Feel",
+				type: "easing",
+				value: [lit("easeIn"), lit("springSnappy")],
+			},
+		],
+		machines: [
+			{
+				...hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } }),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						easing: [{ kind: "token", token: "feel" }],
+					}),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const exploration = await explore(scene, directSolver, { limit: 8 });
+	assert.equal(exploration.universes.length, 2, "the token really branches the space");
+	const written = exploration.universes.map((universe) => {
+		const text = exportUniverse(scene, universe, { target: "html", title: "m" }).text;
+		const base = block(text, `.${className(text, "inst(b1,btn)")}`);
+		return /transition: [^;]*;/.exec(base ?? "")?.[0];
+	});
+	assert.deepEqual(
+		written.sort(),
+		[
+			"transition: background-color 200ms ease-in 0ms;",
+			"transition: background-color 200ms var(--dc-ease-springSnappy) 0ms;",
+		],
+	);
 });
 
 /** A machine whose `spin` state plays a timeline over the panel. */

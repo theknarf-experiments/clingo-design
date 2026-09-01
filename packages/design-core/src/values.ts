@@ -38,7 +38,12 @@ export type ValueType =
 	// literal bridges are therefore untouched by this pair, which is what lets
 	// the whole feature land without a line of `compile.ts`.
 	| "gradient"
-	| "mix";
+	| "mix"
+	// The shape of a curve — see `VALUE_TYPES.easing`. The first type here that is
+	// about *time* rather than about the picture, and the only one whose literals
+	// come in two spellings: a menu word, and a `cubicBezier(…)` term the seventh
+	// literal bridge reads.
+	| "easing";
 
 /** One entry of a closed menu — see {@link ValueTypeSpec.options}. */
 export interface ValueOption {
@@ -87,10 +92,19 @@ export interface ValueOption {
  * answer, which is the same trap the `weight` note above steps around.
  *
  * The count that *does* go up with it is the count of **literal bridges** — the
- * facts a literal reaches the program as. There are six: `numeral`, `tally`,
- * `word`, `millis`, `permille` and `mdeg`. Five quantities and six bridges is
- * not an off-by-one; it is `ratio` having two readers and every other quantity
- * having one.
+ * facts a literal reaches the program as. There are **seven**: `numeral`,
+ * `tally`, `word`, `millis`, `permille`, `mdeg` and `bezier`. Five quantities
+ * and seven bridges is not an off-by-two; it is `ratio` having two readers, and
+ * it is `bezier/5` being a bridge that is not a quantity at all.
+ *
+ * `bezier/5` is the seventh and it is the one that makes the distinction sharp,
+ * so it is worth stating why it is not a sixth {@link Quantity}. A quantity is
+ * *one number with one reader*; a bezier is a **tuple of four**, which is why
+ * the fact is `bezier(Lit,X1,Y1,X2,Y2)` and not `bezier(Lit,N)`. Filing it under
+ * `ratio` would make {@link permilleOf} answer for a thing that is not a
+ * proportion of anything, and giving it a `Quantity` name of its own would be a
+ * column that changed no answer — the same trap the `weight` note above steps
+ * around. It is a bridge, and the count of bridges is the number that goes up.
  */
 export type Quantity = "length" | "ratio" | "count" | "time" | "angle";
 
@@ -409,6 +423,360 @@ const LAMPS: ValueOption[] = [
 	{ value: "spot", label: "Spot" },
 ];
 
+/* ------------------------------------------------------------------ */
+/* Curves                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The easing table lives **here** and not in `scene.ts`, where it was written.
+ *
+ * It moved because {@link VALUE_TYPES}.easing has to read `EASING_NAMES` to
+ * build its menu, and `scene.ts` imports this file rather than the other way
+ * round. That is the same move `FONTS` already made, and doing it any other way
+ * means writing the eight labels twice. `scene.ts` re-exports the whole block,
+ * so no import anywhere else in the tree moved.
+ */
+
+/**
+ * The physics a named spring's `css` was sampled from.
+ *
+ * Here rather than inside the sampler because the numbers are what a designer
+ * *thinks* in — "stiffness 400, damping 32" is the vocabulary of every motion
+ * tool that has springs — while what a browser is handed is a `linear()` with
+ * sixty-five stops in it and no physics at all. Keeping both means the panel can
+ * say what the curve is made of, `values.test.ts` can regenerate the string and
+ * check the constant, and nobody has to read four hundred numbers to find out
+ * that `springBouncy` overshoots by fifteen percent.
+ *
+ * The three of them decide the curve's **shape** through exactly one derived
+ * quantity, the damping ratio ζ = damping / (2·√(stiffness·mass)), because the
+ * sample is taken over normalised time and normalised travel. `mass` is
+ * therefore redundant with the other two and is kept anyway: a designer who
+ * changes stiffness and expects the bounce to change is asking about ζ, and a
+ * table that hid one of its three terms would make that arithmetic a mystery.
+ */
+export interface SpringSpec {
+	stiffness: number;
+	damping: number;
+	mass: number;
+	/**
+	 * Where the sample is truncated, in whole milliseconds: the settle time, at
+	 * which the spring is within half a percent of its rest position and moving
+	 * slowly enough that a person cannot see it move.
+	 *
+	 * **This is a hint and never a duration.** What paces the transition is
+	 * `Transition.duration`, which is a {@link Value} a designer set and a token
+	 * may hold two ends of. A named spring here is a curve of *unit length* and
+	 * the duration is how long that unit is stretched over, so `mdur/3` keeps its
+	 * meaning, `machine_exit_within_duration` keeps its `D`, and a `duration`
+	 * token still retimes the whole document, springs included. A curve that
+	 * ignored the duration would put a second, invisible clock in a document that
+	 * has exactly one. The panel prints this number beside the menu so that a
+	 * designer who wants the spring at its natural speed knows what to type into
+	 * the duration field that is already on the row.
+	 *
+	 * Derived rather than chosen: it is
+	 * `-ln(0.005·√(1−ζ²)) / (ζω₀)`, the moment the exponential envelope has
+	 * shrunk to half a percent of the travel. `docs/framer-motion-spec.md`'s table
+	 * prints 410, 330 and 590 for the three of them and those numbers are not
+	 * what that formula gives — they are 605, 363 and 606 — so the formula won,
+	 * because {@link sampleSpring} pins its last stop to exactly 1 and truncating
+	 * gentle at 410ms would pin a curve that is only 97% of the way there. A
+	 * three-percent step in the final segment is a box that stops short and then
+	 * jumps, which is the artefact the pinning exists to prevent rather than to
+	 * cause.
+	 */
+	natural: number;
+	/**
+	 * What a browser with no `linear()` is given instead.
+	 *
+	 * A named curve or a `cubic-bezier`, chosen to be the nearest thing CSS could
+	 * always express. It is not a good spring; it is a curve that moves in the
+	 * same direction at roughly the same speed, which is the whole ambition of a
+	 * fallback. Written in **CSS's** dialect, not the document's, because it is
+	 * copied verbatim into a declaration and read by nothing else.
+	 */
+	fallback: string;
+}
+
+/**
+ * One row of the curve menu.
+ *
+ * A named interface for a shape that shipped anonymous, which is the whole of
+ * what changed about it apart from the optional {@link SpringSpec}.
+ */
+export interface EasingSpec {
+	label: string;
+	/**
+	 * The CSS timing function this word means.
+	 *
+	 * A separate column and not the stored value itself, unlike almost every
+	 * other enumerated type in this file — and the reason is the reason
+	 * `spaceBetween` and `oneD` exist. CSS spells its curves with hyphens
+	 * (`ease-in-out`) and a stored value reaches the generated program as an ASP
+	 * constant, where a hyphen is a minus sign. So the document's dialect is
+	 * `easeInOut` and this column is the one translator; {@link cssEasing} is the
+	 * only function allowed to read it.
+	 */
+	css: string;
+	/** Present exactly on the three springs — see {@link SpringSpec}. */
+	spring?: SpringSpec;
+}
+
+/**
+ * How a transition is paced.
+ *
+ * The keys are ASP constants and reach the program as themselves, the way
+ * `spaceBetween` does — the words a human reads are the `label`s.
+ *
+ * Eight rather than five, and the three new ones are springs. **A spring is
+ * three fixed members of this menu and never a parameter**, which is the one
+ * decision the whole feature turns on. Parameterised springs would make
+ * stiffness, damping and mass three {@link Value}s — anything else here would be
+ * an asymmetry, since a duration can name a token — so two of them holding two
+ * alternatives each is four universes differing in nothing a still frame can
+ * show; and the settle time is transcendental in the parameters, so `mdur/3`
+ * would be underivable and `machine_exit_within_duration` would go silent on
+ * exactly the transitions most likely to have a wrong number in them. Three
+ * named springs are three table entries and nothing else in the repository.
+ */
+export type Easing =
+	| "linear"
+	| "ease"
+	| "easeIn"
+	| "easeOut"
+	| "easeInOut"
+	| "springGentle"
+	| "springSnappy"
+	| "springBouncy";
+
+/**
+ * How many stops a sampled spring's `linear()` carries.
+ *
+ * `linear()` interpolates linearly between stops, so the error between two of
+ * them is bounded by `h²·max|f″| / 8`. For `springBouncy` — the worst of the
+ * three, at about 9 radians of ω_d over the span — that is roughly two
+ * thousandths of the travel, half a pixel on a two-hundred-pixel move, which is
+ * under the threshold at which anybody can see that a curve is polygonal.
+ * Halving it to thirty-three stops quadruples the error to about a percent,
+ * which is two pixels on the same move and is visible on a slow bounce. The byte
+ * cost is ~500 characters per spring, paid **once per document** and not once
+ * per node, because the export hoists it into a custom property.
+ */
+export const SPRING_STOPS = 65;
+
+/**
+ * A named spring's position at {@link SPRING_STOPS} evenly spaced moments,
+ * normalised so that time runs 0..1 over `natural` and travel runs 0..1 over the
+ * whole move.
+ *
+ * Underdamped and critically damped are one formula, because ζ = 0.997 is not
+ * ζ = 1 and the limit is only interesting to a mathematician:
+ *
+ *     x(t) = 1 − e^(−ζω₀t) · ( cos(ω_d t) + (ζω₀/ω_d) · sin(ω_d t) )
+ *     ω₀ = √(stiffness / mass)      ω_d = ω₀√(1 − ζ²)
+ *
+ * The first stop is pinned to exactly 0 and the last to exactly 1 rather than
+ * taken from the formula. At `natural` the spring is within half a percent of
+ * rest, not at rest, and a `linear()` whose last stop is 0.996 leaves every
+ * animated property four thousandths short of the value the state's own rule
+ * says it has — which is a border that never quite arrives at its colour and a
+ * box that stops one pixel out of a two-hundred-pixel move.
+ *
+ * This exists so the checked-in strings are **checkable**, not so it is called
+ * at run time. `EASINGS.springSnappy.css` is sixty-five numbers written down,
+ * and `values.test.ts` regenerates them and asserts equality. Computing the
+ * curve on every export was rejected twice over: the export runs once per
+ * keystroke in the studio, and a spring's curve is a constant of the universe —
+ * and a checked-in string is a thing a reviewer can read in a diff, while a
+ * number produced at run time is a thing nobody ever looks at.
+ *
+ * Four decimal places, which is the resolution the strings are written at: a
+ * ten-thousandth of a two-hundred-pixel move is a fiftieth of a pixel, and
+ * rounding here rather than at the join is what makes the equality test an
+ * equality of numbers rather than of formatting.
+ */
+export function sampleSpring(spec: SpringSpec, stops: number = SPRING_STOPS): number[] {
+	const w0 = Math.sqrt(spec.stiffness / spec.mass);
+	const zeta = spec.damping / (2 * Math.sqrt(spec.stiffness * spec.mass));
+	const wd = w0 * Math.sqrt(Math.max(0, 1 - zeta * zeta));
+	const out: number[] = [];
+	for (let i = 0; i < stops; i++) {
+		if (i === 0) {
+			out.push(0);
+			continue;
+		}
+		if (i === stops - 1) {
+			out.push(1);
+			continue;
+		}
+		const t = (i / (stops - 1)) * (spec.natural / 1000);
+		const x =
+			1 -
+			Math.exp(-zeta * w0 * t) *
+				(Math.cos(wd * t) + ((zeta * w0) / wd) * Math.sin(wd * t));
+		out.push(Math.round(x * 1e4) / 1e4);
+	}
+	return out;
+}
+
+export const EASINGS: Record<Easing, EasingSpec> = {
+	linear: { label: "Linear", css: "linear" },
+	ease: { label: "Ease", css: "ease" },
+	easeIn: { label: "Ease in", css: "ease-in" },
+	easeOut: { label: "Ease out", css: "ease-out" },
+	easeInOut: { label: "Ease in-out", css: "ease-in-out" },
+	// ζ 0.997, no overshoot at all. The one a designer reaches for when they want
+	// "a spring" and do not want to be told about it.
+	springGentle: {
+		label: "Spring — gentle",
+		css: "linear(0, 0.007, 0.0258, 0.0537, 0.0882, 0.1274, 0.1698, 0.2142, 0.2595, 0.3048, 0.3496, 0.3934, 0.4359, 0.4766, 0.5155, 0.5525, 0.5874, 0.6203, 0.6511, 0.6799, 0.7067, 0.7316, 0.7547, 0.7761, 0.7958, 0.814, 0.8307, 0.8461, 0.8601, 0.873, 0.8848, 0.8956, 0.9054, 0.9144, 0.9225, 0.9299, 0.9367, 0.9428, 0.9484, 0.9534, 0.958, 0.9621, 0.9659, 0.9693, 0.9723, 0.9751, 0.9776, 0.9799, 0.9819, 0.9837, 0.9854, 0.9869, 0.9882, 0.9894, 0.9905, 0.9915, 0.9924, 0.9932, 0.9939, 0.9945, 0.9951, 0.9956, 0.9961, 0.9965, 1)",
+		spring: { stiffness: 170, damping: 26, mass: 1, natural: 605, fallback: "ease-out" },
+	},
+	// ζ 0.800, about one and a half percent of overshoot — enough to read as a
+	// spring and not enough to read as a toy.
+	springSnappy: {
+		label: "Spring — snappy",
+		css: "linear(0, 0.0061, 0.0228, 0.0482, 0.0806, 0.1185, 0.1604, 0.2052, 0.252, 0.2997, 0.3478, 0.3956, 0.4425, 0.4882, 0.5323, 0.5746, 0.6149, 0.653, 0.6889, 0.7225, 0.7538, 0.7827, 0.8094, 0.834, 0.8564, 0.8767, 0.8952, 0.9118, 0.9267, 0.94, 0.9518, 0.9621, 0.9713, 0.9792, 0.9861, 0.992, 0.997, 1.0012, 1.0047, 1.0075, 1.0098, 1.0116, 1.013, 1.014, 1.0146, 1.015, 1.0152, 1.0151, 1.0149, 1.0145, 1.014, 1.0135, 1.0128, 1.0122, 1.0115, 1.0107, 1.01, 1.0093, 1.0086, 1.0079, 1.0072, 1.0065, 1.0059, 1.0054, 1)",
+		spring: {
+			stiffness: 400,
+			damping: 32,
+			mass: 1,
+			natural: 363,
+			fallback: "cubic-bezier(0.2, 0, 0, 1)",
+		},
+	},
+	// ζ 0.520, about fifteen percent of overshoot. A curve that goes past where it
+	// is going and comes back, which is what a person means by "bouncy".
+	springBouncy: {
+		label: "Spring — bouncy",
+		css: "linear(0, 0.0127, 0.0477, 0.1008, 0.1677, 0.2447, 0.3283, 0.4153, 0.5031, 0.5895, 0.6724, 0.7504, 0.8223, 0.8874, 0.945, 0.995, 1.0373, 1.072, 1.0995, 1.1202, 1.1347, 1.1437, 1.1476, 1.1473, 1.1435, 1.1367, 1.1275, 1.1167, 1.1047, 1.092, 1.079, 1.0661, 1.0536, 1.0417, 1.0306, 1.0206, 1.0116, 1.0037, 0.997, 0.9914, 0.9869, 0.9834, 0.9809, 0.9792, 0.9783, 0.9781, 0.9785, 0.9793, 0.9805, 0.982, 0.9837, 0.9856, 0.9875, 0.9894, 0.9913, 0.9931, 0.9948, 0.9963, 0.9977, 0.999, 1.0001, 1.0009, 1.0017, 1.0023, 1)",
+		spring: {
+			stiffness: 300,
+			damping: 18,
+			mass: 1,
+			natural: 606,
+			fallback: "cubic-bezier(0.34, 1.56, 0.64, 1)",
+		},
+	},
+};
+
+/**
+ * The menu, in order. The five plain curves first and the three springs after
+ * them, because `Object.keys` preserves insertion order and a designer opening
+ * the menu is far more often after `easeOut` than after physics.
+ */
+export const EASING_NAMES = Object.keys(EASINGS) as Easing[];
+
+/**
+ * What a transition eases by default.
+ *
+ * `easeOut` rather than `ease`, because a state machine's transitions are
+ * responses to a person: the interesting half of the curve is the beginning,
+ * and a response that starts slowly reads as lag. It did **not** move when the
+ * springs arrived and must not: changing it would re-pace every transition in
+ * every existing document.
+ */
+export const DEFAULT_EASING: Easing = "easeOut";
+
+/** `cubicBezier(200, 0, 0, 1000)` — four whole thousandths, and nothing else. */
+const CUBIC_BEZIER = /^cubicBezier\((-?\d+),[ \t]*(-?\d+),[ \t]*(-?\d+),[ \t]*(-?\d+)\)$/;
+
+/**
+ * The four control points a literal reads as, in **thousandths** — exact or
+ * nothing, for `emuOf`'s and `msOf`'s reason: a bezier reaches the program as
+ * four integers and a fact has to be an integer.
+ *
+ * The dialect is the document's and not CSS's. `cubic-bezier(0.2, 0, 0, 1)` is a
+ * hyphen and three non-integers, which is a minus sign and three things the
+ * grounder cannot hold; `cubicBezier(200,0,0,1000)` is a lowerCamel functor with
+ * four integer arguments, which is a **term**, which means a rule can name it:
+ * `viol(system_curves) :- measing(_,_,cubicBezier(_,_,_,_)).` is "every
+ * transition uses a curve from the system", one line in the Rules panel, and it
+ * is only writable because the term is a term.
+ *
+ * `x` is *refused* outside 0..1000 rather than clamped, because a cubic bezier
+ * timing function whose control points leave that range on the time axis is not
+ * a slow curve, it is a curve that runs backwards in time — which CSS refuses
+ * too, and which is a typo rather than a design. `y` is free in both directions
+ * and deliberately: `y` outside the range is overshoot and undershoot, which is
+ * exactly what somebody reaching for a custom curve instead of a named spring is
+ * reaching for. What bounds `y` at all is {@link MAX_PERMILLE}, and that is a
+ * statement about the grounder's integers rather than about the design — the
+ * same guard every other bridge here carries.
+ *
+ * Whitespace after the commas is accepted and nothing else is; a decimal point
+ * anywhere reads as no curve at all, for `msOf`'s reason — `cubicBezier(0.2,…)`
+ * is two-tenths of a thousandth, ambiguous by a factor of a thousand, and
+ * rounding it behind the designer's back would put a curve in the file that no
+ * panel agrees with.
+ */
+export function bezierOf(
+	text: string,
+): [number, number, number, number] | undefined {
+	const m = CUBIC_BEZIER.exec(text);
+	if (!m) return undefined;
+	const [x1, y1, x2, y2] = m.slice(1, 5).map(Number);
+	if (x1 < 0 || x1 > 1000 || x2 < 0 || x2 > 1000) return undefined;
+	if (Math.abs(y1) > MAX_PERMILLE || Math.abs(y2) > MAX_PERMILLE) return undefined;
+	return [x1, y1, x2, y2];
+}
+
+/**
+ * A stored curve as CSS, or nothing where it is neither spelling.
+ *
+ * Two spellings and one function, because there is exactly one place in the
+ * system where the document's dialect becomes a browser's: a menu word through
+ * {@link EASINGS}, and a `cubicBezier(…)` term through {@link bezierOf}. A
+ * caller that got `undefined` writes `EASINGS[DEFAULT_EASING].css`, which is the
+ * same fallback the generated program takes through `not mreadsease(M,T)`.
+ *
+ * A **spring** comes back as its whole `linear()` string. The export does not
+ * write that string into a rule — it hoists it into a custom property and gates
+ * the upgrade behind `@supports`, because a browser that cannot parse `linear()`
+ * drops the whole `transition` shorthand and the state would snap rather than
+ * tween. But that is the export's business and not this function's, and a caller
+ * with no stylesheet to hoist into — the studio canvas, which sets one custom
+ * property on one element — wants the string itself.
+ */
+export function cssEasing(text: string): string | undefined {
+	if (Object.hasOwn(EASINGS, text)) return EASINGS[text as Easing].css;
+	const points = bezierOf(text);
+	return points === undefined
+		? undefined
+		: `cubic-bezier(${points.map(writePermille).join(", ")})`;
+}
+
+/**
+ * The curve a stored literal *means*, or nothing where it means none.
+ *
+ * The one place the two spellings meet on this side of the boundary, and it is
+ * the same pair the generated program's two `measing/3` rules read: a word the
+ * menu knows (`measeopt/1`), and a `cubicBezier(…)` term (`bezier/5`). A literal
+ * that is neither reads as nothing here and derives nothing there, and both
+ * readers then take {@link DEFAULT_EASING} — which is the whole of why the
+ * fallback lives in ASP as `mdefease/1` rather than only in TypeScript. A
+ * fallback only one reader takes is drift with a fig leaf on it: the file would
+ * show a bespoke overshoot while a rule reading `measing(m1,over,easeOut)` was
+ * told it was an ease-out.
+ *
+ * Here rather than beside its first caller because it now has three — the
+ * document reader in `machines.ts`, the answer-set reader in `model.ts`, and the
+ * panel — and a private copy in each is three chances to fix one and not the
+ * others. It is deliberately *not* `cssEasing(text) !== undefined`, even though
+ * the two agree on every input by construction: asking "what CSS is this" to
+ * find out "is this a curve at all" is a question whose answer would stop being
+ * the same one the day a curve arrives that CSS cannot spell.
+ */
+export const curveOf = (text: string | undefined): string | undefined =>
+	text !== undefined && (Object.hasOwn(EASINGS, text) || bezierOf(text) !== undefined)
+		? text
+		: undefined;
+
+/** The spring a stored curve names, where it names one at all. */
+export const springOf = (text: string): SpringSpec | undefined =>
+	Object.hasOwn(EASINGS, text) ? EASINGS[text as Easing].spring : undefined;
+
 /**
  * What each type of value is, in one place: its name, what an empty one starts
  * at, and whether it is a closed set of choices.
@@ -516,6 +884,52 @@ export const VALUE_TYPES: Record<ValueType, ValueTypeSpec> = {
 	 * the compiler.
 	 */
 	mix: { label: "Mix", fallback: MIXES[0].value, options: MIXES },
+	/**
+	 * The shape of a curve — the **fourteenth** enumerated type of twenty-two, and
+	 * the first one that is about *time* rather than about the picture.
+	 *
+	 * The number is counted rather than copied, because it has been wrong twice.
+	 * `docs/framer-motion-spec.md` says "the tenth enumerated type" of nineteen
+	 * types, which was true before the paint step; `docs/framer-parity-plan.md`
+	 * §5.2 corrects it to the twelfth of twenty-two, which is the paint step's
+	 * two counted and the fonts step's assumed. Fonts added **no** `ValueType` at
+	 * all — a project's own families are merged in the app, at `fontOptions` —
+	 * so what actually happened is that `gradient` and `mix` made twelve
+	 * enumerated of twenty-one, and this makes fourteen of twenty-two, because
+	 * `weight` and `text` are types with no menu. `values.test.ts` counts both
+	 * numbers, which is the only way a sentence like this stays true.
+	 *
+	 * A type rather than a word on a transition for `duration`'s reason exactly,
+	 * and the parallel is the whole feature: a `duration` token holding two
+	 * alternatives is a **motion scale**, one place that decides how quickly a
+	 * design moves; a `curve` token holding `["easeOut", "springBouncy"]` is a
+	 * **feel**, one place that decides whether it moves like a control or like a
+	 * toy. Both are decisions a design system makes once, both show up in the
+	 * exported file as text a reader can tell apart, and both therefore branch the
+	 * space rather than collapsing into one universe with an arbitrary pick.
+	 *
+	 * It used to be a bare word, defended by an argument that proves too much: "a
+	 * closed menu with no arithmetic in it, nothing scales it" is equally true of
+	 * `direction`, `align`, `fit`, `placement`, `justify`, `sizing`, `growth`,
+	 * `solid`, `lamp`, `gradient` and `mix`, every one of which is a Value, and
+	 * `#project l_value/3` exists precisely so that a `direction` token holding
+	 * `row` and `column` is two designs.
+	 *
+	 * No `quantity`, like every other menu here: a curve is not a number, and it
+	 * is read by none of the six numeric bridges. The one spelling of it that
+	 * *does* carry numbers — a custom bezier — carries four of them and so is a
+	 * shape rather than a quantity, which is why {@link bezierOf} feeds a seventh
+	 * bridge instead of a sixth {@link Quantity}.
+	 *
+	 * The fallback is {@link DEFAULT_EASING} and the two are held equal by
+	 * `values.test.ts`: a document that fell back to `ease` in the editor and
+	 * `easeOut` in the program would be a document nobody could debug.
+	 */
+	easing: {
+		label: "Easing",
+		fallback: DEFAULT_EASING,
+		options: EASING_NAMES.map((id) => ({ value: id, label: EASINGS[id].label })),
+	},
 };
 
 export const VALUE_TYPE_NAMES = Object.keys(VALUE_TYPES) as ValueType[];
@@ -1436,6 +1850,23 @@ export const keyValueVar = (
 	track: string,
 	index: number,
 ): string => `kval(${machineId},${timelineId},${track},${index})`;
+/**
+ * How the segment *leaving* a keyframe is paced — see {@link keyTimeVar}, whose
+ * every argument this one takes for the same reason.
+ *
+ * The third variable a keyframe can mint, and the only one a document is allowed
+ * to say nothing about: `machineValues` guards on `key.easing.length > 0`
+ * exactly as it guards on `key.at.length > 0`, so a timeline whose keyframes say
+ * nothing about their curves mints nothing at all here, and one that names a
+ * single curve mints a one-alternative variable, which is not a choice anybody
+ * makes and adds no universes.
+ */
+export const keyEaseVar = (
+	machineId: string,
+	timelineId: string,
+	track: string,
+	index: number,
+): string => `keas(${machineId},${timelineId},${track},${index})`;
 /**
  * How long a timeline runs, where the document said so at all — see
  * {@link keyTimeVar}. Absent, the program takes the last keyframe's time, which

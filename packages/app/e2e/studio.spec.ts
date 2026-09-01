@@ -383,6 +383,125 @@ async function expectAFontChangesTheBox(page: Page): Promise<void> {
 	);
 }
 
+/**
+ * Make a curve a value: pick a spring, read its physics, and branch the space.
+ *
+ * The three claims of this rung that a `node --test` cannot reach, in one walk
+ * on the one template that has a machine in it:
+ *
+ *   - **The row is a `ValueEditor` and not a `<select>` any more.** It varies,
+ *     greys, pins and takes a token exactly as the three duration rows beside it
+ *     do, and the way to check that is to use the machinery that only exists on
+ *     a value row: add a second alternative, and watch the status line count the
+ *     universes it made. `machineprogram.test.ts` asserts that `#project
+ *     measing/3.` splits the space; this asserts that the panel a designer
+ *     actually touches is wired to the same variable.
+ *   - **A spring adds none of them.** Three fixed members of a menu and no
+ *     parameters is the decision the whole feature turns on, and the count not
+ *     moving when the curve becomes `springBouncy` is what that decision looks
+ *     like from a person's chair.
+ *   - **The physics is printed rather than hidden.** `SpringSpec.natural` is a
+ *     hint and never a duration — what paces the move is the duration field on
+ *     the same row — so the panel has to say the number out loud or a designer
+ *     who wants the physical spring has nothing to type.
+ *   - **The canvas plays it.** `--dc-play-easing` carries a spring's whole
+ *     sixty-five-stop `linear()` and `Artboard.module.css` puts that custom
+ *     property straight into `transition-timing-function`, so the claim is not
+ *     that a string reached an attribute: it is that the *engine parsed it*. A
+ *     browser that cannot rejects the declaration and computes `ease`, and the
+ *     only way to know which happened is to ask the browser, which is what
+ *     `getComputedStyle` here does. Reading the code says nothing about it.
+ */
+async function expectACurveIsAValue(page: Page): Promise<void> {
+	// `textContent` rather than `innerText`, which is the difference between what
+	// the element says and what is laid out: the status line is the last row of a
+	// flex column and can be scrolled out of the viewport, and `innerText` on an
+	// element that is not being rendered comes back empty.
+	const universes = async (): Promise<number> => {
+		const text = (await page.locator('[data-role="status"]').textContent()) ?? "";
+		return Number(/(\d+)\s*universes?/.exec(text)?.[1] ?? 0);
+	};
+	await expect
+		.poll(universes, { message: "the machine template has a space to begin with" })
+		.toBeGreaterThan(0);
+	const before = await universes();
+
+	await page.locator('[data-panel="machines"]').click();
+	const row = page.locator('[data-role="transition-easing"][data-transition="enter"]');
+	const curve = row.locator('[data-prop="transition-easing"] select[data-role="literal"]');
+	await expect(curve).toHaveCount(1);
+
+	// A spring is a word where `easeOut` is a word, so choosing one is one
+	// alternative and no branch.
+	await curve.selectOption({ label: "Spring — bouncy" });
+	await expect
+		.poll(universes, { message: "a spring branched the space, which it must never do" })
+		.toBe(before);
+	// And the panel says what it is made of, which is the accommodation
+	// `Transition.duration` winning is paid for with.
+	await expect(row.locator('[data-role="curve-note"]')).toContainText("Settles naturally in 606ms");
+
+	// Now the half that could not exist while an easing was a word: a second
+	// alternative, which is one document holding the crisp reading and the playful
+	// one, and which the solver has to answer twice.
+	await row.locator('[data-role="add-alt"]').click();
+	const alternatives = row.locator('[data-prop="transition-easing"] select[data-role="literal"]');
+	await expect(alternatives).toHaveCount(2);
+	await alternatives.nth(1).selectOption({ label: "Ease in" });
+	await expect
+		.poll(universes, {
+			message: "the second curve made no universe, so #project measing/3 never reached the page",
+		})
+		.toBe(before * 2);
+
+	// Leave it as one curve again, so the returning visit reads back a document
+	// this walk can still recognise — and so that the count it asserts elsewhere
+	// is the template's own. The bouncy spring is what is left on the row, which
+	// is what the next paragraph plays.
+	await row.locator('[data-role="remove-alt"]').nth(1).click();
+	await expect
+		.poll(universes)
+		.toBe(before);
+
+	// And now play it. Preview on, then the pointer onto the *instance* rather
+	// than onto the definition — the machine is worn by the two instances at the
+	// right of the artboard, and hovering the component the states were authored
+	// on fires nothing, which is the shape of probe that reports this broken while
+	// it works.
+	await page.locator('[data-role="preview"]').click();
+	const instance = page.locator('[data-node="resting"]');
+	await expect(instance).toHaveCount(1);
+	const box = await instance.boundingBox();
+	// Measured before it is aimed at, because the artboard is drawn inside a
+	// transformed, absolutely positioned overlay and a node that measured 0×0
+	// would send the pointer somewhere nobody can see — which is how a previous
+	// walk in this file came to click at a negative coordinate and conclude a
+	// working feature was broken.
+	expect(box?.width ?? 0).toBeGreaterThan(8);
+	expect(box?.height ?? 0).toBeGreaterThan(8);
+	// `mouse.move` and not `hover()`, and the difference is not style. `hover()`
+	// waits for the element to *receive* pointer events, and every node on this
+	// canvas sits under the editor's own full-bleed overlay — which is what reads
+	// the pointer and fires the machine. So the actionability check can never pass
+	// here, and the honest instruction is "put the pointer at this point", which is
+	// what a person does.
+	await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2, { steps: 4 });
+	// The computed value, not the declared one: `linear()` is Baseline 2023 and a
+	// browser that cannot parse it drops the declaration and computes something
+	// else, so the assertion is that the engine took the sample rather than that a
+	// string arrived. A prefix match, because pinning the whole 508-character
+	// constant would be a snapshot of `values.ts` written in a second file — and
+	// because a browser re-serialises `linear()` with a percentage per stop.
+	await expect
+		.poll(
+			async () =>
+				instance.evaluate((el) => getComputedStyle(el).transitionTimingFunction.slice(0, 8)),
+			{ message: "the canvas did not play the spring; the browser computed something else" },
+		)
+		.toBe("linear(0");
+	await page.locator('[data-role="preview"]').click();
+}
+
 /** Make a project from the Card template and wait for the studio it opens. */
 async function createFromTemplate(page: Page): Promise<void> {
 	await page.goto(`${BASE_URL}/`, { waitUntil: "load" });
@@ -391,6 +510,14 @@ async function createFromTemplate(page: Page): Promise<void> {
 	// what forces the wasm and the repo.
 	await page.locator('[data-template="card"]').click();
 	await page.waitForURL(/\/p\//);
+}
+
+/** Make a project from the Machine template and wait for its studio. */
+async function createMachine(page: Page): Promise<void> {
+	await page.goto(`${BASE_URL}/`, { waitUntil: "load" });
+	await page.locator('[data-template="machine"]').click();
+	await page.waitForURL(/\/p\//);
+	await expect(page.locator('[data-role="status"]')).toContainText(/\d+ universes/);
 }
 
 /**
@@ -446,6 +573,8 @@ test("a template becomes a drawn studio, first on a clean profile and then on a 
 			await expectAGradientPaints(page);
 			await createTypography(page);
 			await expectAFontChangesTheBox(page);
+			await createMachine(page);
+			await expectACurveIsAValue(page);
 			expect(trouble, "the first visit logged errors").toEqual([]);
 		} finally {
 			// Closed, not merely navigated away from. The database has to be

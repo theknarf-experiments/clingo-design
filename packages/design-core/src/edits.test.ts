@@ -534,12 +534,12 @@ test("a transition is patched in one call, and never re-identified", () => {
 
 	const paced = updateTransition(doc, m, "enter", {
 		duration: single("120ms"),
-		easing: "linear",
+		easing: single("linear"),
 		enabled: false,
 	});
 	const edge = only(paced).transitions[0];
 	assert.deepEqual(edge.duration, single("120ms"));
-	assert.equal(edge.easing, "linear");
+	assert.deepEqual(edge.easing, single("linear"));
 	assert.equal(edge.enabled, false);
 	assert.equal(edge.id, "enter");
 
@@ -1304,13 +1304,13 @@ test("a track is named by its term, and keyframes fall into time order", () => {
 
 	doc = addKeyframe(doc, m, "open", track, single("200ms"), single("20px"));
 	doc = addKeyframe(doc, m, "open", track, single("0ms"), single("0px"));
-	doc = addKeyframe(doc, m, "open", track, single("100ms"), single("40px"), "easeOut");
+	doc = addKeyframe(doc, m, "open", track, single("100ms"), single("40px"), single("easeOut"));
 	// Sorted where it can be, because `orderKeys` sorts on read: an edit that
 	// appended would produce a document that rearranged itself the next time
 	// somebody opened it, with a rule naming `kfr(…,3)` pointing at two different
 	// moments on the two sides of a save.
 	assert.deepEqual(keys().map(litOf), ["0ms", "100ms", "200ms"]);
-	assert.equal(keys()[1].easing, "easeOut");
+	assert.deepEqual(keys()[1].easing, single("easeOut"));
 
 	// Refused onto an occupied moment: two keys at one time collapse to the first
 	// on read, so writing one would be writing a keyframe the next read deletes.
@@ -1319,9 +1319,26 @@ test("a track is named by its term, and keyframes fall into time order", () => {
 	// says something odd, it is half a segment.
 	assert.equal(addKeyframe(doc, m, "open", track, [], single("1px")), doc);
 	assert.equal(addKeyframe(doc, m, "open", track, single("1ms"), []), doc);
-	// An easing the table has not got would reach the export as a timing function
-	// no browser parses.
-	assert.equal(addKeyframe(doc, m, "open", track, single("50ms"), single("1px"), "boing" as never), doc);
+	// An easing the menu has not got is no longer refused at the door, which is
+	// the one thing about these two edits that changed when a curve became a
+	// Value: what a curve resolves to is a question about a universe, so a token
+	// holding a word this build does not know could not be refused here without
+	// refusing the token everywhere. It is written, and both readers fall back on
+	// it — `measeopt/1` in the program, `curveOf` on this side. An *empty* curve
+	// is still absent rather than an empty list, because a `[]` would mint a
+	// variable with no alternatives.
+	const odd = addKeyframe(doc, m, "open", track, single("50ms"), single("1px"), single("boing"));
+	assert.deepEqual(
+		(machineOf(odd, m).timelines?.[0].tracks.find((t) => trackTerm(t) === track) as Track).keys
+			.find((k) => litOf(k) === "50ms")?.easing,
+		single("boing"),
+	);
+	const bare = addKeyframe(doc, m, "open", track, single("60ms"), single("1px"), []);
+	assert.equal(
+		(machineOf(bare, m).timelines?.[0].tracks.find((t) => trackTerm(t) === track) as Track).keys
+			.find((k) => litOf(k) === "60ms")?.easing,
+		undefined,
+	);
 
 	// Moving a key past its neighbour really does move the indices, which is the
 	// honest consequence of the drag rather than a wrinkle to hide: the reader

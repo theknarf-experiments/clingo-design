@@ -40,7 +40,6 @@ import {
 	guardOf,
 	inputInitial,
 	inputRange,
-	keyEasing,
 	keyframeParts,
 	layerOf,
 	machineForRoot,
@@ -92,7 +91,6 @@ import {
 	STYLE_PROPS,
 	constrainsProp,
 	dimension,
-	easingOf,
 	frameDim,
 	guideLines,
 	guideValueOf,
@@ -118,12 +116,16 @@ import {
 	type Derivation,
 	type ResolveContext,
 	type Term,
+	DEFAULT_EASING,
+	EASING_NAMES,
 	VALUE_TYPES,
+	bezierOf,
 	constraintVar,
 	frameVar,
 	guideAtVar,
 	guideVar,
 	isLengthType,
+	keyEaseVar,
 	keyTimeVar,
 	keyValueVar,
 	layoutVar,
@@ -1203,6 +1205,37 @@ const MOTION_DEFAULTS = MOTION_PROP_NAMES.flatMap((prop) => {
 })
 
 /**
+ * The curve menu, as facts, and the curve a transition takes when it says
+ * nothing.
+ *
+ * Emitted **always**, beside {@link MOTION_DEFAULTS} and for its reason exactly:
+ * a hand-written rule may assert `mtrans/2`, and a transition with no curve at
+ * all is a transition nothing shapes. Nine lines on every document in the world,
+ * which is the whole price of the feature for a document that has no machine.
+ *
+ * `measeopt/1` is generated from `EASING_NAMES`, so a ninth curve is one table
+ * entry in `values.ts` and no edit here. It exists so the program can tell a
+ * curve it *knows* from a word it does not: without it, a `curve` token holding
+ * `["easeOut", "wobble"]` would put `measing(m1,over,wobble)` into the answer
+ * set, the export would write `wobble` into a `transition` declaration, and the
+ * browser would drop the declaration and snap. That is `EASINGS`' own "a stored
+ * word the table does not know falls back" rule, moved into ASP so that both
+ * readers keep it and neither can be repaired without the other.
+ *
+ * **`easing` is deliberately not a `MotionProp`** and `MOTION_DEFAULT_PREDICATES`
+ * does not grow. `MotionPropSpec` carries a `type` used as a duration, a
+ * `fallback` read by `msOf` and a `signed` column, and `motionMs` calls `msOf` on
+ * every member — so a non-time member would make `motionMs` return `0` for it.
+ * What *is* in the family is the variable **key**: `motionVar(m, t, "easing")` is
+ * `mval(m1,over,easing)`, read by the same `resolved/2` as the other four, which
+ * is exactly the arrangement {@link EXIT_FALLBACK} already has one setting over.
+ */
+const EASING_DEFAULTS = [
+	atom("mdefease", DEFAULT_EASING),
+	...EASING_NAMES.map((id) => atom("measeopt", id)),
+]
+
+/**
  * What an exit time is when a transition does not say — the fourth motion
  * setting, written out by hand because it is not yet in the table.
  *
@@ -1323,6 +1356,10 @@ const MACHINE_RULES = [
 	"#defined mto/3.",
 	"#defined mtrigger/3.",
 	"#defined measing/3.",
+	"#defined mdefease/1.",
+	"#defined measeopt/1.",
+	"#defined mreadsease/2.",
+	"#defined bezier/5.",
 	"#defined monly/3.",
 	"#defined mdefdur/1.",
 	"#defined mdefdelay/1.",
@@ -1565,6 +1602,32 @@ const MACHINE_RULES = [
 	"mreadsstagger(M,T) :- resolved(mval(M,T,stagger),L), millis(L,_).",
 	"mstagger(M,T,V) :- mtrans(M,T), mdefstagger(V), not mreadsstagger(M,T).",
 	"",
+	"% ---- what SHAPE a move has, per universe ----",
+	"% The same shape mdur/3 has and for the same reason: a curve is a value now, so",
+	"% what the export writes is derived from the pick rather than written down as a",
+	"% fact, and a `curve` token with two alternatives is a FEEL the document can",
+	"% hold both ends of — the crisp reading and the playful one — exactly as a",
+	"% `duration` token is a motion scale.",
+	"measing(M,T,E) :- resolved(mval(M,T,easing),L), word(L,E), measeopt(E).",
+	"% A custom curve is a TERM and never a word. cubicBezier(200,0,0,1000) is a",
+	"% lowerCamel functor with four integer arguments, which is a thing a rule can",
+	"% name — viol(system_curves) :- measing(_,_,cubicBezier(_,_,_,_)) is 'every",
+	"% transition uses a curve from the system', one line in the Rules panel and only",
+	"% writable because the term is a term. CSS's own spelling would be a hyphen and",
+	"% three non-integers, which is a minus sign and three things the grounder cannot",
+	"% hold, so the four numbers are thousandths — permille/2's own unit.",
+	"measing(M,T,cubicBezier(A,B,C,D)) :- resolved(mval(M,T,easing),L), bezier(L,A,B,C,D).",
+	"% Derived from the two SOURCES and never from measing/3 itself. A rule whose",
+	"% body negates its own head predicate is the shape with no stable model — the",
+	"% same trap wornProps records about negating alt/2 — so this mirrors",
+	"% mreadsdur/2 exactly rather than being written the short way.",
+	"mreadsease(M,T) :- resolved(mval(M,T,easing),L), word(L,E), measeopt(E).",
+	"mreadsease(M,T) :- resolved(mval(M,T,easing),L), bezier(L,_,_,_,_).",
+	"% A word the menu has not got is NOT a curve, so it takes the default here and",
+	"% in `machines.ts`'s curveOf, which is the whole point of measeopt/1: a",
+	"% fallback only one reader takes is drift with a fig leaf on it.",
+	"measing(M,T,E) :- mtrans(M,T), mdefease(E), not mreadsease(M,T).",
+	"",
 	"% ---- what is wrong with the machine ----",
 	"% Derived rather than checked here, so that a rule of yours can forbid any of",
 	"% them by name and land in a core like every other rule. The Machines panel",
@@ -1678,6 +1741,7 @@ const MACHINE_RULES = [
 	"#defined mtrackof/4.",
 	"#defined mkey/4.",
 	"#defined mkeasing/5.",
+	"#defined mreadskeas/4.",
 	"#defined mloop/3.",
 	"#defined mkpart/3.",
 	"#defined mblend/3.",
@@ -1883,6 +1947,14 @@ const MACHINE_RULES = [
 	"% draws it at 60Hz or 120.",
 	"mkat(M,W,R,K,V) :- resolved(kat(M,W,R,K),L), millis(L,V), V >= 0.",
 	"mkat(M,W,R,K,0) :- resolved(kat(M,W,R,K),L), millis(L,V), V < 0.",
+	"% The curve out of a keyframe — the five lines above, one grain finer, over the",
+	"% keas(M,W,R,K) variable. mkeasing/5 was a FACT until curves became values and",
+	"% is derived now, which is why it is here rather than in the emitter.",
+	"mkeasing(M,W,R,K,E) :- resolved(keas(M,W,R,K),L), word(L,E), measeopt(E).",
+	"mkeasing(M,W,R,K,cubicBezier(A,B,C,D)) :- resolved(keas(M,W,R,K),L), bezier(L,A,B,C,D).",
+	"mreadskeas(M,W,R,K) :- resolved(keas(M,W,R,K),L), word(L,E), measeopt(E).",
+	"mreadskeas(M,W,R,K) :- resolved(keas(M,W,R,K),L), bezier(L,_,_,_,_).",
+	"mkeasing(M,W,R,K,E) :- mkey(M,W,R,K), mdefease(E), not mreadskeas(M,W,R,K).",
 	"% The empty maximum, written down — the same trailing 0 lbiggest/2 carries and",
 	"% for the same reason: a timeline with no keyframe that reads as a duration must",
 	"% still have a length, and #max over nothing is #inf, which clingo remarks on",
@@ -2806,9 +2878,14 @@ export const CONTRACT = `% Predicates you can rely on:
 %                                  whole millisecond, so it emits nothing, and
 %                                  a bare number is refused except for 0, which
 %                                  reads the same under either unit
-%   mval(M, T, duration|delay|stagger)   the variable a motion setting is, so a
+%   mval(M, T, duration|delay|stagger|exit|easing)   the variable a motion
+%                                  setting is. The first four are DURATIONS, so a
 %                                  \`duration\` token with two alternatives is a
-%                                  motion scale the document holds both ends of
+%                                  motion scale the document holds both ends of;
+%                                  the fifth is a CURVE, and a \`curve\` token with
+%                                  two alternatives is a FEEL the document holds
+%                                  both ends of, which is the same sentence about
+%                                  the other half of how a thing moves
 %   mdur(M, T, Ms)                 derived: millis(resolved(mval(M,T,duration)))
 %   mdelay(M, T, Ms)  mstagger(M, T, Ms)   the same. Duration and stagger clamp
 %                                  at zero; a delay does not, because a negative
@@ -2821,7 +2898,18 @@ export const CONTRACT = `% Predicates you can rely on:
 %
 %   mtrans(M, T)   mfrom(M, T, S)   mto(M, T, S)
 %   mtrigger(M, T, ...)            one of the trigger words below
-%   measing(M, T, ...)             linear|ease|easeIn|easeOut|easeInOut
+%   measing(M, T, C)               derived: the curve, as one of the eight menu
+%                                  words — linear ease easeIn easeOut easeInOut
+%                                  springGentle springSnappy springBouncy — or as
+%                                  cubicBezier(X1,Y1,X2,Y2) with the control
+%                                  points in THOUSANDTHS. Projected, so two
+%                                  curves are two designs. A word the menu has not
+%                                  got is not a curve and takes mdefease
+%   mdefease(C)  measeopt(C)       the curve a transition with none takes, and the
+%                                  eight the menu knows. Both emitted always, so a
+%                                  rule that asserts mtrans/2 gets a shaped move
+%   mreadsease(M, T)               derived: whether the document said anything
+%                                  this program could read as a curve
 %   monly(M, T, Prop)              tween only these; no monly at all is
 %                                  everything the state changes
 %   mreach(M, S)                   derived: reachable from the initial state
@@ -2872,6 +2960,20 @@ export const CONTRACT = `% Predicates you can rely on:
 %                                  refused rather than divided: declare the range
 %                                  0..100 and every number in the machine is in
 %                                  one unit
+%
+%   bezier(Lit, X1, Y1, X2, Y2)    the SEVENTH literal bridge, after mdeg/2: the
+%                                  four control points a literal reads as, in
+%                                  thousandths. "cubicBezier(200,0,0,1000)" is
+%                                  (200,0,0,1000). Exact or absent — a decimal
+%                                  point anywhere reads as no curve at all — and X
+%                                  outside 0..1000 is a curve that runs BACKWARDS
+%                                  in time rather than a slow one, so it is
+%                                  refused. Y is free, because Y off the range is
+%                                  overshoot. Zero facts in a document with no
+%                                  custom curve in it, which is nearly all of them.
+%                                  The one bridge whose fact is a tuple rather
+%                                  than a number, which is why it is a bridge and
+%                                  not a sixth quantity
 %
 % Guards. A transition fires when its trigger happens AND every one of its
 % conditions holds. There is no \`or\`; two guards that are alternatives are two
@@ -3016,7 +3118,18 @@ export const CONTRACT = `% Predicates you can rely on:
 %                                  names the variable, so a K that depended on
 %                                  the answer would be a variable whose name
 %                                  depended on its own value
-%   mkeasing(M, W, R, K, E)        the curve out of that keyframe
+%   keas(M, W, R, K)               the variable its CURVE is — an easing Value,
+%                                  minted only where somebody typed one
+%   mkeasing(M, W, R, K, E)        derived: the curve out of that keyframe, in
+%                                  measing/3's two spellings and with its
+%                                  fallback. Projected. The LAST keyframe's is
+%                                  read by nothing — there is no segment leaving
+%                                  it — and is derived anyway, because a keyframe
+%                                  that stops being last should not have to be
+%                                  told twice
+%   mreadskeas(M, W, R, K)         derived: whether that keyframe said anything
+%                                  this program could read as a curve.
+%                                  mreadsease/2 one grain finer
 %   kat(M, W, R, K)                the variable its TIME is — a duration Value,
 %                                  so a keyframe can name the same motion scale
 %                                  everything else does
@@ -3672,6 +3785,15 @@ function machineValues(
 			if (transition.exit && transition.exit.length > 0) {
 				visit(motionVar(machine.id, transition.id, "exit"), transition.exit);
 			}
+			// The fifth, and the only one that is not a duration. It is out of the
+			// table for a different reason from `exit`'s and a permanent one: an
+			// easing must never become a `MotionProp`, because `motionMs` calls
+			// `msOf` on every member and would answer 0 for a curve. The KEY is in
+			// the family — `mval(M,T,easing)`, read by the same `resolved/2` — and
+			// the table is not, which is exactly the arrangement `exit` has.
+			if (transition.easing && transition.easing.length > 0) {
+				visit(motionVar(machine.id, transition.id, "easing"), transition.easing);
+			}
 		}
 		// A keyframe's time and its value belong to the MACHINE, not to the
 		// instance, and that split is the budget: every instance moves by the same
@@ -3693,6 +3815,13 @@ function machineValues(
 					}
 					if (key.value.length > 0) {
 						visit(keyValueVar(machine.id, timeline.id, term, index + 1), key.value);
+					}
+					// Guarded like the other two, which is what keeps "a curve costs a
+					// keyframe nothing until somebody types one" true: every keyframe in
+					// every document written before this rung says nothing about its
+					// curve, mints no variable here, and takes `mdefease` in the program.
+					if (key.easing && key.easing.length > 0) {
+						visit(keyEaseVar(machine.id, timeline.id, term, index + 1), key.easing);
 					}
 				});
 			}
@@ -4333,11 +4462,12 @@ export function compile(
 			machineLines.push(atom("mfrom", machine.id, transition.id, transition.from));
 			machineLines.push(atom("mto", machine.id, transition.id, transition.to));
 			machineLines.push(atom("mtrigger", machine.id, transition.id, transition.trigger));
-			// Through `easingOf`, so the program is told the curve the editor would
-			// draw and the exporter would write, rather than a stored word that may be
-			// from an older vocabulary. An easing decides the shape of a move and
-			// never whether it happens, so falling back is the whole of the repair.
-			machineLines.push(atom("measing", machine.id, transition.id, easingOf(transition)));
+			// **No `measing/3` fact.** It used to be one, written through `easingOf`
+			// so that the program was told the curve the editor would draw. It is
+			// derived now, from `mval(M,T,easing)` — the variable `machineValues`
+			// mints below — because an easing is a Value, and the two readers still
+			// agree for the reason they always did: `measeopt/1` and `mdefease/1`
+			// carry the same fallback `curveOf` takes in `machines.ts`.
 			for (const prop of transition.only ?? []) {
 				if (prop in PROPS) machineLines.push(atom("monly", machine.id, transition.id, prop));
 			}
@@ -4399,11 +4529,17 @@ export function compile(
 		 * Timelines: keyframes, and nothing but keyframes.
 		 *
 		 * **The solver decides keyframes and never frames.** What is stated here is
-		 * one `mkey/4` and one `mkeasing/5` per keyframe and one `mtrack/3` per
-		 * track, and what is minted beside it in `machineValues` is two variables per
-		 * keyframe and one per timeline. There is no frame rate in any of it, and a
-		 * twenty-key timeline costs the same whether it plays over 100ms or ten
-		 * seconds.
+		 * one `mkey/4` per keyframe and one `mtrack/3` per track, and what is minted
+		 * beside it in `machineValues` is up to three variables per keyframe and one
+		 * per timeline. There is no frame rate in any of it, and a twenty-key
+		 * timeline costs the same whether it plays over 100ms or ten seconds.
+		 *
+		 * *Up to* three, and *one* fact rather than two, because the curve out of a
+		 * keyframe is a Value now: `mkeasing/5` was written here beside `mkey/4`
+		 * until this rung and is derived from `keas(M,W,R,K)` instead, so a keyframe
+		 * that says nothing about its curve mints nothing and takes `mdefease` in the
+		 * program. Every keyframe in every document written before this rung is in
+		 * that case, which is what keeps the sentence above about cost true.
 		 *
 		 * The index is the **document's** position, 1-based, and not the position the
 		 * resolved times put the keyframe in. That is deliberate: `kat(M,W,R,K)` is
@@ -4431,11 +4567,11 @@ export function compile(
 				if (term === undefined) continue;
 				machineLines.push(atom("mtrack", machine.id, timeline.id, term));
 				machineLines.push(atom("mtrackof", machine.id, timeline.id, term, track.part));
-				track.keys.forEach((key, index) => {
+				// One fact per keyframe and no more. `mkeasing/5` used to be written
+				// here beside `mkey/4`; it is derived from `keas(M,W,R,K)` now, for the
+				// same reason `measing/3` is derived from `mval(M,T,easing)`.
+				track.keys.forEach((_key, index) => {
 					machineLines.push(atom("mkey", machine.id, timeline.id, term, index + 1));
-					machineLines.push(
-						atom("mkeasing", machine.id, timeline.id, term, index + 1, keyEasing(key)),
-					);
 				});
 			}
 			// The rationing, stated as the facts it is. Empty for every document that
@@ -4628,11 +4764,14 @@ export function compile(
 	 * uses, because which literal a dimension resolves to is the solver's answer,
 	 * not something known here.
 	 *
-	 * Six bridges, because a literal has no type and the reader is chosen by what
+	 * Seven bridges, because a literal has no type and the reader is chosen by what
 	 * the value *is* rather than by who is asking, exactly as it is on the
-	 * TypeScript side. Six readers over five quantities, and the arithmetic is
-	 * right: `tally/2` and `permille/2` are two readers for the one `ratio`
-	 * quantity, the way `emuOf` and a float reader are two for `length`:
+	 * TypeScript side. Seven readers over five quantities, and the arithmetic is
+	 * right twice over: `tally/2` and `permille/2` are two readers for the one
+	 * `ratio` quantity, the way `emuOf` and a float reader are two for `length`;
+	 * and `bezier/5` is a reader for no quantity at all, because a curve is four
+	 * numbers rather than one and a `Quantity` name for it would have been a column
+	 * that changed no answer:
 	 *
 	 *   numeral(Lit,N)  a length, in EMU. `emuOf`, exact or nothing — so the
 	 *                   `Math.round` that used to sit here is deleted rather
@@ -4661,17 +4800,37 @@ export function compile(
 	 *                   wants percentages declares the input's range as 0..100
 	 *                   and every number in the machine is in one unit, which is
 	 *                   what Rive does and is right.
+	 *   bezier(Lit,X1,Y1,X2,Y2)
+	 *                   a CUSTOM CURVE, control points in whole thousandths:
+	 *                   "cubicBezier(200,0,0,1000)" is (200,0,0,1000) and is
+	 *                   `cubic-bezier(0.2, 0, 0, 1)` in CSS. Exact or nothing like
+	 *                   the rest — a decimal point anywhere reads as no curve at
+	 *                   all — and X is *refused* outside 0..1000 rather than
+	 *                   clamped, because a control point off the time axis is a
+	 *                   curve that runs backwards in time rather than a slow one.
+	 *                   Y is free, because Y outside the range is overshoot, which
+	 *                   is what somebody writes a bespoke curve to get.
+	 *
+	 *                   The one bridge that is a term rather than a number, and
+	 *                   that is the whole reason it exists: `measing/3` carries
+	 *                   `cubicBezier(A,B,C,D)` as a TERM, so
+	 *                   `viol(system_curves) :- measing(_,_,cubicBezier(_,_,_,_))`
+	 *                   grounds. Letting a bezier fall through to `mdefease` with
+	 *                   no bridge was the cheap version and is refused: the file
+	 *                   would show a bespoke overshoot while a rule was told the
+	 *                   transition was an ease-out.
 	 *
 	 * Emitted for every literal, on the same terms as the other four and not
-	 * behind the `spatial` gate, which is a deliberate exception to "nothing about
-	 * the third axis grounds in a flat document". A bridge is a fact about a
+	 * behind the `spatial` gate or the machine one, which is a deliberate exception
+	 * to "nothing about the third axis grounds in a flat document". A bridge is a
+	 * fact about a
 	 * *literal*, not about the document's geometry: `millis/2` is emitted for a
 	 * document with no machine and `tally/2` for one with no grid, and a rule
 	 * reading `mdeg(L,V)` off a camera's `fov` or off a token is a rule somebody
 	 * may write on a document that holds no viewport. Gating it would make the
 	 * angle the one quantity a rule needs permission to read.
 	 *
-	 * All six are emitted for every literal that admits them, and a literal
+	 * All seven are emitted for every literal that admits them, and a literal
 	 * happily carries several — `"12"` is 114300 EMU, a tally of 12 **and** a
 	 * permille of 12000, because a literal is interned by its text and the rule
 	 * that reads it is what says which it meant. The count-and-ratio overlap is
@@ -4716,6 +4875,15 @@ export function compile(
 		if (permille !== undefined) {
 			numeralLines.push(atom("permille", literals.id(text), permille));
 		}
+		// The seventh bridge, and the only one whose fact is not (literal, number).
+		// Four arguments rather than one because a curve is a *tuple*: it is what
+		// makes `bezier/5` a bridge and not a sixth Quantity, and it is what lets a
+		// rule name a control point. Zero facts in every document that holds no
+		// custom curve, which is every document written before this rung.
+		const curve = bezierOf(text);
+		if (curve !== undefined) {
+			numeralLines.push(atom("bezier", literals.id(text), ...curve));
+		}
 	}
 
 	const generated = [
@@ -4736,6 +4904,7 @@ export function compile(
 			"#defined millis/2.",
 			"#defined mdeg/2.",
 			"#defined permille/2.",
+			"#defined bezier/5.",
 			...numeralLines,
 		]),
 		section("choices", [
@@ -4828,7 +4997,12 @@ export function compile(
 		// After the component rules, which is where `instance/2`, `cpart/2`,
 		// `cinner/2` and `mbase/4` are said, and before the scene defaults, so a
 		// copy's own defaults are stated after the frames they guard.
-		section("machine rules", [...MOTION_DEFAULTS, ...LADDER_DEFAULTS, ...MACHINE_RULES]),
+		section("machine rules", [
+			...MOTION_DEFAULTS,
+			...EASING_DEFAULTS,
+			...LADDER_DEFAULTS,
+			...MACHINE_RULES,
+		]),
 		// After the component rules, so a node an instance derived defaults the
 		// same way a node a hand-written rule derived does.
 		section("scene defaults", SCENE_DEFAULT_RULES),
@@ -5049,6 +5223,12 @@ export function compile(
 			"#show mdur(M,T,V) : mdur(M,T,V), scenery.",
 			"#show mdelay(M,T,V) : mdelay(M,T,V), scenery.",
 			"#show mstagger(M,T,V) : mstagger(M,T,V), scenery.",
+			"% The curve, which was never shown because it was never derived: it was a",
+			"% fact the panel read off the document, and a document has no universe. It",
+			"% is derived now, so the answer set is the only place the resolved curve",
+			"% exists — and the export reads it from here, answer set first and document",
+			"% second, exactly as it reads the three durations.",
+			"#show measing(M,T,E) : measing(M,T,E), scenery.",
 			"% What is wrong with a machine, read back so a panel can say it without",
 			"% asking a second question. Derived rather than forbidden, so a rule of",
 			"% yours is what turns any of them into a violation with a name.",
@@ -5067,6 +5247,14 @@ export function compile(
 			"#project mdur/3.",
 			"#project mdelay/3.",
 			"#project mstagger/3.",
+			"% And the curve, which is the line that, if it is ever deleted, silently",
+			"% deletes the whole feature. A `curve` token holding easeOut and",
+			"% springSnappy produces two answer sets identical in every OTHER projected",
+			"% atom — the pictures are the same still frame — so clingo collapses them",
+			"% into one and the studio shows a single design for a document that plainly",
+			"% holds two, with an arbitrary pick nobody chose. That is the asset/2",
+			"% failure of 546eb02 arriving one predicate over.",
+			"#project measing/3.",
 			"% ---- the ladder ----",
 			"% What is wrong with a machine once its guards, its layers and its",
 			"% timelines are taken into account, read back so a panel can say it",
@@ -5127,6 +5315,11 @@ export function compile(
 			"#project mexit/3.",
 			"#project mkat/5.",
 			"#project mtlen/3.",
+			"% The same claim for the curve OUT of a keyframe, beside the one for its",
+			"% time and for the reason that one is here: an overshoot that eases in one",
+			"% universe and springs in the other is two animations, and without this",
+			"% they differ in nothing projected.",
+			"#project mkeasing/5.",
 			"% ---- three copies' values, and a gap this rung inherits ----",
 			"% `f_value/3` is projected, which is what makes \"this card is in one of two",
 			"% places\" two universes. **sfval(I,S,N,D) was projected by nothing**, and",
@@ -5419,6 +5612,12 @@ export function unreadVariables(scene: Scene): Set<string> {
 			// like any other, and leaving it out here would report it unread and grey
 			// its alternatives on the strength of a projection artefact.
 			read.push(transition.exit);
+			// And the fifth. A `curve` token every transition in the document points
+			// at *is* the feel, and leaving it out here would report it unread and
+			// grey its alternatives on the strength of a projection artefact —
+			// precisely the failure this function exists to avoid, one setting over
+			// from the one the comment above describes.
+			read.push(transition.easing);
 		}
 		// A keyframe's time, a keyframe's value and a timeline's length are all
 		// Values and all three may name a token. "The overshoot happens at `--beat`"
@@ -5432,7 +5631,7 @@ export function unreadVariables(scene: Scene): Set<string> {
 		for (const timeline of machine.timelines ?? []) {
 			read.push(timeline.length);
 			for (const track of timeline.tracks) {
-				for (const key of track.keys) read.push(key.at, key.value);
+				for (const key of track.keys) read.push(key.at, key.value, key.easing);
 			}
 		}
 	}

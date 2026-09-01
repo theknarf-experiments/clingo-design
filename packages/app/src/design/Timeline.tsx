@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
 import {
+	DEFAULT_EASING,
 	DEFAULT_UNIT,
 	DIMENSIONS_3D,
-	EASINGS,
-	EASING_NAMES,
-	type Easing,
 	type Keyframe,
 	type LoopMode,
 	type Machine,
@@ -31,6 +29,7 @@ import {
 	deleteTrack,
 	dimensionSpec,
 	findInTree,
+	keyEaseVar,
 	keyEasing,
 	keyTimeVar,
 	keyValueVar,
@@ -52,6 +51,7 @@ import {
 	writeDuration,
 } from "@clingo-design/design-core";
 
+import { CurveField } from "./CurveField";
 import { ValueEditor } from "./ValueEditor";
 import { cx } from "./cx";
 import { fontMenu } from "./fontFiles";
@@ -204,6 +204,16 @@ function KeyRow({
 
 	const timeVar = keyTimeVar(machine.id, timeline.id, term, index);
 	const valueVar = keyValueVar(machine.id, timeline.id, term, index);
+	// The third variable a keyframe can mint, and the only one it is allowed to
+	// say nothing about: `machineValues` guards on `easing.length > 0`, so a
+	// timeline whose keys say nothing about their curves mints nothing at all and
+	// takes `mdefease` in the program.
+	const easeVar = keyEaseVar(machine.id, timeline.id, term, index);
+	// The universe's own reading, because `context` carries this universe's picks:
+	// a curve that names a token the solver chose between is a different curve in
+	// a different universe, and the picture beside the row has to be the one on
+	// screen.
+	const curve = keyEasing(machine, timeline, term, index, keyframe, context);
 
 	const patch = (next: Partial<Keyframe>, coalesce?: string) =>
 		onSceneChange(
@@ -286,20 +296,54 @@ function KeyRow({
 				/>
 			</div>
 
-			<select
-				className={styles.select}
-				data-role="keyframe-easing"
-				aria-label="Easing out of this keyframe"
-				title="The curve of the segment *leaving* this keyframe. The last one's is read by nothing and is kept anyway, because a keyframe that stops being last should not lose what somebody typed."
-				value={keyEasing(keyframe)}
-				onChange={(e) => patch({ easing: e.target.value as Easing })}
-			>
-				{EASING_NAMES.map((easing) => (
-					<option key={easing} value={easing}>
-						{EASINGS[easing].label}
-					</option>
-				))}
-			</select>
+			{/*
+			 * The curve out of this keyframe, widened into a row with the two above
+			 * it and for their reason: a keyframe's easing is an `easing` Value now,
+			 * so it may name a `curve` token and hold two alternatives, and the
+			 * overshoot that eases in one universe and springs in the other is two
+			 * animations rather than one with an arbitrary pick.
+			 *
+			 * Made a Value at the same time as a transition's rather than left
+			 * behind, because half a change is a new asymmetry replacing an old one:
+			 * a document where the hover curve could name a token and the overshoot
+			 * curve could not would be a feel scale with a hole in it.
+			 *
+			 * The **last** keyframe's is read by nothing — there is no segment
+			 * leaving it — and the row is shown anyway, because a keyframe that stops
+			 * being last should not have had nowhere to say what it now needs to say.
+			 */}
+			<div className={styles.easing} data-role="keyframe-easing" data-key={index}>
+				<ValueEditor
+					testId="keyframe-easing"
+					label="Easing"
+					type="easing"
+					value={keyframe.easing ?? []}
+					tokens={tokensOfType(scene, "easing")}
+					fallback={DEFAULT_EASING}
+					names={names}
+					active={picks[easeVar]}
+					varying={varying.has(easeVar)}
+					pinned={pins[easeVar]}
+					onPin={(alternative) => onPin(easeVar, alternative)}
+					preview={(t: Term) => resolveValue(context, [t], easeVar)}
+					onChange={(next) =>
+						patch(
+							{ easing: next.length > 0 ? next : undefined },
+							`key-ease-${machine.id}-${timeline.id}-${term}-${index}`,
+						)
+					}
+				/>
+				<CurveField
+					testId="keyframe-curve"
+					value={curve}
+					onChange={(text) =>
+						patch(
+							{ easing: [lit(text)] },
+							`key-curve-${machine.id}-${timeline.id}-${term}-${index}`,
+						)
+					}
+				/>
+			</div>
 
 			<button
 				type="button"

@@ -105,9 +105,6 @@ import {
 	COMPARE_OPS,
 	CONSTRAINT_KINDS,
 	type Condition,
-	DEFAULT_EASING,
-	type Easing,
-	EASINGS,
 	FRAME_DIMS,
 	INPUT_KINDS,
 	type InputKind,
@@ -137,9 +134,12 @@ import {
 } from "./scene.ts";
 import { findInTree, nodeNames, parentMap } from "./tree.ts";
 import {
+	DEFAULT_EASING,
 	MAX_PERMILLE,
 	type ResolveContext,
 	type Value,
+	curveOf,
+	keyEaseVar,
 	keyTimeVar,
 	motionVar,
 	msOf,
@@ -291,14 +291,47 @@ function parseStateVar(variable: string): {
 	};
 }
 
+/**
+ * The two `mval` settings that are variable keys and not {@link MotionProp}s.
+ *
+ * `MOTION_PROPS` is a table of *durations*: `motionMs` calls `msOf` on every
+ * member, `MOTION_DEFAULT_PREDICATES` writes a millisecond fact for each, and
+ * `capAxes` counts them. `exit` is out of it because the table has not grown to
+ * hold it yet, and `easing` is out of it permanently — a curve is not a number
+ * and `motionMs` would answer `0` for one. Both are nonetheless `mval(M,T,F)`
+ * keys the panel mints, pins, and hands to the why-probe.
+ *
+ * So they are named here, once, rather than left to fall through
+ * {@link parseMotionVar} and out the other side. The caption is the whole reason
+ * this list exists: `Studio.tsx`'s label chain ends in the raw key, and a
+ * sentence about why a swatch is greyed that reads `mval(m1,over,easing)` in the
+ * middle of it is a receipt rather than a sentence — which is exactly what the
+ * comment beside that chain says must not happen. A row a designer can pin has
+ * to be a row the tool can name.
+ *
+ * The two words are written twice — `Transitions.tsx` labels the same two rows —
+ * and that is accepted rather than factored, because the alternative is a third
+ * table beside `MOTION_PROPS` that exists only to hold two strings, which is the
+ * `MotionProp` column the whole feature refused. The day `exit` joins
+ * `MOTION_PROPS` its entry here comes out and nothing else moves, because the
+ * lookup below tries the table first.
+ */
+const MOTION_ASIDES: Record<string, string> = {
+	exit: "Hold first",
+	easing: "Easing",
+};
+
 function parseMotionVar(
 	variable: string,
-): { machine: string; transition: string; field: MotionProp } | null {
+): { machine: string; transition: string; label: string } | null {
 	const atom = parseAtom(variable);
 	if (!atom || atom.name !== "mval" || atom.args.length !== 3) return null;
 	const field = atom.args[2];
-	if (!Object.hasOwn(MOTION_PROPS, field)) return null;
-	return { machine: atom.args[0], transition: atom.args[1], field: field as MotionProp };
+	const label = Object.hasOwn(MOTION_PROPS, field)
+		? MOTION_PROPS[field as MotionProp].label
+		: MOTION_ASIDES[field];
+	if (label === undefined) return null;
+	return { machine: atom.args[0], transition: atom.args[1], label };
 }
 
 /* ------------------------------------------------------------------ */
@@ -788,7 +821,12 @@ export function stateTurnLabel(scene: Scene, variable: string): string | undefin
 }
 
 /**
- * `"Press · Duration"`, for a motion row and for a why-sentence.
+ * `"Press · Duration"`, `"Over · Easing"`, for a motion row and for a
+ * why-sentence.
+ *
+ * All five settings a transition mints a variable for, and not the three in
+ * `MOTION_PROPS` — see {@link MOTION_ASIDES}, which is where the other two are
+ * named and why.
  *
  * Answers nothing where the document no longer holds that machine or that
  * transition — the **opposite** of what {@link stateLabel} and `datumLabel` do,
@@ -805,7 +843,7 @@ export function motionLabel(scene: Scene, variable: string): string | undefined 
 	const machine = findMachine(scene.machines, parsed.machine);
 	const transition = machine ? findTransition(machine, parsed.transition) : undefined;
 	if (!transition) return undefined;
-	return `${capitalise(transition.id)} · ${MOTION_PROPS[parsed.field].label}`;
+	return `${capitalise(transition.id)} · ${parsed.label}`;
 }
 
 /**
@@ -2754,22 +2792,59 @@ export function composeStates(
 }
 
 /**
- * The easing a keyframe's outgoing segment uses, falling back to the default.
+ * How a transition is paced in this universe, as the literal it resolved to.
  *
- * A stored word the table does not know falls back rather than being carried,
- * exactly as `easingOf` does for a transition and an unknown `Scene.unit` does
- * one package over: the emitter would otherwise write a CSS timing function no
- * browser parses, and the canvas would lerp with a curve it cannot look up.
+ * **Text and not an {@link Easing}**, which looks like a loss of type safety and
+ * is the opposite: the answer may be a menu word (`"springSnappy"`) or a custom
+ * curve (`"cubicBezier(200,0,0,1000)"`), and a union of those two shapes would
+ * be a union every caller had to destructure before it could hand the thing to
+ * {@link cssEasing}, which takes text. Text is the currency everywhere else in
+ * this system — a literal has no type and the reader is chosen by what the value
+ * *is* — and an easing is not the place to invent a second convention.
+ *
+ * Falls back to {@link DEFAULT_EASING} in all three of the ways the program
+ * does: where the transition says nothing, where what it says resolves to
+ * nothing, and where what it resolves to is neither a word the menu knows nor a
+ * curve {@link bezierOf} reads. All three are `not mreadsease(M,T)` in ASP, and
+ * that is the point — {@link cssEasing} would otherwise write a timing function
+ * no browser parses.
+ */
+export function easingOf(
+	machine: Machine,
+	transition: Transition,
+	context: ResolveContext = NO_CONTEXT,
+): string {
+	const resolved = resolveValue(
+		context,
+		transition.easing,
+		motionVar(machine.id, transition.id, "easing"),
+	);
+	return curveOf(resolved) ?? DEFAULT_EASING;
+}
+
+/**
+ * The same reader over the segment *leaving* one keyframe.
  *
  * The **last** keyframe's easing is read by nothing, because there is no segment
  * leaving it. It is kept in the document rather than refused — a keyframe that
  * stops being last should not lose what somebody typed — and it is simply never
  * asked for here.
  */
-export const keyEasing = (key: Keyframe): Easing =>
-	key.easing !== undefined && Object.hasOwn(EASINGS, key.easing)
-		? key.easing
-		: DEFAULT_EASING;
+export function keyEasing(
+	machine: Machine,
+	timeline: Timeline,
+	track: string,
+	index: number,
+	key: Keyframe,
+	context: ResolveContext = NO_CONTEXT,
+): string {
+	const resolved = resolveValue(
+		context,
+		key.easing,
+		keyEaseVar(machine.id, timeline.id, track, index),
+	);
+	return curveOf(resolved) ?? DEFAULT_EASING;
+}
 
 /** One keyframe of one track, with the millisecond this universe put it at. */
 export interface SolvedKeyframe {
@@ -2893,8 +2968,14 @@ export interface TrackSample {
 	to?: SolvedKeyframe;
 	/** How far between the two, 0..1. Zero wherever there is nothing to travel to. */
 	t: number;
-	/** The curve the segment leaving `from` uses. */
-	easing: Easing;
+	/**
+	 * The curve the segment leaving `from` uses, as the literal it resolved to.
+	 *
+	 * Text rather than an {@link Easing} for {@link easingOf}'s reason exactly: a
+	 * custom bezier is a curve a keyframe may name and is not a member of that
+	 * union, and every consumer of this field hands it to {@link cssEasing}.
+	 */
+	easing: string;
 }
 
 /**
@@ -2961,7 +3042,9 @@ export function sampleTimeline(
 			...(from === undefined ? {} : { from }),
 			...(to === undefined ? {} : { to }),
 			t,
-			easing: from ? keyEasing(from.key) : DEFAULT_EASING,
+			easing: from
+				? keyEasing(machine, timeline, term, from.index, from.key, context)
+				: DEFAULT_EASING,
 		};
 	}
 	return out;

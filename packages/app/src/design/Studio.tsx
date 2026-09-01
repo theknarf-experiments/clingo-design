@@ -55,7 +55,9 @@ import {
 	fontNotes,
 	usedFamilies,
 	variantLabel,
+	cssEasing,
 	drawGuideAt,
+	easingOf,
 	flatten,
 	layerOf,
 	machineForNode,
@@ -1963,7 +1965,23 @@ export function Studio({
 			setMotion({
 				duration: timing?.duration[edge.transition.id] ?? MOTION_FALLBACK.duration,
 				delay: timing?.delay[edge.transition.id] ?? MOTION_FALLBACK.delay,
-				easing: EASINGS[edge.transition.easing ?? DEFAULT_EASING].css,
+				// The answer set's curve where there is one, the document's reading
+				// against this universe's picks where there is not — the same ordering
+				// the two numbers above take, and it stopped being a lookup the moment
+				// an easing became a Value: a `curve` token the solver chose between
+				// resolves to nothing without a context.
+				//
+				// A **spring comes back as its whole `linear()` string** and is written
+				// straight into `--dc-play-easing`. The canvas needs no `@supports`
+				// dance, which is the one place the studio and the exported file
+				// deliberately differ: the studio runs in whatever browser the designer
+				// has open right now and every browser that can run this app parses
+				// `linear()`; only a file somebody keeps needs the fallback.
+				easing:
+					cssEasing(
+						timing?.easing[edge.transition.id] ??
+							easingOf(edge.machine, edge.transition, context),
+					) ?? EASINGS[DEFAULT_EASING].css,
 			});
 		}
 		playback.fire(instance, trigger);

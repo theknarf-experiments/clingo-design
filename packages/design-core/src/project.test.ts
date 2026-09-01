@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { setUnit } from "./edits.ts";
+import { easingOf } from "./machines.ts";
 import { pointsBounds } from "./geometry.ts";
 import {
 	createProject,
@@ -25,7 +26,6 @@ import {
 	type SceneNode,
 	constraintValue,
 	dimension,
-	easingOf,
 	emptyScene,
 	frameDim,
 	frameOf,
@@ -793,7 +793,7 @@ test("a machine survives a round trip whole", () => {
 	// instance's own width through.
 	assert.deepEqual(Object.keys(m.states[1].parts.label.frame ?? {}), ["y"]);
 	assert.equal(m.transitions[0].trigger, "pointerenter");
-	assert.equal(m.transitions[0].easing, "easeOut");
+	assert.deepEqual(m.transitions[0].easing, [lit("easeOut")]);
 	assert.deepEqual(m.transitions[0].duration, [lit("200ms")]);
 	assert.equal(m.transitions[1].duration, undefined, "absent takes the table's");
 	// The instance's drawn state is a decision about this use of the definition,
@@ -905,9 +905,11 @@ test("a transition's pacing is normalised, and only its trigger is load-bearing"
 					duration: "120ms",
 					delay: 0,
 					stagger: [lit("40ms")],
-					// An easing the table has not got falls back rather than losing
-					// the transition: a trigger decides *whether* the machine ever
-					// moves, while an easing is only the shape of the curve.
+					// An easing the menu has not got is KEPT, which is where the
+					// repair moved to when a curve became a Value: it falls back in
+					// both readers — `measeopt/1` in the program and `curveOf` on
+					// this side — rather than in the reader, so a document cannot
+					// lose what somebody typed because a menu shrank.
 					easing: "bouncy",
 					only: ["fill", "sideways", 7],
 					enabled: false,
@@ -923,8 +925,7 @@ test("a transition's pacing is normalised, and only its trigger is load-bearing"
 	assert.deepEqual(t.delay, single("0"));
 	assert.equal(msOf("0"), 0, "except zero, which reads the same either way");
 	assert.deepEqual(t.stagger, [lit("40ms")]);
-	assert.equal(t.easing, undefined);
-	assert.equal(easingOf(t), DEFAULT_EASING);
+	assert.deepEqual(t.easing, single("bouncy"));
 	assert.deepEqual(t.only, ["fill"]);
 	assert.equal(t.enabled, false, "off keeps it in the document, out of the program");
 
@@ -943,6 +944,74 @@ test("a transition's pacing is normalised, and only its trigger is load-bearing"
 	assert.deepEqual(loose[1].only, []);
 	// A transition written before the switch existed is one somebody wanted.
 	assert.equal(loose[0].enabled, true);
+});
+
+test("an easing stored as a bare word reads as a one-alternative value", () => {
+	// The migration, and it is one line of `normalizeTransitions`. Every document
+	// written before a curve was a Value stores `easing: "easeOut"`, and
+	// `settingValue` takes a string through `snapValue` — which does nothing for a
+	// type with no `length` quantity — so it comes back as `[lit("easeOut")]`: the
+	// same curve, now a value, which is not a choice anybody makes and is why the
+	// two `#project` lines this rung adds split no universe of any template.
+	const scene = normalizeScene(
+		wired({
+			transitions: [
+				{ id: "press", from: "rest", to: "hover", trigger: "pointerdown", easing: "easeOut" },
+			],
+			timelines: [
+				{
+					id: "open",
+					name: "Open",
+					tracks: [
+						{
+							part: "label",
+							prop: "opacity",
+							keys: [
+								{ at: "0ms", value: "0", easing: "easeIn" },
+								{ at: "200ms", value: "1" },
+							],
+						},
+					],
+				},
+			],
+		}),
+	);
+	const edge = scene.machines[0].transitions[0];
+	assert.deepEqual(edge.easing, single(DEFAULT_EASING));
+	assert.equal(edge.easing?.length, 1, "one alternative, so no branch");
+	const keys = scene.machines[0].timelines?.[0].tracks[0].keys ?? [];
+	assert.deepEqual(keys[0].easing, single("easeIn"));
+	// And a keyframe that said nothing says nothing still: the guard in
+	// `machineValues` is on `easing.length > 0`, so a document full of curveless
+	// keyframes mints no `keas(...)` variable at all and takes `mdefease` in the
+	// program.
+	assert.equal(keys[1].easing, undefined);
+	assert.deepEqual(normalizeScene(scene), scene, "and it round-trips");
+});
+
+test("an easing the menu has not got is kept rather than dropped", () => {
+	// The repair moved from the reader to the readers, and this is the assertion
+	// that it moved rather than vanished. A curve nobody knows survives the read —
+	// a document should not lose what somebody typed because a menu shrank, and a
+	// curve from a vocabulary this build has not got is one a later build may have
+	// — and both readers fall back on it in the same place: `measeopt/1` in the
+	// program, `curveOf` on this side. A trigger still gets the other judgement,
+	// because a trigger decides *whether* the machine ever moves.
+	const scene = normalizeScene(
+		wired({
+			transitions: [
+				{ id: "press", from: "rest", to: "hover", trigger: "pointerdown", easing: "wobble" },
+			],
+		}),
+	);
+	const edge = scene.machines[0].transitions[0];
+	assert.deepEqual(edge.easing, single("wobble"), "kept in the document");
+	assert.equal(
+		easingOf(scene.machines[0], edge),
+		DEFAULT_EASING,
+		"and read as the default, which is what `not mreadsease(M,T)` says too",
+	);
+	assert.equal(scene.machines[0].transitions.length, 1, "the transition is still there");
 });
 
 test("a delta decides more than a style variant, and drops what it cannot", () => {
@@ -1631,7 +1700,7 @@ test("a timeline keeps its keys in time order, where the document says what time
 		tracks[0].keys.map((k) => k.at),
 		[[lit("0ms")], [lit("200ms")]],
 	);
-	assert.deepEqual(tracks[0].keys[0].easing, "easeIn");
+	assert.deepEqual(tracks[0].keys[0].easing, [lit("easeIn")]);
 	assert.deepEqual(tracks[0].keys[1].value, [lit("8px")]);
 	// A rotation track's value is an angle, which has no lattice, so it comes
 	// back exactly as it was typed.

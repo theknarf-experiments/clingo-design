@@ -175,7 +175,7 @@ export function machine(): Scene {
 				to: "hover",
 				trigger: "pointerenter",
 				duration: [ref("motion")],
-				easing: "easeOut",
+				easing: single("easeOut"),
 				enabled: true,
 			},
 			{
@@ -184,7 +184,7 @@ export function machine(): Scene {
 				to: "rest",
 				trigger: "pointerleave",
 				duration: [ref("motion")],
-				easing: "easeOut",
+				easing: single("easeOut"),
 				enabled: true,
 			},
 			// A press should feel immediate and the release should settle, which is
@@ -196,7 +196,7 @@ export function machine(): Scene {
 				to: "pressed",
 				trigger: "pointerdown",
 				duration: single("60ms"),
-				easing: "easeOut",
+				easing: single("easeOut"),
 				enabled: true,
 			},
 			{
@@ -205,7 +205,7 @@ export function machine(): Scene {
 				to: "hover",
 				trigger: "pointerup",
 				duration: [ref("motion")],
-				easing: "easeOut",
+				easing: single("easeOut"),
 				enabled: true,
 			},
 		],

@@ -1,8 +1,5 @@
 import {
 	DEFAULT_EASING,
-	EASINGS,
-	EASING_NAMES,
-	type Easing,
 	MOTION_PROPS,
 	MOTION_PROP_NAMES,
 	type Machine,
@@ -21,6 +18,7 @@ import {
 	deleteTransition,
 	easingOf,
 	findState,
+	lit,
 	guardImpossible,
 	layerInitial,
 	layerOf,
@@ -35,6 +33,7 @@ import {
 } from "@clingo-design/design-core";
 
 import { Conditions } from "./Conditions";
+import { CurveField } from "./CurveField";
 import { ValueEditor } from "./ValueEditor";
 import { cx } from "./cx";
 import styles from "./Transitions.module.css";
@@ -278,6 +277,24 @@ function Row({
 	const past = health?.exitPast.includes(transition.id) === true;
 
 	/**
+	 * The variable this edge's curve is, and what this universe resolved it to.
+	 *
+	 * The answer set first and the document second, which is the same ordering
+	 * every number on this row already takes and is not decorative: an easing that
+	 * names a `curve` token the solver chose between resolves to *the token* in
+	 * one universe and to something else in the other, and a panel reading the
+	 * document alone would draw one curve for a design that plainly holds two.
+	 *
+	 * Read off {@link TransitionsProps.health}, which is this machine's
+	 * `ModelMachine`, rather than out of `timing` — the four numbers there come
+	 * from `Machines.tsx`'s `timingFor`, which this rung does not own, and the
+	 * record that carries the resolved curve was already being handed to this
+	 * component for the health lists. One prop fewer for the same answer.
+	 */
+	const easingVariable = motionVar(machine.id, transition.id, "easing");
+	const curve = health?.easing[transition.id] ?? easingOf(machine, transition, context);
+
+	/**
 	 * One motion setting, as the variable it is: `mval(m1,press,duration)`.
 	 *
 	 * Per machine *and* per transition, which is why the predicate is `mdur/3`
@@ -458,32 +475,76 @@ function Row({
 				</p>
 			) : null}
 
-			<div className={styles.settings}>
-				<select
-					className={styles.select}
-					data-role="transition-easing"
-					aria-label="Easing"
-					title="The shape of the curve. A word rather than a value: five curves with no arithmetic in them, nothing scales one, and a `duration` token is where a document says all its motion moves together."
-					value={easingOf(transition)}
-					onChange={(e) => write({ easing: e.target.value as Easing })}
-				>
-					{EASING_NAMES.map((easing) => (
-						<option key={easing} value={easing}>
-							{EASINGS[easing].label}
-							{easing === DEFAULT_EASING ? " (default)" : ""}
-						</option>
-					))}
-				</select>
+			{/*
+			 * The curve, as the fourth motion row and the first of them.
+			 *
+			 * It was a `<select>` writing a bare word, defended by an argument that
+			 * proves too much — "a closed menu with no arithmetic in it, nothing
+			 * scales it" is equally true of `direction`, `align` and nine others,
+			 * every one of which is a Value. So it is a {@link ValueEditor} like the
+			 * three durations beside it: it varies, greys, pins, takes a token and
+			 * shows what this universe resolved it to. A `curve` token holding
+			 * `["easeOut", "springSnappy"]` is a **feel** — one place that decides
+			 * whether the design moves like a control or like a toy — and it branches
+			 * the space exactly as a `duration` token holding two numbers does.
+			 *
+			 * Above the three durations, because the curve is what a designer
+			 * changes first: how long a move takes is a number you tune, and what
+			 * shape it has is the decision.
+			 *
+			 * `data-role="transition-easing"` is kept from the deleted select so the
+			 * e2e walk's selector still finds the control.
+			 */}
+			<div
+				className={styles.motion}
+				data-role="transition-easing"
+				data-transition={transition.id}
+			>
+				<ValueEditor
+					testId="transition-easing"
+					label="Easing"
+					type="easing"
+					value={transition.easing ?? []}
+					tokens={tokensOfType(scene, "easing")}
+					fallback={DEFAULT_EASING}
+					active={picks[easingVariable]}
+					varying={varying.has(easingVariable)}
+					reachable={reach?.[easingVariable]}
+					pinned={pins[easingVariable]}
+					onPin={(index) => onPin(easingVariable, index)}
+					preview={(term: Term) => resolveValue(context, [term], easingVariable)}
+					onChange={(next) =>
+						write(
+							{ easing: next.length > 0 ? next : undefined },
+							`easing-${machine.id}-${transition.id}`,
+						)
+					}
+				/>
+				<CurveField
+					testId="transition-curve"
+					value={curve}
+					onChange={(text) =>
+						write(
+							{ easing: [lit(text)] },
+							`curve-${machine.id}-${transition.id}`,
+						)
+					}
+				/>
+			</div>
 
-				{timing ? (
+			{/* The row used to hold the easing select as well; with that gone it is
+			    the resolved numbers alone, and an empty flex row for a document with
+			    no answer set in hand is a gap nobody asked for. */}
+			{timing ? (
+				<div className={styles.settings}>
 					<span className={styles.resolved} data-role="transition-timing">
 						{timing.duration}ms
 						{timing.delay !== 0 ? `, after ${timing.delay}ms` : ""}
 						{timing.stagger !== 0 ? `, ${timing.stagger}ms apart` : ""}
 						{timing.exit ? `, not before ${writeDuration(timing.exit)} held` : ""}
 					</span>
-				) : null}
-			</div>
+				</div>
+			) : null}
 
 			{MOTION_PROP_NAMES.map(motionRow)}
 

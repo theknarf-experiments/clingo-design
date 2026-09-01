@@ -63,9 +63,7 @@ import {
 	DIMENSIONS_3D,
 	type Diagonal,
 	type Dimension,
-	EASINGS,
 	EDGES,
-	type Easing,
 	type Edge,
 	type FontFile,
 	type Guide,
@@ -5116,14 +5114,19 @@ export function addKeyframe(
 	track: string,
 	at: Value,
 	value: Value,
-	easing?: Easing,
+	easing?: Value,
 ): Scene {
 	if (at.length === 0 || value.length === 0) return scene;
-	if (easing !== undefined && !Object.hasOwn(EASINGS, easing)) return scene;
 	const key: Keyframe = {
 		at,
 		value,
-		...(easing !== undefined ? { easing } : {}),
+		// An empty curve is absent rather than an empty list, the reading every
+		// optional Value on a keyframe gets: absent takes `mdefease` in the program
+		// and `DEFAULT_EASING` in the panel, and a `[]` would mint a variable with
+		// no alternatives. The curve is no longer checked against the menu here —
+		// it is a Value, so the word it holds may be one a token supplies in one
+		// universe and not in another, and both readers fall back on their own.
+		...(easing !== undefined && easing.length > 0 ? { easing } : {}),
 	};
 	return mapTrack(scene, machineId, timelineId, track, (t) => {
 		const keys = placeKeys(t.keys, key);
@@ -5148,9 +5151,14 @@ export function addKeyframe(
  * naming `kfr(…,3)` then names whichever moment is third, which is what "the
  * third keyframe" has meant all along.
  *
- * An easing the table has not got is refused, because it would reach the export
- * as a timing function no browser parses. A time that lands on another key's
- * moment is refused too, for {@link placeKeys}' reason.
+ * An easing is no longer checked against the menu on the way in, and that is the
+ * one thing about this function that changed when a curve became a {@link Value}:
+ * what a curve resolves to is a question about a universe, so a token holding a
+ * word the menu has not got could not be refused here without refusing the token
+ * everywhere. Both readers fall back instead — `measeopt/1` in the program and
+ * `curveOf` in `machines.ts` — which is where a fallback has to live if the file
+ * and the program are to agree about which curve is playing. A time that lands on
+ * another key's moment is still refused, for {@link placeKeys}' reason.
  */
 export function updateKeyframe(
 	scene: Scene,
@@ -5162,9 +5170,6 @@ export function updateKeyframe(
 ): Scene {
 	if (patch.at !== undefined && patch.at.length === 0) return scene;
 	if (patch.value !== undefined && patch.value.length === 0) return scene;
-	if (patch.easing !== undefined && !Object.hasOwn(EASINGS, patch.easing)) {
-		return scene;
-	}
 	return mapTrack(scene, machineId, timelineId, track, (t) => {
 		if (index < 1 || index > t.keys.length) return t;
 		const before = t.keys[index - 1];

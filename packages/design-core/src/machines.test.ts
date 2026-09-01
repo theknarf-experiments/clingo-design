@@ -34,6 +34,7 @@ import {
 	blendWeights,
 	composeStates,
 	durationUnitOf,
+	easingOf,
 	edgeAllows,
 	findMachine,
 	findState,
@@ -47,6 +48,7 @@ import {
 	inputRange,
 	keyCopy,
 	keyCopyLabel,
+	keyEasing,
 	keyframeCopyIds,
 	keyframeLabel,
 	keyframeParts,
@@ -96,7 +98,6 @@ import {
 	type CompareOp,
 	type Condition,
 	type Constraint,
-	type Easing,
 	type Keyframe,
 	type Machine,
 	type MachineInput,
@@ -113,7 +114,10 @@ import {
 import { findInTree } from "./tree.ts";
 import { EMU_PER_PX } from "./units.ts";
 import {
+	DEFAULT_EASING,
 	MAX_PERMILLE,
+	type ResolveContext,
+	cssEasing,
 	keyTimeVar,
 	keyValueVar,
 	lit,
@@ -122,6 +126,7 @@ import {
 	ref,
 	single,
 	timelineLenVar,
+	tokenVar,
 } from "./values.ts";
 
 const px = (n: number): number => n * EMU_PER_PX;
@@ -466,6 +471,15 @@ test("a motion variable reads as its transition, and goes quiet when the edge is
 	);
 	assert.equal(motionLabel(scene, motionVar("m1", "press", "duration")), "Press · Duration");
 	assert.equal(motionLabel(scene, motionVar("m1", "press", "stagger")), "Press · Stagger");
+	// **Five settings and not three.** `exit` and `easing` are `mval` keys the
+	// panel mints, pins and hands to the why-probe, and neither is a `MotionProp`
+	// — `MOTION_PROPS` is a table of durations and `motionMs` would answer 0 for a
+	// curve. Without them the studio's label chain fell through to the raw key, so
+	// a sentence about why a curve's second alternative is greyed read
+	// `mval(m1,press,easing)` in the middle of it: a receipt rather than a
+	// sentence, and in the one place the multiverse explains itself to somebody.
+	assert.equal(motionLabel(scene, motionVar("m1", "press", "easing")), "Press · Easing");
+	assert.equal(motionLabel(scene, motionVar("m1", "press", "exit")), "Press · Hold first");
 
 	// The opposite judgement from `stateLabel`, and the reason is that a `mval`
 	// key is never typed by a person: it is minted by a panel from a transition it
@@ -1004,10 +1018,10 @@ const laddered = (states: MachineState[], extra: Partial<Machine>, uses = [{ id:
 	return { ...scene, machines: [{ ...scene.machines[0], ...extra }] };
 };
 
-const key = (at: string, value: string, easing?: Easing): Keyframe => ({
+const key = (at: string, value: string, easing?: string): Keyframe => ({
 	at: single(at),
 	value: single(value),
-	...(easing ? { easing } : {}),
+	...(easing ? { easing: single(easing) } : {}),
 });
 
 const numberInput = (id: string, extra: Partial<MachineInput> = {}): MachineInput => ({
@@ -2114,6 +2128,123 @@ test("the later layer wins the field, and only the field", () => {
 	// A record naming another layer's state composes nothing for that layer,
 	// rather than composing one layer's pose twice.
 	assert.deepEqual(composeStates(machine, { base: "glow" }), {});
+});
+
+test("easingOf follows a token and falls back three ways", () => {
+	// An easing stopped being a lookup when it became a Value, so this reader takes
+	// a machine and a context and answers **per universe** — the same shape
+	// `motionMs` has one field over.
+	const machine = bare([state("rest", "Rest"), state("hover", "Hover")], []);
+	const of = (extra: Partial<Transition>, context?: ResolveContext) =>
+		easingOf(machine, edge("in", "rest", "hover", "click", extra), context);
+
+	// The three fallbacks, and they are one sentence in ASP: `not
+	// mreadsease(M,T)`. Said nothing; said something that resolves to nothing;
+	// said something that is neither a menu word nor a curve `bezierOf` reads.
+	assert.equal(of({}), DEFAULT_EASING);
+	assert.equal(of({ easing: [{ kind: "token", token: "nobody" }] }), DEFAULT_EASING);
+	assert.equal(of({ easing: single("wobble") }), DEFAULT_EASING);
+	// The two spellings that *are* curves come back as themselves, as text rather
+	// than as an `Easing`: a union of the two would be a union every caller had to
+	// destructure before it could hand the thing to `cssEasing`, which takes text.
+	assert.equal(of({ easing: single("springBouncy") }), "springBouncy");
+	assert.equal(
+		of({ easing: single("cubicBezier(200,0,0,1000)") }),
+		"cubicBezier(200,0,0,1000)",
+	);
+	// And it follows a token, which is the whole point: a `curve` token is a feel,
+	// one place that decides whether a design moves like a control or like a toy.
+	const context = {
+		tokens: [
+			{ id: "feel", name: "Feel", type: "easing" as const, value: single("springSnappy") },
+		],
+		picks: {},
+	};
+	assert.equal(of({ easing: [{ kind: "token", token: "feel" }] }, context), "springSnappy");
+});
+
+test("keyEasing is the same reader over a keyframe, and the last key's is still read by nothing", () => {
+	const context = {
+		tokens: [
+			{
+				id: "feel",
+				name: "Feel",
+				type: "easing" as const,
+				value: [lit("easeIn"), lit("springBouncy")],
+			},
+		],
+		// The second alternative, so the assertion is about a universe rather than
+		// about the first thing in a list.
+		picks: { [tokenVar("feel")]: 1 },
+	};
+	const machine = laddered([state("rest", "Rest")], {
+		timelines: [
+			{
+				id: "slide",
+				name: "Slide",
+				tracks: [
+					{
+						part: "badge",
+						dim: "y",
+						keys: [
+							{ ...key("0ms", "0px"), easing: [{ kind: "token", token: "feel" }] },
+							key("200ms", "20px"),
+						],
+					},
+				],
+			},
+		],
+	}).machines[0];
+	const timeline = machine.timelines?.[0];
+	assert.ok(timeline);
+	const term = trackDim("badge", "y");
+	assert.equal(
+		keyEasing(machine, timeline, term, 1, timeline.tracks[0].keys[0], context),
+		"springBouncy",
+	);
+	// A keyframe that says nothing takes the default, which is what `mdefease`
+	// says in the program and is why the guard in `machineValues` can be on
+	// `easing.length > 0`.
+	assert.equal(
+		keyEasing(machine, timeline, term, 2, timeline.tracks[0].keys[1], context),
+		DEFAULT_EASING,
+	);
+	// The **last** keyframe's easing is read by nothing, because there is no
+	// segment leaving it. It is kept in the document rather than refused — a
+	// keyframe that stops being last should not lose what somebody typed — and it
+	// is simply never asked for by the sampler.
+	const sampled = sampleTimeline(machine, timeline, 200, context)[term];
+	assert.equal(sampled.to, undefined);
+	assert.equal(sampled.easing, DEFAULT_EASING);
+});
+
+test("a TrackSample carries the literal and not an Easing", () => {
+	// A custom bezier is a curve a keyframe may name and is not a member of the
+	// `Easing` union, so the field is text — and every consumer of it hands it to
+	// `cssEasing`, which takes text.
+	const machine = laddered([state("rest", "Rest")], {
+		timelines: [
+			{
+				id: "slide",
+				name: "Slide",
+				tracks: [
+					{
+						part: "badge",
+						dim: "y",
+						keys: [
+							{ ...key("0ms", "0px"), easing: single("cubicBezier(340,1560,640,1000)") },
+							key("200ms", "20px"),
+						],
+					},
+				],
+			},
+		],
+	}).machines[0];
+	const timeline = machine.timelines?.[0];
+	assert.ok(timeline);
+	const at100 = sampleTimeline(machine, timeline, 100)[trackDim("badge", "y")];
+	assert.equal(at100.easing, "cubicBezier(340,1560,640,1000)");
+	assert.equal(cssEasing(at100.easing), "cubic-bezier(0.34, 1.56, 0.64, 1)");
 });
 
 test("a timeline's length is its own, or its last keyframe, and never both", () => {

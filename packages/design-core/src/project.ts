@@ -44,7 +44,6 @@ import {
 	type CompareOp,
 	type Condition,
 	DIMENSIONS_3D,
-	EASINGS,
 	FRAME_DIMS,
 	GUIDE_PROPS,
 	GUIDE_PROP_NAMES,
@@ -68,7 +67,6 @@ import {
 	type Constraint,
 	DEFAULT_FRAME,
 	type Dimension,
-	type Easing,
 	type FontAxis,
 	type FontFile,
 	type FrameValue,
@@ -858,9 +856,12 @@ function normalizeLayers(value: unknown): MachineLayer[] {
  * and no copies at all, and it is how somebody works on an animation before
  * wiring it up. What is dropped is a timeline the program could not name — an id
  * that is not an ASP constant, or a repeat — and a `loop` word the table has not
- * got falls back rather than losing the timeline, which is the judgement an
- * unknown {@link Easing} gets and for the same reason: the mode is the shape of
- * the playback, not whether there is any.
+ * got falls back rather than losing the timeline, because the mode is the shape
+ * of the playback, not whether there is any. It falls back *here*, in the reader,
+ * where an unknown easing no longer does: a loop mode reaches the program as a
+ * fact this file writes, so a word no rule can match would silently disable a
+ * check, while an easing reaches it as a literal both readers fall back on in
+ * the same place.
  */
 function normalizeTimelines(value: unknown): Timeline[] {
 	if (!Array.isArray(value)) return [];
@@ -967,13 +968,16 @@ function normalizeKeyframes(value: unknown, type: ValueType): Keyframe[] {
 		// where the three fields of a {@link Track} are not, because a track can
 		// be being built and a key cannot be half-placed.
 		if (!at || !what) continue;
-		const easing = raw.easing;
+		// The same widening a transition's easing takes, in the same commit and for
+		// the same reason — see {@link Keyframe.easing}. A stored `"easeOut"` comes
+		// back as `[lit("easeOut")]` through `snapValue`, which does nothing for a
+		// type with no `length` quantity, so the migration is this one line and it
+		// adds no universes: a one-alternative value is not a choice anybody makes.
+		const easing = settingValue(raw.easing, "easing");
 		out.push({
 			at,
 			value: what,
-			...(typeof easing === "string" && Object.hasOwn(EASINGS, easing)
-				? { easing: easing as Easing }
-				: {}),
+			...(easing ? { easing } : {}),
 		});
 	}
 	return out;
@@ -1311,7 +1315,12 @@ function normalizeTransitions(value: unknown): Transition[] {
 		// cannot grow yet and what the one-line unblock is. When it does grow,
 		// this line goes and the loop above covers it.
 		const exit = settingValue(raw.exit, MOTION_PROPS.duration.type);
-		const easing = raw.easing;
+		// The fifth setting, and the only one that is not a duration. It goes
+		// through the same {@link settingValue} for the same reason: a stored
+		// `easing: "easeOut"` from every document written before curves were values
+		// comes back as a one-alternative `easing` Value, which is the whole of the
+		// migration and which costs no universes.
+		const easing = settingValue(raw.easing, "easing");
 		const only = raw.only;
 		const conditions = normalizeConditions(raw.conditions);
 		out.push({
@@ -1326,15 +1335,16 @@ function normalizeTransitions(value: unknown): Transition[] {
 			// dropped to absent. Every transition in every document written before
 			// guards existed is unguarded, and it has to keep costing nothing.
 			...(conditions.length > 0 ? { conditions } : {}),
-			// An easing the table has not got falls back rather than losing the
-			// transition, which is the judgement {@link Scene.unit} gets and not
-			// the one a bogus trigger gets. The difference is what the field
-			// decides: a trigger is *whether* the machine ever moves, while an
-			// easing is only the shape of the curve, and `easingOf` already has a
-			// default with an argument behind it.
-			...(typeof easing === "string" && Object.hasOwn(EASINGS, easing)
-				? { easing: easing as Easing }
-				: {}),
+			// An easing the table has not got is now **kept** rather than dropped,
+			// which is a move of the repair from the reader to the readers rather
+			// than a change of mind. It is still not the judgement a bogus trigger
+			// gets — a trigger decides *whether* the machine ever moves and is
+			// refused at the door — but the fallback belongs where both readers
+			// take it: `measeopt/1` in the program and `curveOf` in `machines.ts`,
+			// which agree by construction. A document should not lose what somebody
+			// typed because a menu shrank, and a curve that came back from a
+			// vocabulary this build has not got is a curve a later build may have.
+			...(easing ? { easing } : {}),
 			// Absent and empty mean different things — everything the delta
 			// touches, against nothing at all — so an `only` that is not a list is
 			// dropped to absent while a list that filters down to nothing stays

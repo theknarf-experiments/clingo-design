@@ -1185,6 +1185,75 @@ test("a timeline reads back as the times this universe put it at, and mints no c
 	assert.deepEqual(model.keyframes, {});
 });
 
+test("a curve reads back as the term it is, and not only as a word the menu knows", async () => {
+	// `measing/3` and `mkeasing/5` were **facts this file wrote** until a curve
+	// became a Value, so a reader that tested the argument against `EASINGS` was
+	// right for as long as nothing else could put an atom there. Both are derived
+	// now and both have a second rule that puts `cubicBezier(X1,Y1,X2,Y2)` in the
+	// answer set, which a membership test drops on the floor — and drops
+	// *silently*, because every reader of these two fields falls back to
+	// `DEFAULT_EASING` and the export would then write a curve that is wrong in a
+	// way only a stopwatch could see. So the shape of the atom is asserted here,
+	// where the fallback cannot hide it.
+	const scene = stateful({
+		timelines: [
+			{
+				...PULSE,
+				tracks: [
+					{
+						part: "label",
+						dim: "y",
+						keys: [
+							{ ...key("0ms", "14px"), easing: [lit("cubicBezier(340,1560,640,1000)")] },
+							{ ...key("300ms", "2px"), easing: [lit("springSnappy")] },
+						],
+					},
+				],
+			},
+		],
+		states: [
+			{ id: "rest", name: "rest", parts: {} },
+			{ id: "beat", name: "beat", parts: {}, timeline: "pulse" },
+		],
+		transitions: [
+			{
+				id: "go",
+				from: "rest",
+				to: "beat",
+				trigger: "pointerenter",
+				enabled: true,
+				easing: [lit("cubicBezier(200,0,0,1000)")],
+			},
+			{
+				id: "back",
+				from: "beat",
+				to: "rest",
+				trigger: "pointerleave",
+				enabled: true,
+				easing: [lit("springBouncy")],
+			},
+		],
+	});
+	const model = readModel(await firstModel(scene));
+	// A term survives the parse because `parseAtom` splits on *top-level* commas,
+	// so `measing(m1,go,cubicBezier(200,0,0,1000))` is three arguments and not six.
+	// A reader that had split on every comma would have filed it under
+	// `measing/6` and never seen it at all.
+	assert.deepEqual(model.machines.m1?.easing, {
+		go: "cubicBezier(200,0,0,1000)",
+		back: "springBouncy",
+	});
+	// And the same one grain finer, over the curve *out of* a keyframe. The second
+	// key's curve is read by nothing — there is no segment leaving the last one —
+	// and is derived anyway, so it is here.
+	assert.deepEqual(model.machines.m1?.timelines?.pulse?.tracks, {
+		[trackDim("label", "y")]: [
+			{ index: 1, at: 0, easing: "cubicBezier(340,1560,640,1000)" },
+			{ index: 2, at: 300, easing: "springSnappy" },
+		],
+	});
+});
+
 test("a keyframe copy appears where a rule named one, and is a pose rather than a node", async () => {
 	// `keyframeParts` seeds copies from the *constraints*, so naming a `kfr(...)`
 	// term is what brings one into being. It is not a `node/1` for a state copy's

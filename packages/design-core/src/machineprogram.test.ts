@@ -21,9 +21,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { parseAtom, unquote } from "./atoms.ts";
-import { CONTRACT, PULL_ATOM, SCENERY_ATOM, compile, variableCounts } from "./compile.ts";
+import {
+	CONTRACT,
+	PULL_ATOM,
+	SCENERY_ATOM,
+	compile,
+	unreadVariables,
+	variableCounts,
+} from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
-import { makeNode } from "./edits.ts";
+import { addCustomConstraint, makeNode } from "./edits.ts";
 import { UnsatisfiableError, explore } from "./explore.ts";
 import {
 	LADDER_CHECKS,
@@ -907,6 +914,348 @@ test("a motion scale is two designs, which is what the projection is for", async
 		),
 	);
 	assert.deepEqual([...durations].sort(), ["120", "400"]);
+});
+
+/* ------------------------------------------------------------------ */
+/* The shape of a move                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A machine whose one edge is paced by whatever curve the caller hands it.
+ *
+ * The curve is a {@link Value}, so the argument may be a literal, a token
+ * reference, or two of either — which is the whole point of the rung and is what
+ * every assertion below varies.
+ */
+const curved = (easing: Value, tokenValue?: Value): Scene =>
+	buttons({
+		uses: [{ id: "b1" }],
+		...(tokenValue
+			? { tokens: [{ id: "feel", name: "Feel", type: "easing", value: tokenValue }] }
+			: {}),
+		machines: [
+			machine({
+				states: [{ id: "rest", parts: nudge(14) }, { id: "hover", parts: nudge(4) }],
+				transitions: [
+					edge({ id: "over", from: "rest", to: "hover", easing }),
+					edge({ id: "back", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			}),
+		],
+	});
+
+test("an easing is a value: it follows a token, refuses a word the menu has not got, and falls back", async () => {
+	// The three ways a curve can be said, in one document, because they are one
+	// rule and its two fallbacks: a token the solver resolved, a word `measeopt/1`
+	// does not know, and nothing at all. All three of the last two land on
+	// `mdefease`, which is the same answer `curveOf` gives on the TypeScript side
+	// — a fallback only one reader takes is drift with a fig leaf on it.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		tokens: [
+			{ id: "feel", name: "Feel", type: "easing", value: single("springSnappy") },
+		],
+		machines: [
+			machine({
+				states: [{ id: "rest", parts: nudge(14) }, { id: "hover", parts: nudge(4) }],
+				transitions: [
+					edge({
+						id: "over",
+						from: "rest",
+						to: "hover",
+						easing: [{ kind: "token", token: "feel" }],
+					}),
+					edge({
+						id: "back",
+						from: "hover",
+						to: "rest",
+						trigger: "pointerleave",
+						easing: single("wobble"),
+					}),
+					edge({ id: "press", from: "rest", to: "hover", trigger: "pointerdown" }),
+				],
+			}),
+		],
+	});
+	const model = await only(scene);
+	assert.deepEqual(
+		Object.fromEntries(args(model, "measing", 3).map(([, t, curve]) => [t, curve])),
+		{ over: "springSnappy", back: "easeOut", press: "easeOut" },
+	);
+	// The setting really is a variable, so a `curve` token drives every transition
+	// wearing it — which is what makes a feel one decision.
+	assert.equal(compile(scene).variables[motionVar("m1", "over", "easing")], 1);
+	// And a transition that said nothing mints nothing: the guard in
+	// `machineValues` is on `easing.length > 0`, exactly as it is on `exit`.
+	assert.equal(compile(scene).variables[motionVar("m1", "press", "easing")], undefined);
+});
+
+test("a curve token with two alternatives is two designs", async () => {
+	// **The projection test.** A feel is a design decision like a motion scale: a
+	// `curve` token holding the crisp reading and the playful one is one document
+	// holding both. Without `#project measing/3.` the two answer sets are
+	// identical in every other projected atom — the pictures are the same still
+	// frame — clingo collapses them into one, and the studio shows a single design
+	// for a document that plainly holds two, with an arbitrary pick nobody chose.
+	// That is the asset/2 failure of 546eb02 arriving one predicate over, and this
+	// assertion is what fails loudly if the line is ever deleted.
+	const token = [{ kind: "token" as const, token: "feel" }];
+	assert.equal(
+		(await run(curved(token, [lit("easeOut"), lit("springSnappy")]))).count,
+		2,
+	);
+	// The control, on the same shape: one alternative is one design, so the
+	// projection is not simply multiplying every document that has a machine.
+	assert.equal((await run(curved(token, single("easeOut")))).count, 1);
+	// And the two really do differ in the curve rather than in something
+	// incidental.
+	const curves = new Set(
+		(await answers(curved(token, [lit("easeOut"), lit("springSnappy")]))).map(
+			(model) => args(model, "measing", 3).find(([, t]) => t === "over")?.[2],
+		),
+	);
+	assert.deepEqual([...curves].sort(), ["easeOut", "springSnappy"]);
+});
+
+test("springs add no universes", async () => {
+	// Three fixed members of a menu and no parameters, which is the decision the
+	// whole feature turns on: a parameterised spring would be three Values, and
+	// two of them holding two alternatives each is four universes differing in
+	// nothing a still frame can show. So a spring is a word where `easeOut` is a
+	// word, and swapping one for the other changes the curve and nothing else.
+	const plain = await run(curved(single("easeOut")));
+	const sprung = await run(curved(single("springBouncy")));
+	assert.equal(plain.count, sprung.count);
+	assert.equal(plain.count, 1);
+	// One grain finer: the two documents' atoms differ in the `measing` rows and
+	// in the interned text of the word itself, and in nothing else at all. The
+	// second exclusion is the point rather than a concession — a curve is a
+	// literal like any other, so it is `alt_literal/3` and `literal/2` and no new
+	// machinery, which is the same shape a fill has.
+	const without = (atoms: readonly string[], curve: string) =>
+		atoms.filter((a) => !a.startsWith("measing(") && !a.includes(`"${curve}"`)).sort();
+	assert.deepEqual(
+		without(await only(curved(single("springBouncy"))), "springBouncy"),
+		without(await only(curved(single("easeOut"))), "easeOut"),
+	);
+});
+
+test("a custom bezier reaches the program as a term and never as a word", async () => {
+	// The dialect exists so a rule can name a curve. `cubicBezier(200,0,0,1000)`
+	// is a lowerCamel functor with four integer arguments, so
+	// `viol(system_curves) :- measing(_,_,cubicBezier(_,_,_,_))` grounds; CSS's own
+	// `cubic-bezier(0.2, 0, 0, 1)` is a minus sign and three non-integers and
+	// could only ever have reached the program as a quoted string, about which no
+	// rule can say anything.
+	const scene = curved(single("cubicBezier(200,0,0,1000)"));
+	const model = await only(scene);
+	assert.ok(
+		model.includes("measing(m1,over,cubicBezier(200,0,0,1000))"),
+		"the curve is a term in the answer set",
+	);
+	// And it is a term rather than a word: `word/2` is the *menu* bridge, and a
+	// bezier that reached it would match `measeopt(E)` against nothing and derive
+	// nothing, which is the same failure written the other way round.
+	assert.deepEqual(
+		args(model, "measing", 3).filter(([, t]) => t === "over")[0],
+		["m1", "over", "cubicBezier(200,0,0,1000)"],
+	);
+	// The seventh bridge, present for that literal and for no other.
+	const { generated } = compile(scene);
+	const beziers = [...generated.matchAll(/^bezier\((l\d+),([^)]*)\)\.$/gm)];
+	assert.equal(beziers.length, 1);
+	assert.equal(beziers[0][2], "200,0,0,1000");
+	// A rule really can name it, which is the whole reason for the spelling and
+	// is the assertion the dialect exists to make true. "Every transition uses a
+	// curve from the system" is one line in the Rules panel; with a bespoke curve
+	// in the document it fires, and the document has no design at all — blamed by
+	// name, which is what a term buys and a quoted string could never have.
+	const guarded = addCustomConstraint(scene, "system_curves");
+	const error = await fails({
+		...guarded.scene,
+		rules: "viol(system_curves) :- measing(_,_,cubicBezier(_,_,_,_)).",
+	});
+	assert.deepEqual(error.conflict, ["system_curves"]);
+	// And the same rule over the same document with a menu word in it is silent,
+	// which is the half that says the rule is about the curve rather than about
+	// machines in general.
+	assert.equal(
+		(
+			await run({
+				...addCustomConstraint(curved(single("easeOut")), "system_curves").scene,
+				rules: "viol(system_curves) :- measing(_,_,cubicBezier(_,_,_,_)).",
+			})
+		).count,
+		1,
+	);
+});
+
+test("the seventh bridge costs a document with no curve in it nothing", () => {
+	// Zero facts in every document written before this rung, which is nearly all
+	// of them. The bridge is emitted per literal that admits it, like the other
+	// six, so the price of the feature for a document that holds no bespoke curve
+	// is the `#defined` line and nothing else.
+	const { generated } = compile(buttons({ uses: [{ id: "b1" }] }));
+	assert.ok(!/^bezier\(/m.test(generated), "no bezier fact anywhere");
+	assert.ok(generated.includes("#defined bezier/5."));
+	// And the menu itself, which *is* emitted always — beside `mdefdur` and for
+	// its reason: a hand-written rule may assert `mtrans/2`, and a transition with
+	// no curve at all is a transition nothing shapes.
+	assert.ok(generated.includes("mdefease(easeOut)."));
+	assert.ok(generated.includes("measeopt(springBouncy)."));
+});
+
+test("a keyframe's curve is a value and is projected", async () => {
+	// The same claim one grain finer, over `mkeasing/5`, which stopped being a
+	// fact this repository wrote and became a thing the program derives. An
+	// overshoot that eases in one universe and springs in the other is two
+	// animations, and without `#project mkeasing/5.` they differ in nothing
+	// projected — `#project mkat/5.` is already there for the same keyframe's
+	// *time*, and this belongs beside it.
+	const sprung = (easing: Value, tokenValue?: Value): Scene =>
+		buttons({
+			uses: [{ id: "b1" }],
+			...(tokenValue
+				? { tokens: [{ id: "feel", name: "Feel", type: "easing", value: tokenValue }] }
+				: {}),
+			machines: [
+				machine({
+					states: [{ id: "rest", timeline: "open", parts: {} }],
+					timelines: [
+						{
+							id: "open",
+							name: "Open",
+							tracks: [
+								{
+									part: "label",
+									dim: "y",
+									keys: [
+										{ ...key("0ms", "14px"), easing },
+										key("200ms", "4px"),
+									],
+								},
+							],
+						},
+					],
+				}),
+			],
+		});
+	const token = [{ kind: "token" as const, token: "feel" }];
+	assert.equal(
+		(await run(sprung(token, [lit("easeIn"), lit("springBouncy")]))).count,
+		2,
+	);
+	assert.equal((await run(sprung(token, single("easeIn")))).count, 1);
+	// The keyframe that says nothing takes `mdefease`, which is the rule that
+	// replaced the fact the emitter used to write for every key.
+	const model = await only(sprung(single("cubicBezier(340,1560,640,1000)")));
+	const curves = Object.fromEntries(
+		args(model, "mkeasing", 5).map(([, , , index, curve]) => [index, curve]),
+	);
+	assert.deepEqual(curves, {
+		"1": "cubicBezier(340,1560,640,1000)",
+		"2": "easeOut",
+	});
+});
+
+test("a curve token every transition points at is read, not greyed", () => {
+	// `unreadVariables` is what greys a token's alternatives in the panel, and it
+	// works by walking everything that *reads* a value. A `curve` token every
+	// transition in the document points at is the most-read thing in it, and
+	// leaving `transition.easing` out of that walk would report it unread and grey
+	// its alternatives on the strength of a projection artefact — which is exactly
+	// the failure the comment beside `transition.exit` describes, one setting over.
+	const token = [{ kind: "token" as const, token: "feel" }];
+	const scene = curved(token, [lit("easeOut"), lit("springSnappy")]);
+	assert.equal(unreadVariables(scene).has(tokenVar("feel")), false);
+	// The control: a token nothing points at *is* unread, so the walk is looking
+	// at the field rather than at the presence of a machine.
+	const spare = {
+		...scene,
+		machines: [{ ...scene.machines[0], transitions: scene.machines[0].transitions.map((t) => {
+			const { easing: _easing, ...rest } = t;
+			return rest;
+		}) }],
+	};
+	assert.ok(unreadVariables(spare).has(tokenVar("feel")));
+	// And the same over a keyframe's curve, which is the other field the walk
+	// gained in the same commit.
+	const keyed = buttons({
+		uses: [{ id: "b1" }],
+		tokens: [{ id: "feel", name: "Feel", type: "easing", value: [lit("easeOut"), lit("easeIn")] }],
+		machines: [
+			machine({
+				states: [{ id: "rest", timeline: "open", parts: {} }],
+				timelines: [
+					{
+						id: "open",
+						name: "Open",
+						tracks: [
+							{
+								part: "label",
+								dim: "y",
+								keys: [{ ...key("0ms", "14px"), easing: token }, key("200ms", "4px")],
+							},
+						],
+					},
+				],
+			}),
+		],
+	});
+	assert.equal(unreadVariables(keyed).has(tokenVar("feel")), false);
+});
+
+test("the two projections split no template", async () => {
+	// **The §6.5 gate, and it outranks the feature.** A finer projection can only
+	// ever *split* answer sets, never merge them — so the risk was never that this
+	// stops working, it is that a template's universe count moves and a test that
+	// has asserted a number since the machine model shipped starts failing for a
+	// reason that looks like a bug.
+	//
+	// It does not move, and the reason is a fact about today's templates rather
+	// than a property of the encoding: every easing in every template is a bare
+	// word, which migrates to a one-alternative Value, so every one of those
+	// variables has exactly one alternative and the finer partition partitions
+	// nothing differently. Checked here rather than believed, by solving each
+	// template twice — once as it compiles, and once with the two lines cut out —
+	// because if a count ever does move, the projections come out and become their
+	// own step with their own golden update.
+	for (const template of TEMPLATES) {
+		const scene = template.create();
+		const { program, guards } = compile(scene);
+		// A template with no transition and no keyframe is settled without a solve
+		// and is settled *harder*: `measing/3` and `mkeasing/5` are derived from
+		// `mtrans/2` and `mkey/4`, so with neither fact in the program both
+		// predicates are empty and a projection over an empty predicate partitions
+		// nothing. Thirteen of the fifteen templates are in this case, and solving
+		// each of them twice to find that out would be four minutes of clingo
+		// saying so the long way.
+		const facts = (name: string) =>
+			program.split("\n").some((line) => line.startsWith(`${name}(`) && !line.includes(":-"));
+		if (!facts("mtrans") && !facts("mkey")) {
+			assert.ok(!facts("measing"), `${template.id}`);
+			assert.ok(!facts("mkeasing"), `${template.id}`);
+			continue;
+		}
+		const counts: number[] = [];
+		for (const text of [program, program.replaceAll(/^#project m(easing\/3|keasing\/5)\.$/gm, "")]) {
+			const session = await directSolver.open(text, "--project");
+			try {
+				const outcome = await session.solve({
+					models: 0,
+					assumptions: [...guards, PULL_ATOM, SCENERY_ATOM].map((atom) => ({ atom })),
+				});
+				counts.push(outcome.models.length);
+			} finally {
+				await session.close();
+			}
+		}
+		assert.equal(
+			counts[0],
+			counts[1],
+			`${template.id}: the two #project lines split it into ${counts[0]} where it had ${counts[1]}`,
+		);
+	}
 });
 
 test("millis is the fourth bridge, and a bare number is not a duration", () => {
@@ -2614,6 +2963,7 @@ test("the contract names every predicate the ladder puts in the program", () => 
 		"mtrackof",
 		"mkey",
 		"mkeasing",
+		"mreadskeas",
 		"mkat",
 		"mtlen",
 		"mknext",
@@ -2632,6 +2982,14 @@ test("the contract names every predicate the ladder puts in the program", () => 
 		// The terms and the variable keys a rule may type.
 		"kat",
 		"kval",
+		"keas",
+		// Rung six: the curve, which is a Value now and is therefore derived,
+		// projected and readable rather than a fact the emitter wrote.
+		"measing",
+		"mdefease",
+		"measeopt",
+		"mreadsease",
+		"bezier",
 		"tlen",
 		"trkp",
 		"trkd",

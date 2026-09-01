@@ -1,0 +1,91 @@
+.curve {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: 0.25rem 0.4rem;
+	align-items: start;
+	padding: 0.25rem;
+	background: var(--dc-sunken);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.preview {
+	grid-row: span 2;
+	overflow: visible;
+}
+
+/* The unit box, so an overshoot has something to overshoot. */
+.box {
+	fill: none;
+	stroke: var(--dc-line);
+	stroke-width: 1;
+	stroke-dasharray: 2 3;
+}
+
+.path {
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 2;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	opacity: 0.85;
+}
+
+.handles line {
+	stroke: currentColor;
+	stroke-width: 1;
+	opacity: 0.4;
+}
+
+.handles circle {
+	fill: var(--dc-raised);
+	stroke: currentColor;
+	stroke-width: 1.5;
+}
+
+.fields {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 0.2rem;
+}
+
+.field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.1rem;
+	min-width: 0;
+}
+
+.name {
+	font-size: 0.6rem;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	opacity: 0.5;
+}
+
+.number {
+	min-width: 0;
+	padding: 0.1rem 0.2rem;
+	font: inherit;
+	font-size: 0.7rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+/* The row is holding a menu word, so these four are what a custom curve *would*
+   start at rather than what it is. Dimmed and still live: typing into one is
+   how a person asks for a custom curve, and a disabled field would make the
+   only way in a second control. */
+.inactive {
+	opacity: 0.5;
+}
+
+.note {
+	grid-column: 2;
+	margin: 0;
+	font-size: 0.66rem;
+	line-height: 1.4;
+	opacity: 0.6;
+}

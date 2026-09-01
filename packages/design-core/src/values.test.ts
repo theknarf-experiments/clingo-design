@@ -2,13 +2,23 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+	DEFAULT_EASING,
+	EASINGS,
+	EASING_NAMES,
 	MAX_MDEG,
 	MAX_MS,
 	MAX_PERMILLE,
 	MAX_TALLY,
+	SPRING_STOPS,
 	VALUE_TYPES,
 	VALUE_TYPE_NAMES,
 	activeTerm,
+	bezierOf,
+	cssEasing,
+	curveOf,
+	keyEaseVar,
+	sampleSpring,
+	springOf,
 	angleUnitOf,
 	guideAtIn,
 	guideAtVar,
@@ -740,4 +750,149 @@ test("a guide setting and a guide are one variable family, and cannot collide", 
 	assert.equal(guideAtIn("at(g1)"), "g1");
 	assert.equal(guideAtIn("columns"), undefined);
 	assert.notEqual(guideAtVar("page", "columns"), guideVar("page", "columns"));
+});
+
+
+/* ------------------------------------------------------------------ */
+/* Curves                                                              */
+/* ------------------------------------------------------------------ */
+
+test("one default, two tables", () => {
+	// `VALUE_TYPES.easing.fallback` and `DEFAULT_EASING` are one string written
+	// twice, which is what a `ValueTypeSpec` and a document reader each need. A
+	// document that fell back to `ease` in the editor and `easeOut` in the program
+	// would be a document nobody could debug, so the two are held equal here
+	// rather than by anybody remembering.
+	assert.equal(VALUE_TYPES.easing.fallback, DEFAULT_EASING);
+	assert.equal(DEFAULT_EASING, "easeOut", "and it did not move when the springs arrived");
+	// The menu is the table, in table order, so a ninth curve is one entry and no
+	// edit anywhere else — including in `compile.ts`, which generates its
+	// `measeopt/1` facts from this list.
+	assert.deepEqual(
+		VALUE_TYPES.easing.options?.map((o) => o.value),
+		EASING_NAMES,
+	);
+	assert.equal(VALUE_TYPES.easing.quantity, undefined, "a curve is not a number");
+	// The arithmetic in the comment above the row, counted rather than believed.
+	// It has been wrong twice — the motion spec says the tenth of nineteen, the
+	// parity plan says the twelfth of twenty-two — because both were written
+	// against a tree that had not landed yet, and a comment that carries a number
+	// nothing checks is a comment that is wrong the first time somebody adds a
+	// type.
+	const enumerated = VALUE_TYPE_NAMES.filter((name) => VALUE_TYPES[name].options !== undefined);
+	assert.equal(VALUE_TYPE_NAMES.length, 22, "twenty-two value types");
+	assert.equal(enumerated.length, 14, "fourteen of them are menus");
+	assert.equal(enumerated.indexOf("easing") + 1, 14, "and the curve is the last of them");
+	// Every word is a legal ASP constant, because it reaches `measing/3` as
+	// itself. This is the check `oneD` exists because of.
+	for (const id of EASING_NAMES) {
+		assert.match(id, /^[a-z][A-Za-z0-9]*$/, id);
+		assert.equal(wordOf(id), id, `${id} has to read as a word`);
+	}
+});
+
+test("every spring's checked-in linear() is what its physics gives", () => {
+	// The strings are constants of the universe and are written down rather than
+	// computed on every export — the export runs once per keystroke in the studio,
+	// and a checked-in string is a thing a reviewer can read in a diff while a
+	// number produced at run time is a thing nobody ever looks at. This is what
+	// makes them **checkable**: regenerate from the physics and compare.
+	for (const id of EASING_NAMES) {
+		const spec = EASINGS[id].spring;
+		if (spec === undefined) continue;
+		const stops = sampleSpring(spec).join(", ");
+		assert.equal(EASINGS[id].css, `linear(${stops})`, id);
+	}
+	// Three springs and five plain curves, and the springs are the ones with the
+	// physics on them — a plain curve with a `spring` record would be a row whose
+	// panel copy says "settles naturally in" about a keyword.
+	assert.deepEqual(
+		EASING_NAMES.filter((id) => EASINGS[id].spring !== undefined),
+		["springGentle", "springSnappy", "springBouncy"],
+	);
+	assert.equal(springOf("springSnappy")?.stiffness, 400);
+	assert.equal(springOf("easeOut"), undefined);
+	assert.equal(springOf("cubicBezier(200,0,0,1000)"), undefined);
+});
+
+test("a sampled spring is pinned at both ends and never runs backwards in time", () => {
+	for (const id of EASING_NAMES) {
+		const spec = EASINGS[id].spring;
+		if (spec === undefined) continue;
+		const stops = sampleSpring(spec);
+		assert.equal(stops.length, SPRING_STOPS, id);
+		// Pinned rather than taken from the formula. At `natural` the spring is
+		// within half a percent of rest and not *at* rest, and a `linear()` whose
+		// last stop is 0.996 leaves every animated property four thousandths short
+		// of the value the state's own rule says it has — a border that never quite
+		// arrives at its colour, and a box that stops one pixel out of a
+		// two-hundred-pixel move.
+		assert.equal(stops[0], 0, id);
+		assert.equal(stops[stops.length - 1], 1, id);
+		// Time is what runs forwards; travel is emphatically not, and must not be
+		// asserted to be — `springBouncy` overshoots by about fifteen percent and
+		// comes back, which is the whole of what "bouncy" means.
+		assert.ok(stops.every((x) => Number.isFinite(x)), id);
+	}
+	// And the overshoot is real rather than a rounding artefact, because a spring
+	// menu whose bouncy entry did not bounce would be three names for one curve.
+	assert.ok(Math.max(...sampleSpring(EASINGS.springBouncy.spring!)) > 1.1);
+	assert.ok(Math.max(...sampleSpring(EASINGS.springGentle.spring!)) <= 1);
+});
+
+test("bezierOf is exact or nothing", () => {
+	// The dialect is the document's and not CSS's, for the reason `msOf` refuses
+	// `"1.5ms"`: a bezier reaches the program as four integers and a fact has to
+	// be an integer.
+	assert.deepEqual(bezierOf("cubicBezier(200,0,0,1000)"), [200, 0, 0, 1000]);
+	assert.deepEqual(
+		bezierOf("cubicBezier(340, 1560, 640, 1000)"),
+		[340, 1560, 640, 1000],
+		"whitespace after the commas, and y overshoots on purpose",
+	);
+	// `x` is refused rather than clamped: a control point off the time axis is a
+	// curve that runs backwards in time rather than a slow one, which CSS refuses
+	// too and which is a typo rather than a design.
+	assert.equal(bezierOf("cubicBezier(1200,0,0,0)"), undefined);
+	assert.equal(bezierOf("cubicBezier(-1,0,0,1000)"), undefined);
+	// A decimal anywhere reads as no curve at all: `cubicBezier(0.2,…)` is
+	// two-tenths of a thousandth, ambiguous by a factor of a thousand, and
+	// rounding it behind the designer's back would put a curve in the file no
+	// panel agrees with.
+	assert.equal(bezierOf("cubicBezier(0.2,0,0,1)"), undefined);
+	// And CSS's own spelling is not the dialect. A hyphen is a minus sign to the
+	// grounder, which is why the document does not store it.
+	assert.equal(bezierOf("cubic-bezier(0.2,0,0,1)"), undefined);
+	assert.equal(bezierOf("easeOut"), undefined);
+});
+
+test("cssEasing writes CSS for all eight words and for a bezier, and nothing else", () => {
+	// The one function allowed to read `EasingSpec.css`, because there is exactly
+	// one place in the system where the document's dialect becomes a browser's.
+	for (const id of EASING_NAMES) {
+		assert.equal(cssEasing(id), EASINGS[id].css, id);
+	}
+	assert.equal(cssEasing("easeInOut"), "ease-in-out", "the hyphen lives here and nowhere else");
+	assert.equal(
+		cssEasing("cubicBezier(200,0,0,1000)"),
+		"cubic-bezier(0.2, 0, 0, 1)",
+		"thousandths on the way in, decimals on the way out",
+	);
+	assert.ok(cssEasing("springSnappy")?.startsWith("linear("), "a spring is its whole sample");
+	// Nothing else at all, so a caller that got `undefined` knows to write the
+	// default — which is the same answer `not mreadsease(M,T)` gives in ASP.
+	assert.equal(cssEasing("wobble"), undefined);
+	assert.equal(cssEasing(""), undefined);
+	// And the reader both sides share, which is what makes those two answers one
+	// answer rather than two that happen to agree today.
+	assert.equal(curveOf("springBouncy"), "springBouncy");
+	assert.equal(curveOf("cubicBezier(200,0,0,1000)"), "cubicBezier(200,0,0,1000)");
+	assert.equal(curveOf("wobble"), undefined);
+	assert.equal(curveOf(undefined), undefined);
+});
+
+test("a keyframe's curve is its own variable, and cannot collide with its time", () => {
+	assert.equal(keyEaseVar("m1", "open", "trkd(label,y)", 3), "keas(m1,open,trkd(label,y),3)");
+	assert.notEqual(keyEaseVar("m1", "open", "x", 1), keyTimeVar("m1", "open", "x", 1));
+	assert.notEqual(keyEaseVar("m1", "open", "x", 1), keyValueVar("m1", "open", "x", 1));
 });

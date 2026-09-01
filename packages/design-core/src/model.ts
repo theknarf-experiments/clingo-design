@@ -35,8 +35,6 @@ import { parseKeyCopy, parseStatePart, statePart } from "./machines.ts";
 import { type Emu, wholeEmu } from "./units.ts";
 import {
 	DEFAULT_EASING,
-	type Easing,
-	EASINGS,
 	KINDS,
 	type LoopMode,
 	type NodeKind,
@@ -50,6 +48,7 @@ import {
 	TURNS,
 	sharedPropsOfKinds,
 } from "./scene.ts";
+import { curveOf } from "./values.ts";
 
 /**
  * Six numbers in EMU: a {@link Frame} and its third axis.
@@ -297,8 +296,16 @@ export interface ModelKeyframe {
 	turn?: Record<Turn, number>;
 	/** What it draws with at that moment: final text per property, tokens followed. */
 	rendered: Partial<Record<PropName, string>>;
-	/** The curve *out of* this keyframe — `mkeasing/5`. */
-	easing: Easing;
+	/**
+	 * The curve *out of* this keyframe — `mkeasing/5`.
+	 *
+	 * Text rather than an `Easing`, because that predicate stopped being a fact
+	 * and started being derived when a curve became a {@link Value}: it carries a
+	 * menu word or a `cubicBezier(X1,Y1,X2,Y2)` term, and the second of those is
+	 * not a member of the union. The same widening `TrackSample.easing` takes one
+	 * file over, for the same reason and in the same commit.
+	 */
+	easing: string;
 }
 
 /**
@@ -330,7 +337,7 @@ export interface ModelTimeline {
 	 * keyframe behind the one in front of it is a real universe, reported as
 	 * {@link ModelMachine.backwardsKeys} and sorted through rather than refused.
 	 */
-	tracks: Record<string, Array<{ index: number; at: number; easing: Easing }>>;
+	tracks: Record<string, Array<{ index: number; at: number; easing: string }>>;
 }
 
 /**
@@ -366,6 +373,25 @@ export interface ModelMachine {
 	duration: Record<string, number>;
 	delay: Record<string, number>;
 	stagger: Record<string, number>;
+	/**
+	 * Transition id -> the curve this universe resolved it to — `measing/3`.
+	 *
+	 * The fourth motion table, and the first one that is not a number. It is here
+	 * for the three durations' reason exactly: an easing is a {@link Value} now, so
+	 * which curve a transition uses is an answer the solver gave rather than a
+	 * word the document holds, and a `curve` token with two alternatives is two
+	 * universes that differ in this field and in nothing else the gallery draws.
+	 * A reader that asked the document instead would show one design for a
+	 * document that plainly holds two.
+	 *
+	 * A **string** and not an `Easing`, for `easingOf`'s reason: the answer may be
+	 * a menu word or the term `cubicBezier(200,0,0,1000)`, and every consumer
+	 * hands it to `cssEasing`, which takes text.
+	 *
+	 * Every transition has one, because the program supplies `mdefease` where the
+	 * document is silent — the same sentence {@link exit} makes about a duration.
+	 */
+	easing: Record<string, string>;
 	/* ---- the ladder ---- */
 	/**
 	 * Transition id -> the exit time this universe resolved it to — `mexit/3`.
@@ -806,7 +832,7 @@ interface Facts {
 interface TimelineFacts {
 	length?: number;
 	loop?: LoopMode;
-	tracks: Map<string, Map<number, { at?: number; easing?: Easing }>>;
+	tracks: Map<string, Map<number, { at?: number; easing?: string }>>;
 }
 
 /** The record for one machine, minted by whichever of its atoms arrives first. */
@@ -821,6 +847,7 @@ function machineFacts(facts: Facts, id: string): ModelMachine {
 			duration: {},
 			delay: {},
 			stagger: {},
+			easing: {},
 			exit: {},
 			impossible: [],
 			unreachableWithGuards: [],
@@ -857,7 +884,7 @@ function keyFacts(
 	timeline: string,
 	track: string,
 	index: number,
-): { at?: number; easing?: Easing } {
+): { at?: number; easing?: string } {
 	const line = timelineFacts(facts, machine, timeline);
 	let keys = line.tracks.get(track);
 	if (!keys) line.tracks.set(track, (keys = new Map()));
@@ -1067,6 +1094,19 @@ function collect(atoms: readonly string[]): Facts {
 				machineFacts(facts, a)[field][b] = ms;
 				break;
 			}
+			// The fifth motion table, and the only one that is not a number, so it is
+			// its own case rather than a fifth branch of the ternary above. Read
+			// through `curveOf` for `mkeasing/5`'s reason: the predicate carries two
+			// spellings, one of which is a term, and a curve neither reader knows is
+			// dropped here so that the export takes `DEFAULT_EASING` — which is what
+			// the program itself did through `not mreadsease(M,T)` before it ever got
+			// here, so in practice this guard only ever catches a hand-written atom.
+			case "measing/3": {
+				const curve = curveOf(c);
+				if (curve === undefined) break;
+				machineFacts(facts, a).easing[b] = curve;
+				break;
+			}
 			// ---- the ladder ----
 			// The health lists, which are the program's own answers to questions
 			// `machineHealth` also answers off the document — deliberately duplicated,
@@ -1177,11 +1217,20 @@ function collect(atoms: readonly string[]): Facts {
 				keyFacts(facts, a, timeline, track, key).at = at;
 				break;
 			}
+			// Two spellings, one reader, and it is `curveOf` — the same function the
+			// document side falls back through — rather than a membership test against
+			// `EASINGS`. A menu-word test was what shipped here, and it was right for
+			// exactly as long as `mkeasing/5` was a fact this repository wrote: it is
+			// derived now, and its second rule puts `cubicBezier(200,0,0,1000)` in the
+			// answer set, which a membership test would drop on the floor. A curve
+			// neither spelling knows is dropped and the default is taken below, which
+			// is what `mdefease/1` says in the program.
 			case "mkeasing/5": {
 				const [, timeline, track, index, easing] = atom.args;
 				const key = Number(index);
-				if (!Number.isInteger(key) || !Object.hasOwn(EASINGS, easing)) break;
-				keyFacts(facts, a, timeline, track, key).easing = easing as Easing;
+				const curve = curveOf(easing);
+				if (!Number.isInteger(key) || curve === undefined) break;
+				keyFacts(facts, a, timeline, track, key).easing = curve;
 				break;
 			}
 			// ---- three dimensions ----
@@ -1725,6 +1774,7 @@ export function readModel(atoms: readonly string[]): ModelScene {
 			duration: machine.duration,
 			delay: machine.delay,
 			stagger: machine.stagger,
+			easing: machine.easing,
 			exit: machine.exit,
 			impossible: machine.impossible.sort(),
 			unreachableWithGuards: machine.unreachableWithGuards.sort(),
@@ -1820,7 +1870,7 @@ function readTimelines(
 	for (const [id, line] of [...(lines ?? new Map<string, TimelineFacts>())].sort(([a], [b]) =>
 		cmp(a, b),
 	)) {
-		const tracks: Record<string, Array<{ index: number; at: number; easing: Easing }>> = {};
+		const tracks: Record<string, Array<{ index: number; at: number; easing: string }>> = {};
 		for (const [term, keys] of [...line.tracks].sort(([a], [b]) => cmp(a, b))) {
 			tracks[term] = [...keys]
 				.map(([index, key]) => ({
