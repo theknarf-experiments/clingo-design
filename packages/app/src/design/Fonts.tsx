@@ -182,6 +182,28 @@ export function Fonts({
 	onImported,
 }: FontsProps) {
 	const [busy, setBusy] = useState(false);
+	/**
+	 * What is being typed into a family field, over what the document holds.
+	 *
+	 * The house pattern — `Inputs.tsx`, `LayerStrip.tsx`, `StateStrip.tsx` all
+	 * keep a draft over a name the document normalises — and here it is not
+	 * cosmetic. `normalizeFonts` **drops a declaration with no family**, and
+	 * rightly: a family names nothing a value could point at, so a row without one
+	 * is a row nothing can use. But select-all-and-retype is how a person renames
+	 * anything, and without a draft the empty keystroke in the middle of that
+	 * gesture deleted the declaration, took the row off the panel and left the
+	 * caret in a field that no longer existed — with any value that named the old
+	 * family now pointing at a family the page does not declare. Found by typing
+	 * in it.
+	 *
+	 * So an empty field is a draft and never a write. Blur clears the draft, and
+	 * what comes back is the family the document still holds: leaving the field
+	 * empty is abandoning a rename, not deleting a face. The file itself is
+	 * removed by the × beside it, which says what it does.
+	 */
+	const [draft, setDraft] = useState<{ src: string; text: string } | undefined>(
+		undefined,
+	);
 	const declared = scene.fonts ?? [];
 	const heldPaths = new Set(held.map((f) => f.path));
 	const missing = new Set(missingFonts(scene, heldPaths).map((f) => f.src));
@@ -269,9 +291,18 @@ export function Fonts({
 							<input
 								className={styles.family}
 								data-role="font-family"
-								value={file.family}
+								value={draft?.src === file.src ? draft.text : file.family}
 								title="What this document calls the face. It is the name in the @font-face rule and the name a value puts at the front of its stack — ours, not the file's, so a label that reads wrong is a field to correct and never a design that does not paint."
-								onChange={(e) => edit(file, { family: e.target.value })}
+								onChange={(e) => {
+									const text = e.target.value;
+									setDraft({ src: file.src, text });
+									// Written through on every keystroke, like every other name
+									// in the studio, except the empty one — see the draft's
+									// note. A rename in progress is in the document, so nothing
+									// is lost to a navigation in the middle of one.
+									if (text !== "") edit(file, { family: text });
+								}}
+								onBlur={() => setDraft(undefined)}
 							/>
 							<button
 								type="button"

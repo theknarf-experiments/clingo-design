@@ -234,6 +234,57 @@ export function fontTotalBytes(scene: Scene): number {
 }
 
 /**
+ * Of the faces a host has loaded, the ones nothing can reach any more.
+ *
+ * A host that loads a face has to decide, at some point, when to take it back
+ * out, and that decision is the reason this function is here rather than in the
+ * one file that owns a `document.fonts`: it is a pure question about a roster
+ * and a set of names, it is the exact inverse of {@link paintedStack}'s, and it
+ * got the app wrong in a way only a browser showed. Renaming a family writes on
+ * every keystroke, so retyping a twelve-character name over a 250 kB face left
+ * twelve faces loaded, twelve copies of the bytes and twelve font parses —
+ * `Wide`, `Wid`, `Wi`, `W`, names that lived for sixty milliseconds each.
+ *
+ * A face is abandoned when **its file is still declared, under some other
+ * family, and no value in the document names the family it was loaded as**. Both
+ * clauses are load-bearing and each one is holding a different decision up:
+ *
+ *   - *The file has to still be declared.* A file that has left the roster is a
+ *     font somebody **removed**, and its face stays: unloading a face the design
+ *     still names swaps a stale box for a mismatched one — the picture falls back
+ *     while the box keeps the width the face was measured at, which is precisely
+ *     the artefact `paintedStack` and `font-display: block` exist to prevent. It
+ *     is also what keeps a multi-page project honest, since {@link Scene.fonts}
+ *     is per page: a font declared on `main` is simply absent from `about`'s
+ *     roster, and opening `about` must not unload it.
+ *   - *No value may name the family.* Same decision, for the rename that
+ *     abandons a name the design is still wearing. What is left over is exactly
+ *     the garbage — a name typed through on the way to another one, which nothing
+ *     in the document mentions and nothing ever will.
+ *
+ * `named` is a parameter rather than a walk done here because the walk lives in
+ * `measure.ts` beside `fontNotes`, which asks the same question of the same
+ * document and must get the same answer — see `namedFamilies`. Two spellings of
+ * "nothing names this" would be a sentence and a sweep disagreeing about one
+ * document.
+ */
+export function abandonedFaces<T extends { family: string; src: string }>(
+	loaded: Iterable<T>,
+	scene: Scene,
+	named: ReadonlySet<string>,
+): T[] {
+	const declaredBy = new Map((scene.fonts ?? []).map((file) => [file.src, file.family]));
+	const out: T[] = [];
+	for (const face of loaded) {
+		const now = declaredBy.get(face.src);
+		if (now === undefined || now === face.family) continue;
+		if (named.has(face.family)) continue;
+		out.push(face);
+	}
+	return out;
+}
+
+/**
  * The families a *rendered* scene actually sets text in.
  *
  * Off `ModelNode.rendered.fontFamily` and therefore off the answer set, which is

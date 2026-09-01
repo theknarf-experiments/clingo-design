@@ -24,7 +24,12 @@
  * the design as painted and nothing here suppresses one.
  */
 import { useEffect, useState } from "react";
-import type { FontFile, Scene } from "@clingo-design/design-core";
+import {
+	type FontFile,
+	type Scene,
+	abandonedFaces,
+	namedFamilies,
+} from "@clingo-design/design-core";
 
 import { resolveAsset } from "../projects/store";
 
@@ -255,6 +260,43 @@ export function register(file: FaceDeclaration): Promise<boolean> {
 	return entry.done;
 }
 
+/**
+ * Take back out the faces this page loaded under a family that has moved on.
+ *
+ * **The rename leak, found by typing in the panel rather than by reading it.**
+ * The family field writes through on every keystroke and a family is half of a
+ * {@link keyOf} — deliberately, because renaming has to get the new name into the
+ * browser. What nothing did was take the *old* one out, so retyping a twelve
+ * character family name over a 250 kB face left twelve faces in `document.fonts`,
+ * twelve copies of the bytes alive for the life of the tab, and twelve full font
+ * parses on the way.
+ *
+ * Which of them are garbage is `abandonedFaces`' question and is answered in
+ * design-core, where it is a pure reading of a roster and can be tested against a
+ * real document; both of its clauses are argued there, and the second of them is
+ * what keeps this from undoing the decision two paragraphs of {@link register}
+ * defend. What is left here is the half only a browser has, which is the deleting.
+ *
+ * {@link attempts} and {@link failures} go with it, because they are this file's
+ * record of what the document holds: a resolved `true` left behind for a face
+ * that is no longer in the set is how the hook would go on reporting a family as
+ * loaded, `paintedStack` would go on not stripping it, and a box would end up
+ * measured in a face the browser cannot paint — the exact failure the whole
+ * arrangement exists to make unreachable.
+ */
+function sweep(scene: Scene, named: ReadonlySet<string>): void {
+	const loaded = [...live].map(([key, face]) => {
+		const at = key.indexOf("\x00");
+		return { key, face, family: key.slice(0, at), src: key.slice(at + 1) };
+	});
+	for (const gone of abandonedFaces(loaded, scene, named)) {
+		document.fonts.delete(gone.face);
+		live.delete(gone.key);
+		attempts.delete(gone.key);
+		failures.delete(gone.key);
+	}
+}
+
 /** Two sets with the same members, so a render is not forced for nothing. */
 const same = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean =>
 	a.size === b.size && [...a].every((x) => b.has(x));
@@ -290,6 +332,13 @@ export function useDocumentFonts(
 			return;
 		}
 		const declarations = wanted.map(declarationOf);
+		// Before registering, not after: the whole point is that a slot never holds
+		// two faces at once, and sweeping afterwards would leave the window this
+		// exists to close. `scene` is read here and is not in the dependency list,
+		// which is honest rather than an oversight — this is a collection and not a
+		// gate. It can only ever find something when a slot's family has just
+		// moved, and a slot's family moving *is* a change to `roster`.
+		sweep(scene, namedFamilies(scene));
 		// The tree changed under us, so anything that failed for want of a file is
 		// worth one more try. See {@link failures}.
 		for (const file of declarations) {

@@ -18,7 +18,9 @@ import { compile } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
 import { addFont, removeFont } from "./edits.ts";
 import { explore } from "./explore.ts";
+import { namedFamilies } from "./measure.ts";
 import {
+	abandonedFaces,
 	familiesOf,
 	familyLabel,
 	familyOf,
@@ -34,6 +36,7 @@ import {
 import { normalizeScene } from "./project.ts";
 import type { FontFile, Scene } from "./scene.ts";
 import { card } from "./templates/card.ts";
+import { machine } from "./templates/machine.ts";
 import { typography } from "./templates/typography.ts";
 
 /** One variable face, the shape a `.woff2` upload lands in. */
@@ -294,6 +297,124 @@ test("declaring three fonts adds no universes", async () => {
 	);
 	assert.equal(dressed.universes.length, bare.universes.length);
 	assert.ok(bare.universes.length > 0);
+});
+
+/* ------------------------------------------------------------------ */
+/* What a host may stop holding                                        */
+/* ------------------------------------------------------------------ */
+
+/** What a host's loaded set looks like from here: a family and the file it came from. */
+const loadedAs = (family: string, src: string) => ({ family, src });
+
+test("a name typed on the way to another one is a face nothing can reach", () => {
+	// The rename leak, as a document. One file, declared as `Inter`; the browser
+	// is still holding the four prefixes somebody typed on the way there, and one
+	// value in the design names none of them.
+	const scene = withFonts(card(), [{ ...inter, family: "Inter" }]);
+	const held = [
+		loadedAs("I", inter.src),
+		loadedAs("In", inter.src),
+		loadedAs("Int", inter.src),
+		loadedAs("Inte", inter.src),
+		loadedAs("Inter", inter.src),
+	];
+	assert.deepEqual(
+		abandonedFaces(held, scene, namedFamilies(scene)).map((f) => f.family),
+		["I", "In", "Int", "Inte"],
+	);
+});
+
+test("a family a value still names is kept, however the roster moved on", () => {
+	// The one rename that abandons a name the design is wearing. Keeping the face
+	// is `register`'s decision restated: unloading it would fall the paint back to
+	// the stack while the box kept the width the face was measured at, which is
+	// the artefact `paintedStack` exists to prevent.
+	const dressed: Scene = {
+		...card(),
+		fonts: [{ ...inter, family: "Inter" }],
+		nodes: card().nodes.map((node) => ({
+			...node,
+			props: { ...node.props, fontFamily: [{ kind: "literal", value: '"Inter Var", serif' }] },
+		})),
+	};
+	assert.deepEqual(
+		abandonedFaces([loadedAs("Inter Var", inter.src)], dressed, namedFamilies(dressed)),
+		[],
+	);
+});
+
+test("a font that was removed keeps its face, and so does one this page never declared", () => {
+	// Two different documents and one answer, which is why the clause is "the file
+	// is declared under some *other* family" rather than "the family is gone".
+	// `removeFont` takes the file out of the roster — and the design goes on
+	// naming the family, so the face stays until a reload, which is the decision
+	// argued at length on `register`. A second page is the same shape: the roster
+	// is per page, so a font declared on one is simply absent from another's, and
+	// opening that other page must not unload it or every page change would cost a
+	// font parse.
+	const removed = card();
+	assert.deepEqual(abandonedFaces([loadedAs("Inter Var", inter.src)], removed, new Set()), []);
+	// And a file still declared under the name it was loaded as is never touched.
+	const kept = withFonts(card(), [inter]);
+	assert.deepEqual(abandonedFaces([loadedAs("Inter Var", inter.src)], kept, new Set()), []);
+});
+
+test("a family named only by a token, or only by a machine state, is still named", () => {
+	// `namedFamilies` is a walk of everywhere a `fontFamily` can be spelled, and
+	// the sweep is only as safe as that walk is complete: a family named nowhere
+	// but a hover state is one a design wears, and unloading it would fall that
+	// state back to its stack the moment somebody hovered. Two of the five places
+	// are checked rather than all five, because the walk itself is `fontNotes`'
+	// and shipped — what is new here is that a *second* reader now depends on it.
+	const declared = { ...inter, family: "Inter" };
+	const face = [loadedAs("Inter Var", inter.src)];
+
+	const tokened = withFonts(typography(), [declared]);
+	const byToken: Scene = {
+		...tokened,
+		tokens: [
+			...tokened.tokens,
+			{
+				id: "display",
+				name: "display",
+				type: "font",
+				value: [{ kind: "literal", value: '"Inter Var", serif' }],
+			},
+		],
+	};
+	// Not named before the token is added, which is what stops this passing
+	// vacuously on a template that happened to mention the family already.
+	assert.equal(namedFamilies(tokened).has("Inter Var"), false);
+	assert.deepEqual(abandonedFaces(face, tokened, namedFamilies(tokened)).length, 1);
+	assert.ok(namedFamilies(byToken).has("Inter Var"));
+	assert.deepEqual(abandonedFaces(face, byToken, namedFamilies(byToken)), []);
+
+	const staged = machine();
+	const byState: Scene = {
+		...staged,
+		fonts: [declared],
+		machines: staged.machines.map((m) => ({
+			...m,
+			states: m.states.map((state, i) =>
+				i === 1
+					? {
+							...state,
+							parts: {
+								...state.parts,
+								label: {
+									...state.parts.label,
+									props: {
+										fontFamily: [{ kind: "literal" as const, value: '"Inter Var", serif' }],
+									},
+								},
+							},
+						}
+					: state,
+			),
+		})),
+	};
+	assert.ok(namedFamilies(byState).has("Inter Var"));
+	assert.deepEqual(abandonedFaces(face, byState, namedFamilies(byState)), []);
 });
 
 /* ------------------------------------------------------------------ */

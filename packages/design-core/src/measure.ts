@@ -1180,10 +1180,30 @@ function writtenStacks(scene: Scene): string[] {
  * uploaded, and a panel that complained about it would be complaining about the
  * feature working.
  */
+/**
+ * Every family a value in this document names, wherever one is written.
+ *
+ * {@link usedFamilies}' twin, and the pair is the same distinction `writtenStacks`
+ * draws one function up: that one asks what a *universe came out wearing*, which
+ * needs a solve and is what the exporter has to know; this one asks what a
+ * designer has *typed*, which needs nothing and is what a host has to know before
+ * it can answer for a font set. A page opened without its assets, or one being
+ * edited between two solves, has to be able to answer this.
+ *
+ * Extracted from {@link fontNotes} when a second caller appeared rather than
+ * being copied into it — the app sweeps a face this page loaded under a family
+ * nothing names any more, and "nothing names it" has to mean here exactly what it
+ * means in the note, or the sentence and the sweep would disagree about the same
+ * document.
+ */
+export function namedFamilies(scene: Scene): Set<string> {
+	return new Set(writtenStacks(scene).flatMap(familiesOf));
+}
+
 export function fontNotes(scene: Scene, held: Iterable<string>): string[] {
 	const missing = missingFonts(scene, held);
 	if (missing.length === 0) return [];
-	const named = new Set(writtenStacks(scene).flatMap(familiesOf));
+	const named = namedFamilies(scene);
 	return missing
 		.filter((file) => named.has(file.family))
 		.map(
