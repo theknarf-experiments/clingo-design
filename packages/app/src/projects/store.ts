@@ -84,6 +84,143 @@ export const SCENE_TYPE = "clingo-design:scene";
  */
 export const MAIN_PAGE = "/pages/main.scene";
 
+/* ------------------------------------------------------------------ */
+/* Pages                                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A page's name is its filename, and its path is where it lives.
+ *
+ * Two functions rather than one field, because the tree is the list. There is no
+ * page index anywhere and there deliberately is not: `pathsOfType` already
+ * answers "which pages are there", so an index would be a second answer that
+ * could disagree with the documents — and the failure mode of a stale index is a
+ * page that exists and cannot be reached.
+ *
+ * The name is what a person types and reads; the path is what the vfs keys on
+ * and what a clone writes to disk. A page called "About us" is `/pages/About
+ * us.scene`, spaces and all, because a filename is allowed them and inventing a
+ * slug would mean the tree disagreeing with the tab.
+ */
+export const pagePath = (name: string): string => `/pages/${name}.scene`;
+
+export const pageName = (path: string): string =>
+	path.replace(/^\/pages\//, "").replace(/\.scene$/, "");
+
+/**
+ * Every page of a project, by name, in the order the tree gives them.
+ *
+ * Sorted by `pathsOfType`, so alphabetical rather than by creation — which is a
+ * real limitation and is left rather than papered over: an ordered list of pages
+ * is a field somebody has to store, and storing it in the directory document
+ * means an edit to the project every time a tab is dragged. Worth doing when
+ * somebody wants to drag a tab; not worth inventing first.
+ *
+ * Empty while the project is opening. A caller that needs to tell "no pages yet"
+ * from "not read yet" has {@link useProject}'s tri-state for the page it is
+ * actually showing.
+ */
+export function usePages(url: string | undefined): string[] {
+	const [names, setNames] = useState<string[]>([]);
+
+	useEffect(() => {
+		if (!url) {
+			setNames([]);
+			return;
+		}
+		let alive = true;
+		let stop: (() => void) | undefined;
+		void project(url).then((p) => {
+			if (!alive) return;
+			// Re-read on every structural change: adding, renaming and deleting a
+			// page are all writes to the directory document, and `subscribe` is what
+			// the vfs already fires for those.
+			const read = () => setNames(p.pathsOfType(SCENE_TYPE).map(pageName));
+			read();
+			stop = p.subscribe(read);
+		});
+		return () => {
+			alive = false;
+			stop?.();
+		};
+	}, [url]);
+
+	return names;
+}
+
+/**
+ * Add a page, and answer the name it actually got.
+ *
+ * Uniquified rather than refused, the way a new project's name is: two pages
+ * called "Page 2" would be one path, and the second `createDoc` would hand back
+ * the first one's handle — so the page would silently not be created. Answering
+ * the real name is what lets the caller navigate to it.
+ */
+export async function addPage(url: string, name = "Page"): Promise<string> {
+	const p = await project(url);
+	const taken = new Set(p.pathsOfType(SCENE_TYPE).map(pageName));
+	let chosen = name;
+	for (let n = 2; taken.has(chosen); n++) chosen = `${name} ${n}`;
+	p.createDoc<SceneDoc>(pagePath(chosen), SCENE_TYPE, { scene: emptyScene() });
+	upsertProject(url, { updatedAt: Date.now() });
+	publish();
+	return chosen;
+}
+
+/**
+ * Rename a page, and answer whether it happened.
+ *
+ * The document moves and keeps its identity — `renamePath` re-keys the directory
+ * and leaves the scene document alone — so a page's history survives being
+ * renamed, which is the thing that would be most annoying to lose.
+ *
+ * Refused where the name is taken or empty, rather than uniquified: a rename is
+ * a person typing a specific word, and silently making it "About 2" is not what
+ * they asked for. Adding a page is the opposite case, which is why it does the
+ * opposite thing.
+ */
+export async function renamePage(
+	url: string,
+	from: string,
+	to: string,
+): Promise<boolean> {
+	const trimmed = to.trim();
+	if (trimmed === "" || trimmed === from) return false;
+	const p = await project(url);
+	const taken = new Set(p.pathsOfType(SCENE_TYPE).map(pageName));
+	if (taken.has(trimmed) || !taken.has(from)) return false;
+	p.renamePath(pagePath(from), pagePath(trimmed));
+	// The handle is cached under the old path; drop it so the next read finds it
+	// where it now lives.
+	pages.delete(pageKey(url, pagePath(from)));
+	upsertProject(url, { updatedAt: Date.now() });
+	publish();
+	return true;
+}
+
+/**
+ * Delete a page — and refuse to delete the last one.
+ *
+ * A project with no pages is a project that cannot be opened: `useProject` finds
+ * no document at any path and reports the project as gone, which is a much
+ * worse thing than the deletion the person asked for. So the last page stays,
+ * and the UI does not offer to remove it.
+ *
+ * Unlike a project, this really does delete: the scene document is dropped from
+ * the tree and its history goes with it. That is what deleting a page means, and
+ * it is why the caller confirms first.
+ */
+export async function deletePage(url: string, name: string): Promise<boolean> {
+	const p = await project(url);
+	const all = p.pathsOfType(SCENE_TYPE).map(pageName);
+	if (all.length <= 1 || !all.includes(name)) return false;
+	p.deletePath(pagePath(name));
+	pages.delete(pageKey(url, pagePath(name)));
+	upsertProject(url, { updatedAt: Date.now() });
+	publish();
+	return true;
+}
+
 /** What a page document holds, beside the datatype tag the vfs writes. */
 interface SceneDoc {
 	scene: Scene;

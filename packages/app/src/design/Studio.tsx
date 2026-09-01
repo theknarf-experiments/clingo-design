@@ -105,6 +105,7 @@ import { Machines } from "./Machines";
 import { ProgramPanel } from "./ProgramPanel";
 import { PanelResizer, usePanelWidth } from "./PanelResizer";
 import { Rulers } from "./Rulers";
+import { Pages } from "./Pages";
 import { ShapePicker } from "./ShapePicker";
 import { SyncSettings } from "./SyncSettings";
 import { StatusLine } from "./StatusLine";
@@ -276,6 +277,9 @@ export interface StudioProps {
 	 * one (a test, a preview) simply shows no sync chip.
 	 */
 	projectUrl?: string;
+	/** Which page is being shown, and how to go to another. */
+	activePage?: string;
+	onOpenPage?: (name: string) => void;
 	undo: () => void;
 	redo: () => void;
 	canUndo: boolean;
@@ -287,6 +291,8 @@ export function Studio({
 	onSceneChange,
 	projectName,
 	projectUrl,
+	activePage,
+	onOpenPage,
 	undo,
 	redo,
 	canUndo,
@@ -1900,6 +1906,12 @@ export function Studio({
 				}}
 			>
 				<aside className={styles.side}>
+					{/* Both, or neither: a page list with no way to open a page is a
+					    list that lies about being interactive. A studio rendered
+					    without them — a test, a preview — shows layers alone. */}
+					{projectUrl && onOpenPage ? (
+						<Pages url={projectUrl} active={activePage} onOpen={onOpenPage} />
+					) : null}
 					<LayerList
 						scene={scene}
 						selection={selection}

@@ -1,8 +1,9 @@
-import { Link, useParams } from "react-router";
+import { useEffect } from "react";
+import { Link, useNavigate, useParams } from "react-router";
 
 import { Studio } from "../design/Studio";
 import { useProjectHistory } from "../design/useProjectHistory";
-import { useProject, useProjectsError } from "../projects/store";
+import { pagePath, useProject, useProjectsError, usePages } from "../projects/store";
 import styles from "./Project.module.css";
 
 /**
@@ -19,10 +20,31 @@ import styles from "./Project.module.css";
  * of ours that would have needed mapping to one.
  */
 export function Project() {
-	const { id } = useParams();
+	const { id, page: named } = useParams();
+	const navigate = useNavigate();
 	const error = useProjectsError();
-	const page = useProject(id);
-	const history = useProjectHistory(id);
+	const names = usePages(id);
+
+	// Which page the url names, or the first one there is. Resolved against the
+	// tree rather than trusted: a url naming a page that has been deleted or
+	// renamed should open the project at *a* page rather than report it as gone,
+	// which is what asking for a document at a path nothing lives at would do.
+	const known = named !== undefined && names.includes(named);
+	const active = known ? named : names[0];
+	const path = active === undefined ? undefined : pagePath(active);
+
+	const page = useProject(id, path);
+	const history = useProjectHistory(id, path);
+
+	// A url that named a page which is not there any more is rewritten rather
+	// than left in the address bar saying something untrue. Replace, not push, so
+	// the back button does not land on the broken address again.
+	useEffect(() => {
+		if (!id || named === undefined || known || names.length === 0) return;
+		navigate(`/p/${encodeURIComponent(id)}/${encodeURIComponent(names[0])}`, {
+			replace: true,
+		});
+	}, [id, named, known, names, navigate]);
 
 	// Undefined is "still opening" and null is "cannot be opened", and the two
 	// must not render alike: a synced project waits on a network, and showing
@@ -64,6 +86,10 @@ export function Project() {
 			}
 			projectName={page.name}
 			projectUrl={id}
+			activePage={active}
+			onOpenPage={(name) =>
+				navigate(`/p/${encodeURIComponent(id ?? "")}/${encodeURIComponent(name)}`)
+			}
 			undo={history.undo}
 			redo={history.redo}
 			canUndo={history.canUndo}
