@@ -115,8 +115,22 @@ const abs = (r: string) => '/' + r
 const isLeaf = (v: unknown): v is AutomergeUrl => typeof v === 'string' && isValidAutomergeUrl(v)
 
 /** One IndexedDB namespace for every repo below. Sharing it is what makes
- *  changing where a project syncs cheap — see `repoFor`. */
-const STORAGE = 'clingo-design'
+ *  changing where a project syncs cheap — see `repoFor`.
+ *
+ *  **Not `clingo-design`, and the suffix is the whole point.** The app's previous
+ *  hand-written store used that name and had reached version 2; the storage
+ *  adapter here opens its database at version 1, and `indexedDB.open` on an
+ *  existing database at a *lower* version throws — so every browser that had
+ *  ever run the old app got a blank screen, while a fresh profile worked
+ *  perfectly. Which is exactly the shape of bug that survives being tested: the
+ *  test opened a clean context and could not have seen it.
+ *
+ *  A distinct name rather than a version bump or a migration: the two stores
+ *  have nothing to say to each other, the old one is not read any more, and a
+ *  name nobody else uses cannot collide again. The old database is left where it
+ *  is — orphaned, not deleted, because forgetting is this codebase's stance on
+ *  data it no longer owns. */
+const STORAGE = 'clingo-design-vfs'
 
 /** Where a project syncs: a subduction endpoint, or null for "nowhere". */
 export type SyncTarget = string | null
