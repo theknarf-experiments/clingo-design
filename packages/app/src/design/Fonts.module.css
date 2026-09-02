@@ -232,3 +232,49 @@
 	font-size: 0.7rem;
 	color: inherit;
 }
+
+/*
+ * The Google picker. A search field and a list of families, laid out like the
+ * project's own spare files above it — the two lists answer the same question
+ * ("which family do I want") against two different places, so a designer who has
+ * learned one row has learned the other.
+ */
+.search {
+	width: 100%;
+	padding: 0.2rem 0.35rem;
+	font: inherit;
+	font-size: 0.72rem;
+	color: inherit;
+	background: var(--dc-raised);
+	border: 1px solid var(--dc-line);
+	border-radius: 4px;
+}
+
+.hit {
+	display: flex;
+	align-items: baseline;
+	gap: 0.35rem;
+	font-size: 0.7rem;
+}
+
+.hitName {
+	flex: none;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Takes the slack, so the button lines up down the list however long a name is. */
+.hitMeta {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	font-size: 0.64rem;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	opacity: 0.45;
+}
+
+.hitAdd {
+	composes: add;
+}

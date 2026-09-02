@@ -40,10 +40,17 @@ import {
 import { putNamedAsset, resolveAsset } from "../projects/store";
 import {
 	FONT_ACCEPT,
+	type FontDescription,
 	describeFont,
 	isFontPath,
 	stemOf,
 } from "./fontFiles";
+import {
+	type GoogleFamily,
+	fetchGoogleFamily,
+	fetchedFileNames,
+	searchGoogle,
+} from "./googleFonts";
 import { register } from "./useDocumentFonts";
 import styles from "./Fonts.module.css";
 
@@ -146,6 +153,18 @@ async function adopt(
 	name: string,
 	bytes: Uint8Array,
 	write: () => Promise<string>,
+	/**
+	 * What the face is, where the caller already knows rather than has to guess.
+	 *
+	 * Only the Google fetch passes it, and it is the one thing a fetch does
+	 * better than an upload: `describeFont` reads a filename stem and a weight
+	 * heuristic because a `.woff2`'s tables are Brotli and unreadable without a
+	 * decompressor, while a css2 stylesheet *states* the family, the weight
+	 * descriptor and the style. So the fetched face arrives with `100 900` on it
+	 * rather than with `400` guessed off `Inter-Variable.woff2`, which is the
+	 * single field on {@link FontFile} where being wrong has a consequence.
+	 */
+	known?: FontDescription,
 ): Promise<{ file: FontFile } | { lost: string }> {
 	try {
 		const probe = new FontFace("dc-probe", bytes.slice().buffer as ArrayBuffer);
@@ -157,7 +176,7 @@ async function adopt(
 	}
 	const src = await write();
 	const file: FontFile = {
-		...describeFont(name, bytes),
+		...(known ?? describeFont(name, bytes)),
 		src,
 		bytes: bytes.length,
 		name,
@@ -182,6 +201,9 @@ export function Fonts({
 	onImported,
 }: FontsProps) {
 	const [busy, setBusy] = useState(false);
+	/** What is typed into the Google search, and which family is being fetched. */
+	const [query, setQuery] = useState("");
+	const [fetching, setFetching] = useState<string | undefined>(undefined);
 	/**
 	 * What is being typed into a family field, over what the document holds.
 	 *
@@ -225,20 +247,65 @@ export function Fonts({
 		name: string,
 		bytes: Uint8Array,
 		write: () => Promise<string>,
+		known?: FontDescription,
+		/** Sentences from further up, where the caller already dropped something. */
+		alsoLost: string[] = [],
 	): Promise<void> {
 		setBusy(true);
 		try {
-			const result = await adopt(name, bytes, write);
+			const result = await adopt(name, bytes, write, known);
 			if ("lost" in result) {
-				onImported({ name, lost: [result.lost] });
+				onImported({ name, lost: [result.lost, ...alsoLost] });
 				return;
 			}
 			onSceneChange((prev) => addFont(prev, result.file));
-			onImported({ name, lost: [] });
+			onImported({ name, lost: alsoLost });
 		} catch {
 			onImported({ name, lost: ["This file could not be added to the project."] });
 		} finally {
 			setBusy(false);
+		}
+	}
+
+	/**
+	 * Fetch a family from Google Fonts into this project.
+	 *
+	 * The fetch ends at `bring`, which is where an upload ends, and everything
+	 * after that point is the same code — so a fetched family is a file in
+	 * `/assets` and a `FontFile` in the document, indistinguishable from a
+	 * dropped one. That is the whole of why this feature is a picker rather than
+	 * a new kind of font reference, and why it works on a train the moment after
+	 * it has worked once online.
+	 *
+	 * The losses are reported on the *first* face, not once per file: a static
+	 * family fetches regular and bold, and telling somebody twice that italics
+	 * were left behind is telling them the second time about a decision they have
+	 * already read.
+	 */
+	async function fetchFamily(family: GoogleFamily): Promise<void> {
+		setFetching(family.name);
+		try {
+			const { faces, lost } = await fetchGoogleFamily(family);
+			for (const [i, face] of faces.entries()) {
+				await bring(
+					face.name,
+					face.bytes,
+					() => putNamedAsset(face.name, face.bytes),
+					face.describe,
+					i === 0 ? lost : [],
+				);
+			}
+		} catch (e) {
+			onImported({
+				name: family.name,
+				lost: [
+					e instanceof Error && e.message.includes("does not serve")
+						? e.message
+						: `${family.name} could not be fetched. The picker needs the network; the fonts already in this project do not.`,
+				],
+			});
+		} finally {
+			setFetching(undefined);
 		}
 	}
 
@@ -450,6 +517,86 @@ export function Fonts({
 				))
 			)}
 
+			{/*
+			  * The picker is online and the font is not.
+			  *
+			  * What this fetches are *bytes*, into `/assets`, through the same
+			  * `bring` an upload goes through — so the family is a file in the
+			  * project a second later, syncs with it, and is there on a train. See
+			  * `googleFonts.ts` for why that is a different thing from the linked
+			  * webfont `docs/framer-parity-plan.md` §9 turned down, and for why the
+			  * list below ships in the bundle rather than being fetched (Google's
+			  * catalogue endpoint sends no CORS header and no browser can read it).
+			  */}
+			<h3 className={styles.section}>From Google Fonts</h3>
+			<input
+				className={styles.search}
+				data-role="google-search"
+				type="search"
+				placeholder="Search 1,900 families"
+				value={query}
+				title="Pick a family here and its file is downloaded into this project. From then on it works offline and travels with the project, exactly like a font you added yourself."
+				onChange={(e) => setQuery(e.target.value)}
+			/>
+			{query.trim() === "" ? (
+				<p className={styles.hint}>
+					Type a family name. The one you pick is downloaded into this project
+					and works offline from then on.
+				</p>
+			) : (
+				(() => {
+					const hits = searchGoogle(query, 8);
+					if (hits.length === 0) {
+						return (
+							<p className={styles.empty}>
+								Nothing in the list matches. The list is a snapshot, so a family
+								added to Google since can still be fetched — check the spelling
+								against fonts.google.com.
+							</p>
+						);
+					}
+					return hits.map((family) => {
+						// Whether this project already holds the files this fetch would
+						// write. Asked of the tree rather than of the document, because
+						// the bytes are the thing a second fetch would duplicate — the
+						// declaration is per page and being absent here is ordinary.
+						const have = fetchedFileNames(family).every((n) =>
+							held.some((f) => f.path === `/assets/${n}`),
+						);
+						return (
+							<div
+								key={family.name}
+								className={styles.hit}
+								data-role="google-family"
+								data-family={family.name}
+							>
+								<span className={styles.hitName}>{family.name}</span>
+								<span className={styles.hitMeta}>
+									{family.category}
+									{family.variable
+										? ` · variable ${family.variable.min}–${family.variable.max}`
+										: ` · ${family.weights.length} weight${family.weights.length === 1 ? "" : "s"}`}
+								</span>
+								<button
+									type="button"
+									className={styles.hitAdd}
+									data-role="fetch-font"
+									disabled={busy || fetching !== undefined || have}
+									title={
+										have
+											? "This project already holds this family's file."
+											: "Download this family into the project. It syncs with the project and works offline afterwards."
+									}
+									onClick={() => void fetchFamily(family)}
+								>
+									{have ? "In project" : fetching === family.name ? "…" : "Add"}
+								</button>
+							</div>
+						);
+					});
+				})()
+			)}
+
 			<h3 className={styles.section}>Add a font</h3>
 			<label className={styles.upload}>
 				<input
@@ -474,10 +621,10 @@ export function Fonts({
 				/>
 			</label>
 			<p className={styles.hint}>
-				Fonts are files you add to this project — they sync with it, they work
-				offline, and they travel inside an exported HTML file. There is no font
-				catalogue here: download the family you want from its foundry or from
-				Google Fonts and add the file.
+				Fonts are files this project holds — they sync with it, they work
+				offline, and they travel inside an exported HTML file. That is as true
+				of one picked above as of one added here: the picker downloads the file,
+				it does not link to it.
 			</p>
 			<p className={styles.hint}>
 				A .woff2 is several times smaller than the .ttf of the same face, and an
