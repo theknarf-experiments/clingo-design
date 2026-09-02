@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import { directSolver } from "./directSolver.ts";
 import { deleteNodes, updateConstraint } from "./edits.ts";
-import { exportUniverse } from "./export.ts";
 import { explore, varyingVars } from "./explore.ts";
 import { compareCosts } from "./sampling.ts";
 import { frameOf, sceneContext, wornProps } from "./scene.ts";
@@ -316,39 +315,6 @@ test("every state of the button is in the one answer set, beside the picture", a
 	});
 });
 
-test("the button leaves as a stylesheet with the states in it", async () => {
-	const scene = findTemplate("machine")!.create();
-	const out = await explore(scene, directSolver, { limit: 8 });
-	const html = exportUniverse(scene, out.universes[0], {
-		target: "html",
-		title: "machine",
-	});
-
-	// `pressed` is entered and left by a pointer down and up *from hover* rather
-	// than from the initial state, so it is not a pseudo-class state and the file
-	// carries the table-driven runtime instead. The rest/hover pair on its own
-	// would have collapsed to `:hover` and emitted no script at all.
-	assert.match(html.text, /\[data-state="pressed"\]/);
-	assert.match(html.text, /<script>/);
-	// Paced from the answer set rather than from a number in the emitter.
-	assert.match(html.text, /transition:[^;]*160ms/);
-
-	// And what it cannot carry, it says: the second use is drawn in a state other
-	// than the machine's initial one, so the file starts there and every state is
-	// a data-state rule.
-	assert.ok(
-		html.lost.some((entry) => entry.includes("Hovering")),
-		"the export names the state it starts in",
-	);
-
-	// SVG has no states at all, and says so rather than shipping a still frame
-	// that looks like the whole design.
-	const svg = exportUniverse(scene, out.universes[0], {
-		target: "svg",
-		title: "machine",
-	});
-	assert.ok(svg.lost.some((entry) => entry.startsWith("Behaviour.")));
-});
 
 /* ------------------------------------------------------------------ */
 /* Inputs, guards and layers                                           */
@@ -501,27 +467,6 @@ test("both layers are on screen at once, and the machine is sound on all eleven 
 	assert.equal(health.exit.settle, 180, "the debounce follows the motion scale");
 });
 
-test("the deck leaves as a file whose script holds the guards and the debounce", async () => {
-	const scene = findTemplate("deck")!.create();
-	const out = await explore(scene, directSolver, { limit: 8 });
-	const html = exportUniverse(scene, out.universes[0], { target: "html", title: "deck" });
-
-	// The second layer writes its own attribute, which is the twin of
-	// `attributeOf` in the runtime: plain `data-state` for the first layer and
-	// `data-state-<layer>` after it, so the CSS cascade settles a fight the way
-	// `mwriter/4` does.
-	assert.match(html.text, /data-state-meter/);
-	// The guards ride the table rather than the stylesheet, because a guard is a
-	// comparison a script makes and CSS has no word for one.
-	assert.match(html.text, /"input":"armed"/);
-	assert.match(html.text, /"op":"gt","value":500/, "a number guard is thousandths");
-	assert.match(html.text, /"op":"fired"/);
-	// And the debounce is in the file, at the number the token resolved to. This
-	// is the regression guard for a real defect: built without the universe's
-	// context, the table dropped a token-paced exit time as a zero while this
-	// same file's losses announced the wait.
-	assert.match(html.text, /"exit":180/);
-});
 
 /* ------------------------------------------------------------------ */
 /* Three dimensions                                                    */
@@ -624,45 +569,3 @@ test("a solid is an ordinary node: in the tree, in the answer set, and in a rule
 	assert.deepEqual(model.looks, { stage: "eye" });
 });
 
-test("the page exports around the view, and the view says what it could not carry", async () => {
-	const scene = findTemplate("solids")!.create();
-	const out = await explore(scene, directSolver, { limit: 8 });
-
-	for (const target of ["html", "svg"] as const) {
-		const file = exportUniverse(scene, out.universes[0], { target, title: "solids" });
-		// The rest of the page is there, and so is the view's own box — it is a
-		// rectangle with a fill and a radius, and everything above the seam was
-		// always able to draw one.
-		assert.match(file.text, /data-node="swatch"/);
-		assert.match(file.text, /data-node="stage"/);
-		// What is inside it is not, in either target, because neither has a word
-		// for geometry, a camera, a light or a material.
-		for (const id of ["cube", "ball", "post", "floor", "ring", "eye"]) {
-			assert.doesNotMatch(file.text, new RegExp(`data-node="${id}"`), `${id} in ${target}`);
-		}
-		// And it is a stated loss rather than a subtree that went quiet.
-		assert.ok(
-			file.lost.some((entry) => entry.includes("view")),
-			`${target} drops a subtree with nothing said`,
-		);
-	}
-
-	// The two targets say it differently, and the difference is honest rather
-	// than an oversight. HTML *can* place and turn a flat box and does, so its
-	// loss is specifically the geometry: eight objects, counted off the model
-	// rather than off the document, with glTF named as the way out. SVG is flat
-	// full stop — it has no transform story to half-tell — so it says so once,
-	// unconditionally, alongside its other blanket sentences.
-	const html = exportUniverse(scene, out.universes[0], { target: "html", title: "solids" });
-	assert.ok(
-		html.lost.some((entry) => entry.includes("8 objects inside this view")),
-		"HTML does not count what it dropped",
-	);
-	assert.ok(html.lost.some((entry) => entry.includes("glTF")), "the way out is named");
-
-	const svg = exportUniverse(scene, out.universes[0], { target: "svg", title: "solids" });
-	assert.ok(
-		svg.lost.some((entry) => entry.startsWith("Three dimensions.")),
-		"SVG does not say it is flat",
-	);
-});

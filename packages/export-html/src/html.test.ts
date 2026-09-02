@@ -1,43 +1,34 @@
 /**
- * The way out, held against the answer set it came from.
+ * The HTML target.
  *
- * Everything here runs through the real solver, because an export is only worth
- * anything if it agrees with the picture the solver described — not with the
- * document, and not with what the exporter believes the document says. The two
- * assertions that carry the weight are:
- *
- *   - every node the model draws appears in the output, in paint order;
- *   - substituting every `var(--name)` back into the token export produces the
- *     export that had no tokens in it at all. That is the whole of the promise
- *     in "a fill that names accent comes out as var(--accent)": the name is a
- *     name for the value the answer set rendered, and not for something else.
+ * What `design-core/src/export.test.ts` was before the targets became packages,
+ * minus the tests about SVG and minus the ones about *every* target. Those last
+ * are a conformance suite now, and they live where the target list is composed:
+ * `app/src/design/exportTargets.test.ts`.
  */
+import { htmlTarget } from "./index.ts";
+import { exportMachines } from "./timeline.ts";
+
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { directSolver } from "./directSolver.ts";
-import { makeNode } from "./edits.ts";
-import { explore } from "./explore.ts";
+import { directSolver } from "@clingo-design/design-core";
+import { makeNode } from "@clingo-design/design-core";
+import { explore } from "@clingo-design/design-core";
 import {
-	EXPORT_TARGETS,
-	EXPORT_TARGET_NAMES,
 	type ExportOptions,
 	collapseSpace,
-	exportMachines,
 	exportSpace,
 	exportUniverse,
-} from "./export.ts";
-import { machineTable, stepMachine } from "./machines.ts";
-import type { ModelScene } from "./model.ts";
-import { evalRuntime } from "./runtime.ts";
-import { DOCUMENT_BASE, PAINT, cssName, paintOf } from "./paint.ts";
+} from "@clingo-design/export-core";
+import { machineTable, stepMachine } from "@clingo-design/design-core";
+import { evalRuntime } from "@clingo-design/design-core";
+import { DOCUMENT_BASE, PAINT, cssName, paintOf } from "@clingo-design/design-core";
 import {
-	KINDS,
 	type LoopMode,
 	type Machine,
 	PROPS,
 	PROP_NAMES,
-	type PropName,
 	RULES_HEADER,
 	type Scene,
 	type SceneNode,
@@ -50,23 +41,20 @@ import {
 	makeLayout,
 	starterTokens,
 	trackDatum,
-} from "./scene.ts";
-import { TEMPLATES } from "./templates/index.ts";
-import { card } from "./templates/card.ts";
-import { pair } from "./templates/pair.ts";
-import { places } from "./templates/places.ts";
-import { rail } from "./templates/rail.ts";
-import { typography } from "./templates/typography.ts";
-import { at, frame, rect, text, wearing, withToken } from "./templates/shared.ts";
-import { findInTree } from "./tree.ts";
+} from "@clingo-design/design-core";
+import { card } from "@clingo-design/design-core/templates";
+import { pair } from "@clingo-design/design-core/templates";
+import { places } from "@clingo-design/design-core/templates";
+import { rail } from "@clingo-design/design-core/templates";
+import { typography } from "@clingo-design/design-core/templates";
+import { at, frame, rect, text, wearing, withToken } from "@clingo-design/design-core/templates";
+import { findInTree } from "@clingo-design/design-core";
 import {
 	EMU_PER_PX,
-	type Unit,
 	cssPxFromEmu,
-	emuOf,
 	formatLength,
 	nearestEmu,
-} from "./units.ts";
+} from "@clingo-design/design-core";
 import {
 	EASINGS,
 	GRADIENT_FROM,
@@ -74,11 +62,10 @@ import {
 	SPRING_STOPS,
 	VALUE_TYPES,
 	type Value,
-	isLengthType,
 	lit,
 	ref,
 	single,
-} from "./values.ts";
+} from "@clingo-design/design-core";
 
 /** A document whose universes differ only by a container's direction. */
 function flow(): Scene {
@@ -175,208 +162,11 @@ function parametric(): Scene {
 	};
 }
 
-/**
- * The token export with every `var(--name)` put back, and the definitions
- * removed — which should leave exactly the export that never used a name.
- */
-function inline(text: string): string {
-	const values = new Map<string, string>();
-	for (const [, name, value] of text.matchAll(/^\t(--[A-Za-z0-9_-]+): (.+);$/gm)) {
-		values.set(name, value);
-	}
-	return text
-		.replace(/^\t--[A-Za-z0-9_-]+: .+;\n/gm, "")
-		// The block that held nothing but definitions goes with them.
-		.replace(/^:root \{\n\}\n/gm, "")
-		.replace(/^svg \{\n\}\n/gm, "")
-		.replace(/var\((--[A-Za-z0-9_-]+)\)/g, (whole, name: string) =>
-			values.get(name) ?? whole,
-		);
-}
 
-/**
- * Every node the export is expected to draw, in the order it must draw them.
- *
- * The model's own pre-order — a parent before its children, siblings back to
- * front — with **one stop**, and the stop is stated here rather than tolerated
- * in the assertion below. `KINDS[kind].opaque` is a viewport, whose box the file
- * draws and whose contents it does not: a mesh is geometry, and the honest thing
- * for a DOM exporter to do with a cylinder is to say it cannot carry one rather
- * than to emit a `<div>` with the silhouette of its bounding box. So the walk
- * that predicts the export makes the same single lookup the export makes, in
- * `stopsHere` — one table consulted twice rather than two lists that can drift.
- *
- * Deliberately not "and skip whatever is missing". Written that way, a bug that
- * dropped a rectangle from a flat page would pass here as easily as the seam
- * does. Written this way, the seam is asserted to be in exactly the one place
- * the kind table puts it.
- */
-function drawnByExport(roots: ModelScene["roots"]): string[] {
-	const order: string[] = [];
-	const walk = (nodes: ModelScene["roots"]) => {
-		for (const node of nodes) {
-			order.push(node.id);
-			if (!KINDS[node.kind].opaque) walk(node.children);
-		}
-	};
-	walk(roots);
-	return order;
-}
 
-for (const template of TEMPLATES) {
-	test(`${template.id}: the export holds every node the answer set drew`, async () => {
-		const scene = template.create();
-		const exploration = await explore(scene, directSolver, { limit: 4 });
-		const universe = exploration.universes[0];
-		assert.ok(universe, "expected at least one universe");
 
-		for (const target of EXPORT_TARGET_NAMES) {
-			const out = exportUniverse(scene, universe, { target, title: template.id });
-			const drawn = [...out.text.matchAll(/data-node="([^"]*)"/g)].map((m) =>
-				m[1].replace(/&quot;/g, '"').replace(/&amp;/g, "&"),
-			);
-			const order = drawnByExport(universe.model.roots);
-			assert.deepEqual(
-				drawn.slice().sort(),
-				order.slice().sort(),
-				`${target}: the export and the model draw different nodes`,
-			);
-			assert.deepEqual(drawn, order, `${target}: painted out of order`);
-			assert.ok(out.lost.length > 0, "an export that loses nothing is a lie");
 
-			// And what it stopped at, it *said*. A subtree that goes missing with no
-			// sentence about it is indistinguishable from a subtree that was dropped
-			// by accident, which is the whole reason `lost` exists.
-			const held = new Set(order);
-			const inside = Object.keys(universe.model.byId).filter((id) => !held.has(id));
-			if (inside.length > 0) {
-				assert.ok(
-					out.lost.some((entry) => entry.includes("view")),
-					`${target}: ${inside.length} nodes went missing with nothing said`,
-				);
-			}
-		}
-	});
 
-	test(`${template.id}: a token export is the plain export with names put in`, async () => {
-		const scene = template.create();
-		const exploration = await explore(scene, directSolver, { limit: 4 });
-		const universe = exploration.universes[0];
-		for (const target of EXPORT_TARGET_NAMES) {
-			const named = exportUniverse(scene, universe, { target, title: template.id });
-			const plain = exportUniverse(scene, universe, {
-				target,
-				title: template.id,
-				tokens: false,
-			});
-			assert.equal(
-				inline(named.text),
-				plain.text,
-				`${target}: a token stands for something other than what was drawn`,
-			);
-		}
-	});
-}
-
-test("a fill that names accent comes out as var(--accent)", async () => {
-	const scene = card();
-	const exploration = await explore(scene, directSolver, { limit: 1 });
-	const universe = exploration.universes[0];
-	const out = exportUniverse(scene, universe, { target: "html", title: "card" });
-	assert.match(out.text, /background-color: var\(--accent\);/);
-	// And the definition is the colour the answer set actually rendered.
-	const drawn = universe.model.byId.badge?.rendered.fill;
-	assert.ok(drawn);
-	assert.match(out.text, new RegExp(`--accent: ${drawn};`));
-	// Off, it is the hex and nothing else.
-	const plain = exportUniverse(scene, universe, {
-		target: "html",
-		tokens: false,
-	});
-	assert.doesNotMatch(plain.text, /var\(--/);
-	assert.match(plain.text, new RegExp(`background-color: ${drawn};`));
-});
-
-test("a dimension driven by a token comes out as the token", async () => {
-	const scene = parametric();
-	const exploration = await explore(scene, directSolver, { limit: 1 });
-	const out = exportUniverse(scene, exploration.universes[0], { target: "html" });
-	assert.match(out.text, /width: var\(--panel-width\);/);
-	assert.match(out.text, /--panel-width: 180px;/);
-});
-
-test("every kind the studio can draw reaches both targets", async () => {
-	// Not a template: the templates between them do not use a path, a line or
-	// an arrow, and a target that silently drops one of them would pass every
-	// other test in this file.
-	const scene: Scene = {
-		styles: [],
-		machines: [],
-		tokens: starterTokens(),
-		nodes: [
-			frame("page", "Page", [0, 0, 400, 300], { fill: [ref("surface")] }, [
-				rect("r", "Rect", [10, 10, 60, 40], { fill: [ref("accent")] }),
-				{ ...rect("e", "Ellipse", [80, 10, 60, 60], { fill: [ref("ink")] }), kind: "ellipse" },
-				{
-					...rect("l", "Line", [10, 90, 100, 60], {
-						stroke: [ref("ink")],
-						strokeWidth: single("3px"),
-					}),
-					kind: "line",
-					diagonal: "up",
-				},
-				{
-					...rect("ar", "Arrow", [130, 90, 100, 60], {
-						stroke: [ref("accent")],
-						strokeWidth: single("4px"),
-					}),
-					kind: "arrow",
-					diagonal: "down",
-				},
-				{
-					...rect("p", "Path", [240, 90, 80, 80], {
-						fill: [ref("muted")],
-						stroke: [ref("ink")],
-						strokeWidth: single("2px"),
-					}),
-					kind: "path",
-					points: [
-						{ x: 0, y: 0 },
-						{ x: 80, y: 20 },
-						{ x: 40, y: 80 },
-					],
-					closed: true,
-				},
-				text("t", "Text", [10, 200, 200, 60], "Two\nlines", {
-					ink: [ref("subtle")],
-					size: single("14px"),
-				}),
-			]),
-		],
-		constraints: [],
-		rules: RULES_HEADER,
-	};
-	const exploration = await explore(scene, directSolver, { limit: 1 });
-	const universe = exploration.universes[0];
-
-	const html = exportUniverse(scene, universe, { target: "html" }).text;
-	// A diagonal leans the way the document says, and the answer set does not
-	// carry the lean — so this is the one thing read from the document.
-	assert.match(html, /data-node="l"[^>]*><svg class="s"[^>]*><line x1="0" y1="60"/);
-	assert.match(html, /data-node="ar"[^>]*><svg class="s"[^>]*><line x1="0" y1="0"/);
-	assert.match(html, /<polyline points="/, "an arrow has a head");
-	assert.match(html, /<path d="M/, "a path has its vertices");
-	assert.match(html, /border-radius: 50%/, "an ellipse is a fully rounded box");
-	assert.match(html, /Two\nlines/);
-
-	const svg = exportUniverse(scene, universe, { target: "svg" }).text;
-	assert.match(svg, /<ellipse cx="30" cy="30" rx="30" ry="30"/);
-	assert.match(svg, /<line x1="0" y1="60" x2="100" y2="0"/);
-	assert.match(svg, /<polyline points="/);
-	assert.match(svg, /<path d="M/);
-	// Two lines of text are two tspans, because SVG does not wrap.
-	assert.equal(svg.match(/<tspan /g)?.length, 2);
-});
 
 /* ------------------------------------------------------------------ */
 /* Furniture does not come out                                         */
@@ -439,195 +229,17 @@ const onlyUniverse = async (scene: Scene) => {
 	return exploration.universes[0];
 };
 
-test("a page ruled into columns exports the design, not the grid", async () => {
-	// The strongest form the promise has: the ruled document and the settled one
-	// are the same *file*, byte for byte, in both targets. Nothing about a margin,
-	// a column, a guide or the rule that read them survives — and the coordinate
-	// they decided does, because that is the design.
-	const held = ruledPage(true);
-	const settled = ruledPage(false);
-	const a = await onlyUniverse(held);
-	const b = await onlyUniverse(settled);
-	assert.equal(a.model.byId.card.frame.x, 480 * EMU_PER_PX, "the grid placed it");
 
-	for (const target of EXPORT_TARGET_NAMES) {
-		const out = exportUniverse(held, a, { target, title: "page" });
-		assert.equal(
-			out.text,
-			exportUniverse(settled, b, { target, title: "page" }).text,
-			`${target}: the grid left a mark on the file`,
-		);
-		// Said again directly, because the equality above would also hold if both
-		// files carried the same furniture. `220px` is the hand-drawn line's own
-		// place and is a number nothing else in this design has.
-		assert.doesNotMatch(out.text, /cg\(|gl\(|220px/);
-		// One target says `left: 480px` and the other `translate(480,40)`, so the
-		// claim is about the number: what the grid decided is in the file.
-		assert.match(out.text, /480/);
-	}
-});
 
-test("an export says it left the grid behind, and only where there was one", async () => {
-	// The one loss in the list that is a decision rather than a limitation, so it
-	// is the one that has to be said out loud. Conditional, because a list of
-	// losses that pads itself is one nobody finishes reading.
-	const grid = (out: { lost: string[] }) => out.lost.filter((l) => /^The grid\./.test(l));
-
-	const held = ruledPage(true);
-	const a = await onlyUniverse(held);
-	for (const target of EXPORT_TARGET_NAMES) {
-		const note = grid(exportUniverse(held, a, { target }));
-		assert.equal(note.length, 1, `${target}: expected the grid to be named once`);
-		// It has to say the second half too: the grid is gone, what it *decided* is
-		// not, and a designer who read only the first clause would go looking for a
-		// coordinate that is right there.
-		assert.match(note[0], /coordinates/);
-	}
-
-	const settled = ruledPage(false);
-	assert.deepEqual(
-		grid(exportUniverse(settled, await onlyUniverse(settled), { target: "html" })),
-		[],
-	);
-});
-
-test("a grid on something that is not a surface is not a grid to lose", async () => {
-	// The same question `compile()` asks before it emits `ggrid/1`: a grid stored
-	// on a rectangle is read rather than corrected on the way in, and says nothing
-	// to anybody. An export claiming to have dropped it would be claiming to have
-	// dropped something the document never had.
-	const scene = ruledPage(false);
-	const page = scene.nodes[0];
-	scene.nodes = [
-		{
-			...page,
-			children: [
-				{ ...page.children![0], guides: makeGuides({ columns: 12 }) },
-			],
-		},
-	];
-	const out = exportUniverse(scene, await onlyUniverse(scene), { target: "html" });
-	assert.equal(
-		out.lost.some((l) => /^The grid\./.test(l)),
-		false,
-	);
-});
 
 /* ------------------------------------------------------------------ */
 /* The space as one artefact                                           */
 /* ------------------------------------------------------------------ */
 
-test("universes that differ only by a colour token are one themed artefact", async () => {
-	const scene = pair();
-	const exploration = await explore(scene, directSolver, { limit: 24 });
-	assert.equal(exploration.universes.length, 3);
-	const verdict = collapseSpace(scene, exploration.universes);
-	assert.ok(!("reason" in verdict), "expected the space to collapse");
-	assert.equal(verdict.kind, "theme");
-	assert.equal(verdict.label, "accent");
 
-	const out = exportSpace(scene, exploration.universes, {
-		target: "html",
-		title: "pair",
-	});
-	// One artefact: every accent the space holds is in it, and each is a single
-	// custom-property redefinition rather than a second copy of the design.
-	const accents = exploration.universes.map((u) => u.model.byId.mHero?.rendered.fill);
-	for (const accent of accents) {
-		assert.ok(accent);
-		assert.match(out.text, new RegExp(`--accent: ${accent};`));
-	}
-	assert.equal(out.text.match(/data-node="mHero"/g)?.length, 1);
-	// Nothing but the accent moved, so nothing but the accent is overridden.
-	for (const block of out.text.matchAll(/\[data-theme="[^"]+"\] \{\n([^}]*)\}/g)) {
-		assert.match(block[1].trim(), /^--accent: #[0-9a-f]{6};$/);
-	}
-});
 
-test("two colours are light and dark; three are named themes", async () => {
-	// Two is the case a target has a convention for, so it gets one — and the
-	// attribute as well, because a preference is a default and not a decision.
-	const scene = withToken(pair().tokens, "accent", [lit("#3b82f6"), lit("#0b1220")]);
-	const two = { ...pair(), tokens: scene };
-	const exploration = await explore(two, directSolver, { limit: 24 });
-	assert.equal(exploration.universes.length, 2);
-	const out = exportSpace(two, exploration.universes, { target: "html" });
-	assert.match(out.note, /prefers-color-scheme: dark/);
-	assert.match(out.text, /@media \(prefers-color-scheme: dark\) \{\n\t:root \{\n\t\t--accent: /);
-	assert.match(out.text, /\[data-theme="dark"\] \{\n\t--accent: /);
-	// Three colours have no light and dark to be, so no media query is claimed.
-	const three = await explore(pair(), directSolver, { limit: 24 });
-	const named = exportSpace(pair(), three.universes, { target: "html" });
-	assert.doesNotMatch(named.text, /prefers-color-scheme/);
-	assert.match(named.text, /\[data-theme="alt-1"\]/);
-	assert.match(named.text, /\[data-theme="alt-2"\]/);
-});
 
-test("universes that differ only by direction are one artefact with a breakpoint", async () => {
-	const scene = flow();
-	const exploration = await explore(scene, directSolver, { limit: 24 });
-	assert.equal(exploration.universes.length, 2);
-	const verdict = collapseSpace(scene, exploration.universes);
-	assert.ok(!("reason" in verdict), "expected the space to collapse");
-	assert.equal(verdict.kind, "breakpoint");
 
-	const out = exportSpace(scene, exploration.universes, { target: "html" });
-	const media = /@media \(min-width: (\d+)px\) \{\n([\s\S]*?)\n\}/.exec(out.text);
-	assert.ok(media, "expected a media query");
-
-	// Mobile first: the base is the column, and the query holds the row.
-	const column = exploration.universes.find(
-		(u) => u.model.byId.b.frame.x === u.model.byId.a.frame.x,
-	);
-	const row = exploration.universes.find(
-		(u) => u.model.byId.b.frame.x !== u.model.byId.a.frame.x,
-	);
-	assert.ok(column && row);
-	// The model is EMU and the stylesheet is pixels, so the two are held against
-	// each other through the one conversion. This used to compare a coordinate
-	// with itself, which was true of the numbers and said nothing about them.
-	assert.match(
-		out.text,
-		new RegExp(`top: ${cssPxFromEmu(column.model.byId.b.frame.y)}px;`),
-	);
-	assert.match(
-		media[2],
-		new RegExp(`left: ${cssPxFromEmu(row.model.byId.b.frame.x)}px;`),
-	);
-	// The DOM is shared: one element per node, whatever the viewport.
-	assert.equal(out.text.match(/data-node="b"/g)?.length, 1);
-});
-
-test("a space with no single meaning exports one design and says why", async () => {
-	for (const [make, expected] of [
-		// Two positions for one panel: nothing in the document says which of
-		// them is the narrow screen.
-		[places, /no target has a mechanism/],
-		// A length token moves things; a stylesheet cannot re-derive a layout.
-		[rail, /Only a colour token exports as a theme/],
-		// Two variables at once.
-		[card, /2 variables differ/],
-	] as const) {
-		const scene = make();
-		const exploration = await explore(scene, directSolver, { limit: 24 });
-		const verdict = collapseSpace(scene, exploration.universes);
-		assert.ok("reason" in verdict, "expected a refusal");
-		assert.match(verdict.reason, expected);
-		// And it still exports: one design, with the reason attached.
-		const out = exportSpace(scene, exploration.universes, { target: "html" });
-		assert.equal(out.note, verdict.reason);
-		assert.match(out.text, /<div class="design">/);
-		assert.doesNotMatch(out.text, /@media/);
-	}
-});
-
-test("a collapsible space still exports as one design in SVG", async () => {
-	const scene = pair();
-	const exploration = await explore(scene, directSolver, { limit: 24 });
-	const out = exportSpace(scene, exploration.universes, { target: "svg" });
-	assert.match(out.note, /no media queries/);
-	assert.equal(out.text.match(/data-node="mHero"/g)?.length, 1);
-});
 
 /* ------------------------------------------------------------------ */
 /* A style is a class                                                  */
@@ -684,348 +296,15 @@ function block(text: string, selector: string): string | undefined {
 	return text.slice(from, text.indexOf("\n}", from));
 }
 
-test("a style comes out as a class, and only overrides stay on the node", async () => {
-	const scene = typography();
-	const exploration = await explore(scene, directSolver, { limit: 4 });
-	const out = exportUniverse(scene, exploration.universes[0], {
-		target: "html",
-		title: "typography",
-	});
 
-	// The class is the style, under the style's own name.
-	const prose = block(out.text, ":where(.prose)");
-	assert.ok(prose, "expected a .prose rule");
-	assert.match(prose, /font-family: system-ui/);
-	assert.match(prose, /font-size: 15px;/);
-	assert.match(prose, /font-weight: 450;/);
-	assert.match(prose, /line-height: 1.3;/);
 
-	// Every wearer points at it, and the class name is on the element beside its
-	// own — which is what makes the file editable rather than merely smaller.
-	assert.equal(out.text.match(/ prose"/g)?.length, 6);
 
-	// The title states its own size and weight, so those two declarations are on
-	// its rule and nowhere else. The paragraphs state nothing, so their rules
-	// hold no type at all.
-	const title = [...out.text.matchAll(/\.(n\d+) \{\n([^}]*)\}/g)];
-	const of = (id: string): string => {
-		const cls = new RegExp(`class="(n\\d+) prose" data-node="${id}"`).exec(out.text);
-		assert.ok(cls, `no element for ${id}`);
-		return title.find((m) => m[1] === cls[1])?.[2] ?? "";
-	};
-	assert.match(of("title"), /font-size: 34px;/);
-	assert.match(of("title"), /font-weight: 700;/);
-	assert.doesNotMatch(of("title"), /font-family|line-height/);
-	assert.doesNotMatch(of("deck"), /font-size|font-weight|font-family|line-height/);
 
-	// And SVG keeps inlining, which is the honest half of the same feature.
-	const svg = exportUniverse(scene, exploration.universes[0], { target: "svg" });
-	assert.doesNotMatch(svg.text, /class="prose"/);
-	assert.equal(svg.text.match(/font-size: 15px/g)?.length, 4);
-	assert.ok(
-		svg.lost.some((line) => /A style is not a class here/.test(line)),
-		"SVG has to say that it inlined the treatment",
-	);
-});
 
-test("a class holds the token a variant named, not the hex", async () => {
-	const scene = dressed([{ name: "Loud", parts: { ink: [ref("accent")][0] } }]);
-	const exploration = await explore(scene, directSolver, { limit: 4 });
-	const universe = exploration.universes[0];
-	const out = exportUniverse(scene, universe, { target: "html" });
-	assert.equal(block(out.text, ":where(.panel)"), "\tcolor: var(--accent);");
-	// The name stands for what the answer set drew, and for nothing else.
-	assert.match(out.text, new RegExp(`--accent: ${universe.model.byId.a.rendered.ink};`));
-});
 
-test("a class carries only what every wearer draws", async () => {
-	// A rectangle has corners and an ellipse has not, so a style holding a fill
-	// and a radius shares the fill and leaves the radius on the rectangle. A
-	// shared radius would round the ellipse's box, which the canvas does not.
-	const style: Style = {
-		id: "both",
-		name: "Both",
-		variants: [{ parts: { fill: lit("#abcdef"), radius: lit("12px") } }],
-	};
-	const scene: Scene = {
-		styles: [style],
-		machines: [],
-		tokens: starterTokens(),
-		nodes: [
-			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, [
-				wearing(rect("r", "R", [20, 20, 80, 40], {}), style.id),
-				wearing(
-					{ ...rect("e", "E", [20, 80, 80, 40], {}), kind: "ellipse" },
-					style.id,
-				),
-			]),
-		],
-		constraints: [],
-		rules: RULES_HEADER,
-	};
-	const exploration = await explore(scene, directSolver, { limit: 4 });
-	const out = exportUniverse(scene, exploration.universes[0], { target: "html" });
-	assert.equal(block(out.text, ":where(.both)"), "\tbackground-color: #abcdef;");
-	assert.equal(out.text.match(/background-color: #abcdef;/g)?.length, 1, "the fill is shared");
-	assert.equal(out.text.match(/border-radius: 12px;/g)?.length, 1, "the radius is not");
-	assert.match(out.text, /border-radius: 50%;/, "and the ellipse is still an ellipse");
 
-	// Two kinds with no styleable property in common share nothing, so there is
-	// no class at all rather than an empty one.
-	const apart: Scene = {
-		...scene,
-		styles: [{ ...style, id: "apart", name: "Apart" }],
-		nodes: [
-			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, [
-				wearing(text("t", "T", [20, 20, 200, 24], "Alpha", {}), "apart"),
-				wearing(rect("r", "R", [20, 60, 80, 40], {}), "apart"),
-			]),
-		],
-	};
-	const second = await explore(apart, directSolver, { limit: 4 });
-	const bare = exportUniverse(apart, second.universes[0], { target: "html" });
-	assert.equal(block(bare.text, ":where(.apart)"), undefined);
-	assert.doesNotMatch(bare.text, / apart"/);
-	assert.match(bare.text, /background-color: #abcdef;/, "the rectangle still takes its fill");
-});
 
-test("a wearer only the answer set names shares the class too", async () => {
-	// Wearing has two sources — `sty_doc/3` and anything a rule derives — and a
-	// class with one user was the old reading of the second. The document dresses
-	// two nodes; a rule dresses a third, and all three point at one block.
-	const base = dressed([{ parts: { ink: ref("accent"), size: lit("22px") } }]);
-	const scene: Scene = {
-		...base,
-		nodes: [
-			{
-				...base.nodes[0],
-				children: [
-					...(base.nodes[0].children ?? []),
-					text("c", "C", [20, 100, 200, 24], "Gamma", {}),
-				],
-			},
-		],
-		rules: `${RULES_HEADER}\nsty_wears(c,panel,ink). sty_wears(c,panel,size).\n`,
-	};
-	const exploration = await explore(scene, directSolver, { limit: 4 });
-	const out = exportUniverse(scene, exploration.universes[0], { target: "html" });
 
-	// One block, three elements pointing at it, and the token name survives
-	// because a wearer the document holds is the one that named it.
-	assert.equal(block(out.text, ":where(.panel)"), "\tcolor: var(--accent);\n\tfont-size: 22px;");
-	assert.equal(out.text.match(/ panel"/g)?.length, 3);
-	assert.equal(out.text.match(/font-size: 22px;/g)?.length, 1, "and it is shared, not repeated");
-	// The class is all the derived wearer's type: its own rule holds none of it.
-	const cls = /class="(n\d+) panel" data-node="c"/.exec(out.text);
-	assert.ok(cls, "the rule's wearer carries the class");
-	assert.doesNotMatch(block(out.text, `.${cls[1]}`) ?? "", /font-size|color:/);
-	assert.ok(
-		out.lost.some((line) => /Token names under \.panel/.test(line)),
-		"what a derived wearer cannot bring is the name, and the list says so",
-	);
-});
-
-test("universes that differ only by a style are one artefact with a breakpoint", async () => {
-	const scene = typography();
-	const exploration = await explore(scene, directSolver, { limit: 8 });
-	assert.equal(exploration.universes.length, 2);
-	const verdict = collapseSpace(scene, exploration.universes);
-	assert.ok(!("reason" in verdict), "expected the space to collapse");
-	assert.equal(verdict.kind, "breakpoint");
-	assert.equal(verdict.label, "Prose");
-	// Mobile first: the tighter treatment is the base, and the variants' own
-	// names are what the file calls them.
-	assert.match(verdict.note, /Compact below \d+px and Comfortable at or above it/);
-
-	const out = exportSpace(scene, exploration.universes, {
-		target: "html",
-		title: "typography",
-	});
-	const media = /@media \(min-width: (\d+)px\) \{\n([\s\S]*?)\n\}/.exec(out.text);
-	assert.ok(media, "expected a media query");
-	// One class redefinition is the whole of the switch — that is the claim.
-	assert.match(media[2], /:where\(\.prose\) \{/);
-	assert.match(media[2], /font-size: 18px;/);
-	assert.match(media[2], /font-weight: 400;/);
-	assert.match(media[2], /Georgia/);
-	// The DOM is shared, and a node that overrides the style does not move with
-	// the breakpoint: its own declaration is outside the query.
-	assert.equal(out.text.match(/data-node="title"/g)?.length, 1);
-	assert.doesNotMatch(media[2], /font-size: 34px/);
-	assert.ok(
-		out.lost.some((line) => /Every variant but two/.test(line)),
-		"a collapsed style holds both treatments, and the list has to say so",
-	);
-});
-
-test("a style that varies only in colour is a theme instead", async () => {
-	const scene = dressed([
-		{ name: "Day", parts: { ink: lit("#0f172a") } },
-		{ name: "Night", parts: { ink: lit("#f8fafc") } },
-	]);
-	const exploration = await explore(scene, directSolver, { limit: 8 });
-	assert.equal(exploration.universes.length, 2);
-	const verdict = collapseSpace(scene, exploration.universes);
-	assert.ok(!("reason" in verdict), "expected the space to collapse");
-	assert.equal(verdict.kind, "theme");
-	const out = exportSpace(scene, exploration.universes, { target: "html" });
-	// The light treatment is the base whatever order the solver enumerated in,
-	// and the dark one is the class under the preference.
-	assert.match(block(out.text, ":where(.panel)") ?? "", /color: #0f172a;/);
-	assert.match(
-		out.text,
-		/@media \(prefers-color-scheme: dark\) \{\n\t:where\(\.panel\) \{\n\t\tcolor: #f8fafc;/,
-	);
-	// Scoped, and still weightless: a node that overrode the treatment has to
-	// keep its own colour in the dark theme too.
-	assert.match(
-		out.text,
-		/:where\(\[data-theme="dark"\] \.panel\) \{\n\tcolor: #f8fafc;/,
-	);
-});
-
-test("a style with no size, or with sizes that disagree, is refused", async () => {
-	for (const [variants, expected, boxes] of [
-		// A weight is not a distance: nothing says which of two is the narrow
-		// screen, so this is the same refusal a bare token gets.
-		[
-			[
-				{ name: "Book", parts: { weight: lit("400") } },
-				{ name: "Bold", parts: { weight: lit("700") } },
-			],
-			/none of that is a size/,
-			false,
-		],
-		// One length grows where the other shrinks, so neither treatment is the
-		// tighter one.
-		[
-			[
-				{ name: "A", parts: { radius: lit("4px"), strokeWidth: lit("4px") } },
-				{ name: "B", parts: { radius: lit("8px"), strokeWidth: lit("2px") } },
-			],
-			/disagree about which treatment is the tighter one/,
-			true,
-		],
-	] as const) {
-		const scene = dressed(variants, boxes);
-		const exploration = await explore(scene, directSolver, { limit: 8 });
-		assert.equal(exploration.universes.length, 2);
-		const verdict = collapseSpace(scene, exploration.universes);
-		assert.ok("reason" in verdict, "expected a refusal");
-		assert.match(verdict.reason, expected);
-		// And it still exports one design, with the reason attached.
-		const out = exportSpace(scene, exploration.universes, { target: "html" });
-		assert.equal(out.note, verdict.reason);
-		assert.doesNotMatch(out.text, /@media/);
-	}
-});
-
-test("a line height is ordered by the leading it comes to, not by the ratio", async () => {
-	// The real responsive ramp: bigger type, tighter leading. Read as written,
-	// 1.5 -> 1.2 shrinks where 16px -> 24px grows, and the collapse would refuse
-	// a document that is the textbook case. Read as room on the page, 24px of
-	// leading becomes 28.8px and the two agree.
-	const ramp = dressed([
-		{ name: "Body", parts: { size: lit("16px"), lineHeight: lit("1.5") } },
-		{ name: "Display", parts: { size: lit("24px"), lineHeight: lit("1.2") } },
-	]);
-	const two = await explore(ramp, directSolver, { limit: 8 });
-	assert.equal(two.universes.length, 2);
-	const verdict = collapseSpace(ramp, two.universes);
-	assert.ok(!("reason" in verdict), `expected a collapse, got: ${JSON.stringify(verdict)}`);
-	assert.equal(verdict.kind, "breakpoint");
-	assert.match(verdict.note, /Body below \d+px and Display at or above it/);
-
-	// And a treatment whose only difference is the leading is orderable at all,
-	// which is the case the type table used to get wrong on its own: line height
-	// is a `number`, so nothing about it was a length.
-	const leading = dressed([
-		{ name: "Tight", parts: { lineHeight: lit("1.2") } },
-		{ name: "Airy", parts: { lineHeight: lit("1.8") } },
-	]);
-	const pair = await explore(leading, directSolver, { limit: 8 });
-	assert.equal(pair.universes.length, 2);
-	const collapsed = collapseSpace(leading, pair.universes);
-	assert.ok(!("reason" in collapsed), "a leading ramp is a ramp");
-	assert.match(collapsed.note, /Tight below \d+px and Airy at or above it/);
-	const out = exportSpace(leading, pair.universes, { target: "html" });
-	const media = /@media \(min-width: \d+px\) \{\n([\s\S]*?)\n\}/.exec(out.text);
-	assert.ok(media, "expected a media query");
-	assert.match(media[1], /line-height: 1.8;/);
-});
-
-test("a surface clips, in both targets", async () => {
-	// The child hangs over the frame's right edge, which the canvas clips.
-	const scene: Scene = {
-		styles: [],
-		machines: [],
-		tokens: starterTokens(),
-		nodes: [
-			frame("page", "Page", [0, 0, 200, 100], { fill: [ref("surface")] }, [
-				rect("over", "Over", [150, 10, 200, 40], { fill: [ref("accent")] }),
-			]),
-		],
-		constraints: [],
-		rules: RULES_HEADER,
-	};
-	assert.ok(KINDS.frame.surface);
-	const exploration = await explore(scene, directSolver, { limit: 1 });
-	const universe = exploration.universes[0];
-	// `clip` and not `hidden`, and the word is the assertion rather than an
-	// incidental spelling: the two paint the same picture and only one of them
-	// makes the frame a scroll container. See `paint.ts`'s `CLIP` — with `hidden`,
-	// a scroll-clocked timeline anywhere under this frame resolves its `view()`
-	// against the frame instead of the page and never advances at all.
-	assert.match(
-		exportUniverse(scene, universe, { target: "html" }).text,
-		/overflow: clip;/,
-	);
-	assert.match(
-		exportUniverse(scene, universe, { target: "svg" }).text,
-		/<clipPath id="clip0">/,
-	);
-});
-
-test("a document declares every property it would otherwise inherit", async () => {
-	// The claim DOCUMENT_BASE exists to make: a design looks the same wherever it
-	// is drawn, so nothing about its appearance may be left to the page around
-	// it. Read off the table rather than listed here, which is what would have
-	// caught line-height — declared by every text kind, and so invisible on the
-	// canvas, while an exported file took the browser's `normal`.
-	const inherited = PROP_NAMES.filter((prop) => PROPS[prop].inherited);
-	assert.ok(inherited.length > 0);
-	for (const prop of inherited) {
-		const paint = PAINT[prop];
-		assert.ok(paint, `${prop} inherits but paints nothing`);
-		for (const key of Object.keys(paint(PROPS[prop].fallback))) {
-			assert.ok(
-				key in DOCUMENT_BASE,
-				`${prop} reaches CSS as ${key}, which inherits, so the document has to say it`,
-			);
-		}
-	}
-	// And the other half: what it declares is what an exported file carries.
-	const scene: Scene = {
-		styles: [],
-		machines: [],
-		tokens: starterTokens(),
-		nodes: [frame("page", "Page", [0, 0, 200, 100], {}, [])],
-		constraints: [],
-		rules: RULES_HEADER,
-	};
-	const exploration = await explore(scene, directSolver, { limit: 1 });
-	const design = block(
-		exportUniverse(scene, exploration.universes[0], { target: "html" }).text,
-		".design",
-	);
-	assert.ok(design, "expected a .design rule");
-	for (const [key, value] of Object.entries(DOCUMENT_BASE)) {
-		assert.ok(
-			design.includes(`${cssName(key)}: ${value};`),
-			`.design is missing ${cssName(key)}`,
-		);
-	}
-});
 
 /* ------------------------------------------------------------------ */
 /* EMU stays inside                                                    */
@@ -1107,148 +386,9 @@ function inPixels(): Scene {
 	};
 }
 
-/**
- * The same document with every length respelled in `unit`.
- *
- * Length-typed only, and the table says which: a `weight` of `"400"` and a
- * `lineHeight` of `"1.35"` are bare numbers that `emuOf` would happily read as
- * pixels, and respelling either would be this helper inventing a design rather
- * than restating one. That is the same distinction the exporter's own
- * {@link cssValue} turns on, so the two agreeing is part of what is being
- * tested.
- */
-function respelled(scene: Scene, unit: Unit): Scene {
-	const say = (value: Value): Value =>
-		value.map((term) => {
-			if (term.kind !== "literal") return term;
-			const emu = emuOf(term.value);
-			return emu === undefined ? term : lit(formatLength(emu, unit));
-		});
-	const walk = (node: SceneNode): SceneNode => ({
-		...node,
-		frame: {
-			x: say(node.frame.x),
-			y: say(node.frame.y),
-			width: say(node.frame.width),
-			height: say(node.frame.height),
-		},
-		props: Object.fromEntries(
-			Object.entries(node.props).map(([prop, value]) => [
-				prop,
-				isLengthType(PROPS[prop as PropName].type) ? say(value) : value,
-			]),
-		),
-		...(node.children ? { children: node.children.map(walk) } : {}),
-	});
-	return {
-		...scene,
-		nodes: scene.nodes.map(walk),
-		tokens: scene.tokens.map((token) =>
-			isLengthType(token.type) ? { ...token, value: say(token.value) } : token,
-		),
-	};
-}
 
-test("a document in whole pixels comes out in whole pixels", async () => {
-	// The promise EMU is allowed to make: geometry is 1/914400 of an inch on the
-	// inside and the file is unchanged on the outside. Every number below is the
-	// one the document states, and none of them acquired a fraction on the way
-	// through the solver, the answer set and two emitters.
-	const scene = inPixels();
-	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
 
-	const html = exportUniverse(scene, universe, { target: "html" }).text;
-	assert.ok(block(html, ".n1")?.includes("left: 24px;"));
-	assert.ok(block(html, ".n1")?.includes("top: 12px;"));
-	assert.ok(block(html, ".n1")?.includes("width: 300px;"));
-	assert.ok(block(html, ".n1")?.includes("height: 120px;"));
-	// A length that names a token is the token, and the definition is pixels.
-	assert.ok(block(html, ".n1")?.includes("border-radius: var(--gutter);"));
-	assert.ok(block(html, ":root")?.includes("--gutter: 24px;"));
-	assert.ok(block(html, ".n1")?.includes("border-width: 6px;"));
-	assert.ok(block(html, ".n2")?.includes("font-size: 24px;"));
-	// The design's own box, which is the bounds of every root — and `block`
-	// would find BASE_CSS's `.design` first, so this one is matched whole.
-	assert.match(html, /\n\.design \{\n\twidth: 480px;\n\theight: 300px;\n\}/);
 
-	const svg = exportUniverse(scene, universe, { target: "svg" }).text;
-	assert.match(svg, /viewBox="0 0 480 300"/);
-	assert.match(svg, /<g transform="translate\(24,12\)" data-node="panel"/);
-	assert.match(svg, /<rect width="300" height="120"/);
-	// A diagonal's own arithmetic is in pixels too, barbs and all.
-	assert.match(svg, /data-node="rule"[\s\S]*?<line x1="0" y1="0" x2="300" y2="24"/);
-
-	// And the whole of it, rather than the numbers anyone thought to name: a
-	// fraction anywhere is a conversion that leaked.
-	for (const text of [html, svg]) {
-		for (const [, n] of text.matchAll(/(-?\d+(?:\.\d+)?)px/g)) {
-			assert.ok(Number.isInteger(Number(n)), `${n}px is not a whole pixel`);
-		}
-	}
-});
-
-test("the same design said in points is the same file", async () => {
-	// The other half of the same promise, and the sharper half. A document holds
-	// the unit its designer typed — 18pt stays 18pt on disk, which is the whole
-	// reason the storage form kept its suffixes — and an export must carry none
-	// of that: the file is the picture, the picture is identical, so the bytes
-	// are identical. Points because every whole pixel is exactly 0.75 of one, so
-	// the two documents can say the same design with nothing rounded.
-	const pixels = inPixels();
-	const points = respelled(pixels, "pt");
-	assert.notDeepEqual(points.nodes, pixels.nodes, "the documents differ, as they must");
-	assert.deepEqual(
-		findInTree(points.nodes, "panel")?.frame.x[0],
-		lit("18pt"),
-		"24px, in the unit the designer typed",
-	);
-	assert.deepEqual(
-		findInTree(points.nodes, "headline")?.props.lineHeight,
-		single("1.35"),
-		"a ratio is not a length and is left alone",
-	);
-
-	for (const target of EXPORT_TARGET_NAMES) {
-		const [a, b] = await Promise.all(
-			[pixels, points].map(async (scene) => {
-				const universe = (await explore(scene, directSolver, { limit: 1 }))
-					.universes[0];
-				return exportUniverse(scene, universe, { target, title: "units" }).text;
-			}),
-		);
-		assert.equal(a, b, `${target}: the unit a designer typed reached the file`);
-	}
-});
-
-test("a length no CSS unit spells reaches the canvas as pixels too", async () => {
-	// The literal `formatLength` falls back on when nothing says a value exactly.
-	// Typing `12.5` into a Radius field gives 119063 EMU — half a thousandth of a
-	// pixel off twelve and a half, and no CSS unit spells it — so the document
-	// records `"119063emu"`, which is a real spelling and not a corrupt one.
-	//
-	// `emu` is not CSS, and a browser drops a declaration it cannot parse in
-	// silence. Handed straight to the canvas the corner would simply not round,
-	// while the exporter converted and wrote the radius correctly: a property
-	// that paints differently in the two renderers, which is the one thing
-	// `paint.ts` exists to prevent. So both renderers are asked here, in one
-	// test, because the claim is about the two of them agreeing.
-	const emu = nearestEmu("12.5px");
-	assert.ok(emu !== undefined);
-	const radius = formatLength(emu, "px");
-	assert.equal(radius, "119063emu", "no CSS unit spells this value exactly");
-
-	assert.deepEqual(paintOf({ kind: "rect", rendered: { radius } }), {
-		borderRadius: "12.5001px",
-	});
-
-	const scene = inPixels();
-	const panel = findInTree(scene.nodes, "panel");
-	assert.ok(panel);
-	panel.props.radius = single(radius);
-	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
-	const html = exportUniverse(scene, universe, { target: "html" }).text;
-	assert.ok(block(html, ".n1")?.includes("border-radius: 12.5001px;"));
-});
 
 /* ------------------------------------------------------------------ */
 /* State machines, as selectors                                        */
@@ -1347,7 +487,7 @@ async function exported(scene: Scene, options: Partial<ExportOptions> = {}) {
 	assert.ok(universe, "expected at least one universe");
 	return {
 		universe,
-		out: exportUniverse(scene, universe, { target: "html", title: "m", ...options }),
+		out: await exportUniverse(scene, universe, htmlTarget, { title: "m", ...options }),
 	};
 }
 
@@ -1364,6 +504,771 @@ const hoverMachine = (delta: Record<string, StatePart>): Machine => ({
 		edge({ id: "in", from: "rest", to: "hover", trigger: "pointerenter" }),
 		edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
 	],
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* ------------------------------------------------------------------ */
+/* The ladder: layers, timelines and blends                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The rungs above a plain two-state machine, and the one thing they must not
+ * cost.
+ *
+ * Everything below runs through the real solver for the reason the states above
+ * it do, and one more: a layer's composite is a *rule* — `mwriter/4` decides
+ * which layer owns a property when two of them paint it — so "the cascade
+ * resolves a fight the same way the program does" is a claim about two
+ * mechanisms neither of which this file implements. Asserting it against a
+ * hand-built model would assert what the exporter believes about the encoding.
+ *
+ * The load-bearing assertion is still the first one in this file: **a hover pair
+ * leaves as a stylesheet with no behaviour in it.** Nothing here may make a
+ * document that needed no script need one, and the last test in this block is
+ * that promise held against a document with a second layer in it.
+ */
+
+/** A machine with two layers, each a rest state and one that paints the root. */
+function layered(spec: {
+	second: Value;
+	first?: Value;
+	states?: Record<string, string>;
+}): Machine {
+	return {
+		id: "m3",
+		name: "Stack",
+		root: "btn",
+		layers: [
+			{ id: "press", name: "Press" },
+			{ id: "glow", name: "Glow" },
+		],
+		states: [
+			{ id: "rest", name: "Rest", parts: {}, layer: "press" },
+			{
+				id: "down",
+				name: "Down",
+				parts: { btn: { props: { fill: spec.first ?? single("#111111") } } },
+				layer: "press",
+			},
+			{ id: "dark", name: "Dark", parts: {}, layer: "glow" },
+			{
+				id: "lit",
+				name: "Lit",
+				parts: { btn: { props: { fill: spec.second } } },
+				layer: "glow",
+			},
+		],
+		transitions: [
+			// A click toggle rather than a press pair, deliberately: a pointerdown /
+			// pointerup pair collapses to `:active` and this test is about the
+			// attribute the *first* layer writes when it needs one.
+			edge({ id: "d1", from: "rest", to: "down", trigger: "click" }),
+			edge({ id: "d2", from: "down", to: "rest", trigger: "click" }),
+			edge({ id: "g1", from: "dark", to: "lit", trigger: "click" }),
+			edge({ id: "g2", from: "lit", to: "dark", trigger: "click" }),
+		],
+	};
+}
+
+
+
+
+
+
+
+
+
+/** A machine whose `spin` state plays a timeline over the panel. */
+function timelined(spec: {
+	tracks: Track[];
+	length?: Value;
+	loop?: LoopMode;
+	drawnIn?: string;
+	exit?: Value;
+	/** What advances it — absent is wall time, which is every fixture but one. */
+	clock?: TimelineClock;
+}): Machine {
+	return {
+		id: "m5",
+		name: "Player",
+		root: "btn",
+		timelines: [
+			{
+				id: "w1",
+				name: "Sweep",
+				tracks: spec.tracks,
+				...(spec.length === undefined ? {} : { length: spec.length }),
+				...(spec.loop === undefined ? {} : { loop: spec.loop }),
+			},
+		],
+		states: [
+			{ id: "still", name: "Still", parts: {} },
+			{
+			id: "spin",
+			name: "Spin",
+			parts: {},
+			timeline: "w1",
+			...(spec.clock === undefined ? {} : { clock: spec.clock }),
+		},
+		],
+		transitions: [
+			edge({
+				id: "go",
+				from: "still",
+				to: "spin",
+				trigger: "click",
+				...(spec.exit === undefined ? {} : { exit: spec.exit }),
+			}),
+			edge({ id: "stop", from: "spin", to: "still", trigger: "click" }),
+		],
+	};
+}
+
+
+
+
+
+
+
+
+
+
+
+/* ------------------------------------------------------------------ */
+/* The third axis: what CSS answers exactly, and what it cannot answer */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Two claims, and they are opposite claims about the same feature.
+ *
+ * A flat box with a z and a lean is something CSS draws **exactly** — same
+ * origin, same order, same numbers as the canvas and the solver — so the test
+ * for it is an equality against the document's own arithmetic rather than a
+ * "looks about right". A *scene* is something CSS cannot draw at all, so the
+ * test for that one is that the emitter stops, that the rest of the page still
+ * comes out, and that the file says where to go instead.
+ *
+ * Both run through the real solver, because a `frame(N,z,V)` and a `turn(N,R,V)`
+ * are things the *program* derives — a node is only in the third axis where the
+ * gate opened, which is a property of the document as a whole — and a
+ * hand-written model would be a test of what this file believes about that gate.
+ */
+
+/** A page with a leaning card outside a 3D view, and a mesh inside one. */
+function spatial(): Scene {
+	return {
+		styles: [],
+		machines: [],
+		tokens: starterTokens(),
+		constraints: [],
+		rules: RULES_HEADER,
+		nodes: [
+			frame(
+				"page",
+				"Page",
+				[0, 0, 600, 400],
+				{ fill: single("#ffffff"), perspective: single("900px") },
+				[
+					{
+						...frame("stack", "Stack", [10, 10, 300, 200], {}, [
+							{
+								...rect("card", "Card", [20, 20, 120, 80], { fill: single("#3b82f6") }),
+								spatial: { z: single("24px"), depth: single("0px") },
+								turn: { rotateZ: single("15deg"), rotateY: single("30deg") },
+							},
+						]),
+						kind: "group" as const,
+					},
+					{
+						...frame("view", "Hero", [200, 20, 320, 240], { fill: single("#0b1020") }, [
+							{
+								...makeNode("mesh", at([0, 0, 100, 100]), { id: "cube", name: "Cube" }),
+								props: { solid: single("box"), fill: single("#ef4444") },
+							},
+							{
+								...makeNode("light", at([0, 0, 10, 10]), { id: "sun", name: "Sun" }),
+								props: { lamp: single("directional") },
+							},
+						]),
+						kind: "viewport" as const,
+					},
+				],
+			),
+		],
+	};
+}
+
+
+
+
+
+
+
+
+
+/* ------------------------------------------------------------------ */
+/* Images                                                              */
+/* ------------------------------------------------------------------ */
+
+
+const SRC = "/assets/hero.png";
+
+/** One artboard with one picture on it, sized as the decoder reported it. */
+function withPicture(fit?: Value): Scene {
+	const picture: SceneNode = {
+		...makeNode("image", { x: 0, y: 0, width: 800 * EMU_PER_PX, height: 600 * EMU_PER_PX }, {
+			id: "hero",
+			name: "Hero",
+		}),
+		image: { src: SRC, mimeType: "image/png", width: 800, height: 600 },
+		...(fit ? { props: { fit } } : {}),
+	};
+	return {
+		...card(),
+		nodes: [
+			{
+				...makeNode("frame", { x: 0, y: 0, width: 800 * EMU_PER_PX, height: 600 * EMU_PER_PX }, {
+					id: "page",
+					name: "Page",
+				}),
+				children: [picture],
+			},
+		],
+	};
+}
+
+
+
+
+/* ------------------------------------------------------------------ */
+/* The paint layer                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The direction a gradient runs, as the whole `background-image` it becomes.
+ *
+ * Read off the menu rather than typed out, because the recipe strings name
+ * `--gfrom` and `--gto` with fallbacks and there is exactly one place in this
+ * repo those two colours are spelled. A literal here would be a fourth spelling
+ * of white, and the failure it caused would look like the picture rather than
+ * like a bug.
+ */
+const LINEAR_DOWN = VALUE_TYPES.gradient.options?.[1].value ?? "none";
+
+/** One rectangle, painted however the caller asks, on a page of its own. */
+function painted(props: SceneNode["props"]): Scene {
+	return {
+		styles: [],
+		machines: [],
+		tokens: starterTokens(),
+		constraints: [],
+		rules: RULES_HEADER,
+		nodes: [
+			frame("page", "Page", [0, 0, 300, 200], { fill: [ref("surface")] }, [
+				rect("chip", "Chip", [20, 20, 160, 80], props),
+			]),
+		],
+	};
+}
+
+
+
+
+
+
+
+
+
+
+
+
+/* ------------------------------------------------------------------ */
+/* The face travels in the file                                        */
+/* ------------------------------------------------------------------ */
+
+
+
+
+
+
+
+
+
+/**
+ * The paint properties and a spring, in one state, on one node.
+ *
+ * The seam test between two features written a week apart. The gradient, the two
+ * blurs and the blend mode arrived as ordinary members of {@link PROPS}, and
+ * {@link StatePart.props} spans all of `PROPS` — so a hover that repaints a
+ * gradient is a sentence the document could always write, and nothing in the
+ * exporter was ever asked whether it could write it back out. Every machine
+ * fixture above moves exactly one property, which is the one width at which the
+ * `transition` shorthand's two spellings are the same characters.
+ *
+ * Six keys is also the point rather than a flourish: the defect this test was
+ * written to hold down was invisible at one and unmistakable at six.
+ */
+
+
+test("a fill that names accent comes out as var(--accent)", async () => {
+	const scene = card();
+	const exploration = await explore(scene, directSolver, { limit: 1 });
+	const universe = exploration.universes[0];
+	const out = await exportUniverse(scene, universe, htmlTarget, { title: "card" });
+	assert.match(out.text, /background-color: var\(--accent\);/);
+	// And the definition is the colour the answer set actually rendered.
+	const drawn = universe.model.byId.badge?.rendered.fill;
+	assert.ok(drawn);
+	assert.match(out.text, new RegExp(`--accent: ${drawn};`));
+	// Off, it is the hex and nothing else.
+	const plain = await exportUniverse(scene, universe, htmlTarget, {
+				tokens: false,
+	});
+	assert.doesNotMatch(plain.text, /var\(--/);
+	assert.match(plain.text, new RegExp(`background-color: ${drawn};`));
+});
+
+test("a dimension driven by a token comes out as the token", async () => {
+	const scene = parametric();
+	const exploration = await explore(scene, directSolver, { limit: 1 });
+	const out = await exportUniverse(scene, exploration.universes[0], htmlTarget, {});
+	assert.match(out.text, /width: var\(--panel-width\);/);
+	assert.match(out.text, /--panel-width: 180px;/);
+});
+
+test("a grid on something that is not a surface is not a grid to lose", async () => {
+	// The same question `compile()` asks before it emits `ggrid/1`: a grid stored
+	// on a rectangle is read rather than corrected on the way in, and says nothing
+	// to anybody. An export claiming to have dropped it would be claiming to have
+	// dropped something the document never had.
+	const scene = ruledPage(false);
+	const page = scene.nodes[0];
+	scene.nodes = [
+		{
+			...page,
+			children: [
+				{ ...page.children![0], guides: makeGuides({ columns: 12 }) },
+			],
+		},
+	];
+	const out = await exportUniverse(scene, await onlyUniverse(scene), htmlTarget, {});
+	assert.equal(
+		out.lost.some((l) => /^The grid\./.test(l)),
+		false,
+	);
+});
+
+test("universes that differ only by a colour token are one themed artefact", async () => {
+	const scene = pair();
+	const exploration = await explore(scene, directSolver, { limit: 24 });
+	assert.equal(exploration.universes.length, 3);
+	const verdict = collapseSpace(scene, exploration.universes);
+	assert.ok(!("reason" in verdict), "expected the space to collapse");
+	assert.equal(verdict.kind, "theme");
+	assert.equal(verdict.label, "accent");
+
+	const out = await exportSpace(scene, exploration.universes, htmlTarget, {
+				title: "pair",
+	});
+	// One artefact: every accent the space holds is in it, and each is a single
+	// custom-property redefinition rather than a second copy of the design.
+	const accents = exploration.universes.map((u) => u.model.byId.mHero?.rendered.fill);
+	for (const accent of accents) {
+		assert.ok(accent);
+		assert.match(out.text, new RegExp(`--accent: ${accent};`));
+	}
+	assert.equal(out.text.match(/data-node="mHero"/g)?.length, 1);
+	// Nothing but the accent moved, so nothing but the accent is overridden.
+	for (const block of out.text.matchAll(/\[data-theme="[^"]+"\] \{\n([^}]*)\}/g)) {
+		assert.match(block[1].trim(), /^--accent: #[0-9a-f]{6};$/);
+	}
+});
+
+test("two colours are light and dark; three are named themes", async () => {
+	// Two is the case a target has a convention for, so it gets one — and the
+	// attribute as well, because a preference is a default and not a decision.
+	const scene = withToken(pair().tokens, "accent", [lit("#3b82f6"), lit("#0b1220")]);
+	const two = { ...pair(), tokens: scene };
+	const exploration = await explore(two, directSolver, { limit: 24 });
+	assert.equal(exploration.universes.length, 2);
+	const out = await exportSpace(two, exploration.universes, htmlTarget, {});
+	assert.match(out.note, /prefers-color-scheme: dark/);
+	assert.match(out.text, /@media \(prefers-color-scheme: dark\) \{\n\t:root \{\n\t\t--accent: /);
+	assert.match(out.text, /\[data-theme="dark"\] \{\n\t--accent: /);
+	// Three colours have no light and dark to be, so no media query is claimed.
+	const three = await explore(pair(), directSolver, { limit: 24 });
+	const named = await exportSpace(pair(), three.universes, htmlTarget, {});
+	assert.doesNotMatch(named.text, /prefers-color-scheme/);
+	assert.match(named.text, /\[data-theme="alt-1"\]/);
+	assert.match(named.text, /\[data-theme="alt-2"\]/);
+});
+
+test("universes that differ only by direction are one artefact with a breakpoint", async () => {
+	const scene = flow();
+	const exploration = await explore(scene, directSolver, { limit: 24 });
+	assert.equal(exploration.universes.length, 2);
+	const verdict = collapseSpace(scene, exploration.universes);
+	assert.ok(!("reason" in verdict), "expected the space to collapse");
+	assert.equal(verdict.kind, "breakpoint");
+
+	const out = await exportSpace(scene, exploration.universes, htmlTarget, {});
+	const media = /@media \(min-width: (\d+)px\) \{\n([\s\S]*?)\n\}/.exec(out.text);
+	assert.ok(media, "expected a media query");
+
+	// Mobile first: the base is the column, and the query holds the row.
+	const column = exploration.universes.find(
+		(u) => u.model.byId.b.frame.x === u.model.byId.a.frame.x,
+	);
+	const row = exploration.universes.find(
+		(u) => u.model.byId.b.frame.x !== u.model.byId.a.frame.x,
+	);
+	assert.ok(column && row);
+	// The model is EMU and the stylesheet is pixels, so the two are held against
+	// each other through the one conversion. This used to compare a coordinate
+	// with itself, which was true of the numbers and said nothing about them.
+	assert.match(
+		out.text,
+		new RegExp(`top: ${cssPxFromEmu(column.model.byId.b.frame.y)}px;`),
+	);
+	assert.match(
+		media[2],
+		new RegExp(`left: ${cssPxFromEmu(row.model.byId.b.frame.x)}px;`),
+	);
+	// The DOM is shared: one element per node, whatever the viewport.
+	assert.equal(out.text.match(/data-node="b"/g)?.length, 1);
+});
+
+test("a space with no single meaning exports one design and says why", async () => {
+	for (const [make, expected] of [
+		// Two positions for one panel: nothing in the document says which of
+		// them is the narrow screen.
+		[places, /no target has a mechanism/],
+		// A length token moves things; a stylesheet cannot re-derive a layout.
+		[rail, /Only a colour token exports as a theme/],
+		// Two variables at once.
+		[card, /2 variables differ/],
+	] as const) {
+		const scene = make();
+		const exploration = await explore(scene, directSolver, { limit: 24 });
+		const verdict = collapseSpace(scene, exploration.universes);
+		assert.ok("reason" in verdict, "expected a refusal");
+		assert.match(verdict.reason, expected);
+		// And it still exports: one design, with the reason attached.
+		const out = await exportSpace(scene, exploration.universes, htmlTarget, {});
+		assert.equal(out.note, verdict.reason);
+		assert.match(out.text, /<div class="design">/);
+		assert.doesNotMatch(out.text, /@media/);
+	}
+});
+
+test("a class holds the token a variant named, not the hex", async () => {
+	const scene = dressed([{ name: "Loud", parts: { ink: [ref("accent")][0] } }]);
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const universe = exploration.universes[0];
+	const out = await exportUniverse(scene, universe, htmlTarget, {});
+	assert.equal(block(out.text, ":where(.panel)"), "\tcolor: var(--accent);");
+	// The name stands for what the answer set drew, and for nothing else.
+	assert.match(out.text, new RegExp(`--accent: ${universe.model.byId.a.rendered.ink};`));
+});
+
+test("a class carries only what every wearer draws", async () => {
+	// A rectangle has corners and an ellipse has not, so a style holding a fill
+	// and a radius shares the fill and leaves the radius on the rectangle. A
+	// shared radius would round the ellipse's box, which the canvas does not.
+	const style: Style = {
+		id: "both",
+		name: "Both",
+		variants: [{ parts: { fill: lit("#abcdef"), radius: lit("12px") } }],
+	};
+	const scene: Scene = {
+		styles: [style],
+		machines: [],
+		tokens: starterTokens(),
+		nodes: [
+			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, [
+				wearing(rect("r", "R", [20, 20, 80, 40], {}), style.id),
+				wearing(
+					{ ...rect("e", "E", [20, 80, 80, 40], {}), kind: "ellipse" },
+					style.id,
+				),
+			]),
+		],
+		constraints: [],
+		rules: RULES_HEADER,
+	};
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const out = await exportUniverse(scene, exploration.universes[0], htmlTarget, {});
+	assert.equal(block(out.text, ":where(.both)"), "\tbackground-color: #abcdef;");
+	assert.equal(out.text.match(/background-color: #abcdef;/g)?.length, 1, "the fill is shared");
+	assert.equal(out.text.match(/border-radius: 12px;/g)?.length, 1, "the radius is not");
+	assert.match(out.text, /border-radius: 50%;/, "and the ellipse is still an ellipse");
+
+	// Two kinds with no styleable property in common share nothing, so there is
+	// no class at all rather than an empty one.
+	const apart: Scene = {
+		...scene,
+		styles: [{ ...style, id: "apart", name: "Apart" }],
+		nodes: [
+			frame("page", "Page", [0, 0, 400, 200], { fill: [ref("surface")] }, [
+				wearing(text("t", "T", [20, 20, 200, 24], "Alpha", {}), "apart"),
+				wearing(rect("r", "R", [20, 60, 80, 40], {}), "apart"),
+			]),
+		],
+	};
+	const second = await explore(apart, directSolver, { limit: 4 });
+	const bare = await exportUniverse(apart, second.universes[0], htmlTarget, {});
+	assert.equal(block(bare.text, ":where(.apart)"), undefined);
+	assert.doesNotMatch(bare.text, / apart"/);
+	assert.match(bare.text, /background-color: #abcdef;/, "the rectangle still takes its fill");
+});
+
+test("a wearer only the answer set names shares the class too", async () => {
+	// Wearing has two sources — `sty_doc/3` and anything a rule derives — and a
+	// class with one user was the old reading of the second. The document dresses
+	// two nodes; a rule dresses a third, and all three point at one block.
+	const base = dressed([{ parts: { ink: ref("accent"), size: lit("22px") } }]);
+	const scene: Scene = {
+		...base,
+		nodes: [
+			{
+				...base.nodes[0],
+				children: [
+					...(base.nodes[0].children ?? []),
+					text("c", "C", [20, 100, 200, 24], "Gamma", {}),
+				],
+			},
+		],
+		rules: `${RULES_HEADER}\nsty_wears(c,panel,ink). sty_wears(c,panel,size).\n`,
+	};
+	const exploration = await explore(scene, directSolver, { limit: 4 });
+	const out = await exportUniverse(scene, exploration.universes[0], htmlTarget, {});
+
+	// One block, three elements pointing at it, and the token name survives
+	// because a wearer the document holds is the one that named it.
+	assert.equal(block(out.text, ":where(.panel)"), "\tcolor: var(--accent);\n\tfont-size: 22px;");
+	assert.equal(out.text.match(/ panel"/g)?.length, 3);
+	assert.equal(out.text.match(/font-size: 22px;/g)?.length, 1, "and it is shared, not repeated");
+	// The class is all the derived wearer's type: its own rule holds none of it.
+	const cls = /class="(n\d+) panel" data-node="c"/.exec(out.text);
+	assert.ok(cls, "the rule's wearer carries the class");
+	assert.doesNotMatch(block(out.text, `.${cls[1]}`) ?? "", /font-size|color:/);
+	assert.ok(
+		out.lost.some((line) => /Token names under \.panel/.test(line)),
+		"what a derived wearer cannot bring is the name, and the list says so",
+	);
+});
+
+test("universes that differ only by a style are one artefact with a breakpoint", async () => {
+	const scene = typography();
+	const exploration = await explore(scene, directSolver, { limit: 8 });
+	assert.equal(exploration.universes.length, 2);
+	const verdict = collapseSpace(scene, exploration.universes);
+	assert.ok(!("reason" in verdict), "expected the space to collapse");
+	assert.equal(verdict.kind, "breakpoint");
+	assert.equal(verdict.label, "Prose");
+	// Mobile first: the tighter treatment is the base, and the variants' own
+	// names are what the file calls them.
+	assert.match(verdict.note, /Compact below \d+px and Comfortable at or above it/);
+
+	const out = await exportSpace(scene, exploration.universes, htmlTarget, {
+				title: "typography",
+	});
+	const media = /@media \(min-width: (\d+)px\) \{\n([\s\S]*?)\n\}/.exec(out.text);
+	assert.ok(media, "expected a media query");
+	// One class redefinition is the whole of the switch — that is the claim.
+	assert.match(media[2], /:where\(\.prose\) \{/);
+	assert.match(media[2], /font-size: 18px;/);
+	assert.match(media[2], /font-weight: 400;/);
+	assert.match(media[2], /Georgia/);
+	// The DOM is shared, and a node that overrides the style does not move with
+	// the breakpoint: its own declaration is outside the query.
+	assert.equal(out.text.match(/data-node="title"/g)?.length, 1);
+	assert.doesNotMatch(media[2], /font-size: 34px/);
+	assert.ok(
+		out.lost.some((line) => /Every variant but two/.test(line)),
+		"a collapsed style holds both treatments, and the list has to say so",
+	);
+});
+
+test("a style that varies only in colour is a theme instead", async () => {
+	const scene = dressed([
+		{ name: "Day", parts: { ink: lit("#0f172a") } },
+		{ name: "Night", parts: { ink: lit("#f8fafc") } },
+	]);
+	const exploration = await explore(scene, directSolver, { limit: 8 });
+	assert.equal(exploration.universes.length, 2);
+	const verdict = collapseSpace(scene, exploration.universes);
+	assert.ok(!("reason" in verdict), "expected the space to collapse");
+	assert.equal(verdict.kind, "theme");
+	const out = await exportSpace(scene, exploration.universes, htmlTarget, {});
+	// The light treatment is the base whatever order the solver enumerated in,
+	// and the dark one is the class under the preference.
+	assert.match(block(out.text, ":where(.panel)") ?? "", /color: #0f172a;/);
+	assert.match(
+		out.text,
+		/@media \(prefers-color-scheme: dark\) \{\n\t:where\(\.panel\) \{\n\t\tcolor: #f8fafc;/,
+	);
+	// Scoped, and still weightless: a node that overrode the treatment has to
+	// keep its own colour in the dark theme too.
+	assert.match(
+		out.text,
+		/:where\(\[data-theme="dark"\] \.panel\) \{\n\tcolor: #f8fafc;/,
+	);
+});
+
+test("a style with no size, or with sizes that disagree, is refused", async () => {
+	for (const [variants, expected, boxes] of [
+		// A weight is not a distance: nothing says which of two is the narrow
+		// screen, so this is the same refusal a bare token gets.
+		[
+			[
+				{ name: "Book", parts: { weight: lit("400") } },
+				{ name: "Bold", parts: { weight: lit("700") } },
+			],
+			/none of that is a size/,
+			false,
+		],
+		// One length grows where the other shrinks, so neither treatment is the
+		// tighter one.
+		[
+			[
+				{ name: "A", parts: { radius: lit("4px"), strokeWidth: lit("4px") } },
+				{ name: "B", parts: { radius: lit("8px"), strokeWidth: lit("2px") } },
+			],
+			/disagree about which treatment is the tighter one/,
+			true,
+		],
+	] as const) {
+		const scene = dressed(variants, boxes);
+		const exploration = await explore(scene, directSolver, { limit: 8 });
+		assert.equal(exploration.universes.length, 2);
+		const verdict = collapseSpace(scene, exploration.universes);
+		assert.ok("reason" in verdict, "expected a refusal");
+		assert.match(verdict.reason, expected);
+		// And it still exports one design, with the reason attached.
+		const out = await exportSpace(scene, exploration.universes, htmlTarget, {});
+		assert.equal(out.note, verdict.reason);
+		assert.doesNotMatch(out.text, /@media/);
+	}
+});
+
+test("a line height is ordered by the leading it comes to, not by the ratio", async () => {
+	// The real responsive ramp: bigger type, tighter leading. Read as written,
+	// 1.5 -> 1.2 shrinks where 16px -> 24px grows, and the collapse would refuse
+	// a document that is the textbook case. Read as room on the page, 24px of
+	// leading becomes 28.8px and the two agree.
+	const ramp = dressed([
+		{ name: "Body", parts: { size: lit("16px"), lineHeight: lit("1.5") } },
+		{ name: "Display", parts: { size: lit("24px"), lineHeight: lit("1.2") } },
+	]);
+	const two = await explore(ramp, directSolver, { limit: 8 });
+	assert.equal(two.universes.length, 2);
+	const verdict = collapseSpace(ramp, two.universes);
+	assert.ok(!("reason" in verdict), `expected a collapse, got: ${JSON.stringify(verdict)}`);
+	assert.equal(verdict.kind, "breakpoint");
+	assert.match(verdict.note, /Body below \d+px and Display at or above it/);
+
+	// And a treatment whose only difference is the leading is orderable at all,
+	// which is the case the type table used to get wrong on its own: line height
+	// is a `number`, so nothing about it was a length.
+	const leading = dressed([
+		{ name: "Tight", parts: { lineHeight: lit("1.2") } },
+		{ name: "Airy", parts: { lineHeight: lit("1.8") } },
+	]);
+	const pair = await explore(leading, directSolver, { limit: 8 });
+	assert.equal(pair.universes.length, 2);
+	const collapsed = collapseSpace(leading, pair.universes);
+	assert.ok(!("reason" in collapsed), "a leading ramp is a ramp");
+	assert.match(collapsed.note, /Tight below \d+px and Airy at or above it/);
+	const out = await exportSpace(leading, pair.universes, htmlTarget, {});
+	const media = /@media \(min-width: \d+px\) \{\n([\s\S]*?)\n\}/.exec(out.text);
+	assert.ok(media, "expected a media query");
+	assert.match(media[1], /line-height: 1.8;/);
+});
+
+test("a document declares every property it would otherwise inherit", async () => {
+	// The claim DOCUMENT_BASE exists to make: a design looks the same wherever it
+	// is drawn, so nothing about its appearance may be left to the page around
+	// it. Read off the table rather than listed here, which is what would have
+	// caught line-height — declared by every text kind, and so invisible on the
+	// canvas, while an exported file took the browser's `normal`.
+	const inherited = PROP_NAMES.filter((prop) => PROPS[prop].inherited);
+	assert.ok(inherited.length > 0);
+	for (const prop of inherited) {
+		const paint = PAINT[prop];
+		assert.ok(paint, `${prop} inherits but paints nothing`);
+		for (const key of Object.keys(paint(PROPS[prop].fallback))) {
+			assert.ok(
+				key in DOCUMENT_BASE,
+				`${prop} reaches CSS as ${key}, which inherits, so the document has to say it`,
+			);
+		}
+	}
+	// And the other half: what it declares is what an exported file carries.
+	const scene: Scene = {
+		styles: [],
+		machines: [],
+		tokens: starterTokens(),
+		nodes: [frame("page", "Page", [0, 0, 200, 100], {}, [])],
+		constraints: [],
+		rules: RULES_HEADER,
+	};
+	const exploration = await explore(scene, directSolver, { limit: 1 });
+	const design = block(
+		(await exportUniverse(scene, exploration.universes[0], htmlTarget, {})).text,
+		".design",
+	);
+	assert.ok(design, "expected a .design rule");
+	for (const [key, value] of Object.entries(DOCUMENT_BASE)) {
+		assert.ok(
+			design.includes(`${cssName(key)}: ${value};`),
+			`.design is missing ${cssName(key)}`,
+		);
+	}
+});
+
+test("a length no CSS unit spells reaches the canvas as pixels too", async () => {
+	// The literal `formatLength` falls back on when nothing says a value exactly.
+	// Typing `12.5` into a Radius field gives 119063 EMU — half a thousandth of a
+	// pixel off twelve and a half, and no CSS unit spells it — so the document
+	// records `"119063emu"`, which is a real spelling and not a corrupt one.
+	//
+	// `emu` is not CSS, and a browser drops a declaration it cannot parse in
+	// silence. Handed straight to the canvas the corner would simply not round,
+	// while the exporter converted and wrote the radius correctly: a property
+	// that paints differently in the two renderers, which is the one thing
+	// `paint.ts` exists to prevent. So both renderers are asked here, in one
+	// test, because the claim is about the two of them agreeing.
+	const emu = nearestEmu("12.5px");
+	assert.ok(emu !== undefined);
+	const radius = formatLength(emu, "px");
+	assert.equal(radius, "119063emu", "no CSS unit spells this value exactly");
+
+	assert.deepEqual(paintOf({ kind: "rect", rendered: { radius } }), {
+		borderRadius: "12.5001px",
+	});
+
+	const scene = inPixels();
+	const panel = findInTree(scene.nodes, "panel");
+	assert.ok(panel);
+	panel.props.radius = single(radius);
+	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
+	const html = (await exportUniverse(scene, universe, htmlTarget, {})).text;
+	assert.ok(block(html, ".n1")?.includes("border-radius: 12.5001px;"));
 });
 
 test("a hover pair is a pseudo-class and no script at all", async () => {
@@ -1680,59 +1585,6 @@ test("a state that moves a drawn-geometry node is named as a loss, not emitted",
 	assert.equal(state, undefined, "no broken class for a shape that cannot move");
 });
 
-test("a document with no machine exports exactly what it did before", async () => {
-	// Byte identity against the same document with a machine that says nothing:
-	// an empty state materialises no part, so the program derives no copy and the
-	// file has nowhere to put one. This is the assertion that the feature costs a
-	// machine-less document nothing at all.
-	const bare = machined({ machines: [] });
-	const inert = machined({
-		machines: [
-			{
-				id: "m4",
-				name: "Quiet",
-				root: "btn",
-				states: [
-					{ id: "rest", name: "Rest", parts: {} },
-					{ id: "other", name: "Other", parts: {} },
-				],
-				transitions: [edge({ id: "t1", from: "rest", to: "other" })],
-			},
-		],
-	});
-	for (const target of EXPORT_TARGET_NAMES) {
-		const [a, b] = await Promise.all(
-			[bare, inert].map(async (scene) => {
-				const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
-				return exportUniverse(scene, universe, { target, title: "m" }).text;
-			}),
-		);
-		assert.equal(a, b, `${target}: a machine that says nothing changed the file`);
-	}
-	const { out } = await exported(bare);
-	assert.doesNotMatch(out.text, /<script/);
-	assert.doesNotMatch(out.text, /transition:/);
-	assert.doesNotMatch(out.text, /data-state/);
-});
-
-test("the SVG target says it carries no behaviour, and carries the drawn state", async () => {
-	const scene = machined({
-		machines: [hoverMachine({ btn: { props: { fill: single("#1d4ed8") } } })],
-	});
-	const exploration = await explore(scene, directSolver, { limit: 4 });
-	const out = exportUniverse(scene, exploration.universes[0], {
-		target: "svg",
-		title: "m",
-	});
-	assert.ok(
-		out.lost.some((line) => /^Behaviour\. An SVG has no states/.test(line)),
-		"the format's own loss is unconditional",
-	);
-	// The rest colour, and nothing of the hover one anywhere in the file.
-	assert.doesNotMatch(out.text, /#1d4ed8/);
-	assert.doesNotMatch(out.text, /<script/);
-});
-
 test("a theme and a machine compose, and neither eats the other", async () => {
 	// One colour token with two values is a theme; a hover pair is a state. They
 	// are separate mechanisms on purpose — see the note above `StateLayer` — and
@@ -1743,7 +1595,7 @@ test("a theme and a machine compose, and neither eats the other", async () => {
 	});
 	const exploration = await explore(scene, directSolver, { limit: 4 });
 	assert.equal(exploration.universes.length, 2, "two colours, and the machine adds none");
-	const out = exportSpace(scene, exploration.universes, { target: "html", title: "m" });
+	const out = await exportSpace(scene, exploration.universes, htmlTarget, { title: "m" });
 	assert.match(out.text, /@media \(prefers-color-scheme: dark\)/, "the theme survived");
 	assert.match(out.text, /:hover \./, "and so did the state");
 	// The transition on the base rule must not be unsaid inside the media query:
@@ -1832,69 +1684,6 @@ test("a pair CSS has no name for, or a state with a way out CSS cannot see, keep
 		assert.match(out.text, /<script>/);
 	}
 });
-
-/* ------------------------------------------------------------------ */
-/* The ladder: layers, timelines and blends                            */
-/* ------------------------------------------------------------------ */
-
-/**
- * The rungs above a plain two-state machine, and the one thing they must not
- * cost.
- *
- * Everything below runs through the real solver for the reason the states above
- * it do, and one more: a layer's composite is a *rule* — `mwriter/4` decides
- * which layer owns a property when two of them paint it — so "the cascade
- * resolves a fight the same way the program does" is a claim about two
- * mechanisms neither of which this file implements. Asserting it against a
- * hand-built model would assert what the exporter believes about the encoding.
- *
- * The load-bearing assertion is still the first one in this file: **a hover pair
- * leaves as a stylesheet with no behaviour in it.** Nothing here may make a
- * document that needed no script need one, and the last test in this block is
- * that promise held against a document with a second layer in it.
- */
-
-/** A machine with two layers, each a rest state and one that paints the root. */
-function layered(spec: {
-	second: Value;
-	first?: Value;
-	states?: Record<string, string>;
-}): Machine {
-	return {
-		id: "m3",
-		name: "Stack",
-		root: "btn",
-		layers: [
-			{ id: "press", name: "Press" },
-			{ id: "glow", name: "Glow" },
-		],
-		states: [
-			{ id: "rest", name: "Rest", parts: {}, layer: "press" },
-			{
-				id: "down",
-				name: "Down",
-				parts: { btn: { props: { fill: spec.first ?? single("#111111") } } },
-				layer: "press",
-			},
-			{ id: "dark", name: "Dark", parts: {}, layer: "glow" },
-			{
-				id: "lit",
-				name: "Lit",
-				parts: { btn: { props: { fill: spec.second } } },
-				layer: "glow",
-			},
-		],
-		transitions: [
-			// A click toggle rather than a press pair, deliberately: a pointerdown /
-			// pointerup pair collapses to `:active` and this test is about the
-			// attribute the *first* layer writes when it needs one.
-			edge({ id: "d1", from: "rest", to: "down", trigger: "click" }),
-			edge({ id: "d2", from: "down", to: "rest", trigger: "click" }),
-			edge({ id: "g1", from: "dark", to: "lit", trigger: "click" }),
-			edge({ id: "g2", from: "lit", to: "dark", trigger: "click" }),
-		],
-	};
-}
 
 test("a second layer switches on its own attribute, and the first still switches on data-state", async () => {
 	const scene = machined({ machines: [layered({ second: single("#22c55e") })] });
@@ -2228,11 +2017,11 @@ test("a curve token's two alternatives are two files", async () => {
 	});
 	const exploration = await explore(scene, directSolver, { limit: 8 });
 	assert.equal(exploration.universes.length, 2, "the token really branches the space");
-	const written = exploration.universes.map((universe) => {
-		const text = exportUniverse(scene, universe, { target: "html", title: "m" }).text;
+	const written = await Promise.all(exploration.universes.map(async (universe) => {
+		const text = (await exportUniverse(scene, universe, htmlTarget, { title: "m" })).text;
 		const base = block(text, `.${className(text, "inst(b1,btn)")}`);
 		return /transition: [^;]*;/.exec(base ?? "")?.[0];
-	});
+	}));
 	assert.deepEqual(
 		written.sort(),
 		[
@@ -2241,52 +2030,6 @@ test("a curve token's two alternatives are two files", async () => {
 		],
 	);
 });
-
-/** A machine whose `spin` state plays a timeline over the panel. */
-function timelined(spec: {
-	tracks: Track[];
-	length?: Value;
-	loop?: LoopMode;
-	drawnIn?: string;
-	exit?: Value;
-	/** What advances it — absent is wall time, which is every fixture but one. */
-	clock?: TimelineClock;
-}): Machine {
-	return {
-		id: "m5",
-		name: "Player",
-		root: "btn",
-		timelines: [
-			{
-				id: "w1",
-				name: "Sweep",
-				tracks: spec.tracks,
-				...(spec.length === undefined ? {} : { length: spec.length }),
-				...(spec.loop === undefined ? {} : { loop: spec.loop }),
-			},
-		],
-		states: [
-			{ id: "still", name: "Still", parts: {} },
-			{
-			id: "spin",
-			name: "Spin",
-			parts: {},
-			timeline: "w1",
-			...(spec.clock === undefined ? {} : { clock: spec.clock }),
-		},
-		],
-		transitions: [
-			edge({
-				id: "go",
-				from: "still",
-				to: "spin",
-				trigger: "click",
-				...(spec.exit === undefined ? {} : { exit: spec.exit }),
-			}),
-			edge({ id: "stop", from: "spin", to: "still", trigger: "click" }),
-		],
-	};
-}
 
 test("a timeline comes out as @keyframes, and the state that plays it turns it on", async () => {
 	const scene = machined({
@@ -2751,70 +2494,6 @@ test("an exit time is in the script and says it is not in the CSS", async () => 
 	assert.ok(script.includes('"exit":300'), "the gate is in the emitted table");
 });
 
-/* ------------------------------------------------------------------ */
-/* The third axis: what CSS answers exactly, and what it cannot answer */
-/* ------------------------------------------------------------------ */
-
-/**
- * Two claims, and they are opposite claims about the same feature.
- *
- * A flat box with a z and a lean is something CSS draws **exactly** — same
- * origin, same order, same numbers as the canvas and the solver — so the test
- * for it is an equality against the document's own arithmetic rather than a
- * "looks about right". A *scene* is something CSS cannot draw at all, so the
- * test for that one is that the emitter stops, that the rest of the page still
- * comes out, and that the file says where to go instead.
- *
- * Both run through the real solver, because a `frame(N,z,V)` and a `turn(N,R,V)`
- * are things the *program* derives — a node is only in the third axis where the
- * gate opened, which is a property of the document as a whole — and a
- * hand-written model would be a test of what this file believes about that gate.
- */
-
-/** A page with a leaning card outside a 3D view, and a mesh inside one. */
-function spatial(): Scene {
-	return {
-		styles: [],
-		machines: [],
-		tokens: starterTokens(),
-		constraints: [],
-		rules: RULES_HEADER,
-		nodes: [
-			frame(
-				"page",
-				"Page",
-				[0, 0, 600, 400],
-				{ fill: single("#ffffff"), perspective: single("900px") },
-				[
-					{
-						...frame("stack", "Stack", [10, 10, 300, 200], {}, [
-							{
-								...rect("card", "Card", [20, 20, 120, 80], { fill: single("#3b82f6") }),
-								spatial: { z: single("24px"), depth: single("0px") },
-								turn: { rotateZ: single("15deg"), rotateY: single("30deg") },
-							},
-						]),
-						kind: "group" as const,
-					},
-					{
-						...frame("view", "Hero", [200, 20, 320, 240], { fill: single("#0b1020") }, [
-							{
-								...makeNode("mesh", at([0, 0, 100, 100]), { id: "cube", name: "Cube" }),
-								props: { solid: single("box"), fill: single("#ef4444") },
-							},
-							{
-								...makeNode("light", at([0, 0, 10, 10]), { id: "sun", name: "Sun" }),
-								props: { lamp: single("directional") },
-							},
-						]),
-						kind: "viewport" as const,
-					},
-				],
-			),
-		],
-	};
-}
-
 test("a flat box with a z and a lean exports as a real CSS 3D transform", async () => {
 	const scene = spatial();
 	const { out } = await exported(scene);
@@ -2870,50 +2549,12 @@ test("a rotation in the plane needs no perspective and no preserve-3d", async ()
 	assert.doesNotMatch(block(out.text, `.${className(out.text, "page")}`) ?? "", /perspective/);
 });
 
-test("a 3D view exports as its own box, and the page exports around it", async () => {
-	const scene = spatial();
-	const { out } = await exported(scene);
-
-	// The box is there, with its own fill, and it is selectable like anything else.
-	const view = className(out.text, "view");
-	assert.match(out.text, new RegExp(`<div class="${view}" data-node="view" data-kind="viewport">`));
-	assert.match(block(out.text, `.${view}`) ?? "", /background-color: #0b1020;/);
-	// And nothing inside it is markup, because a subtree of empty divs is not a
-	// partial answer to a scene.
-	assert.doesNotMatch(out.text, /data-node="cube"/);
-	assert.doesNotMatch(out.text, /data-node="sun"/);
-	// The rest of the page is unaffected — this is the "exports around it" half.
-	assert.match(out.text, /data-node="card"/);
-
-	const said = out.lost.find((line) => line.includes("3D view “Hero”"));
-	assert.ok(said, `expected a loss naming the view, got ${JSON.stringify(out.lost)}`);
-	assert.match(said, /the 2 objects inside this view are not in it/);
-	// And the way out is named, and it names *where*. This assertion is worth
-	// more than it looks: `ExportTarget` is "html" | "svg" and there is no glTF
-	// target in this package, so a sentence reading "export the viewport as glTF"
-	// pointed a designer at a menu entry the tool did not have. The writer lives
-	// in `canvas-3d` and the export panel offers it as a third format, which is
-	// what the sentence now says.
-	assert.match(said, /Choose glTF in this panel/);
-
-	// SVG says it once, about the format, and draws the same rectangle.
-	const flat = exportUniverse(scene, (await explore(scene, directSolver, { limit: 1 })).universes[0], {
-		target: "svg",
-		title: "s",
-	});
-	assert.match(flat.text, /data-node="view"/);
-	assert.doesNotMatch(flat.text, /data-node="cube"/);
-	assert.ok(flat.lost.some((line) => line.startsWith("Three dimensions.")));
-	assert.ok(flat.lost.some((line) => line.startsWith("Inputs, guards and timelines.")));
-});
-
 test("a poster puts the frame the canvas drew behind the view's own fill", async () => {
 	const scene = spatial();
 	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
 	const url = "data:image/png;base64,iVBORw0KGgo=";
-	const out = exportUniverse(scene, universe, {
-		target: "html",
-		title: "p",
+	const out = await exportUniverse(scene, universe, htmlTarget, {
+				title: "p",
 		posters: { view: url },
 	});
 	const view = block(out.text, `.${className(out.text, "view")}`);
@@ -3065,107 +2706,13 @@ test("a keyframe past the end of its timeline is held at the end, and the file s
 	assert.ok(out.lost.some((line) => line.includes("land on the same whole percentage")));
 });
 
-/* ------------------------------------------------------------------ */
-/* Images                                                              */
-/* ------------------------------------------------------------------ */
-
-/** A one-pixel PNG, as the bytes a file would actually hold. */
-const PNG = Uint8Array.from([
-	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
-	0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
-	0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
-]);
-
-const SRC = "/assets/hero.png";
-
-/** One artboard with one picture on it, sized as the decoder reported it. */
-function withPicture(fit?: Value): Scene {
-	const picture: SceneNode = {
-		...makeNode("image", { x: 0, y: 0, width: 800 * EMU_PER_PX, height: 600 * EMU_PER_PX }, {
-			id: "hero",
-			name: "Hero",
-		}),
-		image: { src: SRC, mimeType: "image/png", width: 800, height: 600 },
-		...(fit ? { props: { fit } } : {}),
-	};
-	return {
-		...card(),
-		nodes: [
-			{
-				...makeNode("frame", { x: 0, y: 0, width: 800 * EMU_PER_PX, height: 600 * EMU_PER_PX }, {
-					id: "page",
-					name: "Page",
-				}),
-				children: [picture],
-			},
-		],
-	};
-}
-
-test("a picture comes out inlined, in both targets", async () => {
-	const scene = withPicture();
-	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
-
-	const html = exportUniverse(scene, universe, {
-		target: "html",
-		images: { [SRC]: PNG },
-	});
-	// An `<img>`, not a background: an image is content, it takes the box's own
-	// border-radius, and a page it is pasted into keeps an element to select.
-	assert.match(html.text, /<img src="data:image\/png;base64,[A-Za-z0-9+/=]+" alt="" draggable="false"\/>/);
-	// The media type is read off the path's extension, and the bytes round-trip.
-	const encoded = html.text.match(/base64,([A-Za-z0-9+/=]+)"/)?.[1];
-	assert.ok(encoded);
-	assert.deepEqual(
-		Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)),
-		PNG,
-	);
-
-	const svg = exportUniverse(scene, universe, {
-		target: "svg",
-		images: { [SRC]: PNG },
-	});
-	assert.match(svg.text, /<image [^>]*href="data:image\/png;base64,/);
-	// Neither target reports a loss when the bytes were there.
-	assert.equal(
-		[...html.lost, ...svg.lost].some((l) => l.includes(SRC)),
-		false,
-	);
-});
-
-test("fit maps onto the two targets' own words for it", async () => {
-	const universe = async (fit: Value) => {
-		const scene = withPicture(fit);
-		const u = (await explore(scene, directSolver, { limit: 1 })).universes[0];
-		return {
-			html: exportUniverse(scene, u, { target: "html", images: { [SRC]: PNG } }).text,
-			svg: exportUniverse(scene, u, { target: "svg", images: { [SRC]: PNG } }).text,
-		};
-	};
-	// The mapping is exact rather than nearly: slice crops to fill, meet
-	// letterboxes, none stretches — so the two files show the same picture.
-	const cover = await universe(single("cover"));
-	assert.match(cover.html, /object-fit: cover/);
-	assert.match(cover.svg, /preserveAspectRatio="xMidYMid slice"/);
-
-	const contain = await universe(single("contain"));
-	assert.match(contain.html, /object-fit: contain/);
-	assert.match(contain.svg, /preserveAspectRatio="xMidYMid meet"/);
-
-	// `stretch` is the designer's word; CSS calls it `fill` and SVG calls it
-	// `none`, and neither of those is a word anybody would pick from a menu.
-	const stretch = await universe(single("stretch"));
-	assert.match(stretch.html, /object-fit: fill/);
-	assert.match(stretch.svg, /preserveAspectRatio="none"/);
-});
-
 test("a picture whose bytes were not handed over says so rather than going blank", async () => {
 	// The real case: a shared project whose assets are still syncing. The node is
 	// still in the file at its size — that is the right picture for a design
 	// whose file has not arrived — and what must not happen is silence.
 	const scene = withPicture();
 	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
-	const out = exportUniverse(scene, universe, { target: "html" });
+	const out = await exportUniverse(scene, universe, htmlTarget, {});
 
 	assert.doesNotMatch(out.text, /<img/);
 	// The box is still there, and still the size the picture is.
@@ -3174,37 +2721,6 @@ test("a picture whose bytes were not handed over says so rather than going blank
 	assert.equal(named.length, 1, "named once, by the path to go and find");
 	assert.match(named[0], /Hero/);
 });
-
-/* ------------------------------------------------------------------ */
-/* The paint layer                                                     */
-/* ------------------------------------------------------------------ */
-
-/**
- * The direction a gradient runs, as the whole `background-image` it becomes.
- *
- * Read off the menu rather than typed out, because the recipe strings name
- * `--gfrom` and `--gto` with fallbacks and there is exactly one place in this
- * repo those two colours are spelled. A literal here would be a fourth spelling
- * of white, and the failure it caused would look like the picture rather than
- * like a bug.
- */
-const LINEAR_DOWN = VALUE_TYPES.gradient.options?.[1].value ?? "none";
-
-/** One rectangle, painted however the caller asks, on a page of its own. */
-function painted(props: SceneNode["props"]): Scene {
-	return {
-		styles: [],
-		machines: [],
-		tokens: starterTokens(),
-		constraints: [],
-		rules: RULES_HEADER,
-		nodes: [
-			frame("page", "Page", [0, 0, 300, 200], { fill: [ref("surface")] }, [
-				rect("chip", "Chip", [20, 20, 160, 80], props),
-			]),
-		],
-	};
-}
 
 test("a gradient reaches the file over the fill, with both names kept", async () => {
 	// The whole of the split in one rule: a colour underneath, an image over it,
@@ -3270,102 +2786,6 @@ test("a direction on its own reaches the file, and writes no colour nobody chose
 	assert.match(chip, new RegExp(`var\\(--gfrom, ${GRADIENT_FROM}\\)`));
 	assert.match(chip, new RegExp(`var\\(--gto, ${GRADIENT_TO}\\)`));
 	assert.doesNotMatch(chip, /--gfrom:/, "and it wrote no colour nobody chose");
-});
-
-test("the document isolates itself", async () => {
-	// A mix mode blends against everything painted below it in the nearest
-	// isolation group, and without one that group is whatever page the file was
-	// pasted into. Both targets carry it and both carry it unconditionally: a
-	// document with no mix mode in it composites identically either way, and a
-	// declaration that appeared only sometimes would be a file whose shape
-	// depended on a property nobody can see in it.
-	const scene = painted({ fill: single("#abcdef"), mix: single("multiply") });
-	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
-
-	const html = exportUniverse(scene, universe, { target: "html" }).text;
-	assert.match(block(html, ".design") ?? "", /isolation: isolate;/);
-
-	const svg = exportUniverse(scene, universe, { target: "svg" }).text;
-	assert.match(svg, /<svg [^>]*style="isolation: isolate"/);
-});
-
-test("an SVG keeps a mix mode", async () => {
-	// Carried rather than dropped, because CSS Compositing applies to SVG and the
-	// rasterisers this target is written for implement it. Dropping something
-	// that works would be the same lie as approximating something that does not,
-	// in the other direction — which is why `svg.loses` has no sentence about it.
-	const scene = painted({ fill: single("#abcdef"), mix: single("multiply") });
-	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
-	const out = exportUniverse(scene, universe, { target: "svg" });
-	assert.match(out.text, /mix-blend-mode: multiply/);
-	assert.equal(
-		out.lost.some((l) => /blend/i.test(l)),
-		false,
-		"nothing was lost, so nothing is claimed to have been",
-	);
-});
-
-test("an SVG flattens a gradient rather than losing the shape", async () => {
-	// **The guard against a black rectangle.** A rect whose fill has been cleared
-	// and whose whole paint is a gradient would, if the gradient were simply
-	// dropped, emit no `fill` at all — and an SVG shape with no fill is black.
-	// That is not a loss, it is a wrong picture, and it is the class of failure
-	// this repo has already paid for once.
-	const scene = painted({
-		gradient: single(LINEAR_DOWN),
-		gradientFrom: single("#7c3aed"),
-		gradientTo: single("#0f172a"),
-		blur: single("6px"),
-		backdropBlur: single("10px"),
-	});
-	const universe = (await explore(scene, directSolver, { limit: 1 })).universes[0];
-	const svg = exportUniverse(scene, universe, { target: "svg" }).text;
-
-	assert.match(svg, /fill: #7c3aed/, "flattened to the colour it starts from");
-	assert.doesNotMatch(svg, /linear-gradient/);
-	assert.doesNotMatch(svg, /filter:/);
-	assert.doesNotMatch(svg, /backdrop-filter:/);
-
-	// And a direction set back to None leaves the flat fill alone, which is what
-	// the canvas shows: the guard is on the recipe, not on the colours.
-	const off = painted({
-		fill: single("#abcdef"),
-		gradient: single("none"),
-		gradientFrom: single("#7c3aed"),
-	});
-	const flat = (await explore(off, directSolver, { limit: 1 })).universes[0];
-	assert.match(
-		exportUniverse(off, flat, { target: "svg" }).text,
-		/fill: #abcdef/,
-	);
-
-	// And a gradient whose first colour names a token flattens to the colour
-	// rather than to the token, which makes it the one value in this target
-	// written as what the answer set drew instead of as what the document said.
-	// The difference is not tidiness: naming the token here would claim the file
-	// carries a gradient, and what it carries is a flat fill.
-	const named = painted({
-		gradient: single(LINEAR_DOWN),
-		gradientFrom: [ref("accent")],
-	});
-	const chosen = (await explore(named, directSolver, { limit: 1 })).universes[0];
-	const drawn = chosen.model.byId.chip?.rendered.gradientFrom;
-	assert.ok(drawn, "expected the answer set to have chosen a colour");
-	const svgNamed = exportUniverse(named, chosen, { target: "svg" }).text;
-	assert.match(svgNamed, new RegExp(`fill: ${drawn}`));
-	assert.doesNotMatch(svgNamed, /fill: var\(--accent\)/);
-});
-
-test("the SVG target says what it dropped", () => {
-	const svg = EXPORT_TARGETS.svg.loses;
-	assert.equal(svg.filter((l) => /[Gg]radients are flattened/.test(l)).length, 1);
-	assert.equal(svg.filter((l) => /[Bb]lur is dropped/.test(l)).length, 1);
-	// And the HTML target gained nothing, because it carries all four features
-	// exactly. A loss list that pads itself is one nobody finishes reading.
-	assert.equal(
-		EXPORT_TARGETS.html.loses.some((l) => /gradient|blur|blend/i.test(l)),
-		false,
-	);
 });
 
 test("blur is a length like any other, so no EMU escapes", async () => {
@@ -3555,10 +2975,6 @@ test("a style can own the whole sheen", async () => {
 	assert.equal(out.text.match(/filter: blur\(2px\);/g)?.length, 1);
 });
 
-/* ------------------------------------------------------------------ */
-/* The face travels in the file                                        */
-/* ------------------------------------------------------------------ */
-
 test("a design that sets text in an imported font carries the face", async () => {
 	const { out } = await exported(typeset(), { fonts: { [INTER_FILE.src]: FACE } });
 	assert.match(out.text, /@font-face \{/);
@@ -3616,9 +3032,8 @@ test("a family used only in the second collapsed universe is still in the file",
 	};
 	const exploration = await explore(styled, directSolver, { limit: 8 });
 	assert.ok(exploration.universes.length > 1);
-	const whole = exportSpace(styled, exploration.universes, {
-		target: "html",
-		fonts: { [INTER_FILE.src]: FACE },
+	const whole = await exportSpace(styled, exploration.universes, htmlTarget, {
+				fonts: { [INTER_FILE.src]: FACE },
 	});
 	assert.match(whole.text, /@font-face/);
 	assert.match(whole.text, /font-family: "Inter Var";/);
@@ -3651,51 +3066,21 @@ test("the size note names the families and the kilobytes", async () => {
 	assert.match(note, /160 kB/);
 });
 
-test("an SVG names the family and carries no face", async () => {
-	const { out } = await exported(typeset(), {
-		target: "svg",
-		fonts: { [INTER_FILE.src]: FACE },
-	});
-	assert.doesNotMatch(out.text, /@font-face/);
-	assert.doesNotMatch(out.text, /base64/);
-	assert.match(out.text, /Inter Var/, "the family is named; the face is not here");
-	assert.ok(
-		out.lost.some((line) => line.startsWith("A font you imported is not in this file.")),
-		"the format's own sentence, unconditional like its neighbours",
-	);
-});
-
 test("a document with no imported fonts exports exactly what it exported before", async () => {
 	// The regression that keeps the four system stacks where they were: a scene
 	// with no roster must not gain a byte, whichever way the option is spelled.
 	const scene = typography();
 	const exploration = await explore(scene, directSolver, { limit: 1 });
 	const universe = exploration.universes[0];
-	const bare = exportUniverse(scene, universe, { target: "html" });
-	const offered = exportUniverse(scene, universe, {
-		target: "html",
-		fonts: { "/assets/InterVariable.woff2": FACE },
+	const bare = await exportUniverse(scene, universe, htmlTarget, {});
+	const offered = await exportUniverse(scene, universe, htmlTarget, {
+				fonts: { "/assets/InterVariable.woff2": FACE },
 	});
 	assert.equal(offered.text, bare.text);
 	assert.deepEqual(offered.lost, bare.lost);
 	assert.doesNotMatch(bare.text, /@font-face/);
 });
 
-
-/**
- * The paint properties and a spring, in one state, on one node.
- *
- * The seam test between two features written a week apart. The gradient, the two
- * blurs and the blend mode arrived as ordinary members of {@link PROPS}, and
- * {@link StatePart.props} spans all of `PROPS` — so a hover that repaints a
- * gradient is a sentence the document could always write, and nothing in the
- * exporter was ever asked whether it could write it back out. Every machine
- * fixture above moves exactly one property, which is the one width at which the
- * `transition` shorthand's two spellings are the same characters.
- *
- * Six keys is also the point rather than a flourish: the defect this test was
- * written to hold down was invisible at one and unmistakable at six.
- */
 test("a state that repaints a gradient, both blurs and a blend mode paces all of them", async () => {
 	const scene = machined({
 		machines: [

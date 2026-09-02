@@ -36,23 +36,23 @@
  *
  * ## Where the loss list comes from
  *
- * Not from here. `docs/merged-plan.md` M12 puts a `gltf` entry in
- * `EXPORT_TARGETS` with the sentences `docs/three-d-spec.md` §10.3 froze, and
- * that step has not landed. So {@link gltfTarget} **reads `EXPORT_TARGETS.gltf`
- * and falls back to those frozen sentences** — the day M12 lands, the fallback
- * stops being reached and design-core is the single source, with nothing here to
- * edit. The five sentences every export loses whatever the target
- * (`export.ts`'s `ALWAYS_LOST`) are *not* repeated here, because repeating a
- * private constant is exactly the second loss list this must not become: they
- * are `exportUniverse`'s to prepend once `gltf` is one of its targets. Until
- * then a caller showing this list shows those beside it. **Outstanding
- * hand-off.**
+ * Not from here, and the hand-off this paragraph used to describe as
+ * outstanding has landed. What is here writes only the sentences about *this
+ * document* — a payload that could not be found, a primitive that could not be
+ * read. The sentences about the *format* live in `@clingo-design/export-gltf`'s
+ * `TargetSpec.loses`, and the five that every export loses whatever the target
+ * live in `@clingo-design/export-core`, and the driver prepends both.
+ *
+ * That is the same division `export-html` and `export-svg` have, and glTF gets
+ * it for the same reason they do: it is an ordinary target now rather than a
+ * writer the panel special-cased. `gltfTarget()` used to read
+ * `EXPORT_TARGETS.gltf` through a widened record and fall back to its own copy,
+ * because `ExportTarget` was `"html" | "svg"` and the key did not typecheck.
+ * There is no union to be missing from any more.
  */
 import {
 	type ModelNode,
 	type ModelScene,
-	type TargetSpec,
-	EXPORT_TARGETS,
 	boxOf3,
 } from "@clingo-design/design-core";
 import {
@@ -96,43 +96,7 @@ import { emuFromWorld, worldEuler } from "./units3.ts";
 /* The target                                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * What a glTF cannot carry, in `EXPORT_TARGETS`'s own shape.
- *
- * Typed as a {@link TargetSpec} rather than as a bag of strings so that the day
- * M12 adds `gltf` to `ExportTarget` this constant is a drop-in for the entry it
- * writes, and so that a sentence changed upstream and not here is a diff rather
- * than a discovery. The three below are `docs/three-d-spec.md` §10.3's, word for
- * word.
- */
-export const GLTF_TARGET: TargetSpec = {
-	label: "glTF (3D)",
-	extension: "gltf",
-	mime: "model/gltf+json",
-	// `TargetSpec.language` is `"html" | "svg"` — a syntax name for the export
-	// panel's highlighter, and there is no JSON in it. `"svg"` is the honest
-	// stand-in of the two: it is the XML-ish one, the panel highlights strings
-	// and numbers with it, and widening the union is `export.ts`'s to do.
-	language: "svg",
-	loses: [
-		"Everything outside the 3D view. A glTF is a scene, not a page: the artboard around this viewport, its text, its rectangles and the rest of the document are not in the file.",
-		"Behaviour. A glTF has no states: what is here is the one state each instance is drawn in, and the transitions, the triggers and the other states are not in the file.",
-		"Materials are approximated. A fill, a roughness and a metalness become one glTF metallic-roughness material; a shadow, a stroke and a corner radius have no meaning on a solid and are dropped.",
-	],
-};
 
-/**
- * The target spec design-core holds, or this file's copy until it holds one.
- *
- * The lookup is deliberately by string against a widened record: `ExportTarget`
- * does not include `"gltf"` yet, so `EXPORT_TARGETS.gltf` does not typecheck as
- * a property access, and asserting the key exists would be asserting the thing
- * that is not true. This asks.
- */
-export function gltfTarget(): TargetSpec {
-	const shipped = (EXPORT_TARGETS as Record<string, TargetSpec | undefined>).gltf;
-	return shipped ?? GLTF_TARGET;
-}
 
 /* ------------------------------------------------------------------ */
 /* The API                                                             */
@@ -187,7 +151,9 @@ export function exportViewportGltf(
 	options: GltfExportOptions = {},
 ): GltfExport {
 	const writer = gltfWriter({ generator: "clingo-design" });
-	const lost = [...gltfTarget().loses];
+	// Only what *this document* lost. The format's own sentences are the
+	// plugin's, and the driver prepends them — see the module header.
+	const lost: string[] = [];
 	const view = findViewport(model.roots, options.viewport);
 	const state: Emit = {
 		writer,

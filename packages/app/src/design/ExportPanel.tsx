@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-	EXPORT_TARGETS,
-	EXPORT_TARGET_NAMES,
-	type ExportTarget,
 	type Scene,
-	type TargetSpec,
 	type Universe,
-	collapseSpace,
-	exportSpace,
-	exportUniverse,
 	fontPaths,
 	viewports,
 } from "@clingo-design/design-core";
-import type { GltfExport } from "@clingo-design/canvas-3d";
+import {
+	type ExportPlugin,
+	type ExportResult,
+	collapseSpace,
+	exportSpace,
+	exportUniverse,
+	targetFor,
+} from "@clingo-design/export-core";
+import { gltfTarget } from "@clingo-design/export-gltf";
+import { htmlTarget } from "@clingo-design/export-html";
+import { svgTarget } from "@clingo-design/export-svg";
 
 import { assetPaths, usePathBytes } from "./useAssetBytes";
 import styles from "./ExportPanel.module.css";
@@ -65,21 +68,20 @@ export interface ExportPanelProps {
 const WHOLE = "space";
 
 /**
- * What this panel can write, which is one more than `design-core` can.
+ * This studio's targets.
  *
- * **The asymmetry is the package boundary and not an oversight.** `ExportTarget`
- * is `"html" | "svg"` because those are the two `exportUniverse` emits, and
- * `exportUniverse` lives in a package with no rendering dependency of any kind
- * — that is invariant 3. A glTF writer needs three.js's own geometry
- * constructors to tessellate a sphere, so it lives in `canvas-3d`, and the panel
- * is the place the two meet: it already knows the document, the universe and the
- * title, and it is already the only thing in the studio allowed to ask for a
- * file. `canvas-3d`'s `gltfTarget()` anticipates exactly this — it returns
- * `EXPORT_TARGETS.gltf` where one exists and its own spec otherwise — so the day
- * a pure writer lands in `design-core` this union collapses back to
- * `ExportTarget` and nothing else here changes.
+ * **The composition root, and that is the whole of what this panel now knows
+ * about any particular target.** It used to know a great deal: `type PanelTarget
+ * = ExportTarget | "gltf"` because `design-core` had a union with two members
+ * and this file could write three; a dynamic import and a `writer` state; a
+ * branch that built its own result object; a rule of its own that glTF may only
+ * ever be one universe; and a label lookup with a fallback for the target the
+ * record did not have. Every one of those has gone, and what replaced them is
+ * this array.
+ *
+ * The order is the order of the menu. Adding a target is a package and a line.
  */
-type PanelTarget = ExportTarget | "gltf";
+const TARGETS: readonly ExportPlugin[] = [htmlTarget, svgTarget];
 
 /**
  * The way out, as one panel.
@@ -105,12 +107,43 @@ export function ExportPanel({
 	// One name for the file and for the `<title>`, so the href a *link* writes and
 	// the filename a page exports under are the same string by construction.
 	const title = pageName ?? projectName;
-	const [target, setTarget] = useState<PanelTarget>("html");
+	const [target, setTarget] = useState<string>("html");
 	const [which, setWhich] = useState<string>(WHOLE);
 	const [view, setView] = useState<string>("");
 	const [tokens, setTokens] = useState(true);
 	const [copied, setCopied] = useState(false);
 
+	/**
+	 * The views a glTF could be of, and therefore whether glTF is on the menu.
+	 *
+	 * Read off the *document* rather than off a universe, because the target list
+	 * must not change when somebody picks a different design: a viewport is a
+	 * node, and which universe is on screen decides where it sits and not whether
+	 * it is there.
+	 */
+	const views = useMemo(() => viewports(scene), [scene]);
+	/**
+	 * The menu, and the one target that is conditional on the document.
+	 *
+	 * `gltfTarget` is a factory because a glTF is a scene and a document may hold
+	 * two: which viewport to write is the one question this target asks that the
+	 * others do not, and binding it here is what keeps it off `ExportOptions`,
+	 * where exactly one target would ever have read it.
+	 */
+	const targets = useMemo(
+		() => (views.length > 0 ? [...TARGETS, gltfTarget({ viewport: view || undefined })] : TARGETS),
+		[views.length, view],
+	);
+	/**
+	 * The chosen target, as the plugin itself.
+	 *
+	 * Everything below asks *this* rather than comparing the name against a
+	 * string: which payloads to fetch, whether the space may collapse, whether a
+	 * token switch means anything, what the file is called. The fallback is the
+	 * first target rather than a throw, because a document that loses its last
+	 * viewport while glTF is selected should land on HTML rather than on an error.
+	 */
+	const plugin = targetFor(targets, target) ?? targets[0];
 	/**
 	 * The payloads, per kind, and only for the kind the chosen target can use.
 	 *
@@ -130,14 +163,14 @@ export function ExportPanel({
 	 */
 	const images = usePathBytes(
 		useMemo(
-			() => (target === "gltf" ? [] : assetPaths(scene, "image")),
-			[scene, target],
+			() => (plugin.needs.includes("image") ? assetPaths(scene, "image") : []),
+			[scene, plugin],
 		),
 	);
 	const files = usePathBytes(
 		useMemo(
-			() => (target === "gltf" ? assetPaths(scene, "mesh") : []),
-			[scene, target],
+			() => (plugin.needs.includes("mesh") ? assetPaths(scene, "mesh") : []),
+			[scene, plugin],
 		),
 	);
 	/**
@@ -157,7 +190,10 @@ export function ExportPanel({
 	 * what to read.
 	 */
 	const fonts = usePathBytes(
-		useMemo(() => (target === "html" ? fontPaths(scene) : []), [scene, target]),
+		useMemo(
+			() => (plugin.needs.includes("font") ? fontPaths(scene) : []),
+			[scene, plugin],
+		),
 	);
 
 	const collapse = useMemo(
@@ -170,112 +206,50 @@ export function ExportPanel({
 	const at = Number(which);
 	const one = Number.isInteger(at) && at >= 0 && at < universes.length ? at : null;
 
-	/**
-	 * The views a glTF could be of, and therefore whether glTF is on the menu at
-	 * all.
-	 *
-	 * Read off the *document* rather than off a universe, because the target list
-	 * must not change when somebody picks a different design: a viewport is a
-	 * node, and which universe is on screen decides where it sits and not whether
-	 * it is there.
-	 */
-	const views = useMemo(() => viewports(scene), [scene]);
-	const targets: PanelTarget[] = views.length > 0
-		? [...EXPORT_TARGET_NAMES, "gltf"]
-		: [...EXPORT_TARGET_NAMES];
-	// A document that loses its last viewport while glTF is selected falls back,
-	// rather than sitting on a target that can no longer be written.
-	useEffect(() => {
-		if (target === "gltf" && views.length === 0) setTarget("html");
-	}, [target, views.length]);
 
 	/**
-	 * The glTF writer, fetched when somebody asks for one and not before.
+	 * The artefact, written whenever anything it depends on moves.
 	 *
-	 * `@clingo-design/canvas-3d`'s barrel pulls three.js, and the studio's promise
-	 * is that a document with no 3D in it pays for none of it — so this is the
-	 * same dynamic import `Artboard.tsx` makes for the renderer, into the same
-	 * chunk, and a person who never opens this menu never downloads it. The type
-	 * import at the top of the file is erased and costs nothing.
+	 * An effect rather than a `useMemo`, because emitting is asynchronous now:
+	 * `ExportPlugin.load()` is a promise for every target, so that the heavy one
+	 * costs nothing until it is picked. The `alive` flag is the ordinary guard —
+	 * a fast target resolving after a slow one was abandoned must not overwrite it.
+	 *
+	 * `exportSpace` is called for the whole space *whatever the target*, and it is
+	 * the plugin that decides whether the space collapses or one design comes out
+	 * with the reason. That deleted this panel's rule about which universe a glTF
+	 * may be.
 	 */
-	const [writer, setWriter] = useState<{
-		export: (
-			model: Universe["model"],
-			options: {
-				viewport?: string;
-				title?: string;
-				/** Keyed by tree path, exactly as `ExportOptions.images` is. */
-				files?: Record<string, Uint8Array>;
-			},
-		) => GltfExport;
-		spec: TargetSpec;
-	} | null>(null);
+	const [result, setResult] = useState<ExportResult | null>(null);
 	useEffect(() => {
-		if (target !== "gltf" || writer !== null) return;
+		if (universes.length === 0) {
+			setResult(null);
+			return;
+		}
 		let alive = true;
-		void import("@clingo-design/canvas-3d").then((mod) => {
-			if (alive) {
-				setWriter({ export: mod.exportViewportGltf, spec: mod.gltfTarget() });
-			}
+		// One record of payloads, because a payload is a file in the project's tree
+		// whichever exporter is writing it: `images` and `files` are two hooks only
+		// so that each kind can be fetched or skipped on its own, and `plugin.needs`
+		// has already decided which of them is empty.
+		const options = {
+			tokens,
+			title,
+			posters,
+			images: { ...images, ...files },
+			fonts,
+			pages,
+		};
+		const writing =
+			one === null
+				? exportSpace(scene, universes, plugin, options)
+				: exportUniverse(scene, universes[one], plugin, options);
+		void writing.then((out) => {
+			if (alive) setResult(out);
 		});
 		return () => {
 			alive = false;
 		};
-	}, [target, writer]);
-
-	/**
-	 * A glTF is one scene, so it is one universe — never the collapsed space.
-	 *
-	 * `collapseSpace` writes several designs into one artefact using media
-	 * queries and CSS custom properties, which a glTF has no equivalent of: a
-	 * scene file holds one arrangement of one set of objects. So the design picker
-	 * is forced to a single universe here rather than being obeyed and quietly
-	 * exporting the first one.
-	 */
-	const gltfUniverse = one ?? 0;
-
-	const result = useMemo(() => {
-		if (universes.length === 0) return null;
-		if (target === "gltf") {
-			if (!writer) return null;
-			const universe = universes[gltfUniverse];
-			if (!universe) return null;
-			const out = writer.export(universe.model, {
-				viewport: view || undefined,
-				title: projectName,
-				files,
-			});
-			const name = out.viewport ?? "scene";
-			return {
-				text: out.text,
-				lost: out.lost,
-				filename: `${projectName}-${name}.${writer.spec.extension}`,
-				note:
-					universes.length === 1
-						? "The scene in this design."
-						: `Design ${gltfUniverse + 1} of ${universes.length}. A glTF holds one arrangement of one set of objects, so the whole space cannot collapse into it the way a stylesheet can.`,
-			};
-		}
-		const options = { target, tokens, title, posters, images, fonts, pages };
-		return one === null
-			? exportSpace(scene, universes, options)
-			: exportUniverse(scene, universes[one], options);
-	}, [
-		scene,
-		universes,
-		one,
-		target,
-		tokens,
-		title,
-		pages,
-		images,
-		files,
-		fonts,
-		writer,
-		view,
-		gltfUniverse,
-		posters,
-	]);
+	}, [scene, universes, one, plugin, tokens, title, posters, images, files, fonts, pages]);
 
 	function copy() {
 		if (!result) return;
@@ -284,10 +258,6 @@ export function ExportPanel({
 		setTimeout(() => setCopied(false), 1200);
 	}
 
-	const label = (name: PanelTarget): string =>
-		name === "gltf"
-			? (writer?.spec.label ?? "glTF (3D)")
-			: EXPORT_TARGETS[name].label;
 
 	return (
 		<div className={styles.export} data-role="export">
@@ -298,11 +268,11 @@ export function ExportPanel({
 						className={styles.select}
 						data-role="export-target"
 						value={target}
-						onChange={(e) => setTarget(e.target.value as PanelTarget)}
+						onChange={(e) => setTarget(e.target.value)}
 					>
-						{targets.map((name) => (
-							<option key={name} value={name}>
-								{label(name)}
+						{targets.map((t) => (
+							<option key={t.id} value={t.id}>
+								{t.spec.label}
 							</option>
 						))}
 					</select>
@@ -312,7 +282,7 @@ export function ExportPanel({
 				    a document holding two views has two files to write and the panel
 				    has to ask which — silently taking the first would be a file that
 				    looks right and is of the wrong thing. */}
-				{target === "gltf" && views.length > 1 ? (
+				{plugin.id === "gltf" && views.length > 1 ? (
 					<label className={styles.field}>
 						View
 						<select
@@ -336,10 +306,10 @@ export function ExportPanel({
 					<select
 						className={styles.select}
 						data-role="export-universe"
-						value={target === "gltf" ? String(gltfUniverse) : which}
+						value={plugin.collapses ? which : String(one ?? 0)}
 						onChange={(e) => setWhich(e.target.value)}
 					>
-						{collapsible && target !== "gltf" ? (
+						{collapsible && plugin.collapses ? (
 							<option value={WHOLE}>
 								All {universes.length} — one {collapse.kind} on {collapse.label}
 							</option>
@@ -353,9 +323,10 @@ export function ExportPanel({
 					</select>
 				</label>
 
-				{/* Token names are a CSS idea: a glTF has no custom properties and no
-				    cascade, so the switch is hidden rather than shown doing nothing. */}
-				{target === "gltf" ? null : (
+				{/* Token names are a CSS idea, and the target says whether it has any:
+				    a glTF has no custom properties and no cascade, so the switch is
+				    hidden rather than shown doing nothing. */}
+				{!plugin.usesTokens ? null : (
 					<label className={styles.check}>
 						<input
 							type="checkbox"
@@ -381,9 +352,7 @@ export function ExportPanel({
 			<div className={styles.split}>
 				<pre className={styles.text} data-role="export-text">
 					{result?.text ??
-						(target === "gltf" && universes.length > 0
-							? "Writing the scene…"
-							: "Nothing to export yet.")}
+						(universes.length > 0 ? "Writing…" : "Nothing to export yet.")}
 				</pre>
 				<div className={styles.aside}>
 					<p className={styles.note} data-role="export-note">

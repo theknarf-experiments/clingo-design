@@ -30,7 +30,6 @@ import { test } from "node:test";
 import { parseAtom } from "./atoms.ts";
 import { PULL_ATOM, SCENERY_ATOM, compile, variableCounts } from "./compile.ts";
 import { directSolver } from "./directSolver.ts";
-import { exportUniverse } from "./export.ts";
 import { explore } from "./explore.ts";
 import { readModel } from "./model.ts";
 import {
@@ -183,12 +182,11 @@ function lpx(atoms: readonly string[], variable: string): number | undefined {
  * node ids are kept whole, because when this fails the first question is which
  * node appeared or went missing, and a digest cannot answer it.
  */
-function summarise(template: (typeof TEMPLATES)[number], result: {
+function summarise(result: {
 	count: number;
 	total: number | null;
-	universes: ReadonlyArray<Parameters<typeof exportUniverse>[1] & { model: { byId: Record<string, unknown> } }>;
+	universes: ReadonlyArray<{ model: { byId: Record<string, unknown> } }>;
 }): unknown {
-	const scene = template.create();
 	const digest = (text: string): string =>
 		createHash("sha256").update(text).digest("hex").slice(0, 16);
 	const ids = new Set<string>();
@@ -210,8 +208,6 @@ function summarise(template: (typeof TEMPLATES)[number], result: {
 				rendered: digest(
 					nodes.map((id) => `${id}:${JSON.stringify(byId[id]?.rendered ?? null)}`).join("\n"),
 				),
-				html: digest(exportUniverse(scene, u, { target: "html", title: template.id }).text),
-				svg: digest(exportUniverse(scene, u, { target: "svg", title: template.id }).text),
 			};
 		}),
 	};
@@ -306,7 +302,7 @@ for (const template of TEMPLATES) {
 		const scene = template.create();
 		const result = await explore(scene, directSolver, { limit: 32 });
 		assert.deepEqual(
-			summarise(template, result as never),
+			summarise(result as never),
 			GOLDENS[template.id],
 			`the third axis changed the "${template.id}" template`,
 		);

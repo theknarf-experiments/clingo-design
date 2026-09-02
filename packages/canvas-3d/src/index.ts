@@ -227,11 +227,9 @@ export {
 } from "./gltf.ts";
 export { type GltfImport, type GltfImportOptions, importGltf } from "./gltfimport.ts";
 export {
-	GLTF_TARGET,
 	SOLID_ARGS,
 	type GltfExport,
 	type GltfExportOptions,
 	exportViewportGltf,
-	gltfTarget,
 	tessellate,
 } from "./gltfexport.ts";

@@ -32,5 +32,4 @@ export * from "./stuck.ts";
 export * from "./why.ts";
 export * from "./explore.ts";
 export * from "./paint.ts";
-export * from "./export.ts";
 export * from "./runtime.ts";

@@ -345,14 +345,22 @@ test("a flat document exports an empty scene rather than throwing", () => {
 	assert.equal(parse(out.text).scenes?.[0]?.nodes?.length, 0);
 });
 
-test("the loss list is the target's, so it moves upstream without an edit here", async () => {
+test("the loss list is only what this document lost, and it did move upstream", async () => {
 	const out = exportViewportGltf(await solved(scene()));
-	// The three sentences `docs/three-d-spec.md` §10.3 froze for this target come
-	// first and come from `gltfTarget()`, which reads `EXPORT_TARGETS.gltf` the
-	// day M12 writes one.
-	assert.match(out.lost[0] ?? "", /Everything outside the 3D view/);
-	assert.match(out.lost[1] ?? "", /Behaviour/);
-	assert.match(out.lost[2] ?? "", /Materials are approximated/);
+	// This test used to assert the opposite, and its old name — "so it moves
+	// upstream without an edit here" — was a prediction that has now come true.
+	// The three sentences `docs/three-d-spec.md` §10.3 froze are facts about the
+	// *format*, so they live in `@clingo-design/export-gltf`'s `TargetSpec.loses`
+	// and the export driver prepends them. What this writer produces is what *this
+	// document* lost, and asserting the format's sentences here would be asserting
+	// them in the one package that no longer states them.
+	const joined = out.lost.join(" ");
+	assert.doesNotMatch(joined, /Everything outside the 3D view/);
+	assert.doesNotMatch(joined, /Materials are approximated/);
+	// And it does still say the document-shaped things, so an empty list here
+	// would not pass by default.
+	assert.ok(out.lost.length > 0, "a document with a lamp in it lost something");
+	assert.match(joined, /brightness|payload|shear/i);
 });
 
 /* ------------------------------------------------------------------ */

@@ -32,6 +32,18 @@ importers:
       '@clingo-design/design-core':
         specifier: workspace:*
         version: link:../design-core
+      '@clingo-design/export-core':
+        specifier: workspace:*
+        version: link:../export-core
+      '@clingo-design/export-gltf':
+        specifier: workspace:*
+        version: link:../export-gltf
+      '@clingo-design/export-html':
+        specifier: workspace:*
+        version: link:../export-html
+      '@clingo-design/export-svg':
+        specifier: workspace:*
+        version: link:../export-svg
       '@clingo-design/vfs':
         specifier: workspace:*
         version: link:../vfs
@@ -146,6 +158,70 @@ importers:
       '@clingo-design/clingo-wasm':
         specifier: workspace:*
         version: link:../clingo-wasm
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/export-core:
+    dependencies:
+      '@clingo-design/design-core':
+        specifier: workspace:*
+        version: link:../design-core
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/export-gltf:
+    dependencies:
+      '@clingo-design/canvas-3d':
+        specifier: workspace:*
+        version: link:../canvas-3d
+      '@clingo-design/design-core':
+        specifier: workspace:*
+        version: link:../design-core
+      '@clingo-design/export-core':
+        specifier: workspace:*
+        version: link:../export-core
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/export-html:
+    dependencies:
+      '@clingo-design/design-core':
+        specifier: workspace:*
+        version: link:../design-core
+      '@clingo-design/export-core':
+        specifier: workspace:*
+        version: link:../export-core
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/export-svg:
+    dependencies:
+      '@clingo-design/design-core':
+        specifier: workspace:*
+        version: link:../design-core
+      '@clingo-design/export-core':
+        specifier: workspace:*
+        version: link:../export-core
     devDependencies:
       '@types/node':
         specifier: ^26.2.0

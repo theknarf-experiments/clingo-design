@@ -1,0 +1,21 @@
+{
+	"name": "@clingo-design/export-svg",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"test": "node --test \"src/**/*.test.ts\""
+	},
+	"dependencies": {
+		"@clingo-design/design-core": "workspace:*",
+		"@clingo-design/export-core": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "^26.2.0",
+		"typescript": "^7.0.2"
+	}
+}

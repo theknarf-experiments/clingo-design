@@ -16,14 +16,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { directSolver } from "./directSolver.ts";
-import { makeNode, setLink } from "./edits.ts";
-import { explore } from "./explore.ts";
-import { type ExportOptions, EXPORT_TARGETS, exportUniverse } from "./export.ts";
-import { pageIdOf, pagePath } from "./pages.ts";
-import { type Scene, type SceneNode, emptyScene } from "./scene.ts";
-import { EMU_PER_PX } from "./units.ts";
-import { lit } from "./values.ts";
+import { directSolver } from "@clingo-design/design-core";
+import { makeNode, setLink } from "@clingo-design/design-core";
+import { explore } from "@clingo-design/design-core";
+import {
+	type ExportOptions,
+	type ExportPlugin,
+	exportUniverse,
+} from "@clingo-design/export-core";
+import { htmlTarget } from "@clingo-design/export-html";
+import { svgTarget } from "@clingo-design/export-svg";
+import { pageIdOf, pagePath } from "@clingo-design/design-core";
+import { type Scene, type SceneNode, emptyScene } from "@clingo-design/design-core";
+import { EMU_PER_PX } from "@clingo-design/design-core";
+import { lit } from "@clingo-design/design-core";
 
 const px = (n: number): number => n * EMU_PER_PX;
 
@@ -61,12 +67,15 @@ const card = (id: string): SceneNode => ({
 	props: { fill: [lit("#2563eb")] },
 });
 
-async function exported(scene: Scene, options: Partial<ExportOptions> = {}) {
+async function exported(
+	scene: Scene,
+	plugin: ExportPlugin = htmlTarget,
+	options: Partial<ExportOptions> = {},
+) {
 	const exploration = await explore(scene, directSolver, { limit: 4 });
 	const universe = exploration.universes[0];
 	assert.ok(universe, "expected at least one universe");
-	return exportUniverse(scene, universe, {
-		target: "html",
+	return await exportUniverse(scene, universe, plugin, {
 		title: "Home",
 		pages: PAGES,
 		...options,
@@ -101,7 +110,7 @@ test("the href is the filename the page exports under", async () => {
 	// by construction rather than by the caller remembering to match them.
 	const scene = setLink(page([card("one")]), ["one"], { to: ABOUT });
 	const out = await exported(scene);
-	const target = await exported(page([card("x")]), { title: "About us" });
+	const target = await exported(page([card("x")]), htmlTarget, { title: "About us" });
 	assert.equal(target.filename, "About-us.html");
 	assert.match(out.text, /href="About-us\.html"/);
 });
@@ -260,7 +269,7 @@ test("a caller that hands over no page list gets boxes, not broken anchors", asy
 	// optional, and the honest reading of "I do not know what this project holds"
 	// is the same as "that page is gone".
 	const scene = setLink(page([card("one")]), ["one"], { to: ABOUT });
-	const out = await exported(scene, { pages: undefined });
+	const out = await exported(scene, htmlTarget, { pages: undefined });
 	assert.equal(out.text.includes("<a "), false);
 	assert.equal(out.lost.some((line) => line.includes("point at a page")), true);
 });
@@ -269,10 +278,10 @@ test("the SVG target emits no anchor and says so once about the format", async (
 	// The asymmetry `EXPORT_TARGETS` already argues for: HTML *can* carry a link
 	// and names the ones it could not, SVG carries none and says so once.
 	const scene = setLink(page([card("one")]), ["one"], { to: ABOUT });
-	const out = await exported(scene, { target: "svg" });
+	const out = await exported(scene, svgTarget);
 	assert.equal(out.text.includes("<a "), false);
 	assert.equal(
-		EXPORT_TARGETS.svg.loses.filter((line) => line.startsWith("Links.")).length,
+		svgTarget.spec.loses.filter((line) => line.startsWith("Links.")).length,
 		1,
 	);
 	assert.equal(out.lost.filter((line) => line.startsWith("Links.")).length, 1);

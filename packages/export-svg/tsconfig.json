@@ -1,0 +1,36 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		// **`DOM` is deliberately absent, and its absence is invariant 3 made into
+		// something the build enforces.** This package is pure: no DOM, no React,
+		// no three.js, no rendering dependency of any kind, tested headless with
+		// `node --test`. That was held by discipline for as long as `DOM` was in
+		// here — `document.querySelector` inside `derived.ts` would have
+		// typechecked cleanly — and it is now a compile error at the moment
+		// somebody writes one, which is where a rule like this belongs.
+		//
+		// It cost nothing to tighten: the package was already clean, and the only
+		// `document` identifier in it is a parameter name. What it protects is the
+		// day somebody reaches for a canvas to measure a string.
+		"lib": ["ES2023"],
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"moduleDetection": "force",
+		"types": ["node"],
+
+		"strict": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noFallthroughCasesInSwitch": true,
+
+		"isolatedModules": true,
+		"verbatimModuleSyntax": true,
+		"erasableSyntaxOnly": true,
+		"skipLibCheck": true,
+
+		"allowImportingTsExtensions": true,
+		"rewriteRelativeImportExtensions": true,
+		"noEmit": true
+	},
+	"include": ["src"]
+}
