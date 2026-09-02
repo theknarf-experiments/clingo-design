@@ -4279,8 +4279,38 @@ function transitionsFor(
 		// carries no record of who asked. The declaration is the only place that
 		// knows, so it is the place that says so.
 		if (spring !== undefined) springs.add(spring);
+		// **The pacing is repeated once per property, and the repetition is the
+		// whole declaration.** `transition` is a comma-separated list of *whole*
+		// transitions, not a property list with one pacing after it: the commas
+		// separate the items, so `a, b, c 200ms ease-out` is three transitions of
+		// which the first two take the initial `0s ease` and only `c` is paced.
+		// That is what shipped here — `keys.join(", ")` followed by one pacing —
+		// and it meant every state that changed two or more things snapped on all
+		// of them but the last, in every file this repository has ever written.
+		//
+		// It survived a green suite because the string is *correct* for one key,
+		// and every machine fixture in `export.test.ts` moved exactly one property
+		// — a fill. One key is also the only case where the two spellings are the
+		// same characters, so nothing short of a two-property state could see it.
+		//
+		// The canvas never had the bug and that is the sharpest way to say what
+		// this was: `Artboard.module.css` writes the *longhands*, where one
+		// `transition-duration` legitimately repeats across every entry of
+		// `transition-property`. So a hover that changed a fill and a shadow tweened
+		// both on screen and tweened one in the file, which is the divergence
+		// `SHAPE_PAINT` and `PAINT` exist to make impossible — the same class of bug
+		// as `overflow: hidden`, and invisible for the same reason: nothing in the
+		// stylesheet says it out loud, and `getComputedStyle` reports the parse
+		// rather than the intent unless you read `transitionDuration` and count the
+		// zeroes.
+		//
+		// The shorthand is kept rather than switched to the longhands the canvas
+		// uses. Three declarations where one will do is three things for `diff` to
+		// unsay in every theme and every breakpoint, and the collapse machinery
+		// above is written against one `transition` key per selector.
+		const paced = `${ms(duration)} ${easing} ${ms(delay + i * stagger)}`;
 		out.set(id, {
-			transition: `${keys.join(", ")} ${ms(duration)} ${easing} ${ms(delay + i * stagger)}`,
+			transition: keys.map((key) => `${key} ${paced}`).join(", "),
 		});
 	});
 	return out;

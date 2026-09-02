@@ -1471,7 +1471,31 @@ test("the transition names only what changes, and takes the duration it resolved
 	// Both properties, in the order they changed, and seconds read as whole
 	// milliseconds — the same reading `msOf` gives and the program's `mdur/3`
 	// carries.
-	assert.match(base, /transition: color, font-size 120ms ease-in-out 0ms;/);
+	//
+	// **Each carrying its own pacing, which is what this line used to get wrong.**
+	// It read `transition: color, font-size 120ms ease-in-out 0ms` and passed,
+	// because that is what was written — and it is a `transition` list of *two*
+	// entries in which `color` takes the initial `0s ease` and only `font-size` is
+	// paced at all. The comma separates whole transitions, not the members of a
+	// property list, so a pacing meant for both has to be said twice. Every state
+	// in this repository that changed more than one thing snapped on all of them
+	// but the last, in every exported file, and this assertion is why nobody saw
+	// it: the expected string was the defect, written down.
+	assert.match(
+		base,
+		/transition: color 120ms ease-in-out 0ms, font-size 120ms ease-in-out 0ms;/,
+	);
+	// Said again structurally, because the broken spelling and the correct one
+	// share a prefix and a loose `match` would pass on either: *every* entry of
+	// the list has to be a whole transition, and a bare property name is the one
+	// shape that is not.
+	for (const entry of (/transition: ([^;]*);/.exec(base)?.[1] ?? "").split(", ")) {
+		assert.match(
+			entry,
+			/^\S+ \d+ms \S+ -?\d+ms$/,
+			`“${entry}” is not a whole transition, so the browser paces it at 0s`,
+		);
+	}
 	// And nothing that did not change: the button's own fill is untouched here.
 	const part = className(out.text, "inst(b1,btn)");
 	assert.doesNotMatch(block(out.text, `.${part}`) ?? "", /transition:/);
@@ -3655,4 +3679,96 @@ test("a document with no imported fonts exports exactly what it exported before"
 	assert.equal(offered.text, bare.text);
 	assert.deepEqual(offered.lost, bare.lost);
 	assert.doesNotMatch(bare.text, /@font-face/);
+});
+
+
+/**
+ * The paint properties and a spring, in one state, on one node.
+ *
+ * The seam test between two features written a week apart. The gradient, the two
+ * blurs and the blend mode arrived as ordinary members of {@link PROPS}, and
+ * {@link StatePart.props} spans all of `PROPS` — so a hover that repaints a
+ * gradient is a sentence the document could always write, and nothing in the
+ * exporter was ever asked whether it could write it back out. Every machine
+ * fixture above moves exactly one property, which is the one width at which the
+ * `transition` shorthand's two spellings are the same characters.
+ *
+ * Six keys is also the point rather than a flourish: the defect this test was
+ * written to hold down was invisible at one and unmistakable at six.
+ */
+test("a state that repaints a gradient, both blurs and a blend mode paces all of them", async () => {
+	const scene = machined({
+		machines: [
+			{
+				...hoverMachine({
+					btn: {
+						props: {
+							gradient: single("linear-gradient(180deg, VAR(--a), VAR(--b))"),
+							gradientFrom: single("#ff0000"),
+							gradientTo: single("#00ff00"),
+							blur: single("3px"),
+							backdropBlur: single("4px"),
+							shadow: single("0 2px 4px #00000040"),
+						},
+					},
+				}),
+				transitions: [
+					edge({
+						id: "in",
+						from: "rest",
+						to: "hover",
+						trigger: "pointerenter",
+						easing: single("springBouncy"),
+					}),
+					edge({ id: "out", from: "hover", to: "rest", trigger: "pointerleave" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const host = className(out.text, "b1");
+	const part = className(out.text, "inst(b1,btn)");
+
+	// The state itself repaints all six, which is the half that was never in
+	// doubt: `paintOf` walks `PAINT` and a new property is a new entry there.
+	const state = block(out.text, `.${host}:hover .${part}`);
+	assert.ok(state, "expected a :hover rule on the instance");
+	for (const declaration of [
+		/background-image: linear-gradient\(/,
+		/--gfrom: #ff0000;/,
+		/--gto: #00ff00;/,
+		/filter: blur\(3px\);/,
+		/backdrop-filter: blur\(4px\);/,
+		/box-shadow: 0 2px 4px #00000040;/,
+	]) {
+		assert.match(state, declaration);
+	}
+
+	// And the base rule paces *every* one of them, each entry whole. A gradient's
+	// direction is deliberately not among them — `tweenedKeys` strikes
+	// `background-image` because CSS cuts it at the halfway point rather than
+	// interpolating, and the losses say so — so the colours travel as the two
+	// registered custom properties and the picture is the one the canvas draws.
+	const base = block(out.text, `.${part}`);
+	assert.ok(base);
+	const entries = (/transition: ([^;]*);/.exec(base)?.[1] ?? "").split(", ");
+	assert.deepEqual(
+		entries.map((entry) => entry.split(" ")[0]),
+		["--gfrom", "--gto", "box-shadow", "filter", "backdrop-filter"],
+		"a background-image cut must not be paid for in frames",
+	);
+	for (const entry of entries) {
+		assert.match(
+			entry,
+			/^\S+ 200ms var\(--dc-ease-springBouncy\) 0ms$/,
+			`“${entry}” is not a whole transition, so the browser paces it at 0s`,
+		);
+	}
+
+	// The spring reached the file as the pair it is: a `cubic-bezier` every browser
+	// can parse, upgraded to the sampled `linear()` behind `@supports`. A spring
+	// remembered on a declaration that was never written is the other half of this,
+	// and it is asserted above.
+	assert.match(out.text, /--dc-ease-springBouncy: cubic-bezier\(/);
+	assert.match(out.text, /@supports \(transition-timing-function: linear\(0, 1\)\)/);
 });
