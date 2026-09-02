@@ -3594,16 +3594,20 @@ function planMachines(
 		// second animator arguing with the compositor that `runtime.ts` refuses. A
 		// designer who wants the thing to follow the finger wants a pointer-driven
 		// number input, which is deliberately not built.
-		const gestures = [
-			...new Set(
-				machine.transitions
-					.filter((t) => t.enabled && TRIGGERS[t.trigger].source !== undefined)
-					.map((t) => TRIGGERS[t.trigger].label.toLowerCase()),
-			),
-		];
+		//
+		// The threshold and the it-does-not-follow-your-finger sentence are
+		// conditional on a *drag*, and that is not tidiness. There are two sources
+		// and a machine that only reveals on scroll would otherwise be told how far
+		// a pointer has to travel and what a drag does not do, about a gesture it
+		// has not got — which is how a losses list stops being read.
+		const gestured = machine.transitions.filter(
+			(t) => t.enabled && TRIGGERS[t.trigger].source !== undefined,
+		);
+		const gestures = [...new Set(gestured.map((t) => TRIGGERS[t.trigger].label.toLowerCase()))];
 		if (gestures.length > 0) {
+			const dragged = gestured.some((t) => TRIGGERS[t.trigger].source === "drag");
 			say(
-				`“${machine.name}” moves on a gesture — ${gestures.join(", ")} — and CSS has no name for either, so those states are \`data-state\` rules and the file carries the interpreter that switches them. A drag is a pointer that moved more than ${DRAG_SLOP_PX} pixels while down, which is the same threshold the canvas uses. What the file does **not** do is move the element with the pointer: a drag trigger says which state the machine is in, and what that state looks like is your design.`,
+				`“${machine.name}” moves on a gesture — ${gestures.join(", ")} — and CSS has no name for any of them, so those states are \`data-state\` rules and the file carries the interpreter that switches them.${dragged ? ` A drag is a pointer that moved more than ${DRAG_SLOP_PX} pixels while down, which is the same threshold the canvas uses. What the file does **not** do is move the element with the pointer: a drag trigger says which state the machine is in, and what that state looks like is your design.` : ""}`,
 			);
 		}
 
@@ -3718,6 +3722,23 @@ function planMachines(
  * own pose and no motion. That is the honest degradation and it is argued for
  * where the gate is written; a document with no clock in it emits **neither
  * block** and is byte-identical to what it exported before.
+ *
+ * **One gate for both clocks**, and `view()` is what it tests even where the
+ * only clock in the document is `scroll(root block)`. The two functions are one
+ * feature and shipped together in every engine that has either — Chrome and Edge
+ * 115, Firefox 144 — so a second `@supports` would be a second block that can
+ * never disagree with the first, and one block is one line for a reader to
+ * check. If an engine ever ships one without the other, this is the line that
+ * has to grow a second gate keyed on {@link TIMELINE_CLOCKS}`[c].css`.
+ *
+ * And the whole of it is worth nothing without one thing this function cannot
+ * say: **no box between the animated element and the page may be a scroll
+ * container.** `view()` is the element's pass through its *nearest* scrollport,
+ * so a clipping ancestor that clips with `overflow: hidden` becomes that
+ * scrollport and freezes the animation at a constant with every declaration here
+ * still perfectly correct. That is why a surface clips with `overflow: clip` —
+ * `paint.ts`'s `CLIP` carries the argument, and `export.test.ts` asserts it in
+ * the same test as this block.
  */
 function timelineRules(scrolled: ReadonlySet<string>): string[] {
 	if (scrolled.size === 0) return [];

@@ -971,9 +971,14 @@ test("a surface clips, in both targets", async () => {
 	assert.ok(KINDS.frame.surface);
 	const exploration = await explore(scene, directSolver, { limit: 1 });
 	const universe = exploration.universes[0];
+	// `clip` and not `hidden`, and the word is the assertion rather than an
+	// incidental spelling: the two paint the same picture and only one of them
+	// makes the frame a scroll container. See `paint.ts`'s `CLIP` — with `hidden`,
+	// a scroll-clocked timeline anywhere under this frame resolves its `view()`
+	// against the frame instead of the page and never advances at all.
 	assert.match(
 		exportUniverse(scene, universe, { target: "html" }).text,
-		/overflow: hidden;/,
+		/overflow: clip;/,
 	);
 	assert.match(
 		exportUniverse(scene, universe, { target: "svg" }).text,
@@ -2384,6 +2389,31 @@ test("a scroll-clocked timeline is a gated custom property and no script", async
 		}),
 	);
 	assert.match(paged.out.text, /animation-timeline: scroll\(root block\);/);
+
+	// **And nothing between the animated element and the page is a scroll
+	// container**, which is the assertion the rest of this test cannot make and
+	// without which every line above it is true of a file where nothing moves.
+	//
+	// `view()` is *this element's pass through its nearest scrollport*, and
+	// `overflow: hidden` makes an element a scrollport — one with nothing to
+	// scroll. Every ancestor here is a surface and a surface clips, so with
+	// `hidden` the timeline resolved against the frame immediately around the
+	// node, which never moves, and the animation froze at whatever progress that
+	// frame's geometry put it at. Driven in Chromium,
+	// `getAnimations()[0].timeline.source` named `inst(resting,button)` where it
+	// had to name the document; with `clip` it names the document and the progress
+	// tracks the scroll. See `paint.ts`'s `CLIP`.
+	//
+	// Asserted over the whole stylesheet rather than over the ancestors of the
+	// animated node, because "no box in this file is a scrollport" is the property
+	// that has to hold and it is a stronger sentence than the one the feature
+	// strictly needs.
+	assert.doesNotMatch(
+		out.text,
+		/overflow: hidden/,
+		"a clipping ancestor that is also a scrollport freezes view() at a constant",
+	);
+	assert.match(out.text, /overflow: clip/);
 });
 
 test("a document with no clock and no gesture emits neither", async () => {

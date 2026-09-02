@@ -255,6 +255,22 @@ function summarise(template: (typeof TEMPLATES)[number], result: {
  * `svg`, `nodes`, `frames` and `rendered` digest did not move at all, which is
  * what says the gestures reached the behaviour and nothing else.
  *
+ * And the `html` digest of every universe of every template moved a **third**
+ * time, reviewing that same step, for one CSS word: a surface clips with
+ * `overflow: clip` where it used to say `overflow: hidden`. That is not a
+ * cosmetic edit and it is not a paint change — the two spell the same picture,
+ * and `hidden` additionally makes the box a *scroll container*, which made every
+ * frame in every document the nearest scrollport of everything inside it and left
+ * `animation-timeline: view()` resolving against a box that never scrolls. The
+ * gesture step's own scroll-clocked timeline was frozen at a constant in every
+ * exported file, with correct-looking CSS. `paint.ts`'s `CLIP` carries the whole
+ * argument. The proof this fixture demands was made the same direct way and is
+ * sharper than the last one: **133 universes, every `html` digest moved, no
+ * `nodes`, `frames`, `rendered`, `svg`, `count` or `ids` digest moved at all,
+ * and replacing `overflow: clip` with `overflow: hidden` in the exported text
+ * reproduces the previous digest exactly, for all 133.** One word in, one word
+ * out, and nothing else in the file is different.
+ *
  * Two ids were **added** later and neither is a regeneration: `deck` and
  * `solids` are the templates written after the ladder and the third axis
  * shipped, so they have no "before" to have moved away from. What they get out

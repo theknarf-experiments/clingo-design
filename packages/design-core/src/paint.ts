@@ -209,6 +209,44 @@ export interface ShapePaint {
 }
 
 /**
+ * How a box cuts off what hangs over its edge: **`clip`, and never `hidden`.**
+ *
+ * The two paint the same picture. They differ in one invisible way, and that way
+ * decided whether a whole feature worked: `overflow: hidden` makes the element a
+ * **scroll container** — a box that happens to have nothing to scroll — where
+ * `overflow: clip` makes it a box that clips and nothing else.
+ *
+ * Every ancestor of every node in this document is a surface, and a surface
+ * clips. So with `hidden`, the nearest scroll container of anything on a page is
+ * the frame immediately around it, and `animation-timeline: view()` — which is
+ * *this element's pass through its nearest scrollport* — resolves against a
+ * scrollport that never moves. A scroll-clocked timeline sat frozen at whatever
+ * progress the frame put it at, in every exported file, and the CSS was
+ * otherwise perfect: the `@supports` matched, the custom property carried the
+ * name, `animation-timeline` computed to `view()`, and the element did not move.
+ * Nothing in a stylesheet says that out loud, which is why it took driving one in
+ * a browser and reading `getAnimations()[0].timeline.source` to see it — that
+ * property named `inst(resting,button)` where it had to name the document.
+ *
+ * **What was rejected.** Emitting `clip` only on the ancestors of a node that
+ * plays a scroll-clocked timeline: it would make two identical frames clip by two
+ * different mechanisms depending on an animation somewhere below them, for no
+ * visible difference at all, since the picture is the same either way. And
+ * leaving `hidden` on the canvas while the export said `clip`: the canvas and the
+ * exported file agreeing about every CSS property is the promise this table
+ * exists to keep, and a divergence nobody could see is the worst kind to have.
+ *
+ * The cost is the one thing `hidden` still has over `clip`: a browser too old to
+ * parse `clip` drops the declaration and clips nothing, where the two-declaration
+ * fallback that fixes that cannot be written here — {@link Declarations} is one
+ * key per property and `overflow` is one key. It is Chrome and Edge 90, Firefox
+ * 81 and Safari 16, which is older than `linear()`, older than `@property` and
+ * older than the `animation-timeline` this exists for, so the file already needs
+ * a newer browser than this line does.
+ */
+const CLIP = "clip";
+
+/**
  * What each kind does to its box beyond taking a colour.
  *
  * One table, for the same reason `KINDS` is one: a kind that paints unusually
@@ -218,7 +256,7 @@ export const SHAPE_PAINT: Partial<Record<NodeKind, ShapePaint>> = {
 	text: {
 		box: {
 			lineHeight: PROPS.lineHeight.fallback,
-			overflow: "hidden",
+			overflow: CLIP,
 			whiteSpace: "pre-wrap",
 		},
 	},
@@ -246,7 +284,7 @@ export const SURFACE_BOX: Declarations = {
 	// the shorthand would have wiped the `background-image` of every surface that
 	// paints one before the node's own properties ever ran.
 	backgroundColor: "#ffffff",
-	overflow: "hidden",
+	overflow: CLIP,
 };
 
 /* ------------------------------------------------------------------ */
