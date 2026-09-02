@@ -714,11 +714,38 @@ const CUBIC_BEZIER = /^cubicBezier\((-?\d+),[ \t]*(-?\d+),[ \t]*(-?\d+),[ \t]*(-
 export function bezierOf(
 	text: string,
 ): [number, number, number, number] | undefined {
+	const points = bezierPoints(text);
+	if (points === undefined) return undefined;
+	const [x1, y1, x2, y2] = points;
+	if (x1 < 0 || x1 > 1000 || x2 < 0 || x2 > 1000) return undefined;
+	if (Math.abs(y1) > MAX_PERMILLE || Math.abs(y2) > MAX_PERMILLE) return undefined;
+	return points;
+}
+
+/**
+ * The four numbers a `cubicBezier(…)` literal *spells*, whether or not they make
+ * a curve.
+ *
+ * The field-side twin of {@link bezierOf}, in exactly the relationship
+ * {@link nearestPermille} has to {@link permilleOf}: one grammar, two readers,
+ * and the strict one is the only one anything downstream of the document may
+ * call. It exists because the refusal above is silent by design — an `x` of 1400
+ * is *kept* in the document and falls back in both readers, which is the right
+ * answer for a program and the wrong one for the four boxes somebody is typing
+ * in, where it would blank every one of them and lose the three points that were
+ * fine along with the one that was not.
+ *
+ * So the panel reads what is written and the program reads what is legal, and the
+ * two disagree in exactly one place: a curve nobody can play yet. `bezierOf` is
+ * still what decides whether there is a curve at all — {@link curveOf} calls it,
+ * `bezier/5` is emitted from it, and nothing here weakens either.
+ */
+export function bezierPoints(
+	text: string,
+): [number, number, number, number] | undefined {
 	const m = CUBIC_BEZIER.exec(text);
 	if (!m) return undefined;
 	const [x1, y1, x2, y2] = m.slice(1, 5).map(Number);
-	if (x1 < 0 || x1 > 1000 || x2 < 0 || x2 > 1000) return undefined;
-	if (Math.abs(y1) > MAX_PERMILLE || Math.abs(y2) > MAX_PERMILLE) return undefined;
 	return [x1, y1, x2, y2];
 }
 

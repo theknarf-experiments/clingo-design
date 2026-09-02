@@ -45,6 +45,19 @@
  * test, so that the distinction is the thing under guard rather than the word
  * "clock".
  *
+ * **An `IntersectionObserver` is not a clock either, and it is here.** The gesture
+ * triggers gave this text two binders it did not have — a pointer recogniser with
+ * a slop threshold, and one observer for the whole document — and neither of them
+ * schedules anything. An observer is `addEventListener` for geometry: the browser
+ * tells us, on its own schedule and coalesced with everything else it is already
+ * doing per frame, that an element crossed the edge of the viewport. The
+ * alternative shape — a `scroll` listener calling `getBoundingClientRect` per
+ * driven instance — is the one that needs a frame budget, and it is the one this
+ * file cannot have. That is why "scroll" here means *this element entered the
+ * view* rather than *the page moved*, and why a scroll-**clocked timeline**, which
+ * really is a clock, is emitted as CSS with no script at all rather than sampled
+ * in here.
+ *
  * **What is deliberately not here: timelines and blends.** A timeline is
  * `@keyframes` in the exported file and the compositor plays it; a blend is
  * arithmetic over a runtime value that CSS cannot mix, so the file carries one
@@ -69,34 +82,66 @@
  * gate is checkable at all without sleeping in a test suite.
  */
 import type { MachineTable } from "./machines.ts";
-import { TRIGGERS, TRIGGER_NAMES, type Trigger } from "./scene.ts";
+import {
+	TRIGGERS,
+	TRIGGER_NAMES,
+	type Trigger,
+	type TriggerSource,
+} from "./scene.ts";
 
 /**
- * Which DOM event each trigger listens for — {@link TRIGGERS}, flattened to the
- * one column the runtime needs.
+ * The three columns of {@link TRIGGERS} the runtime needs, serialised into the
+ * script beside the table.
  *
- * Serialised into the script beside the table rather than written out inside
- * {@link MACHINE_RUNTIME}, and that is a deliberate choice about where drift can
- * happen. A copy of this mapping baked into the runtime text would be a second
- * statement of `TRIGGERS[g].event` — and the day somebody decides that `focus`
- * should listen for `focusin` rather than `focus` (which is exactly the decision
- * `scene.ts` already records, and for a good reason), the panel and the exported
- * file would quietly stop agreeing about what a focus trigger is. Deriving it
+ * Serialised rather than written out inside {@link MACHINE_RUNTIME}, and that is
+ * a deliberate choice about where drift can happen. A copy of this mapping baked
+ * into the runtime text would be a second statement of `TRIGGERS` — and the day
+ * somebody decides that `focus` should listen for `focusin` rather than `focus`
+ * (which is exactly the decision `scene.ts` already records, and for a good
+ * reason), or that a drag is five pixels rather than three, the panel and the
+ * exported file would quietly stop agreeing about what a trigger is. Deriving it
  * here means the table in the file is always the table in the document.
  *
- * The empty string for `load` is not a missing entry: `load` is the trigger with
- * no event, fired once when the runtime starts, and the runtime tests the string
- * for emptiness rather than keeping a second list of "the real events".
+ * **A widening of the shipped `TRIGGER_EVENTS` rather than a second constant**,
+ * and the argument that constant already made is the argument for widening it:
+ * two tables about triggers, one of them a record of strings and the other a
+ * record of records, is exactly the pair a maintainer keeps only one of up to
+ * date. The empty string for `load` is not a missing entry: `load` is the
+ * trigger with no event, fired once when the runtime starts, and the runtime
+ * tests the string for emptiness rather than keeping a second list of "the real
+ * events". `viewenter`, `viewleave`, `dragbegin` and `dragend` have empty events
+ * too and are *not* that case — they carry a {@link TriggerSpec.source}, and the
+ * binder for that source is what fires them.
+ *
+ * `label` is deliberately left out. It is the only column of the five that
+ * nothing in the script could act on, and twelve labels is two hundred bytes in
+ * every exported file.
  */
-export const TRIGGER_EVENTS: Record<Trigger, string> = Object.fromEntries(
-	TRIGGER_NAMES.map((trigger) => [trigger, TRIGGERS[trigger].event]),
-) as Record<Trigger, string>;
+export const TRIGGER_BINDINGS: Record<
+	Trigger,
+	{ event: string; source?: TriggerSource; suppresses?: Trigger }
+> = Object.fromEntries(
+	TRIGGER_NAMES.map((trigger) => {
+		const spec = TRIGGERS[trigger];
+		return [
+			trigger,
+			{
+				event: spec.event,
+				...(spec.source === undefined ? {} : { source: spec.source }),
+				...(spec.suppresses === undefined ? {} : { suppresses: spec.suppresses }),
+			},
+		];
+	}),
+) as Record<Trigger, { event: string; source?: TriggerSource; suppresses?: Trigger }>;
 
 /**
  * The generated runtime, as source text: the body of
  * `function (T, E, root, onChange, clock)`.
  *
- * `T` is a {@link MachineTable}, `E` is {@link TRIGGER_EVENTS}, `root` is a
+ * `T` is a {@link MachineTable}, `E` is {@link TRIGGER_BINDINGS} — it keeps the
+ * one-letter name the shipped event map had, because the letter is a *position*
+ * in a factory signature three files agree about and renaming it would be
+ * renaming an argument to say something about its contents — `root` is a
  * `Document` or element to bind inside (null binds nothing, which is a runtime
  * that still answers questions but touches no DOM), `onChange` is an optional
  * `(instance, state, layer)` callback so a host that re-renders rather than
@@ -148,7 +193,14 @@ export const MACHINE_RUNTIME = `"use strict";
 // line one of somebody's page.
 var instances = T && T.instances ? T.instances : {};
 var machines = T && T.machines ? T.machines : {};
-var events = E || {};
+var bindings = E || {};
+// How far a pointer must travel while down before this counts it a drag, in CSS
+// pixels, off the table's own settings. The literal is the one duplication of
+// DRAG_SLOP_PX there is, and it is here rather than nowhere because the table
+// arrives as JSON out of a script tag in somebody's page and may have been
+// written by hand: a slop of undefined would make every pointerdown a drag,
+// which is the one failure mode a threshold exists to prevent.
+var slop = T && T.settings && typeof T.settings.dragSlop === "number" ? T.settings.dragSlop : 3;
 // The clock, read and never set. A page gets the wall clock below, because the
 // emitted script passes no fifth argument; a test passes a function it can wind
 // forward, which is the only way to check an exit-time gate without sleeping.
@@ -188,6 +240,18 @@ var heldAt = {};
 var values = {};
 // Instance node id -> the element wearing the state attributes, filled by start().
 var elements = {};
+// Instance -> the pointerdown that may become a drag, as [x, y] in CLIENT
+// coordinates; null once it has become one or once the pointer is gone. Client
+// and not page or offset, because the threshold is a fact about the hand: a
+// scroll under a held finger is not travel, and the studio measures the same
+// gesture on the same raw numbers so that the two readers cannot disagree about
+// whether something was a drag.
+var origin = {};
+// Instance -> true while a drag is in progress.
+var dragging = {};
+// Instance -> the trigger the drag that just ended swallows once. Read off the
+// table's suppresses column, so this text holds no trigger id of its own.
+var swallow = {};
 
 function owns(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -620,7 +684,16 @@ function begin(instance) {
 // One listener, in its own function so the trigger it closes over is this one
 // and not whatever the loop variable ended up being.
 function listen(instance, trigger, element) {
-  element.addEventListener(events[trigger], function () {
+  element.addEventListener(bindings[trigger].event, function () {
+    // A drag that ended swallows the click the browser sends after it, because a
+    // gesture that ended is not also a click. Read off the table rather than
+    // tested against a trigger id, so this text still contains no trigger name at
+    // all — the day somebody adds a second gesture with the same manners, it is
+    // one column in scene.ts and nothing here.
+    if (swallow[instance] === trigger) {
+      swallow[instance] = undefined;
+      return;
+    }
     // fireIn, because the page wants every layer moved and not the first layer's
     // answer. fire is the reporting shape a host calls; this is the machine
     // running, and running only the first layer would be a click that pressed a
@@ -629,8 +702,110 @@ function listen(instance, trigger, element) {
   });
 }
 
+// Whether any edge of any layer of this machine is taken by a trigger this
+// source is responsible for, so that an instance gets a pointer recogniser or a
+// place in the observer only where one can actually move it. The twin of
+// triggersOf below, asking the question the other way round.
+function usesSource(machine, source) {
+  var layers = machine.layers || [];
+  for (var i = 0; i < layers.length; i++) {
+    var edges = layers[i].edges;
+    for (var from in edges) {
+      if (!owns(edges, from)) continue;
+      var row = edges[from];
+      for (var trigger in row) {
+        if (owns(row, trigger) && bindings[trigger] && bindings[trigger].source === source) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// A drag is over: by the pointer coming up, by the browser cancelling it, or by
+// the capture being lost. All three end it and all three fire dragend if one had
+// begun, because a gesture that stopped reporting is a gesture that ended and a
+// machine left in its dragging state would be a machine stuck there.
+function endDrag(instance) {
+  origin[instance] = null;
+  if (!dragging[instance]) return;
+  dragging[instance] = false;
+  swallow[instance] = bindings.dragend ? bindings.dragend.suppresses : undefined;
+  fireIn(instance, "dragend");
+}
+
+// The drag recogniser: a pointer that went down and then moved far enough.
+//
+// A drag with no threshold is pointerdown under a different name, and pointerdown
+// already exists with :active behind it — so the slop IS the gesture. Nothing
+// here moves the element: a drag trigger says the machine is now in the dragging
+// state, and what that state looks like is CSS, exactly as a hover state is. A
+// transform written on every pointermove by this script would be the second
+// animator arguing with the compositor that this whole file refuses.
+function bindDrag(instance, element) {
+  element.addEventListener("pointerdown", function (event) {
+    origin[instance] = [event.clientX, event.clientY];
+    dragging[instance] = false;
+  });
+  element.addEventListener("pointermove", function (event) {
+    var at = origin[instance];
+    if (!at || dragging[instance]) return;
+    var dx = event.clientX - at[0];
+    var dy = event.clientY - at[1];
+    // Squared, so there is no square root and no floating-point comparison
+    // against a threshold that is a whole number of pixels.
+    if (dx * dx + dy * dy < slop * slop) return;
+    dragging[instance] = true;
+    // Capture, so the drag keeps reporting once the pointer leaves the element. A
+    // drag that stopped at the edge of the thing being dragged would be a gesture
+    // that ends when it starts working.
+    if (element.setPointerCapture) element.setPointerCapture(event.pointerId);
+    fireIn(instance, "dragbegin");
+  });
+  element.addEventListener("pointerup", function () { endDrag(instance); });
+  element.addEventListener("pointercancel", function () { endDrag(instance); });
+  element.addEventListener("lostpointercapture", function () { endDrag(instance); });
+}
+
+// One observer for the whole document, because a browser coalesces records across
+// targets and N observers is N callbacks per scroll.
+//
+// An IntersectionObserver is NOT a clock, and the distinction is the one this
+// file is built around: it is the browser telling us, on its own schedule, that a
+// geometric fact changed. It is addEventListener for geometry. Nothing here
+// polls and nothing here schedules, so the absence assertion in runtime.test.ts
+// still passes — and the three functions it forbids are deliberately not named in
+// this sentence, because a comment naming one of them would fail the test it is
+// trying to reassure the reader about. That is the same care the element scan
+// below takes about the attribute selector it does not spell.
+//
+// threshold is the observer's own default, which is any pixel at all — what a
+// person means by "on screen". A fraction would be a number nobody could pick
+// correctly for two different elements, and a designer who wants "half of it"
+// writes a timeline whose clock is the scroll rather than a state that flips at
+// 50%.
+function observeViews(ids) {
+  if (typeof IntersectionObserver === "undefined" || ids.length === 0) return;
+  var seen = {};
+  var observer = new IntersectionObserver(function (records) {
+    for (var i = 0; i < records.length; i++) {
+      var id = records[i].target.getAttribute("data-node");
+      if (id === null || !owns(instances, id)) continue;
+      var inside = records[i].isIntersecting;
+      // Crossings only. An observer re-reports on a resize and on a scroll that
+      // did not change the answer, and a machine that fired viewenter twice would
+      // take a second edge out of the state the first one arrived in.
+      if (seen[id] === inside) continue;
+      seen[id] = inside;
+      fireIn(id, inside ? "viewenter" : "viewleave");
+    }
+  });
+  for (var j = 0; j < ids.length; j++) {
+    if (elements[ids[j]]) observer.observe(elements[ids[j]]);
+  }
+}
+
 // Every trigger any edge of any layer of this machine uses, so an instance gets
-// listeners for what it can actually respond to and not for all eight.
+// listeners for what it can actually respond to and not for all twelve.
 function triggersOf(machine) {
   var used = {};
   var layers = machine.layers || [];
@@ -675,6 +850,7 @@ function bind() {
 // other.
 function start() {
   var id;
+  var watching = [];
   bind();
   for (id in instances) {
     if (!owns(instances, id)) continue;
@@ -688,12 +864,21 @@ function start() {
     if (!element || !machine) continue;
     var used = triggersOf(machine);
     for (var trigger in used) {
-      if (owns(used, trigger) && events[trigger]) listen(id, trigger, element);
+      if (owns(used, trigger) && bindings[trigger] && bindings[trigger].event) {
+        listen(id, trigger, element);
+      }
     }
+    if (usesSource(machine, "drag")) bindDrag(id, element);
+    if (usesSource(machine, "view")) watching.push(id);
   }
   for (id in instances) {
     if (owns(instances, id)) settle(id);
   }
+  // Observed LAST, and after settle. An IntersectionObserver delivers an initial
+  // record for everything it is given, so an element already on screen gets
+  // viewenter on the frame after this line — which is what a reveal wants, and
+  // which arriving before the load chain had run would have overwritten.
+  observeViews(watching);
 }
 
 return {
@@ -844,7 +1029,7 @@ export function runtimeSource(): string {
 
 export function runtimeScript(table: MachineTable): string {
 	const json = JSON.stringify(table).replace(/</g, "\\u003c");
-	const events = JSON.stringify(TRIGGER_EVENTS);
+	const events = JSON.stringify(TRIGGER_BINDINGS);
 	return [
 		"(function(){",
 		`var T = ${json};`,
@@ -1024,10 +1209,10 @@ export function evalRuntime(
 		runtimeSource(),
 	) as (
 		table: MachineTable,
-		events: Record<string, string>,
+		bindings: typeof TRIGGER_BINDINGS,
 		root: unknown,
 		onChange: ((instance: string, state: string, layer: string) => void) | undefined,
 		clock: (() => number) | undefined,
 	) => RuntimeHandle;
-	return factory(table, TRIGGER_EVENTS, root, onChange, clock);
+	return factory(table, TRIGGER_BINDINGS, root, onChange, clock);
 }

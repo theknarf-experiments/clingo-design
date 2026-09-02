@@ -37,6 +37,7 @@
  */
 import { componentDef, componentDefs, instanceNodes, instancePart } from "./components.ts";
 import {
+	clockOf,
 	guardOf,
 	inputInitial,
 	inputRange,
@@ -1730,6 +1731,7 @@ const MACHINE_RULES = [
 	"#defined mlayer/2.",
 	"#defined mlindex/3.",
 	"#defined mslayer/3.",
+	"#defined mclock/3.",
 	"#defined mlfirst/3.",
 	"#defined mlshadow/4.",
 	"#defined mlfshadow/4.",
@@ -2095,8 +2097,14 @@ const MACHINE_RULES = [
 	"% mloop(M,W,none) is in the body because a looping timeline never ends, so no",
 	"% exit time is past it, and reporting one would be reporting a bug against a",
 	"% design that works.",
+	"% mclock(M,S,time) for the same shape of reason one line down: a scroll-clocked",
+	"% timeline has no wall-clock length for an exit time to be past. The state",
+	"% finishes when the reader scrolls past it, which is not a duration, so",
+	"% \"the trigger can never arrive late enough\" is a sentence about nothing there.",
+	"% Positive rather than `not mclock(M,S,view)`, because every state states a",
+	"% clock — which is what makes one literal answer for the whole vocabulary.",
 	"mexitpast(M,T) :- mexit(M,T,E), mfrom(M,T,S), mtplays(M,S,W), mtlen(M,W,Len),",
-	"                  mloop(M,W,none), E > Len.",
+	"                  mloop(M,W,none), mclock(M,S,time), E > Len.",
 ]
 
 /**
@@ -2897,7 +2905,20 @@ export const CONTRACT = `% Predicates you can rely on:
 % soften to a preference, and \`why\`:
 %
 %   mtrans(M, T)   mfrom(M, T, S)   mto(M, T, S)
-%   mtrigger(M, T, ...)            one of the trigger words below
+%   mtrigger(M, T, G)              what makes the machine take this edge, as one
+%                                  of twelve words: pointerenter pointerleave
+%                                  pointerdown pointerup focus blur click load
+%                                  viewenter viewleave dragbegin dragend. The
+%                                  first eight are DOM events on the instance's
+%                                  own element (load is the one with no event,
+%                                  fired once at start); the last four are not.
+%                                  A view pair is an IntersectionObserver
+%                                  crossing and a drag pair is a pointer that
+%                                  moved past a slop threshold, which is
+%                                  recognition rather than an event — the
+%                                  program does not care, because a trigger is a
+%                                  word here either way, and it is the exported
+%                                  runtime that has to know the difference
 %   measing(M, T, C)               derived: the curve, as one of the eight menu
 %                                  words — linear ease easeIn easeOut easeInOut
 %                                  springGentle springSnappy springBouncy — or as
@@ -3026,7 +3047,9 @@ export const CONTRACT = `% Predicates you can rely on:
 %                                  exported runtime and there is not going to be
 %   mexitpast(M, T)                derived: an exit time longer than the \`from\`
 %                                  state's own timeline, which makes the edge
-%                                  unreachable rather than merely odd
+%                                  unreachable rather than merely odd. Only where
+%                                  that timeline runs on a clock a duration can
+%                                  be measured against — mclock(M,S,time)
 %
 % Entry, Exit and Any. Three reserved ids, legal only as a transition's end and
 % never as a state — a state is a delta over the definition's parts, and these
@@ -3109,6 +3132,16 @@ export const CONTRACT = `% Predicates you can rely on:
 % in either.
 %
 %   mtimeline(M, W)   mtplays(M, S, W)   mloop(M, W, none|loop|pingPong)
+%   mclock(M, S, time|view|pageScroll)
+%                                  what advances the timeline state S plays:
+%                                  wall time, this element's pass through the
+%                                  viewport, or the page's own scroll. ONE PER
+%                                  STATE, always, defaulting to \`time\`, so a rule
+%                                  can read the wall-clock case positively. A
+%                                  fact and never a variable — a clock is wiring,
+%                                  and there is no scale for it to be on. It is
+%                                  \`pageScroll\` and not \`page\` because a page of
+%                                  a flow is about to be page/1
 %   trkp(N, P)  trkd(N, D)  trkr(N, R)
 %                                  a track: part N's property, its dimension, or
 %                                  its rotation. A track names exactly one
@@ -4398,6 +4431,26 @@ export function compile(
 		}
 		for (const state of machine.states) {
 			machineLines.push(atom("mslayer", machine.id, state.id, layerOf(machine, state)));
+			/**
+			 * What advances the timeline this state plays — one fact per state, in
+			 * `mslayer/3`'s own shape and beside it.
+			 *
+			 * **Emitted for every state, defaulting to `time` where the document is
+			 * silent**, rather than only where somebody chose a scroll. That is what
+			 * lets the rules read `mclock(M,S,time)` *positively* — the narrowing on
+			 * `mexitpast/2` is one body literal rather than a negation over two
+			 * alternatives, and a fourth clock added later narrows nothing by
+			 * accident. It is also `mloop/3`'s arrangement, one record over: a
+			 * timeline with nothing said about looping still states `mloop(M,W,none)`.
+			 *
+			 * **A fact and never a variable.** A clock is wiring — there is no scale
+			 * for it to be on, nothing points at it twice, and two universes differing
+			 * only in what drives an animation would be two identical still frames. So
+			 * there is nothing to `#project` here and nothing to collapse, which is
+			 * the opposite answer from the one an easing gets and is the whole of
+			 * `MachineState.clock`'s essay.
+			 */
+			machineLines.push(atom("mclock", machine.id, state.id, clockOf(state)));
 		}
 		for (const [layerId, part, prop] of entry.lshadow) {
 			machineLines.push(atom("mlshadow", machine.id, layerId, part, prop));
@@ -5297,6 +5350,13 @@ export function compile(
 			"#show mkat(M,W,R,K,V) : mkat(M,W,R,K,V), scenery.",
 			"#show mtlen(M,W,V) : mtlen(M,W,V), scenery.",
 			"#show mloop(M,W,Mode) : mloop(M,W,Mode), scenery.",
+			// And what advances it, shown for `mloop/3`'s reason exactly, which is
+			// right beside it: the Machines and Timeline panels read a timeline's
+			// settings out of the model rather than asking the document a second
+			// question — and a panel that had to ask the document would be a panel a
+			// hand-written `mclock/3` could not reach. No `#project`: a clock is a
+			// fact, so it is in every answer set, and there is nothing to collapse.
+			"#show mclock(M,S,C) : mclock(M,S,C), scenery.",
 			"#show mkeasing(M,W,R,K,E) : mkeasing(M,W,R,K,E), scenery.",
 			"% minput/2 and its five companions are shown by NOTHING and projected by",
 			"% nothing, and that is not an omission. An input is a fact the document",

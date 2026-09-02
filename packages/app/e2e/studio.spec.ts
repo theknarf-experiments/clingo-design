@@ -404,6 +404,15 @@ async function expectAFontChangesTheBox(page: Page): Promise<void> {
  *     hint and never a duration — what paces the move is the duration field on
  *     the same row — so the panel has to say the number out loud or a designer
  *     who wants the physical spring has nothing to type.
+ *   - **A bespoke curve can be typed.** The four control-point fields are the
+ *     only way into a custom bezier, and everything about them lives between a
+ *     keydown and a document — which is why two bugs sat in them through a green
+ *     suite and a landed commit. `-0.2` could not be entered at all (a number
+ *     input's `value` is empty whenever the box holds `"-"` or `"0."`, so the
+ *     controlled value snapped back over both) and four keystrokes deleted the
+ *     row's other alternatives (the field wrote the whole `Value` rather than one
+ *     term of it). Neither is visible from Node and neither is visible from the
+ *     code; both are one keystroke away in a browser.
  *   - **The canvas plays it.** `--dc-play-easing` carries a spring's whole
  *     sixty-five-stop `linear()` and `Artboard.module.css` puts that custom
  *     property straight into `transition-timing-function`, so the claim is not
@@ -429,6 +438,7 @@ async function expectACurveIsAValue(page: Page): Promise<void> {
 	await page.locator('[data-panel="machines"]').click();
 	const row = page.locator('[data-role="transition-easing"][data-transition="enter"]');
 	const curve = row.locator('[data-prop="transition-easing"] select[data-role="literal"]');
+	const field = row.locator('[data-role="curve-field"]');
 	await expect(curve).toHaveCount(1);
 
 	// A spring is a word where `easeOut` is a word, so choosing one is one
@@ -454,14 +464,63 @@ async function expectACurveIsAValue(page: Page): Promise<void> {
 		})
 		.toBe(before * 2);
 
+	// And now the bespoke curve, typed the way a person types one, which is the
+	// half of this rung that only a browser can see at all. `bezierOf` is pinned
+	// by `values.test.ts` and `placeCurve` by `curveFields.test.ts`; what neither
+	// can reach is the four hundred milliseconds between a keydown and a document,
+	// where both of the bugs this paragraph guards actually lived.
+	const y1 = field.locator('[data-role="curve-y1"]');
+	await y1.click();
+	await y1.press("ControlOrMeta+a");
+	for (const key of ["Minus", "0", "Period", "2"]) await page.keyboard.press(key);
+	// **A minus sign survives.** The fields were `type="number"`, whose `value` is
+	// the empty string whenever what is in the box is not a valid floating-point
+	// number — `"-"` and `"0."` both are not — so the controlled value snapped back
+	// under the caret and `-0.2` arrived as `2`: the wrong sign and ten times the
+	// magnitude. `y` being free in both directions is the stated reason a bespoke
+	// curve exists at all, and undershoot was the one thing it could not say.
+	await expect(y1, "a control point cannot be typed one key at a time").toHaveValue("-0.2");
+	// **And the other alternative is still there.** The field wrote the whole
+	// value rather than one term of it, so the feel token this feature exists for
+	// collapsed to a single curve — and the space halved — the moment a handle
+	// moved. The universe count is the only witness that says so out loud.
+	await expect
+		.poll(universes, { message: "a nudged handle deleted the row's other alternative" })
+		.toBe(before * 2);
+	await expect(alternatives).toHaveCount(2);
+	await expect(
+		row.locator('[data-role="curve-note"]'),
+		"the row is holding a curve nobody could have chosen from the menu",
+	).toContainText("-0.2");
+
+	// A control point off the time axis is refused rather than clamped — and the
+	// document keeps it, which is right and is why some panel has to say so.
+	const x1 = field.locator('[data-role="curve-x1"]');
+	await x1.click();
+	await x1.press("ControlOrMeta+a");
+	await page.keyboard.type("1.4");
+	await expect(
+		row.locator('[data-role="curve-note"]'),
+		"an unplayable curve was kept and nothing on screen admitted it",
+	).toContainText("reads as no curve");
+	// The three points that were fine are still on screen beside the one that is
+	// not, which is what reading the *written* curve rather than the played one
+	// buys: correcting a typo must not delete the work beside it.
+	await expect(y1).toHaveValue("-0.2");
+
 	// Leave it as one curve again, so the returning visit reads back a document
 	// this walk can still recognise — and so that the count it asserts elsewhere
-	// is the template's own. The bouncy spring is what is left on the row, which
-	// is what the next paragraph plays.
+	// is the template's own. The bouncy spring is what has to be left on the row,
+	// which is what the next paragraph plays — and it is chosen again explicitly,
+	// because which of the two alternatives the bespoke curve landed in is the
+	// solver's business rather than this walk's.
 	await row.locator('[data-role="remove-alt"]').nth(1).click();
 	await expect
 		.poll(universes)
 		.toBe(before);
+	await alternatives.first().selectOption({ label: "Spring — bouncy" });
+	await expect(row.locator('[data-role="curve-note"]')).toContainText("Settles naturally in 606ms");
+	await expect.poll(universes).toBe(before);
 
 	// And now play it. Preview on, then the pointer onto the *instance* rather
 	// than onto the definition — the machine is worn by the two instances at the
@@ -500,6 +559,108 @@ async function expectACurveIsAValue(page: Page): Promise<void> {
 		)
 		.toBe("linear(0");
 	await page.locator('[data-role="preview"]').click();
+}
+
+/**
+ * Drag an instance in preview, and watch the machine move rather than the node.
+ *
+ * Two claims, and neither can be reached from Node, because both are about what
+ * a real pointer does to a real surface:
+ *
+ *   - **The threshold is the gesture.** `runtime.test.ts` drives the exported
+ *     interpreter with a fake element and proves the emitted file recognises a
+ *     drag at three pixels; nothing there says the *canvas* does, and the canvas
+ *     is the other half of "one table, two readers". A slop measured after
+ *     `toDocument` would pass every unit test in the repository and behave
+ *     differently at every zoom.
+ *   - **Preview is running the document, not editing it.** A pointer that goes
+ *     down on an instance and travels forty pixels is, in edit mode, a move
+ *     gesture that writes a new frame and an undo entry. In preview it must be a
+ *     `dragbegin` and nothing else: the machine moves and the node does not.
+ *     That is the sentence the whole preview mode is for, and a regression in it
+ *     looks like a design that rearranges itself when somebody demonstrates it.
+ *
+ * The template's two hover edges are re-triggered rather than a new pair being
+ * added, because the assertion is about the gesture and not about the panel's
+ * "+ Transition" button — and because the trigger `<select>` maps `TRIGGER_NAMES`,
+ * so the four new words being *in* it is itself part of what this checks.
+ *
+ * ## Where this walk aims, and the two ways it was aimed wrong first
+ *
+ * Both were the probe rather than the feature, which is the standing hazard of
+ * this file and the reason every locator below is justified rather than chosen.
+ *
+ *   - **`data-state` is on the instance's *parts*, never on the instance.**
+ *     `Artboard` writes it from `posesFor`, which reads `parseInstancePart(id)`
+ *     first — so `inst(resting,button)` carries the attribute and `resting`, the
+ *     instance node the box is measured on, returns `null` from it forever. A
+ *     walk asserting on the wrong one of those two reports the gesture broken in
+ *     a browser where it visibly works, which is exactly the failure this file's
+ *     header warns about.
+ *   - **Nothing is being played until something fires.** `useMachinePlayback`
+ *     starts at `NOTHING` and preview's load chain leaves it there for a machine
+ *     with no `load` edge, so at rest there is *no* `data-state` anywhere on the
+ *     canvas rather than a `data-state="rest"`: the canvas is drawing the
+ *     document's own picture and pretending nothing. So the under-slop assertion
+ *     is the **absence** of the attribute, which is a stronger sentence anyway —
+ *     "no edge was taken at all" rather than "an edge was taken back".
+ */
+async function expectADragMovesTheMachine(page: Page): Promise<void> {
+	await page.locator('[data-panel="machines"]').click();
+	const trigger = (id: string) =>
+		page.locator(`[data-role="transition"][data-transition="${id}"] [data-role="transition-trigger"]`);
+	await trigger("enter").selectOption({ label: "Drag begins" });
+	await trigger("leave").selectOption({ label: "Drag ends" });
+
+	await page.locator('[data-role="preview"]').click();
+	// The instance node for the geometry, its button part for the state — see the
+	// two paragraphs above, which is where a previous version of this walk went
+	// wrong twice.
+	const instance = page.locator('[data-node="resting"]');
+	const part = page.locator('[data-node="inst(resting,button)"]');
+	await expect(part).toHaveCount(1);
+	const box = await instance.boundingBox();
+	// Measured before it is aimed at, for the reason the curve walk above gives:
+	// a node that measured 0×0 would send the pointer somewhere nobody can see.
+	expect(box?.width ?? 0).toBeGreaterThan(8);
+	const from = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+
+	// A shaky click is a click. Two pixels is inside the slop, so nothing begins
+	// and nothing ends — and this machine has no `click` edge out of rest either,
+	// so no edge of any kind was taken and the canvas is still drawing the
+	// document rather than pretending a state.
+	await page.mouse.move(from.x, from.y, { steps: 2 });
+	await page.mouse.down();
+	await page.mouse.move(from.x + 2, from.y, { steps: 2 });
+	await page.mouse.up();
+	await expect(
+		page.locator('[data-node="inst(resting,button)"][data-state]'),
+		"a shake inside the slop moved the machine, so the threshold is not the gesture",
+	).toHaveCount(0);
+
+	// And forty pixels is a drag.
+	await page.mouse.down();
+	await page.mouse.move(from.x + 40, from.y + 10, { steps: 6 });
+	await expect(part, "forty pixels was not recognised as a drag").toHaveAttribute(
+		"data-state",
+		"hover",
+	);
+	// The node did not go with it. Compared against the box measured before the
+	// gesture, which is what makes this "the machine moved and the design did
+	// not" rather than "something is still on screen".
+	const during = await instance.boundingBox();
+	expect(Math.round(during!.x)).toBe(Math.round(box!.x));
+	expect(Math.round(during!.y)).toBe(Math.round(box!.y));
+
+	await page.mouse.up();
+	await expect(part, "the drag never ended").toHaveAttribute("data-state", "rest");
+
+	// Put the document back the way the template wrote it, so the returning visit
+	// reads a machine this walk still recognises — and so that a later assertion
+	// about the template's own space is about the template.
+	await page.locator('[data-role="preview"]').click();
+	await trigger("enter").selectOption({ label: "Pointer enters" });
+	await trigger("leave").selectOption({ label: "Pointer leaves" });
 }
 
 /** Make a project from the Card template and wait for the studio it opens. */
@@ -575,6 +736,7 @@ test("a template becomes a drawn studio, first on a clean profile and then on a 
 			await expectAFontChangesTheBox(page);
 			await createMachine(page);
 			await expectACurveIsAValue(page);
+			await expectADragMovesTheMachine(page);
 			expect(trouble, "the first visit logged errors").toEqual([]);
 		} finally {
 			// Closed, not merely navigated away from. The database has to be

@@ -4110,6 +4110,16 @@ export function propValueOf(
  * pseudo-class and cost the export no script at all; the rest drive
  * `data-state` from a generated runtime. Which is which is the `css` column,
  * read off this table rather than decided at the emitter — see `export.ts`.
+ *
+ * **Twelve, and the last four are not DOM events.** A pointer event on the
+ * instance's own element is what the first eight are, and it is not what a
+ * gesture is: "this scrolled into view" is a geometric fact a browser reports
+ * through an `IntersectionObserver`, and "this was dragged" is a pointer that
+ * went down and then moved *far enough* — a recognition rather than an event.
+ * {@link TriggerSpec.source} is what says so, and it exists because the alternative
+ * failed silently: `listen()` binds `bindings[trigger].event` and a trigger with
+ * an empty event would simply never be bound, in the exported file, with nothing
+ * anywhere to say why the machine did not move.
  */
 export type Trigger =
 	| "pointerenter"
@@ -4119,7 +4129,24 @@ export type Trigger =
 	| "focus"
 	| "blur"
 	| "click"
-	| "load";
+	| "load"
+	| "viewenter"
+	| "viewleave"
+	| "dragbegin"
+	| "dragend";
+
+/**
+ * How a runtime hears about a trigger that is not a DOM event on the element.
+ *
+ * **TypeScript-only, and it never reaches the program.** That is what lets
+ * `view` be a member here and a {@link TimelineClock} twenty lines down at the
+ * same time: a clock reaches the program as itself, inside `mclock/3`, and a
+ * source is read by two binders and by nothing else. The two can never meet in
+ * an answer set, which is the test `docs/framer-parity-plan.md` §1.2 applies —
+ * and it is recorded rather than merged, because they have the same members
+ * today and are answers to two different questions.
+ */
+export type TriggerSource = "view" | "drag";
 
 export interface TriggerSpec {
 	label: string;
@@ -4131,8 +4158,39 @@ export interface TriggerSpec {
 	 * with no behaviour in it. Null where CSS has no name for the condition.
 	 */
 	css: "hover" | "active" | "focus-visible" | null;
-	/** The trigger that undoes it, where the pair is what CSS understands. */
+	/**
+	 * The trigger that undoes it.
+	 *
+	 * This comment used to say "where the pair is what CSS understands", which was
+	 * true of the six that shipped and is a narrower claim than the field makes. A
+	 * pair is a fact about the *gesture* — a drag that begins ends, a thing that
+	 * scrolls in scrolls out — and `pseudoClassFor` reads `css` first and
+	 * short-circuits before it ever gets here, so a pair on a trigger with no
+	 * pseudo-class changes no behaviour and says something true.
+	 */
 	pair?: Trigger;
+	/**
+	 * Where the runtime hears it, where a listener on the instance's own element
+	 * is not where.
+	 *
+	 * Absent is the ordinary case and covers eight of the twelve: {@link event}
+	 * names a DOM event and `listen()` attaches to it. `load` is absent too and
+	 * has an empty event, which is the third case — fired once by `settle()` and
+	 * never bound at all.
+	 */
+	source?: TriggerSource;
+	/**
+	 * A trigger this one swallows once, because a gesture that ended is not also a
+	 * click.
+	 *
+	 * A browser does the same thing with a real drag on a link, and the two
+	 * interpreters have to agree about it or a machine with a drag edge *and* a
+	 * click edge would move twice in the studio and once in the file. Named in the
+	 * table rather than written into the runtime text, so that the emitted
+	 * interpreter contains no trigger id at all — the same argument
+	 * `TRIGGER_BINDINGS` already makes about not baking `focusin` into the script.
+	 */
+	suppresses?: Trigger;
 }
 
 export const TRIGGERS: Record<Trigger, TriggerSpec> = {
@@ -4179,9 +4237,126 @@ export const TRIGGERS: Record<Trigger, TriggerSpec> = {
 	// No event: a load trigger fires once, when the runtime starts. It is how a
 	// machine says "settle into this state" rather than "wait to be poked".
 	load: { label: "On load", event: "", css: null },
+	viewenter: {
+		label: "Scrolls into view",
+		// No DOM event, and unlike `load` that is not because it fires once: an
+		// IntersectionObserver is how a browser tells us a geometric fact changed,
+		// which is `source` rather than `event`. Keeping `event` empty is what stops
+		// `start()` attaching a listener for an event name that does not exist.
+		//
+		// "This element entered the viewport" and not "the page scrolled", which was
+		// the other available reading and is not close: a page-scrolled trigger has
+		// no pair, so every state it entered would be a one-way door; it is the same
+		// event for every instance, so a machine could not tell which button it was
+		// about; and "the page scrolled at all, ever" is true within four hundred
+		// milliseconds of a page opening and false never again.
+		event: "",
+		source: "view",
+		// CSS has no pseudo-class for "on screen". `:target` is the fragment,
+		// `animation-timeline: view()` is a clock and not a state, and there is no
+		// third candidate — so a machine that reveals on scroll is a data-state rule
+		// and a script. A scroll-*clocked timeline* is the one exception, and it is
+		// a different question asked of a different record — see {@link TimelineClock}.
+		css: null,
+		pair: "viewleave",
+	},
+	viewleave: {
+		label: "Scrolls out of view",
+		event: "",
+		source: "view",
+		css: null,
+		pair: "viewenter",
+	},
+	dragbegin: {
+		label: "Drag begins",
+		// Deliberately NOT the HTML5 `dragstart` event, and the constant is spelled
+		// differently from it for exactly that reason. The HTML drag-and-drop API
+		// needs `draggable="true"`, paints a ghost image the page cannot style, does
+		// not fire on touch at all, and is about transferring data rather than about
+		// a gesture. What a designer means by "drag" is a pointer that went down and
+		// then moved, and that is recognised from pointer events — `source` below.
+		//
+		// A maintainer who "fixes" this by filling in `event: "dragstart"` will get a
+		// machine that moves only under a mouse, only after the browser's own drag
+		// heuristics agree, and never on a phone.
+		event: "",
+		source: "drag",
+		css: null,
+		pair: "dragend",
+	},
+	dragend: {
+		label: "Drag ends",
+		event: "",
+		source: "drag",
+		css: null,
+		pair: "dragbegin",
+		suppresses: "click",
+	},
 };
 
 export const TRIGGER_NAMES = Object.keys(TRIGGERS) as Trigger[];
+
+/**
+ * How far a pointer must move while down before a runtime calls it a drag, in
+ * CSS pixels.
+ *
+ * **The threshold is what makes it a drag.** A drag with no slop is
+ * `pointerdown` under a different name, and `pointerdown` already exists with
+ * `:active` behind it. Three pixels because it is the smallest slop that
+ * survives a shaky click and is what every drag library converges on; Chromium's
+ * own is 5 and iOS's scroll threshold is about 10, and both of those are tuned
+ * for a different question — should this become a scroll?
+ *
+ * **Screen pixels and never document ones.** The studio's canvas pans and zooms,
+ * so three document pixels at 25% zoom is under one pixel of finger travel and
+ * at 400% is twelve — and a threshold that changed with the zoom would be a
+ * gesture that behaved differently depending on how closely somebody was
+ * looking. It is measured on the raw event coordinates in both readers.
+ *
+ * **Not a per-transition setting**, for {@link MachineInput}'s reason exactly: it
+ * is a property of *the hand*, not of the design, and a document holding two
+ * opinions about it would be a document that could not say whether its own
+ * gesture worked. It travels to the exported file on {@link MachineTable.settings}.
+ */
+export const DRAG_SLOP_PX = 3;
+
+/**
+ * What advances a timeline: wall time, or a scroll position.
+ *
+ * Bare constants, and the spelling matters for {@link BlendKind}'s reason
+ * exactly — a clock reaches the program as itself, inside `mclock/3`.
+ *
+ * `view` is **this element's** pass through the viewport; `pageScroll` is the
+ * document's own scroll. Two and not one, because they are two different
+ * sentences a designer says: "the hero image drifts as it goes by" is about the
+ * element, and "the progress bar fills as you read" is about the page. Both are
+ * CSS scroll-timeline concepts and the names are chosen to say which — `view()`
+ * and `scroll()` — so that the document and the stylesheet it becomes use one
+ * vocabulary.
+ *
+ * **`pageScroll` and not `page`**, which is what the motion spec called it and
+ * what `docs/framer-parity-plan.md` §1.2 renamed: `page/1` is the prototyping
+ * step's predicate for a page of a flow, and `mclock(M,S,page)` beside `page(P)`
+ * in one generated program is one word carrying two meanings through one
+ * `%`-contract, one Rules panel and one grep. A 0-ary constant and a unary
+ * predicate do not collide for the grounder and they collide for everybody else.
+ */
+export type TimelineClock = "time" | "view" | "pageScroll";
+
+export const TIMELINE_CLOCKS: Record<
+	TimelineClock,
+	{
+		label: string;
+		/** The CSS `animation-timeline` value, or null for wall time. */
+		css: string | null;
+	}
+> = {
+	time: { label: "Time", css: null },
+	view: { label: "This element's pass through the view", css: "view()" },
+	pageScroll: { label: "The page's scroll", css: "scroll(root block)" },
+};
+
+export const TIMELINE_CLOCK_NAMES = Object.keys(TIMELINE_CLOCKS) as TimelineClock[];
 
 /**
  * The curve menu, which **lives in `values.ts`** and is re-exported from here.
@@ -4809,6 +4984,35 @@ export interface MachineState {
 	 * where moving the last keyframe left the picture behind.
 	 */
 	timeline?: string;
+	/**
+	 * What advances {@link timeline} — wall time, or a scroll position.
+	 *
+	 * Absent is `time`, which is every state in every document today and must go
+	 * on meaning exactly what it meant.
+	 *
+	 * **On the state and not on the timeline**, which is the same choice
+	 * {@link timeline} itself made and for the same reason: two states routinely
+	 * play one animation, and a `loop` state that ran on wall time while a
+	 * `parallax` state played the same keyframes off the scroll is a real
+	 * document. Putting it on {@link Timeline} would make the two states rename
+	 * each other's animation.
+	 *
+	 * **A plain word and never a {@link Value}, and this is the one place in the
+	 * motion work where that answer goes the other way from {@link
+	 * Transition.easing}'s.** An easing is a *feel*, and a feel is a scale a
+	 * design system holds one end of — a `curve` token pointed at by every
+	 * transition is a real thing to write. A clock is *wiring*. There is no scale
+	 * for it to be on, nothing points at it twice, and a token holding
+	 * `["time","view"]` would be a document that could not say what its own
+	 * parallax is attached to. Same judgement {@link MachineInput} makes about a
+	 * range: a budget is the thing alternatives are judged against, not a thing
+	 * that has them.
+	 *
+	 * Read by nothing where {@link timeline} is absent, and kept rather than
+	 * refused — a state that stops playing a timeline should not lose what
+	 * somebody typed.
+	 */
+	clock?: TimelineClock;
 	/**
 	 * A blend state — several timelines mixed by a number input.
 	 *

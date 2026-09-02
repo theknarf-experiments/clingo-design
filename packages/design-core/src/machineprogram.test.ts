@@ -43,6 +43,7 @@ import {
 	trackProp,
 } from "./machines.ts";
 import { type Measurements, oneSize, stateMeasures } from "./measure.ts";
+import { readModel } from "./model.ts";
 import type {
 	Blend,
 	Constraint,
@@ -55,6 +56,7 @@ import type {
 	SceneNode,
 	StatePart,
 	Timeline,
+	TimelineClock,
 	Transition,
 	Trigger,
 } from "./scene.ts";
@@ -98,6 +100,13 @@ const machine = (spec: {
 		 */
 		layer?: string;
 		timeline?: string;
+		/**
+		 * ...and the fourth, added with the gestures. Threaded through the same
+		 * builder for the same reason: a state with a clock is a state, and a
+		 * builder that split them would let a test assert something about a
+		 * scroll-driven machine that is not true of the machine beside it.
+		 */
+		clock?: TimelineClock;
 		blend?: Blend;
 	}>;
 	transitions?: Transition[];
@@ -115,6 +124,7 @@ const machine = (spec: {
 			parts: state.parts ?? {},
 			...(state.layer ? { layer: state.layer } : {}),
 			...(state.timeline ? { timeline: state.timeline } : {}),
+			...(state.clock ? { clock: state.clock } : {}),
 			...(state.blend ? { blend: state.blend } : {}),
 		}),
 	),
@@ -2264,6 +2274,171 @@ test("an exit time is the fourth motion setting, and pacing is still a design", 
 	assert.equal((await run(varied)).count, 2, "a debounce scale is two designs");
 });
 
+/* ------------------------------------------------------------------ */
+/* Gestures and clocks                                                 */
+/* ------------------------------------------------------------------ */
+
+test("four new triggers are four facts and no universes", async () => {
+	// A trigger reaches the program as `mtrigger(M,T,G)`, a fact, and a fact is in
+	// every answer set — so widening the vocabulary from eight words to twelve
+	// cannot branch the space however different the four new ones are to a
+	// *runtime*. Asserted against the same document written with the shipped
+	// triggers rather than against a remembered number, because the claim is that
+	// the two documents cost the same and not that either costs one.
+	const built = (a: Trigger, b: Trigger): Scene =>
+		buttons({
+			uses: [{ id: "b1" }],
+			machines: [
+				machine({
+					states: [{ id: "rest" }, { id: "held" }],
+					transitions: [
+						edge({ id: "grab", from: "rest", to: "held", trigger: a }),
+						edge({ id: "drop", from: "held", to: "rest", trigger: b }),
+					],
+				}),
+			],
+		});
+	const pointers = built("pointerdown", "pointerup");
+	const dragged = built("dragbegin", "dragend");
+	const viewed = built("viewenter", "viewleave");
+	const bare = (await run(pointers)).count;
+	assert.equal((await run(dragged)).count, bare, "a drag pair is not two designs");
+	assert.equal((await run(viewed)).count, bare, "nor is a view pair");
+
+	// And the words really do reach the program, which is the half that would go
+	// silently missing if the emitter ever filtered a trigger it did not know.
+	assert.ok(states(dragged, "mtrigger(m1,grab,dragbegin)."));
+	assert.ok(states(dragged, "mtrigger(m1,drop,dragend)."));
+	assert.ok(states(viewed, "mtrigger(m1,grab,viewenter)."));
+	assert.ok(states(viewed, "mtrigger(m1,drop,viewleave)."));
+});
+
+test("every state has a clock, and the default is time", async () => {
+	// One fact per state, always — the arrangement `mslayer/3` and `mloop/3`
+	// already have, and the reason is the rule that reads it: `mexitpast/2` names
+	// `mclock(M,S,time)` positively, which is one body literal instead of a
+	// negation over a vocabulary that will grow. A document that said nothing
+	// about clocks and emitted nothing would make that rule silently stop firing.
+	const scene = buttons({
+		uses: [{ id: "b1" }],
+		machines: [machine({ states: [{ id: "rest" }, { id: "hover" }] })],
+	});
+	assert.deepEqual(named((await answers(scene))[0], "mclock"), [
+		"mclock(m1,hover,time)",
+		"mclock(m1,rest,time)",
+	]);
+});
+
+test("a clock is a word on a state, and a state with one mints the same copies", async () => {
+	// The other half of `MachineState.clock`'s essay, checked rather than
+	// asserted: a clock is *wiring*, so it is a fact and never a Value, so it
+	// branches nothing and — the sharper claim — it changes nothing about what the
+	// state materialises. Two universes differing only in what drives an animation
+	// would be two identical still frames, which is the thing the multiverse is
+	// not for.
+	const built = (clock?: "view" | "pageScroll"): Scene =>
+		buttons({
+			uses: [{ id: "b1" }],
+			machines: [
+				machine({
+					timelines: [
+						{
+							id: "drift",
+							name: "Drift",
+							loop: "none",
+							tracks: [track("label", "y", [key("0ms", "14px"), key("400ms", "2px")])],
+						},
+					],
+					states: [
+						{ id: "rest" },
+						{ id: "para", timeline: "drift", ...(clock ? { clock } : {}) },
+					],
+					transitions: [edge({ id: "over", from: "rest", to: "para" })],
+				}),
+			],
+		});
+	const plain = built();
+	const scrolled = built("view");
+	assert.equal((await run(scrolled)).count, (await run(plain)).count);
+
+	const atoms = (await answers(scrolled))[0];
+	assert.deepEqual(named(atoms, "mclock"), [
+		"mclock(m1,para,view)",
+		"mclock(m1,rest,time)",
+	]);
+	// **The whole answer set, minus the clock fact itself, is the unclocked
+	// document's answer set.** Not "the same number of copies": the same atoms, by
+	// name — every `stt(...)` copy, every frame, every rendered property. A clock
+	// that changed one of them would be a clock that had leaked into the picture,
+	// and a clock that is in the picture is a design decision the multiverse would
+	// then have to be able to explore, which is exactly the argument for it being
+	// a fact.
+	const withoutClock = (list: readonly string[]) =>
+		list.filter((a) => !a.startsWith("mclock(")).sort();
+	assert.deepEqual(withoutClock(atoms), withoutClock((await answers(plain))[0]));
+	// And it mints no variable, so there is nothing for a pick to decide and
+	// nothing for a projection to partition.
+	assert.deepEqual(
+		Object.keys(compile(scrolled).variables).sort(),
+		Object.keys(compile(plain).variables).sort(),
+	);
+	// And the page's own scroll is the other word, spelled `pageScroll` rather
+	// than `page` because a page of a flow is about to be `page/1` and one word
+	// carrying two meanings through one program is the collision this rename
+	// exists to prevent.
+	assert.ok(states(built("pageScroll"), "mclock(m1,para,pageScroll)."));
+	assert.equal(compile(built("pageScroll")).program.includes("mclock(m1,para,page)"), false);
+
+	// **And it comes back out**, which is the assertion `#show mclock/3` is for
+	// and the one this repository has learned to write down: a predicate stated
+	// and never shown is a feature that works everywhere except where anybody can
+	// see it, and `asset/2` cost a whole feature to exactly that omission. This is
+	// `ModelMachine.clocks`' only reader in the tree — the two panels ask the
+	// document, for the reason written where the field is declared — so without
+	// this line the `#show` could be deleted and every other test would stay
+	// green.
+	assert.deepEqual(readModel(atoms).machines.m1?.clocks, {
+		para: "view",
+		rest: "time",
+	});
+	assert.deepEqual(readModel((await answers(plain))[0]).machines.m1?.clocks, {
+		para: "time",
+		rest: "time",
+	});
+});
+
+test("an exit time past a scroll-clocked timeline is not reported", async () => {
+	// A scroll-clocked timeline has no wall-clock length for a debounce to be
+	// longer than: the state finishes when the reader scrolls past it, which is
+	// not a duration, so "the trigger can never arrive late enough" is a sentence
+	// about nothing. The same document on the wall clock reports it, which is what
+	// makes this a narrowing rather than a silence.
+	const timelines: Timeline[] = [
+		{
+			id: "pulse",
+			name: "Pulse",
+			loop: "none",
+			tracks: [track("label", "y", [key("0ms", "14px"), key("200ms", "4px")])],
+		},
+	];
+	const built = (clock?: "view"): Scene =>
+		buttons({
+			uses: [{ id: "b1" }],
+			machines: [
+				machine({
+					timelines,
+					states: [
+						{ id: "rest", timeline: "pulse", ...(clock ? { clock } : {}) },
+						{ id: "hover" },
+					],
+					transitions: [edge({ id: "over", from: "rest", to: "hover", exit: [lit("9s")] })],
+				}),
+			],
+		});
+	assert.deepEqual(named((await answers(built()))[0], "mexitpast"), ["mexitpast(m1,over)"]);
+	assert.deepEqual(named((await answers(built("view")))[0], "mexitpast"), []);
+});
+
 test("an exit time longer than its own state's timeline makes the edge unreachable", async () => {
 	// The deeper reading of the brief's check, shipped beside the literal one
 	// rather than substituted for it: a transition that must wait longer to become
@@ -2979,6 +3154,8 @@ test("the contract names every predicate the ladder puts in the program", () => 
 		"mstopout",
 		"mstopgap",
 		"mtwosource",
+		// ...and what advances one, which arrived with the gestures.
+		"mclock",
 		// The terms and the variable keys a rule may type.
 		"kat",
 		"kval",

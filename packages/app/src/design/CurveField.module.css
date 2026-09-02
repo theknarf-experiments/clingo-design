@@ -82,6 +82,14 @@
 	opacity: 0.5;
 }
 
+/* And where the alternative follows a token or a derivation there is no literal
+   to type into at all, so the four are inert rather than dim — the same answer
+   `ValueEditor` gives for the same term one row up, said the same way. */
+.number:disabled {
+	opacity: 0.35;
+	cursor: not-allowed;
+}
+
 .note {
 	grid-column: 2;
 	margin: 0;

@@ -18,7 +18,6 @@ import {
 	deleteTransition,
 	easingOf,
 	findState,
-	lit,
 	guardImpossible,
 	layerInitial,
 	layerOf,
@@ -520,12 +519,26 @@ function Row({
 						)
 					}
 				/>
+				{/*
+				 * The four control points, writing into the *same* value the row
+				 * above writes into — one of its alternatives, and not the list.
+				 *
+				 * It used to hand over `[lit(text)]`, which reads as "put this curve
+				 * in the row" and means "delete every other design the row was
+				 * holding": a `["easeOut", "springBouncy"]` feel collapsed to one
+				 * curve, and the space halved, the moment a handle was nudged. Which
+				 * alternative it lands in is `picks[easingVariable]` — the one this
+				 * universe is using, because that is the curve the drawing beside the
+				 * fields is drawing.
+				 */}
 				<CurveField
 					testId="transition-curve"
-					value={curve}
-					onChange={(text) =>
+					curve={curve}
+					value={transition.easing ?? []}
+					active={picks[easingVariable]}
+					onChange={(next) =>
 						write(
-							{ easing: [lit(text)] },
+							{ easing: next.length > 0 ? next : undefined },
 							`curve-${machine.id}-${transition.id}`,
 						)
 					}

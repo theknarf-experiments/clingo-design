@@ -14,6 +14,7 @@ import {
 	type Scene,
 	TURNS,
 	TURN_NAMES,
+	TIMELINE_CLOCKS,
 	type Term,
 	type Timeline as TimelineDoc,
 	type Track,
@@ -23,6 +24,7 @@ import {
 	VALUE_TYPES,
 	addKeyframe,
 	addTrack,
+	clockOf,
 	componentDef,
 	deleteKeyframe,
 	deleteTimeline,
@@ -42,6 +44,7 @@ import {
 	setTimelineLoop,
 	sharedPropsOfKinds,
 	solvedKeys,
+	statePlays,
 	timelineLength,
 	timelineLenVar,
 	tokensFor,
@@ -333,12 +336,17 @@ function KeyRow({
 						)
 					}
 				/>
+				{/* Into one alternative of the same value, for `Transitions.tsx`'s
+				    reason: a keyframe whose curve holds two feels must not lose one of
+				    them to a nudged handle either. */}
 				<CurveField
 					testId="keyframe-curve"
-					value={curve}
-					onChange={(text) =>
+					curve={curve}
+					value={keyframe.easing ?? []}
+					active={picks[easeVar]}
+					onChange={(next) =>
 						patch(
-							{ easing: [lit(text)] },
+							{ easing: next.length > 0 ? next : undefined },
 							`key-curve-${machine.id}-${timeline.id}-${term}-${index}`,
 						)
 					}
@@ -562,6 +570,20 @@ export function Timeline({
 	const length = solved?.length ?? timelineLength(machine, timeline, context);
 	const lengthVar = timelineLenVar(machine.id, timeline.id);
 
+	/**
+	 * The first state that plays this timeline off a scroll, or nothing.
+	 *
+	 * Through `statePlays` rather than `state.timeline`, so that a blend stop
+	 * naming this timeline counts too — a blend state with a scroll clock is a
+	 * legal document, and the panel that showed nothing for it would be the panel
+	 * that is wrong about the one case somebody had to think about.
+	 */
+	const scrolled = machine.states.find(
+		(state) =>
+			clockOf(state) !== "time" &&
+			statePlays(machine, state).some((w) => w.id === timeline.id),
+	);
+
 	/** The part a new track would animate, and the field it would animate. */
 	const [part, setPart] = useState("");
 	const chosen = part || parts[0]?.id || "";
@@ -663,12 +685,34 @@ export function Timeline({
 			 * canvas to draw one moment, which is two keyframe copies out of the
 			 * answer set and a lerp.
 			 */}
+			{/*
+			 * ...and where a state that plays it is driven by the scroll instead, the
+			 * scrubber is that scroll position rather than a moment in time.
+			 *
+			 * **Nothing about the slider changes**, which is the strongest available
+			 * evidence that the clock was put on the right record: `Playback.scrub` is
+			 * already "a *position*, set by a hand on a slider", and a scroll clock is
+			 * the exported file's hand on that same slider. Not one line of
+			 * `useMachinePlayback.ts` moved for this feature, and if a later step
+			 * finds itself editing that hook for a clock, something is wrong.
+			 *
+			 * Read off the machine's states rather than taken as a prop, because the
+			 * question is "does any state that plays *this* timeline scroll-drive it"
+			 * and this component already holds the machine. Where two states play one
+			 * timeline and disagree, the sentence says so by naming the first
+			 * scroll-clocked one — which is the honest answer to a question that has
+			 * two.
+			 */}
 			<label className={styles.scrub}>
 				<input
 					className={styles.slider}
 					type="range"
 					data-role="scrub"
-					aria-label="Where in the timeline the canvas is drawing"
+					aria-label={
+						scrolled === undefined
+							? "Where in the timeline the canvas is drawing"
+							: "How far through the scroll the canvas is drawing"
+					}
 					min={0}
 					max={Math.max(1, length)}
 					step={1}
@@ -679,6 +723,17 @@ export function Timeline({
 					{writeDuration(Math.min(Math.max(0, at), Math.max(0, length)))}
 				</span>
 			</label>
+
+			{scrolled === undefined ? null : (
+				<p className={styles.empty} data-role="scroll-clocked">
+					{TIMELINE_CLOCKS[clockOf(scrolled)].label} drives this timeline in{" "}
+					{scrolled.name} in the exported file — `animation-timeline`, played by
+					the browser, with no script in it. The scrubber above is that scroll
+					position, by hand. A browser without scroll timelines shows the
+					state's own pose and animates nothing, which is what the canvas shows
+					when you let go of the slider.
+				</p>
+			)}
 
 			{timeline.tracks.length === 0 ? (
 				<p className={styles.empty} data-role="no-tracks">

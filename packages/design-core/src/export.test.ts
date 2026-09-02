@@ -43,6 +43,7 @@ import {
 	type SceneNode,
 	type StatePart,
 	type Style,
+	type TimelineClock,
 	type Track,
 	type Transition,
 	makeGuides,
@@ -2219,6 +2220,8 @@ function timelined(spec: {
 	loop?: LoopMode;
 	drawnIn?: string;
 	exit?: Value;
+	/** What advances it — absent is wall time, which is every fixture but one. */
+	clock?: TimelineClock;
 }): Machine {
 	return {
 		id: "m5",
@@ -2235,7 +2238,13 @@ function timelined(spec: {
 		],
 		states: [
 			{ id: "still", name: "Still", parts: {} },
-			{ id: "spin", name: "Spin", parts: {}, timeline: "w1" },
+			{
+			id: "spin",
+			name: "Spin",
+			parts: {},
+			timeline: "w1",
+			...(spec.clock === undefined ? {} : { clock: spec.clock }),
+		},
 		],
 		transitions: [
 			edge({
@@ -2287,6 +2296,210 @@ test("a timeline comes out as @keyframes, and the state that plays it turns it o
 	const state = block(out.text, `.${host}[data-state="spin"] .${panel}`);
 	assert.ok(state, "expected a rule for the state that plays it");
 	assert.match(state, new RegExp(`animation: ${name} 600ms linear 0ms 1 normal both;`));
+});
+
+test("a scroll-clocked timeline is a gated custom property and no script", async () => {
+	// The whole of scroll-linked motion, and the claim it rests on: it is CSS.
+	// `animation-timeline` is the feature that does exactly this, the `@keyframes`
+	// block already exists, and the `animation` declaration is already on the
+	// state's rule — so what a parallax costs is a custom property and four
+	// longhands. Nothing is scripted, nothing polls, and `runtime.ts` did not
+	// move a line for it.
+	const scene = machined({
+		machines: [
+			timelined({
+				clock: "view",
+				length: single("600ms"),
+				tracks: [
+					{
+						part: "panel",
+						prop: "opacity",
+						keys: [
+							{ at: single("0ms"), value: single("0.2") },
+							{ at: single("600ms"), value: single("1") },
+						],
+					},
+				],
+			}),
+		],
+	});
+	const { out } = await exported(scene);
+	const host = className(out.text, "b1");
+	const panel = className(out.text, "inst(b1,panel)");
+	const name = "k-b1-w1-panel";
+
+	// The block itself is the block an unclocked timeline gets: what changed is
+	// what advances it, not what it says.
+	assert.ok(out.text.includes(`@keyframes ${name} {`));
+
+	// The gate. `none` plainly, the name inside `@supports` — so a browser that
+	// cannot parse `animation-timeline` gets `animation-name: none` and plays
+	// nothing, which is a still design rather than an animation at the wrong
+	// moment.
+	assert.ok(out.text.includes(`--dc-tl-${name}: none;`), "the plain definition is none");
+	assert.match(
+		out.text,
+		new RegExp(
+			`@supports \\(animation-timeline: view\\(\\)\\) \\{\\n\\t:root \\{\\n\\t\\t--dc-tl-${name}: ${name};`,
+		),
+	);
+
+	// And the node's rule is five flat declarations, because `Declarations` is one
+	// key per property and a rule split across an `@supports` boundary cannot live
+	// in that shape.
+	const state = block(out.text, `.${host}[data-state="spin"] .${panel}`);
+	assert.ok(state, "expected a rule for the state that plays it");
+	assert.match(state, new RegExp(`animation-name: var\\(--dc-tl-${name}\\);`));
+	assert.match(state, /animation-duration: auto;/);
+	assert.match(state, /animation-timeline: view\(\);/);
+	assert.doesNotMatch(state, /\n\tanimation: /, "and no shorthand beside them");
+
+	// The losses say what a reader who opens this in Safari will see, and name the
+	// mechanism rather than apologising for it.
+	assert.ok(
+		out.lost.some((line) => /driven by this element's pass through the view/.test(line)),
+		"the loss names the clock",
+	);
+	assert.ok(out.lost.some((line) => /animation-timeline/.test(line)));
+
+	// The page's own scroll is the other clock and the other CSS value.
+	const paged = await exported(
+		machined({
+			machines: [
+				timelined({
+					clock: "pageScroll",
+					length: single("600ms"),
+					tracks: [
+						{
+							part: "panel",
+							prop: "opacity",
+							keys: [
+								{ at: single("0ms"), value: single("0.2") },
+								{ at: single("600ms"), value: single("1") },
+							],
+						},
+					],
+				}),
+			],
+		}),
+	);
+	assert.match(paged.out.text, /animation-timeline: scroll\(root block\);/);
+});
+
+test("a document with no clock and no gesture emits neither", async () => {
+	// The no-regression assertion, and the one this feature is most likely to
+	// break silently: a document that says nothing about clocks must export the
+	// bytes it exported before, with no `:root` pair, no `@supports` and no
+	// pointer recogniser it never uses.
+	const scene = machined({
+		machines: [
+			timelined({
+				length: single("600ms"),
+				tracks: [
+					{
+						part: "panel",
+						prop: "opacity",
+						keys: [
+							{ at: single("0ms"), value: single("0.2") },
+							{ at: single("600ms"), value: single("1") },
+						],
+					},
+				],
+			}),
+		],
+	});
+	const { out } = await exported(scene);
+	assert.doesNotMatch(out.text, /--dc-tl-/);
+	assert.doesNotMatch(out.text, /animation-timeline/);
+	assert.doesNotMatch(out.text, /@supports \(animation-timeline/);
+	// And the shorthand is still what an unclocked timeline gets.
+	assert.match(out.text, /animation: k-b1-w1-panel 600ms linear 0ms 1 normal both;/);
+	assert.equal(
+		out.lost.some((line) => /moves on a gesture/.test(line)),
+		false,
+		"and nothing is said about gestures this document has not got",
+	);
+});
+
+test("a machine entered by a drag does not collapse to a pseudo-class", async () => {
+	// A drag pair is a *pair* — `dragbegin` and `dragend` name each other — which
+	// is what makes `TriggerSpec.pair` a fact about the gesture rather than about
+	// CSS. `pseudoClassFor` reads `css` first and short-circuits, so a paired
+	// gesture with no pseudo-class is a `data-state` rule and the script, exactly
+	// as a click toggle is, with no change at all in the emitter.
+	const scene = machined({
+		machines: [
+			{
+				id: "m9",
+				name: "Card",
+				root: "btn",
+				states: [
+					{ id: "rest", name: "Rest", parts: {} },
+					{
+						id: "held",
+						name: "Held",
+						parts: { panel: { props: { fill: single("#f8fafc") } } },
+					},
+				],
+				transitions: [
+					edge({ id: "grab", from: "rest", to: "held", trigger: "dragbegin" }),
+					edge({ id: "drop", from: "held", to: "rest", trigger: "dragend" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const host = className(out.text, "b1");
+	const panel = className(out.text, "inst(b1,panel)");
+
+	assert.ok(
+		block(out.text, `.${host}[data-state="held"] .${panel}`),
+		"a gesture is a data-state rule",
+	);
+	assert.doesNotMatch(out.text, /:hover|:active|:focus-visible/);
+	assert.match(out.text, /<script>/, "and the interpreter comes with it");
+	// The transition is still on the base rule, so the *appearance* of dragging is
+	// CSS and only the state flip is script — the same division of labour a hover
+	// pair has.
+	const base = block(out.text, `.${panel}`);
+	assert.ok(base);
+	assert.match(base, /transition: background-color/);
+});
+
+test("a gesture-driven machine says so in the losses", async () => {
+	// One sentence per machine, naming both halves and the threshold — and saying
+	// the thing nobody expects, which is that the element does not move with the
+	// pointer. A drag trigger says which state the machine is in; making it carry
+	// the pointer's position would be a `transform` written every pointermove by a
+	// script, which is the second animator `runtime.ts` refuses.
+	const scene = machined({
+		machines: [
+			{
+				id: "m9",
+				name: "Card",
+				root: "btn",
+				states: [
+					{ id: "rest", name: "Rest", parts: {} },
+					{
+						id: "held",
+						name: "Held",
+						parts: { panel: { props: { fill: single("#f8fafc") } } },
+					},
+				],
+				transitions: [
+					edge({ id: "grab", from: "rest", to: "held", trigger: "dragbegin" }),
+					edge({ id: "drop", from: "held", to: "rest", trigger: "dragend" }),
+				],
+			},
+		],
+	});
+	const { out } = await exported(scene);
+	const said = out.lost.filter((line) => /moves on a gesture/.test(line));
+	assert.equal(said.length, 1, "once per machine, not once per state");
+	assert.match(said[0], /drag begins/);
+	assert.match(said[0], /drag ends/);
+	assert.match(said[0], /3 pixels/);
+	assert.match(said[0], /\*\*not\*\* do is move the element with the pointer/);
 });
 
 test("a loop and a ping-pong reach animation-iteration-count and animation-direction", async () => {

@@ -98,6 +98,7 @@ import {
 	type CompareOp,
 	type Condition,
 	type Constraint,
+	DRAG_SLOP_PX,
 	type Keyframe,
 	type Machine,
 	type MachineInput,
@@ -332,7 +333,31 @@ test("a paired trigger is paired back, and the pair agrees on its pseudo-class",
 		const other = TRIGGERS[spec.pair];
 		assert.equal(other.pair, name, `${name} and ${spec.pair} do not pair back`);
 		assert.equal(other.css, spec.css, `${name} and ${spec.pair} disagree on css`);
-		assert.notEqual(spec.css, null, `${name} is paired but has no pseudo-class`);
+		// A pair is a fact about the *gesture* and not about CSS, and this
+		// assertion used to say the opposite: `assert.notEqual(spec.css, null)` was
+		// true of the six triggers that shipped and was a narrower claim than the
+		// field makes. A drag that begins ends and a thing that scrolls in scrolls
+		// out, and neither has a pseudo-class — so the four gestures are paired and
+		// `css: null`, which `pseudoClassFor` handles by reading `css` first and
+		// short-circuiting before it ever looks at the pair. What is left of the
+		// original claim is the half that still bites: a pair that disagrees about
+		// its pseudo-class would emit a selector for one direction and a script for
+		// the other, and that is the line above.
+		//
+		// The two halves must also agree about their *source*, which is the same
+		// sentence one column over: a `dragbegin` bound by the pointer recogniser
+		// whose `dragend` was not would be a machine that can enter a state and
+		// never leave it.
+		assert.equal(other.source, spec.source, `${name} and ${spec.pair} disagree on source`);
+	}
+	// And the other direction, which is what the deleted assertion was really
+	// about: a trigger with a pseudo-class must have a pair, or `pseudoClassFor`
+	// would have a `css` to collapse to and no way back out of the state.
+	for (const name of TRIGGER_NAMES) {
+		const spec = TRIGGERS[name];
+		if (spec.css !== null) {
+			assert.notEqual(spec.pair, undefined, `${name} has a pseudo-class and no pair`);
+		}
 	}
 });
 
@@ -898,8 +923,17 @@ test("the table carries the instances a machine drives, each starting where it i
 test("a machine nothing uses is not in the table at all", () => {
 	// Which is what lets an export with no drawn machine emit no script: an empty
 	// table is the signal, and a machine with no instances would falsify it.
+	//
+	// `settings` is beside them and is not machine-specific: it is the gesture
+	// threshold, which belongs to no machine and is stated on every table so that
+	// a reader never has to tell "no drag in this document" apart from "this table
+	// was written out by hand".
 	const scene = machined(cards([]), [state("rest", "Rest")]);
-	assert.deepEqual(machineTable(scene), { instances: {}, machines: {} });
+	assert.deepEqual(machineTable(scene), {
+		instances: {},
+		machines: {},
+		settings: { dragSlop: DRAG_SLOP_PX },
+	});
 });
 
 test("disabled and dangling edges are left out of the table", () => {

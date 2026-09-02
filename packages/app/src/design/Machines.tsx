@@ -22,8 +22,11 @@ import {
 	type Scene,
 	type SceneNode,
 	type StatePart,
+	TIMELINE_CLOCKS,
+	TIMELINE_CLOCK_NAMES,
 	TRIGGERS,
 	type Term,
+	type TimelineClock,
 	type Token,
 	type Value,
 	type ValueType,
@@ -34,6 +37,7 @@ import {
 	addState,
 	addTimeline,
 	clearStatePart,
+	clockOf,
 	componentDef,
 	componentDefs,
 	deleteBlendStop,
@@ -74,6 +78,7 @@ import {
 	setStateBlend,
 	setStateFrame,
 	setStateHidden,
+	setStateClock,
 	setStateLayer,
 	setStateProp,
 	setStateTimeline,
@@ -950,6 +955,53 @@ function Plays({
 					{timelines.map((w) => (
 						<option key={w.id} value={w.id}>
 							{w.name}
+						</option>
+					))}
+				</select>
+
+				{/*
+				 * What advances the timeline, beside what it plays — because those are
+				 * the two halves of one sentence and a designer reads them together.
+				 *
+				 * **This row is in `Machines.tsx` and the parity plan's ownership table
+				 * gives the clock select to `Timeline.tsx`, which is wrong and is
+				 * followed as far as it can be.** A clock is a field on a *state* —
+				 * that is the whole of its argument, and the reason it is not on the
+				 * timeline is that two states routinely play one animation — and
+				 * `Timeline.tsx` renders a timeline, once, with no state in scope. A
+				 * select there would have had to write the clock of every state that
+				 * plays the timeline, which is precisely the "the two states rename
+				 * each other's animation" failure the field's own essay refuses. So the
+				 * select is here, where every other whole-state fact already is, and
+				 * the Timeline panel takes the half of the row it can honestly hold:
+				 * the scrubber's label.
+				 *
+				 * Greyed where the state plays nothing, rather than hidden: a clock
+				 * with no timeline is read by nothing and is *kept* — a state that
+				 * stops playing a timeline should not lose what somebody typed — and a
+				 * row that vanished would take the setting with it.
+				 */}
+				<select
+					className={styles.select}
+					data-role="state-clock"
+					aria-label="What advances this state's timeline"
+					title="Wall time, or a scroll position. A scroll-clocked timeline is `animation-timeline` in the exported file and no script at all — the browser scrubs it. Here the scrubber is that scroll position, by hand."
+					value={clockOf(state)}
+					disabled={state.timeline === undefined && state.blend === undefined}
+					onChange={(e) =>
+						onSceneChange((prev) =>
+							setStateClock(
+								prev,
+								machine.id,
+								state.id,
+								e.target.value === "time" ? null : (e.target.value as TimelineClock),
+							),
+						)
+					}
+				>
+					{TIMELINE_CLOCK_NAMES.map((clock) => (
+						<option key={clock} value={clock}>
+							{clock === "time" ? "on time" : TIMELINE_CLOCKS[clock].label}
 						</option>
 					))}
 				</select>

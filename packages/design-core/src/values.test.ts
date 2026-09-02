@@ -14,6 +14,7 @@ import {
 	VALUE_TYPE_NAMES,
 	activeTerm,
 	bezierOf,
+	bezierPoints,
 	cssEasing,
 	curveOf,
 	keyEaseVar,
@@ -864,6 +865,26 @@ test("bezierOf is exact or nothing", () => {
 	// grounder, which is why the document does not store it.
 	assert.equal(bezierOf("cubic-bezier(0.2,0,0,1)"), undefined);
 	assert.equal(bezierOf("easeOut"), undefined);
+});
+
+test("bezierPoints reads what is written where bezierOf reads what is legal", () => {
+	// One grammar and two readers, in the relationship `nearestPermille` has to
+	// `permilleOf`. The strict one is what decides whether there is a curve at
+	// all; this one exists for the four boxes somebody is typing in, where an `x`
+	// of 1400 must not blank the three points that were fine along with the one
+	// that was not.
+	assert.deepEqual(bezierPoints("cubicBezier(1400,0,580,1000)"), [1400, 0, 580, 1000]);
+	assert.equal(bezierOf("cubicBezier(1400,0,580,1000)"), undefined);
+	// They agree on every literal that is a curve, which is what keeps the panel
+	// and the program showing one thing.
+	for (const text of ["cubicBezier(200,0,0,1000)", "cubicBezier(340, 1560, 640, 1000)"]) {
+		assert.deepEqual(bezierPoints(text), bezierOf(text), text);
+	}
+	// And the grammar is the *same* grammar, so nothing the strict reader refuses
+	// for being unspellable is spellable here either.
+	assert.equal(bezierPoints("cubicBezier(0.2,0,0,1)"), undefined);
+	assert.equal(bezierPoints("cubic-bezier(0.2,0,0,1)"), undefined);
+	assert.equal(bezierPoints("easeOut"), undefined);
 });
 
 test("cssEasing writes CSS for all eight words and for a bezier, and nothing else", () => {

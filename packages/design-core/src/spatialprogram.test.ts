@@ -241,6 +241,20 @@ function summarise(template: (typeof TEMPLATES)[number], result: {
  * property never reached the file; a paint change that moved a frame would mean
  * it reached the geometry, which is the thing `MEASURED_PROPS` exists to stop.
  *
+ * The `html` digest of every universe of the two templates that carry a
+ * `<script>` — `machine` and `deck` — moved a second time, with the gesture
+ * step, and that one *is* the case `runtime.ts:796–815` writes the rule for: the
+ * runtime text gained two binders, the serialised trigger table gained two
+ * columns, and the machine table gained a `settings` field, so every file with an
+ * interpreter in it changed by construction. The rule was met rather than waived:
+ * the whole exported HTML of every universe of every template was written out
+ * before and after, and the diff is **entirely inside the `<script>` element** —
+ * with the script region replaced by a placeholder, the two files are byte
+ * identical, for all twelve. Which is the same proof "roll the runtime back and
+ * the hashes return" makes, done the direct way round. Ten templates and every
+ * `svg`, `nodes`, `frames` and `rendered` digest did not move at all, which is
+ * what says the gestures reached the behaviour and nothing else.
+ *
  * Two ids were **added** later and neither is a regeneration: `deck` and
  * `solids` are the templates written after the ladder and the third axis
  * shipped, so they have no "before" to have moved away from. What they get out

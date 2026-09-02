@@ -105,6 +105,7 @@ import {
 	COMPARE_OPS,
 	CONSTRAINT_KINDS,
 	type Condition,
+	DRAG_SLOP_PX,
 	FRAME_DIMS,
 	INPUT_KINDS,
 	type InputKind,
@@ -122,7 +123,9 @@ import {
 	type Scene,
 	type SceneNode,
 	type StatePart,
+	TIMELINE_CLOCKS,
 	type Timeline,
+	type TimelineClock,
 	type Track,
 	type Transition,
 	type Trigger,
@@ -629,6 +632,25 @@ export function layerOf(machine: Machine, state: MachineState): string {
 	return state.layer !== undefined && layers.some((l) => l.id === state.layer)
 		? state.layer
 		: layers[0].id;
+}
+
+/**
+ * What advances a state's timeline: what it says, or wall time.
+ *
+ * One reader for four callers — the compiler's `mclock/3` fact, the export's
+ * `scrollTimelineFor`, the state row's select and the Timeline panel's scrubber
+ * label — because "absent is `time`" is the whole of the field's meaning and
+ * four spellings of `state.clock ?? "time"` is four places for the default to
+ * stop agreeing. A clock the table has not got falls back rather than being
+ * carried, exactly as an unknown loop mode does: a word no rule can match would
+ * silently disable the `mexitpast/2` narrowing instead of changing it. The
+ * document reader refuses one on the way in, so in practice this only ever
+ * catches a scene somebody built in a fixture.
+ */
+export function clockOf(state: MachineState): TimelineClock {
+	return state.clock !== undefined && Object.hasOwn(TIMELINE_CLOCKS, state.clock)
+		? state.clock
+		: "time";
 }
 
 /** Every state of one layer, in document order. */
@@ -2198,6 +2220,23 @@ export interface MachineTable {
 			>;
 		}
 	>;
+	/**
+	 * Settings that belong to no machine — the gesture thresholds, today just one.
+	 *
+	 * On the table rather than as another parameter to the runtime factory,
+	 * because the table is the thing both interpreters already read and the
+	 * factory signature is a thing three files agree about. A seventh argument to
+	 * `evalRuntime` would also be a seventh argument the emitted script has to
+	 * pass, which is the shape `clock` deliberately avoided.
+	 *
+	 * Optional for `layerStart`'s reason exactly: two files build a
+	 * `MachineTable` by hand in a fixture, and a required field would fail their
+	 * typecheck rather than their tests. {@link machineTable} always fills it, and
+	 * the runtime falls back to {@link DRAG_SLOP_PX}'s own number where it is
+	 * missing — one default in two places, which is the one duplication a text
+	 * that has to survive a hand-edited table cannot avoid.
+	 */
+	settings?: { dragSlop: number };
 }
 
 /**
@@ -2307,7 +2346,12 @@ export function machineTable(
 		};
 	}
 
-	return { instances, machines };
+	// Stated always rather than only where a machine uses a gesture, and the
+	// asymmetry with `lost` is deliberate: a table is data both interpreters read,
+	// and a field that appears only sometimes is a field every reader has to test
+	// for twice — once for "absent because this document has no drag" and once for
+	// "absent because somebody wrote this table out by hand". Eighteen bytes.
+	return { instances, machines, settings: { dragSlop: DRAG_SLOP_PX } };
 }
 
 /**

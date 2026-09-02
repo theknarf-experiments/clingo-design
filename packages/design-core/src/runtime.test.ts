@@ -55,6 +55,7 @@ import {
 	type MachineState,
 	type Scene,
 	type SceneNode,
+	DRAG_SLOP_PX,
 	TRIGGERS,
 	TRIGGER_NAMES,
 	type Transition,
@@ -63,7 +64,7 @@ import {
 } from "./scene.ts";
 import {
 	MACHINE_RUNTIME,
-	TRIGGER_EVENTS,
+	TRIGGER_BINDINGS,
 	evalRuntime,
 	runtimeScript,
 	runtimeSource,
@@ -303,19 +304,37 @@ function clocked(
 /* A DOM small enough to read                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A pointer event, as much of one as the recogniser reads.
+ *
+ * Three fields, and no more, which is itself the assertion: the drag recogniser
+ * looks at `clientX`, `clientY` and `pointerId` and at nothing else — no
+ * `pageX`, no `offsetX`, no `target`. Client coordinates because the threshold
+ * is a fact about the hand, and a scroll under a held finger is not travel.
+ */
+interface FakePointer {
+	clientX: number;
+	clientY: number;
+	pointerId: number;
+}
+
 interface FakeElement {
 	attrs: Record<string, string>;
-	listeners: Record<string, Array<() => void>>;
+	listeners: Record<string, Array<(event: unknown) => void>>;
+	/** Pointer ids this element was asked to capture, in order. */
+	captured: number[];
 	getAttribute(name: string): string | null;
 	setAttribute(name: string, value: string): void;
-	addEventListener(type: string, handler: () => void): void;
-	dispatch(type: string): void;
+	addEventListener(type: string, handler: (event: unknown) => void): void;
+	setPointerCapture(id: number): void;
+	dispatch(type: string, event?: Partial<FakePointer>): void;
 }
 
 function element(nodeId: string): FakeElement {
 	return {
 		attrs: { "data-node": nodeId },
 		listeners: {},
+		captured: [],
 		getAttribute(name) {
 			return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null;
 		},
@@ -325,8 +344,67 @@ function element(nodeId: string): FakeElement {
 		addEventListener(type, handler) {
 			(this.listeners[type] ??= []).push(handler);
 		},
-		dispatch(type) {
-			for (const handler of this.listeners[type] ?? []) handler();
+		setPointerCapture(id) {
+			this.captured.push(id);
+		},
+		dispatch(type, event = {}) {
+			const full = { clientX: 0, clientY: 0, pointerId: 1, ...event };
+			for (const handler of this.listeners[type] ?? []) handler(full);
+		},
+	};
+}
+
+/**
+ * The browser's own reporter of geometry, faked, with the two properties the
+ * runtime relies on: it is handed targets and it delivers records for them.
+ *
+ * Installed on `globalThis` because the runtime text is compiled with
+ * `new Function` and therefore sees the global scope and nothing else — which is
+ * the scope it gets inside a `<script>` tag too, and is exactly why
+ * `evalRuntime` is written that way. Removed again by the caller, so one test
+ * cannot leave an observer standing for the next.
+ */
+function observing(): {
+	install: () => void;
+	remove: () => void;
+	/** Deliver one batch, as the browser would. */
+	report: (records: Array<{ node: string; inside: boolean }>) => void;
+	/** Targets handed to `observe`, in order. */
+	watched: string[];
+	/** How many observers were constructed. */
+	made: number;
+} {
+	const state = { watched: [] as string[], made: 0 };
+	let deliver: ((records: unknown[]) => void) | undefined;
+	class Fake {
+		constructor(callback: (records: unknown[]) => void) {
+			state.made += 1;
+			deliver = callback;
+		}
+		observe(target: { getAttribute(name: string): string | null }): void {
+			state.watched.push(target.getAttribute("data-node") ?? "");
+		}
+	}
+	return {
+		install: () => {
+			(globalThis as Record<string, unknown>).IntersectionObserver = Fake;
+		},
+		remove: () => {
+			(globalThis as Record<string, unknown>).IntersectionObserver = undefined;
+		},
+		report: (records) => {
+			deliver?.(
+				records.map((r) => ({
+					target: { getAttribute: () => r.node },
+					isIntersecting: r.inside,
+				})),
+			);
+		},
+		get watched() {
+			return state.watched;
+		},
+		get made() {
+			return state.made;
 		},
 	};
 }
@@ -425,18 +503,51 @@ test("the event map is derived from TRIGGERS rather than restated", () => {
 	// `focusin`/`focusout` and not `focus`/`blur` — the panel and the exported
 	// file would quietly disagree about what a focus trigger is.
 	for (const trigger of TRIGGER_NAMES) {
-		assert.equal(TRIGGER_EVENTS[trigger], TRIGGERS[trigger].event);
+		assert.equal(TRIGGER_BINDINGS[trigger].event, TRIGGERS[trigger].event);
+		assert.equal(TRIGGER_BINDINGS[trigger].source, TRIGGERS[trigger].source);
+		assert.equal(TRIGGER_BINDINGS[trigger].suppresses, TRIGGERS[trigger].suppresses);
 	}
-	assert.equal(TRIGGER_EVENTS.focus, "focusin");
-	assert.equal(TRIGGER_EVENTS.blur, "focusout");
+	assert.equal(TRIGGER_BINDINGS.focus.event, "focusin");
+	assert.equal(TRIGGER_BINDINGS.blur.event, "focusout");
 	// `load` is the trigger with no event: it fires once at start, and the runtime
 	// tests the string for emptiness rather than keeping a second list.
-	assert.equal(TRIGGER_EVENTS.load, "");
+	assert.equal(TRIGGER_BINDINGS.load.event, "");
+	// The four gestures have no event *and* a source, which is the pair that keeps
+	// them out of `listen()` and inside a binder. A gesture that lost its source
+	// would silently never be bound — the failure `TriggerSpec.source` exists to
+	// prevent — so both halves are asserted rather than one.
+	for (const trigger of ["viewenter", "viewleave"] as const) {
+		assert.equal(TRIGGER_BINDINGS[trigger].event, "");
+		assert.equal(TRIGGER_BINDINGS[trigger].source, "view");
+	}
+	for (const trigger of ["dragbegin", "dragend"] as const) {
+		assert.equal(TRIGGER_BINDINGS[trigger].event, "");
+		assert.equal(TRIGGER_BINDINGS[trigger].source, "drag");
+	}
+	// And the one column that is neither an event nor a source: what a drag that
+	// ended swallows. In the table rather than in the runtime text, so the emitted
+	// interpreter holds no trigger id at all.
+	assert.equal(TRIGGER_BINDINGS.dragend.suppresses, "click");
+	// `label` is the column that is deliberately absent: nothing in the script
+	// could act on it, and twelve labels is two hundred bytes in every file.
+	assert.equal("label" in TRIGGER_BINDINGS.click, false);
 
 	const script = runtimeScript(menuTable());
 	const json = /^var E = (.*);$/m.exec(script);
 	assert.ok(json);
-	assert.deepEqual(JSON.parse(json[1]), TRIGGER_EVENTS);
+	assert.deepEqual(JSON.parse(json[1]), TRIGGER_BINDINGS);
+});
+
+test("the drag threshold travels on the table, and it is the studio's number", () => {
+	// One threshold, two readers. `DRAG_SLOP_PX` is a property of the hand rather
+	// than of the design, so it is not a per-transition setting and there is
+	// nowhere in the document to say it — which makes "how far is a drag" a
+	// question only this constant answers, in the studio and in the file at once.
+	const table = menuTable();
+	assert.deepEqual(table.settings, { dragSlop: DRAG_SLOP_PX });
+	// Stated always, not only where a machine uses a gesture: a field that appears
+	// sometimes is a field every reader has to test for twice.
+	assert.deepEqual(machineTable(emptyScene()).settings, { dragSlop: DRAG_SLOP_PX });
 });
 
 /* ------------------------------------------------------------------ */
@@ -806,6 +917,226 @@ test("a load self-edge is not a loop", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* Gestures: a recognition, not an event                               */
+/* ------------------------------------------------------------------ */
+
+/** A machine with a drag pair and a click edge out of the same state. */
+const draggable = (): MachineTable =>
+	machineTable(
+		menus(
+			[{ id: "m_a" }],
+			[state("rest"), state("held"), state("open")],
+			[
+				edge("grab", "rest", "held", "dragbegin"),
+				edge("drop", "held", "rest", "dragend"),
+				edge("tap", "rest", "open", "click"),
+			],
+		),
+	);
+
+test("a drag past the slop fires dragbegin exactly once", () => {
+	const { root, els } = page(["m_a"]);
+	const js = evalRuntime(draggable(), root);
+	js.start();
+	// The recogniser is bound because the machine uses a drag trigger, and the
+	// three listeners it needs are the three it has. `dragbegin` and `dragend`
+	// themselves are never event names — that is what `source` means.
+	assert.deepEqual(
+		Object.keys(els.m_a.listeners).sort(),
+		["click", "lostpointercapture", "pointercancel", "pointerdown", "pointermove", "pointerup"],
+	);
+
+	els.m_a.dispatch("pointerdown", { clientX: 100, clientY: 100 });
+	assert.equal(js.state("m_a"), "rest", "a press alone is not a drag");
+	els.m_a.dispatch("pointermove", { clientX: 101, clientY: 101 });
+	assert.equal(js.state("m_a"), "rest", "and neither is a tremor under the slop");
+	// √2 ≈ 1.41 and √8 ≈ 2.83 are both under three; √18 ≈ 4.24 is over. The
+	// comparison is squared in the runtime so there is no square root and no
+	// float, and this is the crossing that proves the threshold is the distance
+	// rather than either axis alone.
+	els.m_a.dispatch("pointermove", { clientX: 102, clientY: 102 });
+	assert.equal(js.state("m_a"), "rest");
+	els.m_a.dispatch("pointermove", { clientX: 103, clientY: 103 });
+	assert.equal(js.state("m_a"), "held", "past three pixels it is a drag");
+	assert.deepEqual(els.m_a.captured, [1], "and the pointer is captured, so it keeps reporting");
+
+	// Once. Every further move is the same gesture, and a `dragbegin` per pixel
+	// would take a second edge out of the state the first one arrived in.
+	els.m_a.dispatch("pointermove", { clientX: 200, clientY: 200 });
+	els.m_a.dispatch("pointermove", { clientX: 300, clientY: 300 });
+	assert.equal(js.state("m_a"), "held");
+});
+
+test("a drag under the slop is a click and never a drag", () => {
+	// The whole reason the threshold exists: a drag with no slop is `pointerdown`
+	// under another name, and `pointerdown` already exists with `:active` behind
+	// it. A shaky click has to stay a click.
+	const { root, els } = page(["m_a"]);
+	const js = evalRuntime(draggable(), root);
+	js.start();
+
+	els.m_a.dispatch("pointerdown", { clientX: 50, clientY: 50 });
+	els.m_a.dispatch("pointermove", { clientX: 52, clientY: 50 });
+	els.m_a.dispatch("pointerup", { clientX: 52, clientY: 50 });
+	assert.equal(js.state("m_a"), "rest", "nothing began, so nothing ended");
+	els.m_a.dispatch("click");
+	assert.equal(js.state("m_a"), "open", "and the click is an ordinary click");
+	assert.deepEqual(els.m_a.captured, []);
+});
+
+test("the click after a drag is swallowed exactly once", () => {
+	// A browser sends a click after a drag that started on the element, and a
+	// machine with a drag edge *and* a click edge would otherwise move twice. The
+	// swallow is read off the table's `suppresses` column rather than tested
+	// against a trigger id, so the emitted text holds no trigger name — and it is
+	// consumed by the very next click, so the gesture after it is ordinary again.
+	const { root, els } = page(["m_a"]);
+	const js = evalRuntime(draggable(), root);
+	js.start();
+
+	els.m_a.dispatch("pointerdown", { clientX: 0, clientY: 0 });
+	els.m_a.dispatch("pointermove", { clientX: 40, clientY: 0 });
+	assert.equal(js.state("m_a"), "held");
+	els.m_a.dispatch("pointerup", { clientX: 40, clientY: 0 });
+	assert.equal(js.state("m_a"), "rest", "the drag ended and the machine came back");
+
+	els.m_a.dispatch("click");
+	assert.equal(js.state("m_a"), "rest", "the click the browser sends after it is eaten");
+	els.m_a.dispatch("click");
+	assert.equal(js.state("m_a"), "open", "exactly one, and the next click is a click");
+});
+
+test("a pointercancel ends a drag that had begun", () => {
+	// Three things end a drag — the pointer coming up, the browser cancelling it,
+	// and the capture being lost — and all three fire `dragend` where one had
+	// begun. A machine left in its dragging state because the browser took the
+	// pointer away would be a machine stuck there with nothing on the page to say
+	// why.
+	for (const ending of ["pointercancel", "lostpointercapture"]) {
+		const { root, els } = page(["m_a"]);
+		const js = evalRuntime(draggable(), root);
+		js.start();
+		els.m_a.dispatch("pointerdown", { clientX: 0, clientY: 0 });
+		els.m_a.dispatch("pointermove", { clientX: 0, clientY: 20 });
+		assert.equal(js.state("m_a"), "held", ending);
+		els.m_a.dispatch(ending);
+		assert.equal(js.state("m_a"), "rest", ending);
+		// ...and the drag is over, so a further move does not begin a second one.
+		els.m_a.dispatch("pointermove", { clientX: 0, clientY: 90 });
+		assert.equal(js.state("m_a"), "rest", ending);
+	}
+});
+
+test("a machine with no gesture gets no recogniser and no observer", () => {
+	// The no-regression half, and it is what `usesSource` is for: an ordinary
+	// hover machine must not grow three pointer listeners and a place in an
+	// observer because the *vocabulary* grew.
+	const watcher = observing();
+	watcher.install();
+	try {
+		const { root, els } = page(["m_a"]);
+		evalRuntime(menuTable(), root).start();
+		assert.deepEqual(
+			Object.keys(els.m_a.listeners).sort(),
+			["click", "pointerdown", "pointerleave", "pointerup"],
+		);
+		assert.equal(els.m_a.listeners.pointermove, undefined);
+		assert.equal(watcher.made, 0, "and no observer is constructed at all");
+	} finally {
+		watcher.remove();
+	}
+});
+
+/** A machine that reveals when it scrolls into view and hides when it leaves. */
+const revealing = (): MachineTable =>
+	machineTable(
+		menus(
+			[{ id: "m_a" }],
+			[state("away"), state("here")],
+			[
+				edge("reveal", "away", "here", "viewenter"),
+				edge("hide", "here", "away", "viewleave"),
+				// A load edge into the same place the observer's first record would
+				// take it, so the ordering assertion below has something to be about.
+				edge("settled", "away", "away", "load"),
+			],
+		),
+	);
+
+test("an element already in view gets viewenter after settle and not before", () => {
+	// The ordering `start()` is written for, and the difference between a reveal
+	// that works and one that has already happened before anybody sees it. An
+	// observer delivers an initial record for everything it is given, so an
+	// element on screen at load gets `viewenter` on the frame after `observe` —
+	// and `observe` is the last thing `start` does, after the load chain.
+	const watcher = observing();
+	watcher.install();
+	try {
+		const { root, els } = page(["m_a"]);
+		const seen: string[] = [];
+		const js = evalRuntime(revealing(), root, (_i, to) => seen.push(to));
+		js.start();
+		// Nothing bound on the element: a view trigger is not an event.
+		assert.deepEqual(Object.keys(els.m_a.listeners), []);
+		assert.deepEqual(watcher.watched, ["m_a"]);
+		assert.equal(js.state("m_a"), "away", "settled first, and the observer has not spoken");
+
+		watcher.report([{ node: "m_a", inside: true }]);
+		assert.equal(js.state("m_a"), "here");
+		// The initial state, then the reveal — in that order, which is what says
+		// the load chain ran before the observer rather than being overwritten by
+		// it.
+		assert.deepEqual(seen, ["away", "here"]);
+	} finally {
+		watcher.remove();
+	}
+});
+
+test("a view crossing that repeats the same answer fires nothing", () => {
+	// An observer re-reports on a resize and on a scroll that did not change the
+	// answer. A machine that fired `viewenter` twice would take a second edge out
+	// of the state the first one arrived in, which on a three-state reveal is a
+	// machine that skips a state for a reason nothing on the page marks.
+	const watcher = observing();
+	watcher.install();
+	try {
+		const { root } = page(["m_a"]);
+		const moves: string[] = [];
+		const js = evalRuntime(revealing(), root, (_i, to) => moves.push(to));
+		js.start();
+		moves.length = 0;
+
+		watcher.report([{ node: "m_a", inside: true }]);
+		watcher.report([{ node: "m_a", inside: true }]);
+		watcher.report([{ node: "m_a", inside: true }]);
+		assert.deepEqual(moves, ["here"], "three records, one crossing");
+
+		watcher.report([{ node: "m_a", inside: false }]);
+		assert.deepEqual(moves, ["here", "away"], "and the crossing back is one too");
+		// A record about something the table does not drive is ignored rather than
+		// thrown on: the observer is one per document and an element could be
+		// anything.
+		watcher.report([{ node: "nobody", inside: true }]);
+		assert.deepEqual(moves, ["here", "away"]);
+	} finally {
+		watcher.remove();
+	}
+});
+
+test("a page with no IntersectionObserver runs, and simply never crosses", () => {
+	// The `typeof` guard, which is not defensive tidiness: this text is evaluated
+	// in Node by every test in this file, and a bare `new IntersectionObserver`
+	// would throw on the first line of `start()` — taking the machine's ordinary
+	// click behaviour down with it, in a page as well as in a test.
+	const { root } = page(["m_a"]);
+	const js = evalRuntime(revealing(), root);
+	assert.doesNotThrow(() => {
+		js.start();
+	});
+	assert.equal(js.state("m_a"), "away");
+});
+
+/* ------------------------------------------------------------------ */
 /* Pacing is the stylesheet's, and stays there                         */
 /* ------------------------------------------------------------------ */
 
@@ -889,7 +1220,11 @@ test("a document with no machines has an empty table and no behaviour to lose", 
 	assert.notDeepEqual(bare.instances, {});
 
 	const none = machineTable({ ...menus([{ id: "m_a" }], [], []), machines: [] });
-	assert.deepEqual(none, { instances: {}, machines: {} });
+	assert.deepEqual(none, {
+		instances: {},
+		machines: {},
+		settings: { dragSlop: DRAG_SLOP_PX },
+	});
 	const js = evalRuntime(none);
 	js.start();
 	assert.equal(js.fireIn("m_a", "click"), null);

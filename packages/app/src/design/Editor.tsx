@@ -62,6 +62,8 @@ import {
 	type Picks,
 	type Scene,
 	type SnapGuide,
+	DRAG_SLOP_PX,
+	TRIGGERS,
 	type Trigger,
 	type Universe,
 	addNodeTo,
@@ -873,6 +875,39 @@ export function Editor({
 	const pressed = useRef<string | null>(null);
 
 	/**
+	 * The drag recogniser: where the press landed, and whether it has become a
+	 * gesture.
+	 *
+	 * **In client coordinates and never document ones**, which is `DRAG_SLOP_PX`'s
+	 * own instruction and the one thing about this that is easy to get wrong here
+	 * and impossible to get wrong in the exported file. This canvas pans and
+	 * zooms: three *document* pixels at 25% zoom is under one pixel of finger
+	 * travel and at 400% is twelve, so a threshold measured after `toDocument`
+	 * would be a gesture that behaved differently depending on how closely
+	 * somebody was looking — and differently from the file, which has no zoom to
+	 * be at.
+	 *
+	 * Refs beside {@link hovering} and for its reason exactly: a slop test is a
+	 * fact about the previous event, nothing here is drawn, and re-rendering the
+	 * canvas on every pixel of a drag while a transition is mid-flight is the
+	 * stutter that gets blamed on the design.
+	 */
+	const dragFrom = useRef<{ x: number; y: number } | null>(null);
+	const dragging = useRef(false);
+	/**
+	 * The trigger the drag that just ended swallows once, read off `TRIGGERS`.
+	 *
+	 * Read from the table rather than tested against `"click"` for the reason the
+	 * emitted runtime does the same: "a drag is not also a click" is one sentence,
+	 * and it cannot be true for one reader and false for the other. The studio
+	 * synthesises its own click — the DOM's would land on the editor's overlay —
+	 * so here the swallow is a click this file declines to *send*, where in the
+	 * file it is one the runtime declines to *hear*. Same sentence, two shapes,
+	 * one table.
+	 */
+	const swallow = useRef<Trigger | undefined>(undefined);
+
+	/**
 	 * Leaving preview forgets where the pointer was.
 	 *
 	 * Without this the next preview would open holding a `pointerenter` it never
@@ -883,6 +918,14 @@ export function Editor({
 		if (previewing) return;
 		hovering.current = null;
 		pressed.current = null;
+		// And a drag half-recognised when preview closed is not a drag that ended:
+		// there is nothing to send `dragend` to and nothing waiting for it, so the
+		// recogniser is cleared rather than fired. A `swallow` left armed would eat
+		// the first click of the *next* preview, which is the same "an edge taken
+		// for a reason no one could see" this effect exists to prevent.
+		dragFrom.current = null;
+		dragging.current = false;
+		swallow.current = undefined;
 	}, [previewing]);
 
 	/**
@@ -923,11 +966,58 @@ export function Editor({
 	 * entered, or two buttons are hovered at once for a frame.
 	 */
 	function onPreviewMove(event: React.PointerEvent) {
+		recogniseDrag(event);
 		const now = instanceUnder(toDocument(event));
 		if (now === hovering.current) return;
 		if (hovering.current !== null) onTrigger?.(hovering.current, "pointerleave");
 		hovering.current = now;
 		if (now !== null) onTrigger?.(now, "pointerenter");
+	}
+
+	/**
+	 * A pointer that went down on an instance and has now moved far enough.
+	 *
+	 * Fired once, on the first crossing, and never again until the pointer comes
+	 * up — which is what makes `dragbegin` a beginning rather than a stream. There
+	 * is no capture to take here, unlike in the exported file: this handler is on
+	 * the canvas surface rather than on the instance's own element, so a drag that
+	 * wanders off the thing being dragged is still this surface's to report.
+	 *
+	 * **`viewenter` and `viewleave` are not fired from here at all**, and the
+	 * argument is `onPreviewUp`'s own about focus, one gesture over: the canvas has
+	 * no viewport to enter. An artboard is a box the camera pans and zooms over
+	 * rather than a page somebody scrolls, so firing a view trigger when a node
+	 * crossed the *editor's* edge would make the studio disagree with the exported
+	 * file about the one thing the two exist to agree on — while also firing every
+	 * time somebody panned. A view state is authored, exported, read in the panel
+	 * and played from the state strip, exactly as a focus state already is.
+	 */
+	function recogniseDrag(event: React.PointerEvent) {
+		const at = dragFrom.current;
+		const on = pressed.current;
+		if (at === null || on === null || dragging.current) return;
+		const dx = event.clientX - at.x;
+		const dy = event.clientY - at.y;
+		// Squared, so there is no square root and no floating-point comparison
+		// against a threshold that is a whole number of pixels — the same shape the
+		// emitted runtime uses, because it is the same test.
+		if (dx * dx + dy * dy < DRAG_SLOP_PX * DRAG_SLOP_PX) return;
+		dragging.current = true;
+		onTrigger?.(on, "dragbegin");
+	}
+
+	/**
+	 * The drag is over, however it ended: the pointer came up, or it left the
+	 * surface. Both fire `dragend` where one had begun, because a gesture that
+	 * stopped reporting is a gesture that ended and a machine left in its dragging
+	 * state would be a machine stuck there.
+	 */
+	function endDrag(instance: string | null) {
+		dragFrom.current = null;
+		if (!dragging.current) return;
+		dragging.current = false;
+		swallow.current = TRIGGERS.dragend.suppresses;
+		if (instance !== null) onTrigger?.(instance, "dragend");
 	}
 
 	/**
@@ -942,6 +1032,9 @@ export function Editor({
 		pressed.current = id;
 		if (id === null) return;
 		event.stopPropagation();
+		// The raw event's coordinates, not `toDocument`'s — see `dragFrom`.
+		dragFrom.current = { x: event.clientX, y: event.clientY };
+		dragging.current = false;
 		onTrigger?.(id, "pointerdown");
 	}
 
@@ -966,13 +1059,26 @@ export function Editor({
 		const was = pressed.current;
 		pressed.current = null;
 		if (was === null) return;
+		// Before `pointerup`, so that a machine with a drag pair and a press pair
+		// sees them in the order a browser would: the gesture ends, then the button
+		// is released.
+		endDrag(was);
 		onTrigger?.(was, "pointerup");
-		if (instanceUnder(toDocument(event)) === was) onTrigger?.(was, "click");
+		// A drag that ended is not also a click. Consumed here, so exactly one click
+		// is swallowed and the next release on the same instance is an ordinary
+		// click again.
+		const eat = swallow.current === "click";
+		swallow.current = undefined;
+		if (!eat && instanceUnder(toDocument(event)) === was) onTrigger?.(was, "click");
 	}
 
 	/** The pointer leaving the surface leaves whatever it was over. */
 	function onPreviewLeave() {
 		if (hovering.current !== null) onTrigger?.(hovering.current, "pointerleave");
+		endDrag(pressed.current);
+		// Nothing follows a leave, so the arm is dropped rather than left for a
+		// click that will never come: the next press starts a fresh gesture.
+		swallow.current = undefined;
 		hovering.current = null;
 		pressed.current = null;
 	}

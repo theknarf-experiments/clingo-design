@@ -43,6 +43,7 @@ import {
 	type PropName,
 	type Spatial,
 	SPATIALS,
+	type TimelineClock,
 	type Turn,
 	TURN_NAMES,
 	TURNS,
@@ -470,6 +471,32 @@ export interface ModelMachine {
 	 * knows about, and a one-layer machine reads as the un-layered one it is.
 	 */
 	layers: string[];
+	/**
+	 * State id -> what advances the timeline it plays — `mclock/3`.
+	 *
+	 * Every state is in here, because the program states one fact per state and
+	 * defaults it to `time`; a state missing from the map is a state this answer
+	 * set does not know about rather than a state on wall time, which is a
+	 * distinction a panel reading it can act on.
+	 *
+	 * **Not** because it varies per universe. It cannot: a clock is a fact, not a
+	 * variable, so this map is the same map in every answer set of one document.
+	 * It is here because a hand-written rule may assert `mclock/3` and the answer
+	 * set is the only place that would show, which is `ModelTimeline.loop`'s
+	 * position exactly, one record over.
+	 *
+	 * And, exactly as with `loop`, **no panel reads it**, which is a statement
+	 * about panels rather than a hole here: the two controls that show a clock —
+	 * the state row's select and the Timeline scrubber's label — are controls that
+	 * *write* the document, and a select showing the answer set's answer while
+	 * writing the document's would be a field that argues with the person using
+	 * it. Both call `clockOf` on the state, which is the document. So this map's
+	 * one reader today is `machineprogram.test.ts`, which is what makes "the fact
+	 * reaches the model" a checked claim rather than a hopeful one — and it is
+	 * what a rules panel or a why-probe would ask the moment either wants to say
+	 * where a clock came from.
+	 */
+	clocks: Record<string, TimelineClock>;
 	/** Timeline id -> what this universe made of it. */
 	timelines: Record<string, ModelTimeline>;
 }
@@ -861,6 +888,7 @@ function machineFacts(facts: Facts, id: string): ModelMachine {
 			exitPast: [],
 			backwardsKeys: [],
 			layers: [],
+			clocks: {},
 			timelines: {},
 		};
 		facts.machines.set(id, machine);
@@ -1181,6 +1209,17 @@ function collect(atoms: readonly string[]): Facts {
 				// print order cannot decide it.
 				if (!facts.stateLayer.has(b) || a < (facts.stateLayer.get(b)?.machine ?? "")) {
 					facts.stateLayer.set(b, { machine: a, layer: c });
+				}
+				break;
+			// What advances the timeline a state plays. A word outside the three is
+			// dropped rather than kept, for `mloop/3`'s reason exactly: the field's
+			// type is the vocabulary, and a fourth word carried through it would be a
+			// clock every reader downstream has to have an opinion about. Dropped, the
+			// state simply has no entry, and a reader falls back to wall time — which
+			// is what a state with no `mclock/3` at all means.
+			case "mclock/3":
+				if (c === "time" || c === "view" || c === "pageScroll") {
+					machineFacts(facts, a).clocks[b] = c;
 				}
 				break;
 			case "mlindex/3": {
@@ -1798,6 +1837,11 @@ export function readModel(atoms: readonly string[]): ModelScene {
 			layers: [...(facts.layerIndex.get(id) ?? new Map())]
 				.sort(([l1, k1], [l2, k2]) => k1 - k2 || cmp(l1, l2))
 				.map(([layer]) => layer),
+			// Unsorted, unlike everything above it, and the difference is that this
+			// is a map rather than a list: there is no order for two readings of one
+			// answer set to disagree about, and a key set does not depend on the order
+			// the atoms arrived in.
+			clocks: machine.clocks,
 			timelines: readTimelines(facts.timelines.get(id)),
 		};
 	}

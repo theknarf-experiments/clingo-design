@@ -1132,6 +1132,7 @@ function normalizeStates(value: unknown): MachineState[] {
 		taken.add(id);
 		const layer = raw.layer;
 		const timeline = raw.timeline;
+		const clock = raw.clock;
 		const blend = normalizeBlend(raw.blend);
 		out.push({
 			id,
@@ -1147,6 +1148,17 @@ function normalizeStates(value: unknown): MachineState[] {
 			// collaborator pulls — on a question that answers itself.
 			...(typeof layer === "string" ? { layer } : {}),
 			...(typeof timeline === "string" ? { timeline } : {}),
+			// A clock, unlike the two ids above it, is checked against its own table
+			// — and the asymmetry is the difference between a *reference* and a
+			// *word*. A layer id names something else in the document and may
+			// legitimately be waiting for it to come back; a clock names one of three
+			// constants this build knows, and a fourth would reach `mclock/3` as a
+			// term no rule can match, which silently disables the `mexitpast/2`
+			// narrowing rather than changing it. The same reading `loop` gets, one
+			// record over, and for the same reason.
+			...(clock === "time" || clock === "view" || clock === "pageScroll"
+				? { clock }
+				: {}),
 			...(blend ? { blend } : {}),
 		});
 	}

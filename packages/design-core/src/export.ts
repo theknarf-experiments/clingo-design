@@ -86,6 +86,7 @@ import {
 } from "./measure.ts";
 import {
 	blendWeights,
+	clockOf,
 	easingOf,
 	findState,
 	keyEasing,
@@ -128,6 +129,7 @@ import {
 import {
 	DEFAULT_EASING,
 	type Dimension,
+	DRAG_SLOP_PX,
 	type Easing,
 	DIMENSIONS,
 	EASINGS,
@@ -149,6 +151,7 @@ import {
 	type Spatial,
 	type StatePart,
 	type Style,
+	TIMELINE_CLOCKS,
 	TRIGGERS,
 	TURNS,
 	TURN_NAMES,
@@ -244,6 +247,13 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 			// either way — it says what a browser without `linear()` gets, which for a
 			// document with no spring in it is "nothing to get".
 			"A spring is a sampled curve, and a browser too old to parse `linear()` gets the nearest `cubic-bezier` instead — the same speed and direction, without the overshoot. That is a fallback rather than a loss: the file defines both and the browser picks, so the state still tweens over the duration you set. Nothing else about the pacing changes.",
+			// Appended by the trigger step, in the sentence above's shape and for its
+			// reason: whether a document holds a scroll clock is a property of a
+			// universe and this list is a property of the target. Unlike the spring
+			// one, this really is a loss rather than a fallback, and it says which —
+			// a still element rather than an animation at the wrong moment, which is
+			// the choice §2.5.2 of the motion spec argues at length.
+			"A timeline driven by the scroll needs `animation-timeline`, which Chrome and Edge have from 115 and Firefox from 144. A browser without it plays nothing at all and shows the state's own pose — a still design rather than a wrong one, because an animation that fires once on load, before the element is anywhere near the viewport, reads to a person as a bug.",
 		],
 	},
 	svg: {
@@ -1956,6 +1966,10 @@ function htmlExport(
 	// as well. A reader looking for "what curve is this" should find it beside the
 	// other things the document named once.
 	css.push(...springRules(machines.springs));
+	// Beside the springs, which is where `docs/framer-parity-plan.md` §5.6 puts
+	// them: two `:root` pairs written by two steps for one structural reason, and
+	// a reader who has understood one has understood the other.
+	css.push(...timelineRules(machines.scrolled));
 
 	for (const layer of layers.slice(1)) {
 		const rules = readLayer(layer);
@@ -3178,6 +3192,30 @@ export interface MachineExport {
 	 * inline, because they are short and every browser parses them.
 	 */
 	springs: Set<Easing>;
+	/**
+	 * The `@keyframes` names whose `animation-name` is gated behind
+	 * `@supports (animation-timeline: view())`, so the stylesheet can define the
+	 * custom property that carries them.
+	 *
+	 * A scroll-clocked timeline is four longhands and a `var()` where an
+	 * unclocked one is the `animation` shorthand, and the `var()` is not
+	 * decoration: `animation-timeline` is Chrome/Edge 115 and Firefox 144, Safari
+	 * has no `view()` yet, and a browser that ignores the declaration would
+	 * otherwise play the animation **once, on load**, before the element is
+	 * anywhere near the viewport. That is motion at the wrong moment, which reads
+	 * to a person as a bug, where a still element reads as a design. So the name
+	 * itself is what the `@supports` block switches on, and a browser without the
+	 * feature gets `animation-name: none`.
+	 *
+	 * The custom property rather than the whole rule inside `@supports`, for
+	 * {@link springs}' reason exactly and it is worth having said once: {@link
+	 * Declarations} is `Record<string, string>`, one key is one property, and a
+	 * rule split across an `@supports` boundary cannot live in that shape without
+	 * turning every declaration map in this file into a list of blocks.
+	 *
+	 * A **set collected during the walk**, beside `springs` and threaded with it.
+	 */
+	scrolled: Set<string>;
 }
 
 /**
@@ -3228,6 +3266,32 @@ function pseudoClassFor(
 	const spec = TRIGGERS[enter.trigger];
 	if (spec.css === null || spec.pair !== leave.trigger) return null;
 	return `:${spec.css}`;
+}
+
+/**
+ * The `animation-timeline` a state's timeline is driven by, or nothing where it
+ * runs on wall time.
+ *
+ * Deliberately shaped as {@link pseudoClassFor}'s twin, and placed beside it,
+ * because it is the same question: **is there a CSS shape for what this machine
+ * says?** That function answers with a pseudo-class where the trigger pair has
+ * one and with a data-state rule where it has not; this one answers with a scroll
+ * timeline where the clock has one and with wall time where it has not. Neither
+ * is a feature the document knows about — the document says one thing, and the
+ * export finds the CSS-native path where there is one.
+ *
+ * That parallel is the whole argument for putting a scroll-linked effect on the
+ * state that already plays a timeline: it is not a new concept in this file, it
+ * is a second instance of the one this file is built around. The alternative
+ * considered and refused — scroll progress as a number input driving a 1D blend —
+ * would have needed a keyframe sampler inside `runtime.ts`, which is the
+ * two-implementations-that-drift problem that file exists to prevent, and it
+ * would not have worked anyway: a 1D blend is a *selector* over whole timelines
+ * and returns no time, so wiring the scroll to it gives a crossfade with a
+ * stopped clock rather than a parallax.
+ */
+function scrollTimelineFor(state: MachineState): string | null {
+	return TIMELINE_CLOCKS[clockOf(state)].css;
 }
 
 /**
@@ -3506,6 +3570,9 @@ function planMachines(
 	// than scanned for afterwards, for `used`'s reason — a spring a `curve` token
 	// named in a hover state is a spring only the walk ever sees.
 	const springs = new Set<Easing>();
+	// And its twin, for the same reason and threaded the same way: the gated
+	// `@keyframes` names, which only the walk that emitted the `var()` ever sees.
+	const scrolled = new Set<string>();
 	let scripted = false;
 	const context = { tokens: index.scene.tokens, picks: base.universe.pick };
 
@@ -3515,6 +3582,30 @@ function planMachines(
 		if (!model.byId[node.id]) continue;
 		const stack = machineLayers(machine);
 		const drawn = drawnStates(model, machine, node, stack[0].id);
+
+		// What a gesture costs, said once per machine rather than once per state,
+		// because it is one fact about the machine and a designer reading six copies
+		// of it learns nothing on the sixth.
+		//
+		// Two sentences and the second is the one nobody expects: **the element does
+		// not move with the pointer.** A drag trigger says the machine is now in the
+		// dragging state; it does not carry the pointer's position, and making it do
+		// so would be a `transform` written on every pointermove by a script — the
+		// second animator arguing with the compositor that `runtime.ts` refuses. A
+		// designer who wants the thing to follow the finger wants a pointer-driven
+		// number input, which is deliberately not built.
+		const gestures = [
+			...new Set(
+				machine.transitions
+					.filter((t) => t.enabled && TRIGGERS[t.trigger].source !== undefined)
+					.map((t) => TRIGGERS[t.trigger].label.toLowerCase()),
+			),
+		];
+		if (gestures.length > 0) {
+			say(
+				`“${machine.name}” moves on a gesture — ${gestures.join(", ")} — and CSS has no name for either, so those states are \`data-state\` rules and the file carries the interpreter that switches them. A drag is a pointer that moved more than ${DRAG_SLOP_PX} pixels while down, which is the same threshold the canvas uses. What the file does **not** do is move the element with the pointer: a drag trigger says which state the machine is in, and what that state looks like is your design.`,
+			);
+		}
 
 		for (const [index_, stratum] of stack.entries()) {
 			const drawnIn = drawn[stratum.id];
@@ -3546,7 +3637,17 @@ function planMachines(
 				// declaration on the same elements the delta paints — so it is one more
 				// thing this state changes, and a state that changes *only* an
 				// animation is still a state the file has to be able to select.
-				const played_ = playTimelines(base, machine, node, state, context, played, springs, say);
+				const played_ = playTimelines(
+					base,
+					machine,
+					node,
+					state,
+					context,
+					played,
+					springs,
+					scrolled,
+					say,
+				);
 				if (state.id === drawnIn) {
 					// The state the picture is in has no selector of its own — it is what
 					// the base rules are — so an animation it plays goes on the base rule
@@ -3596,7 +3697,40 @@ function planMachines(
 		runtime: scripted ? runtimeScript(machineTable(index.scene, context)) : null,
 		lost,
 		springs,
+		scrolled,
 	};
+}
+
+/**
+ * The two blocks a document with a scroll-clocked timeline needs at the top of
+ * its stylesheet, or nothing at all where it has none.
+ *
+ * {@link springRules}' sibling, written the same way and emitted beside it, and
+ * the pairing is structural rather than aesthetic: both are one logical
+ * declaration that has to exist twice — once plainly and once behind
+ * `@supports` — and {@link Declarations} cannot hold either, because one key is
+ * one property and a rule split across an at-rule boundary is two blocks. So
+ * both hoist the conditional part into a custom property on `:root`, where it is
+ * one line, and leave the node's own rule a flat set of declarations.
+ *
+ * The plain definition is `none`, which is a legal `animation-name` meaning
+ * nothing plays — so a browser without `animation-timeline` shows the state's
+ * own pose and no motion. That is the honest degradation and it is argued for
+ * where the gate is written; a document with no clock in it emits **neither
+ * block** and is byte-identical to what it exported before.
+ */
+function timelineRules(scrolled: ReadonlySet<string>): string[] {
+	if (scrolled.size === 0) return [];
+	// Sorted, for `springRules`' reason: a stylesheet is a thing people diff, and
+	// "the order the walk happened to visit two states in" is not an order
+	// anybody asked for.
+	const names = [...scrolled].sort();
+	const off = names.map((name) => `\t--dc-tl-${name}: none;`);
+	const on = names.map((name) => `\t\t--dc-tl-${name}: ${name};`);
+	return [
+		`:root {\n${off.join("\n")}\n}`,
+		`@supports (animation-timeline: view()) {\n\t:root {\n${on.join("\n")}\n\t}\n}`,
+	];
 }
 
 /**
@@ -4157,6 +4291,8 @@ function playTimelines(
 	out: Played,
 	/** The springs this state's keyframes named — see {@link MachineExport.springs}. */
 	springs: Set<Easing>,
+	/** The gated `@keyframes` names — see {@link MachineExport.scrolled}. */
+	scrolled: Set<string>,
 	say: (line: string) => void,
 ): Map<string, Declarations> {
 	const model = base.universe.model;
@@ -4222,6 +4358,46 @@ function playTimelines(
 			const name = keyframeName(out.names, [instance.id, timeline.id, part]);
 			out.keyframes.push(`@keyframes ${name} {\n${block}\n}`);
 			const loop = LOOPING[timeline.loop ?? "none"];
+			const scroll = scrollTimelineFor(state);
+			if (scroll !== null) {
+				scrolled.add(name);
+				// Longhands rather than the shorthand, because one of the five has to
+				// be a `var()` the `@supports` block switches — see
+				// `MachineExport.scrolled`. The other four are harmless in a browser
+				// that ignores them: `animation-timeline` is dropped as unknown,
+				// `animation-duration: auto` is dropped as invalid, and
+				// `animation-name: none` means nothing plays regardless.
+				//
+				// `auto` and not the timeline's own length: a scroll-driven animation's
+				// duration *is* the range it is attached to, and a number here would
+				// be a second clock inside the one the scroll already is. The
+				// document's length still decides everything that matters — the
+				// keyframe percentages, which are what the block above is made of.
+				//
+				// The loop mode is deliberately dropped, and it is the one thing this
+				// path silently does not carry: a scroll timeline has no repetitions to
+				// count, because scrolling back *is* the animation running backwards.
+				// `iteration-count` and `direction` against a scroll range are either
+				// ignored or subdivide the range, and neither is what "ping-pong" was
+				// asked for.
+				animations.set(nodeId, {
+					...(animations.get(nodeId) ?? {}),
+					"animation-name": `var(--dc-tl-${name})`,
+					"animation-duration": "auto",
+					"animation-timing-function": "linear",
+					"animation-fill-mode": "both",
+					"animation-timeline": scroll,
+				});
+				// One sentence per (state, clock) rather than per node, because `say`
+				// dedupes and a timeline animating six parts is one decision a designer
+				// made once. It names the browsers rather than saying "some browsers",
+				// for the reason every other loss here names a thing: a sentence a
+				// person can act on beats a sentence they have to go and research.
+				say(
+					`“${timeline.name}” in ${stateName(machine, state.id)} of “${machine.name}” is driven by ${TIMELINE_CLOCKS[clockOf(state)].label.toLowerCase()} rather than by the clock. That needs \`animation-timeline\`, which Safari has not got: there the element sits at the state's own pose and nothing moves. ${timeline.loop !== undefined && timeline.loop !== "none" ? "Its looping is not in the file either — scrolling back is what plays it backwards. " : ""}Nothing here is scripted; the whole of it is five declarations and a custom property.`,
+				);
+				continue;
+			}
 			// `linear` in the shorthand on purpose: each stop carries its own
 			// `animation-timing-function`, which is what a per-keyframe easing means
 			// in CSS, and a curve in the shorthand would be applied *on top of* those

@@ -92,9 +92,11 @@ import {
 	type Style,
 	type StyleVariant,
 	type SurfaceGuides,
+	TIMELINE_CLOCKS,
 	TRIGGERS,
 	TURNS,
 	type Timeline,
+	type TimelineClock,
 	type Track,
 	type Transition,
 	type Trigger,
@@ -3180,6 +3182,16 @@ const TRANSITION_VERBS: Record<Trigger, string> = {
 	blur: "blur",
 	click: "click",
 	load: "load",
+	// The four gestures, and their verbs follow the press/release pattern above
+	// rather than the trigger's own name for the reason the whole table exists:
+	// `dragbegin` describes the hand and `grab` describes the card. Added here
+	// because `Record<Trigger, string>` does not compile without them — the same
+	// one-line departure from an ownership row that widening `Transition.easing`
+	// forced one step ago, and stated rather than quietly made.
+	viewenter: "reveal",
+	viewleave: "hide",
+	dragbegin: "grab",
+	dragend: "drop",
 };
 
 /**
@@ -5248,6 +5260,46 @@ export function setStateTimeline(
 		return timeline === null
 			? without(state, "timeline")
 			: { ...state, timeline };
+	});
+}
+
+/**
+ * What advances the timeline this state plays: wall time, or a scroll position.
+ *
+ * `null` is `time`, written as **absence**, and not as the word: absent-is-time
+ * is what every document written before this rung means, and a writer that filled
+ * the field in with `"time"` would change nothing today and would put a word in
+ * every state of every document for a setting almost none of them make.
+ *
+ * The word **is** checked, unlike the timeline id above it, and the asymmetry is
+ * the same one the document reader makes: a timeline id is a *reference* and may
+ * legitimately be waiting for something to come back, while a clock is one of
+ * three constants that reach the program as themselves. A fourth would be a
+ * `mclock/3` no rule can match, which silently disables the exit-time narrowing
+ * rather than changing it — the failure mode a syntax error would at least be
+ * loud about.
+ *
+ * **Left alone where the state plays nothing.** A clock with no timeline is read
+ * by nothing, and clearing it would lose what somebody typed the moment they
+ * unhooked an animation to try another one.
+ *
+ * Written here rather than in a panel, and it is the second of two edits this
+ * step added to a file its ownership row does not give it — the first being four
+ * verbs `Record<Trigger, string>` would not compile without. The reason is the
+ * same both times: a field a document can hold and no edit can write is a feature
+ * no panel can reach.
+ */
+export function setStateClock(
+	scene: Scene,
+	machineId: string,
+	stateId: string,
+	clock: TimelineClock | null,
+): Scene {
+	if (clock !== null && !Object.hasOwn(TIMELINE_CLOCKS, clock)) return scene;
+	return mapState(scene, machineId, stateId, (state) => {
+		const now = clock === "time" ? null : clock;
+		if ((state.clock ?? null) === now) return state;
+		return now === null ? without(state, "clock") : { ...state, clock: now };
 	});
 }
 
