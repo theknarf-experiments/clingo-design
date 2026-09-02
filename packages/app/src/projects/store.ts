@@ -19,9 +19,13 @@ import {
 	asDefinition,
 	composeLibrary,
 	decomposeLibrary,
+	documentLinks,
 	emptyScene,
 	normalizeScene,
+	pageName,
+	pagePath,
 	reconcile,
+	repointLinks,
 } from "@clingo-design/design-core";
 
 import {
@@ -98,21 +102,17 @@ export const MAIN_PAGE = "/pages/main.scene";
 /**
  * A page's name is its filename, and its path is where it lives.
  *
- * Two functions rather than one field, because the tree is the list. There is no
- * page index anywhere and there deliberately is not: `pathsOfType` already
- * answers "which pages are there", so an index would be a second answer that
- * could disagree with the documents — and the failure mode of a stale index is a
- * page that exists and cannot be reached.
+ * **Defined in `design-core/src/pages.ts` and re-exported here**, which is a move
+ * rather than a duplication: the compiler now has to turn a page path into an ASP
+ * constant — a link names a page and `link(N,P)` needs one — and `design-core`
+ * may not import from the app. The four call sites in this file and the one in
+ * `Project.tsx` keep importing them from here, so nothing churned.
  *
- * The name is what a person types and reads; the path is what the vfs keys on
- * and what a clone writes to disk. A page called "About us" is `/pages/About
- * us.scene`, spaces and all, because a filename is allowed them and inventing a
- * slug would mean the tree disagreeing with the tab.
+ * `MAIN_PAGE` and `SCENE_TYPE` stay: the first is a policy about where a new
+ * project's first page goes and the second is a vfs datatype tag. Neither is a
+ * pure string function about paths.
  */
-export const pagePath = (name: string): string => `/pages/${name}.scene`;
-
-export const pageName = (path: string): string =>
-	path.replace(/^\/pages\//, "").replace(/\.scene$/, "");
+export { PAGE_DIR, pageName, pagePath } from "@clingo-design/design-core";
 
 /**
  * Every page of a project, by name, in the order the tree gives them.
@@ -153,6 +153,74 @@ export function usePages(url: string | undefined): string[] {
 	}, [url]);
 
 	return names;
+}
+
+/**
+ * Which pages link to which, read from the documents.
+ *
+ * From the tree and **not from any answer set**, and the split is deliberate.
+ * There are two reachability questions and they have two homes. "Which pages does
+ * this *design* lead to" is `goes/1`, per universe, in the program of the page you
+ * have open — because whether a link is live depends on whether its node is, and
+ * only the solver knows that. "Which pages does this *project* link between" is a
+ * question about the documents, and answering it in ASP would mean grounding every
+ * page's program to find out, which is a solve per page to draw a marker in a list.
+ *
+ * So this reads the scenes and never solves. The cost is that it reports a link on
+ * a node a rule hides as a link, which is right for this question: the document
+ * does link there, and whether some design uses it is the other question, asked
+ * elsewhere.
+ *
+ * The answer is keyed by the **target** page's name and holds the names of the
+ * pages that lead to it, which is the direction the Pages panel asks in: "does
+ * anything link here". A page nothing links to is absent rather than empty, so a
+ * caller reads `?.length` and gets the same answer either way.
+ *
+ * Re-read on every structural change, exactly as {@link usePages} is — and a
+ * link is an edit *inside* a page document, which `subscribe` also fires for.
+ */
+export function usePageLinks(
+	url: string | undefined,
+): Record<string, string[]> {
+	const [links, setLinks] = useState<Record<string, string[]>>({});
+
+	useEffect(() => {
+		if (!url) {
+			setLinks({});
+			return;
+		}
+		let alive = true;
+		let stop: (() => void) | undefined;
+		void project(url).then((p) => {
+			if (!alive) return;
+			const read = () => {
+				const out: Record<string, string[]> = {};
+				for (const path of p.pathsOfType(SCENE_TYPE)) {
+					const scene = p.docAt<SceneDoc>(path)?.doc()?.scene;
+					if (!scene) continue;
+					const from = pageName(path);
+					// Uncomposed, because a link inside a *component* document belongs to
+					// that component and follows to wherever it is placed — which is a
+					// question about instances and therefore about a solve. What this
+					// counts is what the page's own document says.
+					for (const to of new Set(documentLinks(scene).values())) {
+						const name = pageName(to);
+						(out[name] ??= []).push(from);
+					}
+				}
+				for (const list of Object.values(out)) list.sort();
+				setLinks(out);
+			};
+			read();
+			stop = p.subscribe(read);
+		});
+		return () => {
+			alive = false;
+			stop?.();
+		};
+	}, [url]);
+
+	return links;
 }
 
 /**
@@ -258,6 +326,29 @@ export async function renamePage(
 	const taken = new Set(p.pathsOfType(SCENE_TYPE).map(pageName));
 	if (taken.has(trimmed) || !taken.has(from)) return false;
 	p.renamePath(pagePath(from), pagePath(trimmed));
+	// And every link into it follows, because a rename keeps the document: the
+	// page a link points at still exists and is still the same document, and only
+	// its address changed. A reference that keeps pointing at it is *correct*, so
+	// leaving it on the old address would break every link into a page because
+	// somebody fixed a typo in its name — an edit nobody asked for.
+	//
+	// This writes other pages' documents and is therefore an entry in their undo
+	// histories, which is the honest cost and is the right one: the alternative is
+	// a repair on read, and a repair on read makes *looking* at a project an edit
+	// that syncs. `repointLinks` assigns only where it differs, so a page holding
+	// no such link produces no change at all and no `updatedAt` bump.
+	//
+	// Deleting a page does **nothing of the sort**, and the asymmetry is a fact
+	// about the two verbs rather than a preference: there is no document left to
+	// point at, so a link into it leads nowhere and saying so is the honest state.
+	// That is `deleteComponent`'s stance verbatim; here the larger edit would be
+	// silently un-linking nodes across the project because one page went away.
+	for (const path of p.pathsOfType(SCENE_TYPE)) {
+		const handle = p.docAt<SceneDoc>(path);
+		handle?.change((draft) => {
+			repointLinks(draft.scene, pagePath(from), pagePath(trimmed));
+		});
+	}
 	// The handle is cached under the old path; drop it so the next read finds it
 	// where it now lives.
 	pages.delete(pageKey(url, pagePath(from)));

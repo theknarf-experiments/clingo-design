@@ -2941,6 +2941,94 @@ export interface SceneNode {
 	 * canvas and must not appear on every page that uses it.
 	 */
 	hidden?: true;
+	/**
+	 * Where this node leads when a prototype is being walked — see
+	 * {@link NodeLink}.
+	 *
+	 * Beside {@link SceneNode.hidden} because it is the field it most resembles:
+	 * an optional, purely additive statement about a node that changes nothing
+	 * about what the node *is*.
+	 *
+	 * On **every kind**, not a kind of its own. A hotspot tool that drew a special
+	 * invisible link rectangle was the obvious alternative and it is a worse
+	 * document: it makes "which things can be clicked" a question about node kinds
+	 * rather than about the design, so a card that is a frame cannot be a link
+	 * without something drawn on top of it, and the thing on top is then a second
+	 * object in the layer list that has to be kept aligned with the first by hand.
+	 * A link on the frame is the frame leading somewhere, which is what a designer
+	 * means and what an `<a>` around a box means in the file it exports to.
+	 *
+	 * **Not a {@link Value}, and that is the sharpest decision in this field.** A
+	 * `Value` would let a node lead to one page in one universe and another in
+	 * another, which sounds exactly like what this document model is for — and it
+	 * is not, because it would make every link a `pick`, an `alt/2` table and a
+	 * branch of the space, paid for by every link in every document so that the
+	 * rare one can vary. The things that are `Value`s are what a design is *made
+	 * of*: geometry and properties. The things that are bare references —
+	 * {@link SceneNode.instanceOf}, {@link SceneNode.style},
+	 * {@link SceneNode.camera}, and now this — are relations to other objects, and
+	 * none of them is a `Value`. And the varying case is not lost: `link/2` is
+	 * `#defined` in the program, so a rule can assert one, and "this card leads to
+	 * A in the compact designs and to B in the wide ones" is a rule over `pick/2`
+	 * — which is where a decision that depends on the design has always belonged.
+	 */
+	link?: NodeLink;
+}
+
+/**
+ * Where a node leads, and what makes it lead there.
+ *
+ * An object rather than two optional fields on {@link SceneNode}, because `on`
+ * is meaningless without `to` and a pair of loose fields is a document that can
+ * say so — a node with a trigger and no target, which every reader would then
+ * have to decide what to do about. One field, present or absent, has no such
+ * state. It is the shape {@link MeshRef} and {@link ImageRef} already have and
+ * for the same reason: a reference plus what to do with it is one fact.
+ */
+export interface NodeLink {
+	/**
+	 * The page it leads to, as a path in the project's tree —
+	 * `/pages/About us.scene`.
+	 *
+	 * A **path**, which is the third time this codebase has answered this question
+	 * the same way, and the reasons have not changed. A page is a document and the
+	 * tree is the list of them, so a path is the one name a page has that nothing
+	 * else has to agree with; the tree is already the page list and a second
+	 * identifier beside it would be a second answer that could disagree. It is
+	 * what {@link SceneNode.instanceOf} holds when it names a component document,
+	 * what {@link MeshRef.src} and {@link ImageRef.src} hold, and what a clone
+	 * writes to disk.
+	 *
+	 * **A path that no document lives at is legal and stays legal**, in exactly
+	 * the terms `composeLibrary` uses about a definition: a dangling reference
+	 * derives nothing, which is what deleting a document out from under its uses
+	 * has always left behind, and is a great deal better than refusing to open the
+	 * page. A link that leads nowhere is a thing a document is allowed to say.
+	 * Repairing it on the way in would make opening a file an edit that syncs;
+	 * refusing it would mean deleting a page could make another page unopenable,
+	 * which is a far larger consequence than the deletion anybody asked for. The
+	 * consequence is *checkable* rather than merely tolerated — see `LINK_RULES`
+	 * and `viol(dead_link) :- goes(P), not page(P).`
+	 */
+	to: string;
+	/**
+	 * What makes it fire. Absent is {@link DEFAULT_LINK_TRIGGER}, which is
+	 * `click`.
+	 *
+	 * A {@link Trigger} and not a word of its own: a trigger has to mean something
+	 * to a browser at the far end, a link fires on a DOM event, and the export
+	 * writes an element a browser navigates. Same requirement, same table — and
+	 * `TRIGGERS[g].event` is already the exact event name a listener needs, which
+	 * is why the studio's presenter and the exported script cannot disagree about
+	 * what a hover is. See {@link LINK_TRIGGERS} for which three of the twelve are
+	 * offered, and why the other nine are not.
+	 *
+	 * Absent rather than written out, so the overwhelmingly common link is one
+	 * field in the document and the reader supplies the default, the way
+	 * {@link SceneNode.hidden} and {@link SceneNode.component} are absent rather
+	 * than `false`.
+	 */
+	on?: Trigger;
 }
 
 /** True when this node's children are placed by the solver. */
@@ -4319,6 +4407,57 @@ export const TRIGGER_NAMES = Object.keys(TRIGGERS) as Trigger[];
  * gesture worked. It travels to the exported file on {@link MachineTable.settings}.
  */
 export const DRAG_SLOP_PX = 3;
+
+/**
+ * The triggers a {@link NodeLink} may fire on.
+ *
+ * **Three of the twelve**, and the nine that are absent are absent for reasons,
+ * because a menu with a wrong answer in it is worse than a short menu. This
+ * table is read-only here: prototyping adds no trigger and no column, and
+ * `LINK_TRIGGERS` is a *subset* rather than a second vocabulary — which is the
+ * whole reason a link fires on a `Trigger` at all.
+ *
+ *   - `pointerup` — `click` is what a person means and what an anchor does
+ *     natively; offering both is two rows that differ only in whether a drag off
+ *     the button still navigates, which nobody is choosing between.
+ *   - `pointerleave` and `blur` — "when you stop touching this, go somewhere
+ *     else" is a trap rather than a design, and a prototype built from them
+ *     cannot be walked backwards.
+ *   - `focus` — the canvas has no focus to give. `Editor.tsx` says so in as many
+ *     words about the machines: an instance is a div in an artboard rather than
+ *     a control, nothing is tabbable. A focus link would work in neither the
+ *     studio nor the exported file, which is the definition of a row that should
+ *     not be offered.
+ *   - `load` — a page that navigates the moment it renders is a redirect, and
+ *     two pages redirecting at each other is an infinite navigation with no
+ *     human act in the loop to stop it. No health check catches a load cycle;
+ *     for a machine the cost is a preview that spins, and here it is a browser
+ *     that cannot be stopped. Refused at the vocabulary rather than guarded at
+ *     the runtime.
+ *   - `viewenter` and `viewleave` — the same objection as `load`, with a delay
+ *     bolted on. A page that navigates because something scrolled into view is a
+ *     redirect with no human act in the loop, and it would also be inert in the
+ *     two places a prototype is looked at: the canvas has no viewport to enter,
+ *     and a presentation is a design scaled to fit, so nothing ever crosses.
+ *   - `dragbegin` and `dragend` — the pair the exported runtime has to
+ *     *suppress*: a gesture that ended is not also a click, so a drag on a
+ *     linked card must not navigate. Offering them as link triggers would be
+ *     shipping that collision as a feature.
+ *
+ * `pointerenter` stays, and it is the one worth defending: a link on hover is a
+ * real thing designers prototype — a menu that opens as you pass it, a gallery
+ * that changes as you sweep across thumbnails — and it is exactly the kind of
+ * thing that is easy in this tool and impossible to hand to somebody without a
+ * prototype mode.
+ */
+export const LINK_TRIGGERS = [
+	"click",
+	"pointerdown",
+	"pointerenter",
+] as const satisfies readonly Trigger[];
+
+/** What an absent {@link NodeLink.on} means, in the one place that decides it. */
+export const DEFAULT_LINK_TRIGGER: Trigger = "click";
 
 /**
  * What advances a timeline: wall time, or a scroll position.

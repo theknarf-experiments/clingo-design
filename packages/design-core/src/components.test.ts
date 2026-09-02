@@ -830,3 +830,28 @@ test("composing and decomposing is a round trip, which is what stops a page eati
 	assert.equal(decomposeLibrary(own, library), own);
 	assert.equal(decomposeLibrary(composeLibrary(own, library), library), own);
 });
+
+test("a link survives the round trip, because neither half has heard of one", () => {
+	// A link is a *page* relation and `composeLibrary`/`decomposeLibrary` are about
+	// a *component* one, so neither may touch it — and today neither would, because
+	// both use `mapTree` and copy the node with `{ ...node, instanceOf: id }`. That
+	// makes this true by construction rather than by care, which is exactly the
+	// kind of thing that stops being true the day somebody rewrites the walk to
+	// pick fields out one at a time. A new field is precisely what falls out of a
+	// round trip silently: the page renders identically without it, and the link is
+	// simply gone the next time the document is saved.
+	const page = pageUsing(BUTTON, ["one", "two"]);
+	const withLink: Scene = {
+		...page,
+		nodes: [
+			{
+				...page.nodes[0],
+				children: (page.nodes[0].children ?? []).map((node, i) =>
+					i === 0 ? { ...node, link: { to: "/pages/About us.scene" } } : node,
+				),
+			},
+		],
+	};
+	const library = { [BUTTON]: buttonDoc() };
+	assert.deepEqual(decomposeLibrary(composeLibrary(withLink, library), library), withLink);
+});

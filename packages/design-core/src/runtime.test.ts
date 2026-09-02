@@ -409,19 +409,74 @@ function observing(): {
 	};
 }
 
-/** A document that is a list of elements and one query. */
-function page(ids: string[]): { root: unknown; els: Record<string, FakeElement> } {
+/**
+ * A document that is a list of elements, one query, and a capture phase.
+ *
+ * The capture phase is here because the runtime now uses one: a gesture that
+ * ended swallows the click the browser sends after it, and the swallow has to be
+ * a listener on the *root* — a listener on the element runs after an anchor has
+ * already been asked to navigate, and there is no `preventDefault` left to make.
+ * So `dispatch` on an element runs the root's capture handlers first and stops
+ * before the element's own if one called `stopPropagation`, which is the whole of
+ * what propagation means for a test that only ever dispatches at a leaf.
+ *
+ * Two counters rather than none, because "the click was swallowed" and "the
+ * machine did not move" are different claims and a test that could only see the
+ * second would pass against a runtime that never bound the listener at all.
+ */
+function page(ids: string[]): {
+	root: unknown;
+	els: Record<string, FakeElement>;
+	/** How many times a capture handler called `preventDefault`. */
+	prevented: () => number;
+} {
 	const els: Record<string, FakeElement> = {};
 	for (const id of ids) els[id] = element(id);
 	const list = ids.map((id) => els[id]);
+	const capture: Record<string, Array<(event: unknown) => void>> = {};
+	let prevented = 0;
+	for (const id of ids) {
+		const el = els[id];
+		const own = el.dispatch.bind(el);
+		el.dispatch = (type, event = {}) => {
+			let stopped = false;
+			const full = {
+				clientX: 0,
+				clientY: 0,
+				pointerId: 1,
+				...event,
+				preventDefault: () => {
+					prevented += 1;
+				},
+				stopPropagation: () => {
+					stopped = true;
+				},
+			};
+			for (const handler of capture[type] ?? []) handler(full);
+			if (stopped) return;
+			own(type, full);
+		};
+	}
 	return {
 		root: {
 			querySelectorAll(selector: string) {
 				assert.equal(selector, "[data-node]");
 				return list;
 			},
+			addEventListener(
+				type: string,
+				handler: (event: unknown) => void,
+				useCapture?: boolean,
+			) {
+				// Capture only: the runtime attaches nothing to the root in the bubble
+				// phase, and a fake that quietly accepted one would let a listener in
+				// the wrong phase pass a test it cannot pass in a browser.
+				assert.equal(useCapture, true);
+				(capture[type] ??= []).push(handler);
+			},
 		},
 		els,
+		prevented: () => prevented,
 	};
 }
 
@@ -1004,6 +1059,58 @@ test("the click after a drag is swallowed exactly once", () => {
 	assert.equal(js.state("m_a"), "rest", "the click the browser sends after it is eaten");
 	els.m_a.dispatch("click");
 	assert.equal(js.state("m_a"), "open", "exactly one, and the next click is a click");
+});
+
+test("a drag that ended does not follow the link", () => {
+	// **The assertion this step exists to get right**, and the one that is wrong
+	// only in the artefact and only after a gesture.
+	//
+	// A linked node is an `<a href>` and a click link emits no script at all,
+	// because an anchor navigates natively and that is the whole reason for
+	// choosing one. So the swallow cannot be a listener that returns early: a
+	// listener cannot stop a default action it never sees. It is a capture-phase
+	// handler on the root, and what it calls is `preventDefault` — which is the
+	// only thing in this whole file that a machine never needed and an anchor
+	// always did.
+	//
+	// The flag is deliberately not matched against a node id: the anchor may be an
+	// ancestor of the part that was dragged, which is exactly the linked-card-with-
+	// a-draggable-handle case. So this drags one element and asserts the *document*
+	// refused the click that followed.
+	const { root, els, prevented } = page(["m_a"]);
+	const js = evalRuntime(draggable(), root);
+	js.start();
+
+	els.m_a.dispatch("pointerdown", { clientX: 0, clientY: 0 });
+	els.m_a.dispatch("pointermove", { clientX: 40, clientY: 0 });
+	els.m_a.dispatch("pointerup", { clientX: 40, clientY: 0 });
+	assert.equal(prevented(), 0, "nothing is prevented until the click arrives");
+
+	els.m_a.dispatch("click");
+	assert.equal(prevented(), 1, "the browser's own navigation is refused, once");
+	assert.equal(js.state("m_a"), "rest", "and the machine's click edge with it");
+
+	// And the next one is an ordinary click: the anchor navigates, the machine
+	// moves, and nothing in between has any memory of the gesture.
+	els.m_a.dispatch("click");
+	assert.equal(prevented(), 1, "exactly one");
+	assert.equal(js.state("m_a"), "open");
+});
+
+test("a machine with no gesture prevents nothing", () => {
+	// The no-regression half of the capture listener. It is attached whatever the
+	// table holds — the event name comes off `bindings`, not off the machine — so
+	// the thing that has to be true is that it never *fires*: a document with no
+	// drag edge anywhere never arms the flag, and every click through it is an
+	// ordinary click.
+	const { root, els, prevented } = page(["m_a", "m_b"]);
+	const js = evalRuntime(menuTable(), root);
+	js.start();
+
+	els.m_a.dispatch("click");
+	els.m_a.dispatch("click");
+	assert.equal(prevented(), 0);
+	assert.equal(js.state("m_a"), "shut", "and both clicks moved the machine");
 });
 
 test("a pointercancel ends a drag that had begun", () => {

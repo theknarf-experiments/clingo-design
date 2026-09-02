@@ -144,3 +144,23 @@
 	opacity: 1;
 	background: var(--dc-sunken);
 }
+
+/*
+ * A link into a page the project no longer has.
+ *
+ * Loud rather than absent, because the document is *allowed* to say it: deleting
+ * a page leaves the links into it dangling on purpose — silently un-linking
+ * nodes across a project because one page went away would be a much larger edit
+ * than the one anybody asked for — so the honest state has to be readable.
+ * `badge`'s own `text-transform: uppercase` is turned off here: the badge holds a
+ * page's name, and a name a person typed should read the way they typed it.
+ */
+.badgeBad {
+	color: var(--dc-bad, #fca5a5);
+	opacity: 1;
+}
+
+.badge[data-link-to] {
+	text-transform: none;
+	letter-spacing: 0;
+}

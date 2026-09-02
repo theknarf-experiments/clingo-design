@@ -55,6 +55,7 @@ import {
 	CONSTRAINT_KINDS,
 	CONSTRAINT_NAMES,
 	type ChildProp,
+	DEFAULT_LINK_TRIGGER,
 	type Condition,
 	type Constraint,
 	type ConstraintKind,
@@ -80,6 +81,7 @@ import {
 	type ImageRef,
 	type MeshRef,
 	type NodeKind,
+	type NodeLink,
 	PROPS,
 	type PropName,
 	SPATIALS,
@@ -1144,6 +1146,46 @@ export function setSizing(
 				return rest;
 			}
 			return { ...node, sizing };
+		}),
+	};
+}
+
+/**
+ * Point a selection at a page, or at nothing.
+ *
+ * Deletes the field rather than storing a sentinel, the way {@link setSizing}
+ * drops `sizing` for the automatic case: absent is the answer for "does not lead
+ * anywhere", and a document holding `{ to: "" }` would be a second spelling of it
+ * that every reader would have to know about.
+ *
+ * A `to` naming a page the project does not have is **written and kept**, which
+ * is the same silence a dangling `instanceOf` gets and is what makes deleting a
+ * page a deletion rather than an edit to every other page. The Inspector shows
+ * the dangling target rather than hiding it, and `viol(dead_link)` is how a
+ * document is told to complain about saying it.
+ */
+export function setLink(
+	scene: Scene,
+	ids: readonly string[],
+	link: NodeLink | undefined,
+): Scene {
+	const touch = new Set(ids);
+	return {
+		...scene,
+		nodes: mapTree(scene.nodes, (node) => {
+			if (!touch.has(node.id)) return node;
+			if (link === undefined || link.to === "") {
+				const { link: _dropped, ...rest } = node;
+				return rest;
+			}
+			// The default trigger is absence, so the overwhelmingly common link stays
+			// one field in the document — the same shape `hidden` and `component`
+			// keep, and the reason `DEFAULT_LINK_TRIGGER` is a constant rather than a
+			// rule.
+			const on = link.on === undefined || link.on === DEFAULT_LINK_TRIGGER
+				? undefined
+				: link.on;
+			return { ...node, link: on === undefined ? { to: link.to } : { to: link.to, on } };
 		}),
 	};
 }

@@ -8,7 +8,9 @@ import {
 	type SceneNode,
 	addInstance,
 	componentDefs,
+	documentLinks,
 	isLaidOut,
+	pageName,
 	partLabel,
 	reparent,
 } from "@clingo-design/design-core";
@@ -55,6 +57,21 @@ export interface LayerListProps {
 	 * that is simply there.
 	 */
 	everywhere?: ReadonlySet<string>;
+	/**
+	 * The project's pages, by name, so a link can be shown as leading somewhere
+	 * or as leading nowhere.
+	 *
+	 * Absent means the list says nothing about links at all, which is what a
+	 * studio rendered without a project around it gets — and is right, because
+	 * without the page list "dangling" is not a question this panel can answer.
+	 *
+	 * A link is read from the **document** here and not from the answer set, and
+	 * the split is the same one the Inspector makes: the layer list is a view of
+	 * what you wrote, and a rule-asserted link is not something you can select or
+	 * repoint. Where a *design* leads is `goes/1`, per universe, and is a question
+	 * asked elsewhere.
+	 */
+	pages?: readonly string[];
 	/** Right-click, in client coordinates, on the node under the pointer. */
 	onContextMenu?: (at: { x: number; y: number }, nodeId: string) => void;
 }
@@ -134,6 +151,7 @@ export function LayerList({
 	solved,
 	derived = [],
 	everywhere,
+	pages,
 	onContextMenu,
 }: LayerListProps) {
 	const [dragging, setDragging] = useState<string | null>(null);
@@ -196,6 +214,11 @@ export function LayerList({
 
 	const defs = componentDefs(scene);
 	const defNames = new Map(defs.map((d) => [d.root.id, d.name] as const));
+
+	// Read once for the whole list rather than per row: `documentLinks` is a walk
+	// of the tree and this component renders every node in it.
+	const links = pages === undefined ? undefined : documentLinks(scene);
+	const known = new Set(pages ?? []);
 
 	const rowOf = (id: string): DocRow | undefined =>
 		rows.find((r): r is DocRow => r.kind === "doc" && r.node.id === id);
@@ -444,10 +467,46 @@ export function LayerList({
 									<span className={styles.kind} aria-hidden="true">
 										{GLYPH[node.kind]}
 									</span>
-									<span className={styles.label}>{node.name}</span>
-									{/* What a row *is* comes before what it does: an instance
-									    that reads as a plain frame is the one thing that
-									    makes a component unreadable. */}
+									{/* Marked, because a row is a glyph, a name and however many
+									    badges, and "the name" is the one part of it a reader —
+									    a person or the browser lane — should not have to find
+									    by counting lines. It was the last line until a link
+									    badge could follow it, which is exactly the kind of
+									    thing that goes wrong once and then again. */}
+									<span className={styles.label} data-role="layer-name">
+										{node.name}
+									</span>
+									{/* Where it goes, before what it is: "this leads
+									    somewhere" is the one thing about a row that a
+									    prototype is entirely made of, and a link nobody can
+									    see is a link nobody maintains. Two states rather
+									    than one, because a link into a page that has been
+									    deleted is a different thing from a link that works
+									    — and the document is allowed to hold either. */}
+									{links?.has(node.id) ? (
+										(() => {
+											const to = links.get(node.id) as string;
+											const name = pageName(to);
+											const gone = !known.has(name);
+											return (
+												<span
+													className={cx(styles.badge, gone && styles.badgeBad)}
+													data-role={gone ? "dangling-badge" : "link-badge"}
+													data-link-to={name}
+													title={
+														gone
+															? `Leads to “${name}”, which this project no longer has`
+															: `Leads to ${name}`
+													}
+												>
+													{gone ? `→ ${name}?` : `→ ${name}`}
+												</span>
+											);
+										})()
+									) : null}
+									{/* What a row *is* comes after that: an instance that
+									    reads as a plain frame is the one thing that makes a
+									    component unreadable. */}
 									{node.instanceOf !== undefined ? (
 										<span
 											className={styles.badge}

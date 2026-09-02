@@ -337,3 +337,44 @@
 .entered[aria-pressed="true"] {
 	background: color-mix(in srgb, #6366f1 62%, #000);
 }
+
+/*
+ * A link, while the design is running.
+ *
+ * The one thing `[data-previewing]` above does *not* hide, and the rule below is
+ * what exempts it — at the same weight as the blanket `display: none` and after
+ * it, which is how one exception is written without giving the general rule a
+ * class to know about.
+ *
+ * Preview shows a link and does not follow it: watching a machine run must cost
+ * nothing, and being thrown onto another page is not nothing. Present is the mode
+ * that goes. The outline is dashed to say so — a solid one is a selection, and
+ * there is no selection while a design is running.
+ */
+.linkHint {
+	position: absolute;
+	pointer-events: none;
+	outline: 1px dashed var(--dc-accent);
+	outline-offset: 2px;
+	border-radius: 2px;
+}
+
+.surface[data-previewing] > .content > .linkHint {
+	display: block;
+}
+
+/* Above the box rather than inside it, like an artboard's name tag: a label
+   drawn over a design is a label covering the thing it is about. */
+.linkName {
+	position: absolute;
+	left: 0;
+	bottom: 100%;
+	margin-bottom: 4px;
+	padding: 1px 5px;
+	font-size: 11px;
+	line-height: 1.4;
+	white-space: nowrap;
+	color: var(--dc-bg);
+	background: var(--dc-accent);
+	border-radius: 3px;
+}

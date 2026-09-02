@@ -20,8 +20,31 @@ import styles from "./ExportPanel.module.css";
 export interface ExportPanelProps {
 	scene: Scene;
 	universes: readonly Universe[];
-	/** Names the file and the document. */
+	/** Names the file and the document, where the page has no name of its own. */
 	projectName: string;
+	/**
+	 * The page being exported, which is what actually names the file.
+	 *
+	 * **A visible change to what this button produces**, and it is load-bearing
+	 * rather than tidy: a five-page project used to export five files all called
+	 * `card.html`. A link's href is `${slug(pageName)}.html`, computed by the same
+	 * `slug` that computes {@link ExportResult.filename}, so the page has to export
+	 * under its own name or a folder of pages does not hold together at all.
+	 *
+	 * Absent falls back to the project's name, which is what a component's document
+	 * gets — a component is not a page and has no page to be.
+	 */
+	pageName?: string;
+	/**
+	 * The project's pages, as page id -> that page's name.
+	 *
+	 * What turns a link in the answer set into an `<a href>`: `link/2` carries
+	 * `pg_about_us_1k3z9`, because an atom's argument has to be a legal constant,
+	 * and a hash does not run backwards. A link whose target is not in here comes
+	 * out as an ordinary box and is named in `lost` — an `<a href>` that 404s is
+	 * worse than a box, because the box is honest about leading nowhere.
+	 */
+	pages?: Readonly<Record<string, string>>;
 	/**
 	 * The last frame each 3D view drew, as a PNG data URL by viewport node id.
 	 *
@@ -75,8 +98,13 @@ export function ExportPanel({
 	scene,
 	universes,
 	projectName,
+	pageName,
+	pages,
 	posters,
 }: ExportPanelProps) {
+	// One name for the file and for the `<title>`, so the href a *link* writes and
+	// the filename a page exports under are the same string by construction.
+	const title = pageName ?? projectName;
 	const [target, setTarget] = useState<PanelTarget>("html");
 	const [which, setWhich] = useState<string>(WHOLE);
 	const [view, setView] = useState<string>("");
@@ -228,7 +256,7 @@ export function ExportPanel({
 						: `Design ${gltfUniverse + 1} of ${universes.length}. A glTF holds one arrangement of one set of objects, so the whole space cannot collapse into it the way a stylesheet can.`,
 			};
 		}
-		const options = { target, tokens, title: projectName, posters, images, fonts };
+		const options = { target, tokens, title, posters, images, fonts, pages };
 		return one === null
 			? exportSpace(scene, universes, options)
 			: exportUniverse(scene, universes[one], options);
@@ -238,7 +266,8 @@ export function ExportPanel({
 		one,
 		target,
 		tokens,
-		projectName,
+		title,
+		pages,
 		images,
 		files,
 		fonts,

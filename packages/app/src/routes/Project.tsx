@@ -111,6 +111,20 @@ export function Project() {
 			onOpenPage={(name) =>
 				navigate(`/p/${encodeURIComponent(id ?? "")}/${encodeURIComponent(name)}`)
 			}
+			{...(active === undefined
+				? {}
+				: {
+						// Resolved here rather than in the studio, because the bare form of
+						// the route has no address: only `/p/:id/present/:page` is a
+						// presentation, so entering one is a navigation to a *named* page.
+						//
+						// A push, which is what makes back leave the presentation: somebody
+						// who pressed Present once and then back once means the editor.
+						onPresent: () =>
+							navigate(
+								`/p/${encodeURIComponent(id ?? "")}/present/${encodeURIComponent(active)}`,
+							),
+					})}
 			undo={history.undo}
 			redo={history.redo}
 			canUndo={history.canUndo}

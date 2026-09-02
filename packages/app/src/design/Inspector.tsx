@@ -58,6 +58,7 @@ import {
 	setGuideValue,
 	setGuides,
 	setLayout,
+	setLink,
 	setSizing,
 	single,
 	sizingOf,
@@ -136,6 +137,12 @@ import {
 	setViewportCamera,
 	spatialFrozen,
 	turnOf,
+	DEFAULT_LINK_TRIGGER,
+	LINK_TRIGGERS,
+	TRIGGERS,
+	type Trigger,
+	pageName,
+	pagePath,
 } from "@clingo-design/design-core";
 
 import { NOTHING } from "./Styles";
@@ -198,6 +205,24 @@ export interface InspectorProps {
 	 * for in the layer tree.
 	 */
 	onSelectionChange?: (ids: string[]) => void;
+	/**
+	 * The project's pages, by name, for the Link section's target menu.
+	 *
+	 * Names and not paths, because a name is what a person reads and `pagePath`
+	 * is what the document stores — one conversion, at the one place a page is
+	 * chosen. Absent hides the section entirely: a studio rendered without a
+	 * project around it has no page to lead to, and a menu with nothing in it is
+	 * worse than no menu.
+	 */
+	pages?: readonly string[];
+	/**
+	 * Open a page by name — the Link section's Open button.
+	 *
+	 * A name you cannot follow is a name you have to hunt for in a list, which is
+	 * the argument the component section's `onSelectionChange` already makes one
+	 * relation over.
+	 */
+	onOpenPage?: (name: string) => void;
 	/**
 	 * Instance node id -> the state the canvas is drawing.
 	 *
@@ -953,6 +978,135 @@ function ComponentSection({
  * saying there is nothing here. Where both have machines the inner one wins,
  * because that is the definition the selection is most immediately part of.
  */
+/**
+ * Where this node leads, and what makes it lead there.
+ *
+ * On **every node kind**, because a link is a field on a node rather than a kind
+ * of its own: a hotspot tool would make "what can be clicked" a question about
+ * node kinds, and would put a second object in the layer list that has to be kept
+ * aligned with the first by hand.
+ *
+ * **A dangling target is shown, not hidden.** The menu carries a disabled option
+ * holding the stored path with the word *Missing*, and choosing a real page
+ * repairs it. The panel already does exactly this one screen up — "An instance of
+ * X, which is no longer a component definition" — and for the same reason:
+ * deleting a page leaves the links into it dangling on purpose, so the document
+ * that says so has to be readable.
+ */
+function LinkSection({
+	node,
+	pages,
+	onSceneChange,
+	onOpenPage,
+}: {
+	node: SceneNode;
+	pages: readonly string[];
+	onSceneChange: (next: (prev: Scene) => Scene, coalesce?: string) => void;
+	onOpenPage?: (name: string) => void;
+}) {
+	const link = node.link;
+	const to = link?.to;
+	const target = to === undefined ? undefined : pageName(to);
+	const dangling = target !== undefined && !pages.includes(target);
+	// Absent is `click`, so the overwhelmingly common link is one field in the
+	// document — see `setLink`, which drops the trigger rather than storing the
+	// default a reader already supplies.
+	const on: Trigger = link?.on ?? DEFAULT_LINK_TRIGGER;
+
+	return (
+		<div data-role="link-section">
+			<h3>Link</h3>
+			<label className={cx(styles.field, styles.wide)}>
+				<span className={styles.fieldLabel}>goes to</span>
+				<select
+					className={styles.number}
+					data-role="link-to"
+					value={to === undefined ? "" : to}
+					onChange={(e) =>
+						onSceneChange((prev) =>
+							setLink(
+								prev,
+								[node.id],
+								e.target.value === "" ? undefined : { to: e.target.value, on },
+							),
+						)
+					}
+				>
+					<option value="">Nothing</option>
+					{/* The stored path, kept in the list so the row can show what the
+					    document actually says. Disabled, because choosing it again would
+					    be choosing the broken thing on purpose. */}
+					{dangling && to !== undefined ? (
+						<option value={to} disabled>
+							{target} — missing
+						</option>
+					) : null}
+					{pages.map((name) => (
+						<option key={name} value={pagePath(name)}>
+							{name}
+						</option>
+					))}
+				</select>
+			</label>
+
+			{/* Offered only where there is a link for it to be about. A trigger menu
+			    on a node that leads nowhere is a control with nothing to control. */}
+			{link ? (
+				<label className={cx(styles.field, styles.wide)}>
+					<span className={styles.fieldLabel}>on</span>
+					<select
+						className={styles.number}
+						data-role="link-on"
+						value={on}
+						onChange={(e) =>
+							onSceneChange((prev) =>
+								setLink(prev, [node.id], {
+									to: link.to,
+									on: e.target.value as Trigger,
+								}),
+							)
+						}
+					>
+						{LINK_TRIGGERS.map((trigger) => (
+							<option key={trigger} value={trigger}>
+								{TRIGGERS[trigger].label}
+							</option>
+						))}
+					</select>
+				</label>
+			) : null}
+
+			{link ? (
+				<button
+					type="button"
+					className={styles.follow}
+					data-role="open-linked-page"
+					disabled={dangling || onOpenPage === undefined}
+					title={
+						dangling
+							? "This page is not in the project any more"
+							: `Open ${target}`
+					}
+					onClick={() => {
+						if (target !== undefined) onOpenPage?.(target);
+					}}
+				>
+					{dangling ? "Missing page" : `Open ${target}`}
+				</button>
+			) : null}
+
+			{dangling ? (
+				<p className={styles.note} data-role="dangling-link">
+					This leads to “{target}”, which the project no longer has. The link is
+					kept rather than cleared — deleting a page should not quietly edit
+					every other page — and it comes out of an export as an ordinary box.
+					Choose a page above to repair it.
+				</p>
+			) : null}
+		</div>
+	);
+}
+
 function machineForPart(
 	scene: Scene,
 	node: SceneNode,
@@ -1902,6 +2056,8 @@ export function Inspector({
 	everywhere,
 	variables = {},
 	onSelectionChange,
+	pages,
+	onOpenPage,
 	playing,
 	onPlay,
 	onImportModel,
@@ -2675,6 +2831,19 @@ export function Inspector({
 				onSceneChange={onSceneChange}
 				onSelect={onSelectionChange}
 			/>
+
+			{/* Where it leads, next: a link is a statement about the whole node, like
+			    being an instance, and it changes what clicking the thing means. Only
+			    where the app knows what pages there are — a studio rendered without a
+			    project around it has nowhere to lead. */}
+			{pages && pages.length > 0 ? (
+				<LinkSection
+					node={node}
+					pages={pages}
+					onSceneChange={onSceneChange}
+					onOpenPage={onOpenPage}
+				/>
+			) : null}
 
 			{/* Then what it *does*, which is the same kind of claim: an instance of a
 			    component that behaves is not fully described by which variant it is

@@ -4,13 +4,10 @@ import { type RawHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import { putNamedAsset } from "../projects/store";
 import {
 	CONSTRAINT_KINDS,
-	DEFAULT_EASING,
 	DEFAULT_UNIT,
 	DUPLICATE_OFFSET,
-	EASINGS,
 	EMU_PER_PX,
 	LAYOUT_PROPS,
-	MOTION_PROPS,
 	type LayoutProp,
 	DRAW_KINDS,
 	type Edge,
@@ -55,13 +52,10 @@ import {
 	fontNotes,
 	usedFamilies,
 	variantLabel,
-	cssEasing,
 	drawGuideAt,
-	easingOf,
 	flatten,
 	layerOf,
 	machineForNode,
-	machineLayers,
 	machineTable,
 	motionLabel,
 	parentOf,
@@ -75,23 +69,21 @@ import {
 	placeInstance,
 	sceneContext,
 	shownState,
-	shownStates,
 	keyframeCopyIds,
 	stateCopyIds,
 	stateLabel,
 	stateVarLabel,
 	takesMembers,
 	variableCounts,
+	pageIdOf,
+	pagePath,
 	reorderNodes,
 	ungroupNodes,
 	varyingVariables,
 	updateConstraint,
 	unreadVariables,
 	varyingVars,
-	msOf,
-	type Machine,
 	type ModelScene,
-	type Transition,
 	type Trigger,
 	wrapInLayout,
 	wrapsChildren,
@@ -112,6 +104,7 @@ import { Guides } from "./Guides";
 import { Inspector } from "./Inspector";
 import { LayerList } from "./LayerList";
 import { Machines } from "./Machines";
+import { edgeAt, motionOf } from "./playbackMotion";
 import { ProgramPanel } from "./ProgramPanel";
 import { PanelResizer, usePanelWidth } from "./PanelResizer";
 import { Rulers } from "./Rulers";
@@ -120,6 +113,7 @@ import {
 	extractComponent,
 	useAssetFiles,
 	useComponents,
+	usePages,
 } from "../projects/store";
 import { Components } from "./Components";
 import { Pages } from "./Pages";
@@ -221,21 +215,6 @@ const STRIP_GAP = 56 * EMU_PER_PX;
 const STRIP_STEP = 24 * EMU_PER_PX;
 
 /**
- * What a transition is paced at when nothing in this universe answers.
- *
- * Read out of `MOTION_PROPS` through `msOf`, which is the same table and the
- * same reader the compiler emits `mdefdur/1` from — so the canvas and the
- * program cannot hold two different opinions about what "no duration" means.
- * A table entry no unit spells reads as nothing here and emits no default
- * there, which is a table to fix rather than a number to invent, so the `?? 0`
- * is a type obligation rather than a second policy.
- */
-const MOTION_FALLBACK = {
-	duration: msOf(MOTION_PROPS.duration.fallback) ?? 0,
-	delay: msOf(MOTION_PROPS.delay.fallback) ?? 0,
-};
-
-/**
  * The toolbar's slots, in the order the kinds are declared.
  *
  * Every drawable kind gets one, except that the shapes collapse into a single
@@ -315,6 +294,18 @@ export interface StudioProps {
 	 */
 	activeComponent?: string;
 	onOpenComponent?: (name: string) => void;
+	/**
+	 * Leave the editor and walk the prototype — see `Present.tsx`.
+	 *
+	 * A callback rather than a `<Link>`, because "present the first page" has no
+	 * address of its own: the route names the page it is presenting, so the button
+	 * has to resolve a page name before it can navigate. `Project.tsx` does that,
+	 * which is where the page list already is.
+	 *
+	 * Absent hides the button. A studio rendered without a project around it has
+	 * no prototype to walk.
+	 */
+	onPresent?: () => void;
 	undo: () => void;
 	redo: () => void;
 	canUndo: boolean;
@@ -330,6 +321,7 @@ export function Studio({
 	onOpenPage,
 	activeComponent,
 	onOpenComponent,
+	onPresent,
 	undo,
 	redo,
 	canUndo,
@@ -1399,6 +1391,24 @@ export function Studio({
 		null,
 	);
 	const componentNames = useComponents(projectUrl);
+	/**
+	 * The project's pages, and the same list keyed by the constant a page takes in
+	 * a program.
+	 *
+	 * Two shapes of one fact, because two questions are asked of it. The Inspector
+	 * and the layer list want *names*, which is what a person reads and what
+	 * `pagePath` turns back into a document reference. The canvas and the export
+	 * want the **id**, because a link in an answer set carries `pg_about_us_1k3z9`
+	 * — an atom's argument has to be a legal constant — and a hash does not run
+	 * backwards, so the only way to a readable name is the list the app already
+	 * holds. `pageIndexOf`'s job, one conversion further on.
+	 */
+	const pageNames = usePages(projectUrl);
+	const pagesById = useMemo(
+		() =>
+			Object.fromEntries(pageNames.map((name) => [pageIdOf(pagePath(name)), name])),
+		[pageNames],
+	);
 
 	/**
 	 * Bring a glTF into a view: pick a file, parse it, put it in the tree, make
@@ -1901,47 +1911,17 @@ export function Studio({
 	const keyMembers = useMemo(() => keyframeCopyIds(scene), [scene]);
 
 	/**
-	 * The edge a trigger takes at an instance right now, or nothing.
+	 * The edge a trigger takes at an instance right now, and how it is paced.
 	 *
-	 * A second reading of what `stepMachine` answers, and the duplication is
-	 * deliberate and narrow: the step decides *where the machine goes*, which
-	 * must have exactly one answer shared with the exported file, while this
-	 * decides *how the move is paced*, which the file gets from the same document
-	 * by a different route. The two are kept in step by being written to the same
-	 * three conditions `machineTable` filters on — enabled, both ends real, first
-	 * in document order — so the transition found here is the transition the
-	 * table's edge came from.
+	 * **Both moved to `playbackMotion.ts`**, because present mode has to pace a
+	 * move the same way this canvas does: the studio and the presenter are two
+	 * views of one document, and a second answer to "how long does this hover
+	 * take" would make a presentation a demo of a design nobody wrote. The essay
+	 * about why pacing is a second reading of the step — rather than a second
+	 * decision about it — went with them.
 	 */
-	function edgeAt(
-		instance: string,
-		trigger: Trigger,
-	): { machine: Machine; transition: Transition } | undefined {
-		const node = byId.get(instance);
-		if (!node) return undefined;
-		const machine = machineForNode(scene, node);
-		if (!machine) return undefined;
-		// Where every layer is: what is being played, over what the document draws.
-		// Layers made "where the machine is" plural, so the edge that fired is the
-		// first one leaving *any* layer's current state — which is what
-		// `stepInstance` walks, in the same layer order, and the same reason this
-		// is a second reading rather than a second decision.
-		const at = { ...shownStates(machine, node), ...playback.playing[instance] };
-		const ids = new Set(machine.states.map((s) => s.id));
-		for (const layer of machineLayers(machine)) {
-			const from = at[layer.id];
-			if (from === undefined) continue;
-			const transition = machine.transitions.find(
-				(t) =>
-					t.enabled &&
-					t.trigger === trigger &&
-					t.from === from &&
-					ids.has(t.from) &&
-					ids.has(t.to),
-			);
-			if (transition) return { machine, transition };
-		}
-		return undefined;
-	}
+	const firedEdge = (instance: string, trigger: Trigger) =>
+		edgeAt(scene, byId.get(instance), playback.playing, instance, trigger);
 
 	/**
 	 * A trigger the canvas saw, followed.
@@ -1959,31 +1939,8 @@ export function Studio({
 	 * would not.
 	 */
 	function onTrigger(instance: string, trigger: Trigger) {
-		const edge = edgeAt(instance, trigger);
-		if (edge) {
-			const timing = answer?.machines[edge.machine.id];
-			setMotion({
-				duration: timing?.duration[edge.transition.id] ?? MOTION_FALLBACK.duration,
-				delay: timing?.delay[edge.transition.id] ?? MOTION_FALLBACK.delay,
-				// The answer set's curve where there is one, the document's reading
-				// against this universe's picks where there is not — the same ordering
-				// the two numbers above take, and it stopped being a lookup the moment
-				// an easing became a Value: a `curve` token the solver chose between
-				// resolves to nothing without a context.
-				//
-				// A **spring comes back as its whole `linear()` string** and is written
-				// straight into `--dc-play-easing`. The canvas needs no `@supports`
-				// dance, which is the one place the studio and the exported file
-				// deliberately differ: the studio runs in whatever browser the designer
-				// has open right now and every browser that can run this app parses
-				// `linear()`; only a file somebody keeps needs the fallback.
-				easing:
-					cssEasing(
-						timing?.easing[edge.transition.id] ??
-							easingOf(edge.machine, edge.transition, context),
-					) ?? EASINGS[DEFAULT_EASING].css,
-			});
-		}
+		const edge = firedEdge(instance, trigger);
+		if (edge) setMotion(motionOf(edge, answer, context));
 		playback.fire(instance, trigger);
 	}
 
@@ -2133,6 +2090,7 @@ export function Studio({
 					) : null}
 					<LayerList
 						scene={scene}
+						pages={pageNames}
 						skip={librarySplices}
 						selection={selection}
 						onSelectionChange={selectionIds}
@@ -2211,6 +2169,7 @@ export function Studio({
 											derived={derived}
 											showGuides={showGuides}
 											previewing={previewing}
+											pages={pagesById}
 											playing={playback.playing}
 											scrub={playback.scrub}
 											onTrigger={onTrigger}
@@ -2542,6 +2501,32 @@ export function Studio({
 										Preview
 									</button>
 								) : null}
+								{/*
+								 * Leaving the editor and walking the prototype, which is the
+								 * other half of the sentence the Preview button makes.
+								 *
+								 * Always offered where there is a project to walk, unlike
+								 * Preview: there is always something to show, where a machine to
+								 * run is something a document may not have. The title states the
+								 * difference the two buttons exist to draw, because nothing else
+								 * on screen can — one runs the design in front of you and writes
+								 * nothing down; the other takes you away, which is the whole
+								 * point of it.
+								 */}
+								{onPresent ? (
+									<button
+										type="button"
+										className={styles.tool}
+										data-role="present"
+										title={
+											"Preview: run the machines here \u2014 hover and click the design, nothing is written down.\n" +
+											"Present: leave the editor and walk the prototype, following links between pages."
+										}
+										onClick={onPresent}
+									>
+										Present
+									</button>
+								) : null}
 								<button
 									type="button"
 									className={styles.tool}
@@ -2720,6 +2705,8 @@ export function Studio({
 								everywhere={everywhere}
 								variables={minted}
 								onSelectionChange={selectionIds}
+								pages={pageNames}
+								onOpenPage={onOpenPage}
 								playing={playingFlat}
 								onPlay={playFlat}
 								onImportModel={importModel}
@@ -2870,6 +2857,13 @@ export function Studio({
 					]}
 					universes={universes}
 					projectName={projectName}
+					// The *page's* name, not the project's, and it is a visible change to
+					// what the Copy button produces: a five-page project used to export
+					// five files all called `card.html`. The href a link writes is
+					// `${slug(pageName)}.html`, so a page has to export under its own name
+					// for a folder of them to hold together at all.
+					pageName={activePage}
+					pages={pagesById}
 					posters={posters}
 					status={
 						<StatusLine

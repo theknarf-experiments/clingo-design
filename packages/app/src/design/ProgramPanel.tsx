@@ -38,6 +38,17 @@ export interface ProgramPanelProps {
 	universes: readonly Universe[];
 	projectName: string;
 	/**
+	 * Which page this is, and the project's pages by the id a link carries — both
+	 * passed straight through to {@link ExportPanel}.
+	 *
+	 * This panel never looks at either, for the reason {@link posters} is on the
+	 * way: the studio holds them and the export is where they are wanted, and
+	 * threading them rather than reaching for a context keeps the one place that
+	 * knows and the one place that uses visible in the same call chain.
+	 */
+	pageName?: string;
+	pages?: Readonly<Record<string, string>>;
+	/**
 	 * The last frame each 3D view drew, as a PNG data URL by viewport node id —
 	 * passed straight through to {@link ExportPanel}.
 	 *
@@ -81,6 +92,8 @@ export function ProgramPanel({
 	approximations,
 	universes,
 	projectName,
+	pageName,
+	pages,
 	posters,
 	status,
 }: ProgramPanelProps) {
@@ -119,6 +132,8 @@ export function ProgramPanel({
 							scene={scene}
 							universes={universes}
 							projectName={projectName}
+							pageName={pageName}
+							pages={pages}
 							posters={posters}
 						/>
 					) : tab === "rules" ? (

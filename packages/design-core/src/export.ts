@@ -128,6 +128,7 @@ import {
 } from "./paint.ts";
 import {
 	DEFAULT_EASING,
+	DEFAULT_LINK_TRIGGER,
 	type Dimension,
 	DRAG_SLOP_PX,
 	type Easing,
@@ -172,7 +173,7 @@ import {
 	variantLabel,
 	wornProps,
 } from "./scene.ts";
-import { runtimeScript } from "./runtime.ts";
+import { LINK_RUNTIME, runtimeScript } from "./runtime.ts";
 import { flatten } from "./tree.ts";
 import { type Emu, cssPxFromEmu, emuOf } from "./units.ts";
 import {
@@ -298,6 +299,10 @@ export const EXPORT_TARGETS: Record<ExportTarget, TargetSpec> = {
 			// document with no z in it at all — where it is, vacuously, and costs a
 			// reader one line.
 			"Three dimensions. An SVG is flat: a node with a z or a turn is drawn in the place its untransformed box occupies, and a 3D view is drawn as its own rectangle.",
+			// Unconditional, like its neighbours, and the same asymmetry this table
+			// already argues for: HTML *can* carry a link and names the ones it could
+			// not, SVG carries none and says so once about the format.
+			"Links. An SVG is a picture: a node that leads to another page is drawn and does not lead anywhere.",
 		],
 	},
 };
@@ -447,6 +452,33 @@ function missingImages(
 const TURNED_LOST =
 	"A turned box is drawn by the browser through its transform and laid out by its untransformed rectangle, here and on the canvas both — so a click near a corner of something leaned away may land on it where there is nothing drawn.";
 
+/**
+ * Where a document links out and the export is one file.
+ *
+ * Conditional, like {@link GRID_LOST} and for its reason: a document with no
+ * link loses no page, and a list of losses that pads itself is one nobody
+ * finishes reading.
+ *
+ * The second sentence is the way out, and it is a real one rather than a
+ * consolation: `about-us.html` is *already* the right string for a folder of
+ * pages, so exporting every page under its own name into one directory makes the
+ * links work with nothing about this emitter changing. Multi-file export is a zip
+ * or a directory picker and is a different artefact; until somebody writes that
+ * loop, this sentence is how a person does it by hand.
+ *
+ * The third is the honest cost of the fonts step meeting this one, and it is not
+ * fixable inside either: every face is inlined per file, once per family, so a
+ * folder of five pages carrying one variable `.ttf` is five copies of it. No
+ * browser can share them, because each `data:` URI is a separate document's
+ * private bytes with no cache key.
+ */
+const LINKED_LOST =
+	"Other pages. A link leads to the file its page exports as — “about-us.html” beside this one — and this is one file. Export every page under its own name into one folder and the links work; until then they lead to a file that is not there. Each page carries its own copy of every font it uses, so a five-page prototype carrying one family is five copies of it: nothing is fetched and nothing is shared, so the files work offline and they are large.";
+
+/** Where a link's page is gone, or was never handed over. */
+const DEAD_LINK_LOST = (n: number): string =>
+	`${n} link${n === 1 ? "" : "s"} point at a page this project no longer has. They come out as ordinary boxes rather than as anchors to a file that is never going to exist.`;
+
 export interface ExportResult {
 	target: ExportTarget;
 	filename: string;
@@ -518,6 +550,27 @@ export interface ExportOptions {
 	 * pretty. The loss sentence says which of the two happened.
 	 */
 	posters?: Record<string, string>;
+	/**
+	 * The project's pages, as page id -> that page's **name**.
+	 *
+	 * A name and not a filename, so the two cannot disagree: the href is
+	 * `${slug(name)}.html`, computed by the same `slug` that computes
+	 * {@link ExportResult.filename}, so a page exported under its own name and a
+	 * link to that page produce the same string by construction rather than by the
+	 * caller remembering to match them.
+	 *
+	 * Handed in for {@link images}' reason exactly — the pages are documents in a
+	 * tree and this package does not do I/O — and a second map beside it rather
+	 * than one merged one, because the panel knows which target is selected and
+	 * the SVG target wants the pictures and none of this.
+	 *
+	 * A link whose target is not in here — a page deleted out from under it, or a
+	 * caller that passed no map at all — exports as an ordinary box rather than as
+	 * an anchor to a file that is not going to exist, and says so in `lost`. An
+	 * `<a href>` that 404s is worse than a box, because the box is honest about
+	 * leading nowhere.
+	 */
+	pages?: Readonly<Record<string, string>>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1749,6 +1802,31 @@ ${cssText(DOCUMENT_BASE, "\t")}
 	height: 100%;
 	object-fit: inherit;
 	border-radius: inherit;
+}
+/* A link is an anchor, so the user agent has opinions about it — a colour, an
+   underline and a tap highlight the design did not ask for. Neutralised once
+   here rather than folded into each linked node's own rule, so putting a link on
+   something never repaints it.
+
+   Wrapped in :where(), and that is the whole of the rule rather than decoration.
+   ".design a[data-node]" is a class, a type and an attribute — (0,2,1) — while a
+   node's own rule is a bare class at (0,1,0) and a style's is already inside
+   :where() and weighs nothing at all. And the ink property writes "color". So the unwrapped
+   selector would do the exact opposite of what this comment claims: a text node
+   that leads somewhere would lose its ink to a neutraliser written to be
+   invisible. At zero specificity it still beats the user agent — author styles
+   win over UA styles regardless of weight — and loses to every node rule and
+   every style class, which is what "never repaints it" was trying to say.
+
+   Keyed on [data-node] so it says what it means: the design's own boxes, not an
+   anchor a rule put inside a text node. Unconditional because it is three
+   declarations on a selector that matches nothing in a document with no links,
+   and because BASE_CSS is a constant — a condition here would be a second code
+   path for four lines. */
+:where(.design a[data-node]) {
+	color: inherit;
+	text-decoration: none;
+	-webkit-tap-highlight-color: transparent;
 }`;
 
 /**
@@ -1769,6 +1847,7 @@ function htmlBody(
 	/** The style class each wearer carries beside its own, if any. */
 	wearing: Map<string, string>,
 	images: Readonly<Record<string, Uint8Array>> = {},
+	pages: Readonly<Record<string, string>> = {},
 ): string {
 	const byId = new Map(slots.map((s) => [s.id, s] as const));
 	const render = (node: ModelNode, depth: number, pretty: boolean): string => {
@@ -1777,7 +1856,28 @@ function htmlBody(
 		const pad = pretty ? "\t".repeat(depth + 2) : "";
 		const worn = wearing.get(node.id);
 		const names = worn === undefined ? slot.className : `${slot.className} ${worn}`;
-		const open = `${pad}<div class="${names}" data-node="${escapeAttr(node.id)}" data-kind="${node.kind}">`;
+		// A link is an anchor, because a link that is not an `<a>` is not a link: it
+		// is not in the tab order, middle-click does not open it in a tab, and a
+		// screen reader does not announce it as one. Everything else about the box
+		// is untouched — same class, same data attributes, same rule in the
+		// stylesheet — so this swaps one tag and adds one attribute rather than
+		// growing a second way for a node to be emitted.
+		//
+		// Read off the `ModelNode`, which came from the answer set, so **a link a
+		// rule asserted exports too**. Nothing extra was needed for that and it is
+		// worth the sentence, so nobody "simplifies" it into reading the document.
+		const link = node.link;
+		const to = link === undefined ? undefined : pages[link.to];
+		const tag = to === undefined ? "div" : "a";
+		const href = to === undefined ? "" : ` href="${escapeAttr(`${slug(to)}.html`)}"`;
+		// Only where the browser will not do it on its own — see LINK_RUNTIME. A
+		// click link carries no attribute and therefore costs the file no script.
+		const fires =
+			to !== undefined && link !== undefined && link.on !== DEFAULT_LINK_TRIGGER
+				? ` data-link-on="${escapeAttr(TRIGGERS[link.on].event)}"`
+				: "";
+		const open = `${pad}<${tag} class="${names}" data-node="${escapeAttr(node.id)}" data-kind="${node.kind}"${href}${fires}>`;
+		const close = `</${tag}>`;
 		const content = htmlContent(index, layer, node, images);
 		// A viewport's box is markup and its contents are not — see `stopsHere`.
 		// The element is still emitted, still carries its id and its kind, and is
@@ -1788,8 +1888,8 @@ function htmlBody(
 		const kids = inside
 			.map((child) => render(child, depth + 1, nested))
 			.filter((markup) => markup !== "");
-		if (!nested) return `${open}${content}${kids.join("")}</div>`;
-		return [content === "" ? open : `${open}${content}`, ...kids, `${pad}</div>`].join(
+		if (!nested) return `${open}${content}${kids.join("")}${close}`;
+		return [content === "" ? open : `${open}${content}`, ...kids, `${pad}${close}`].join(
 			"\n",
 		);
 	};
@@ -2036,6 +2136,32 @@ function htmlExport(
 	spatialLost.push(...missingFaces(index.scene, families, options.fonts ?? {}));
 	spatialLost.push(...fontWeightNote(index.scene, families, options.fonts ?? {}));
 
+	/**
+	 * What this document's links came to, over the nodes that are actually drawn.
+	 *
+	 * Over the slots rather than over `model.links`, and the difference is the
+	 * `visible/1` guard one level up: `link/2` is shown for hidden nodes too — a
+	 * rule may want to reason about an edge the design does not offer — while what
+	 * this file emits is what it drew. A link on a node no slot holds is not in
+	 * this file at all, so it is neither an anchor nor a loss.
+	 */
+	const pages = options.pages ?? {};
+	let linked = 0;
+	let dead = 0;
+	let scripted = false;
+	for (const slot of slots) {
+		const link = base.universe.model.byId[slot.id]?.link;
+		if (link === undefined) continue;
+		if (pages[link.to] === undefined) {
+			dead += 1;
+			continue;
+		}
+		linked += 1;
+		if (link.on !== DEFAULT_LINK_TRIGGER) scripted = true;
+	}
+	if (linked > 0) spatialLost.push(LINKED_LOST);
+	if (dead > 0) spatialLost.push(DEAD_LINK_LOST(dead));
+
 	const title = escapeText(options.title ?? "Design");
 	// At the end of the body, where a script that reads the document has to be:
 	// the runtime's first act is one `querySelectorAll("[data-node]")` pass, and in
@@ -2044,6 +2170,15 @@ function htmlExport(
 	// ES5 body with no dependency on when it runs beyond the elements existing.
 	const script =
 		machines.runtime === null ? "" : `\n<script>\n${machines.runtime}\n</script>`;
+	// And the six lines a link that is not a click needs, in a script of its own
+	// beside the interpreter's rather than inside it. Two scripts and not one
+	// because they are two different things: that one is a table interpreter and
+	// this one has no table. A document whose every link is a click emits neither
+	// this tag nor a `data-link-on` anywhere, which is the whole reason an anchor
+	// was chosen over a handler.
+	const links = scripted
+		? `\n<script>\n(function(){\nvar root = document;\n${LINK_RUNTIME}\n})();\n</script>`
+		: "";
 	return {
 		classes,
 		lost: [...spatialLost, ...machines.lost],
@@ -2059,8 +2194,8 @@ ${css.join("\n")}
 </head>
 <body>
 \t<div class="design">
-${htmlBody(index, slots, base, wearing, options.images ?? {})}
-\t</div>${script}
+${htmlBody(index, slots, base, wearing, options.images ?? {}, pages)}
+\t</div>${script}${links}
 </body>
 </html>
 `,

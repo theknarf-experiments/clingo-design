@@ -122,3 +122,28 @@
 	font: inherit;
 	font-size: 12px;
 }
+
+/*
+ * How many pages lead here.
+ *
+ * The whole of what a flow graph would have been for: boxes and arrows for a
+ * whole project is a second canvas — a layout, a camera, drag-to-arrange and an
+ * ordering somebody has to store — and the sentence it gets asked to say is "no
+ * page links here". A dot says it.
+ *
+ * Quiet by default, because on most projects most pages are linked and a column
+ * of numbers competing with the names would be a list that is harder to read for
+ * a fact nobody was asking about.
+ */
+.links {
+	margin-left: auto;
+	padding: 0 0.3rem;
+	font-size: 0.65rem;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.4;
+	white-space: nowrap;
+}
+
+.links[data-orphan] {
+	opacity: 0.75;
+}

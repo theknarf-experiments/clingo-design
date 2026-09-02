@@ -271,6 +271,24 @@ function summarise(template: (typeof TEMPLATES)[number], result: {
  * reproduces the previous digest exactly, for all 133.** One word in, one word
  * out, and nothing else in the file is different.
  *
+ * A **fourth** time, with the prototyping step, and this one is recorded against
+ * a plan that said it would not happen. `docs/framer-parity-plan.md` §8.12 says
+ * this fixture is regenerated in the gesture step and in no other; §5.6 of the
+ * same document requires the prototyping step to append
+ * `:where(.design a[data-node])` to `BASE_CSS` **unconditionally**, and §6.1
+ * requires it to move the drag's click-swallow out of the interpreter's
+ * `listen()` and onto the root in the capture phase. Both of those are texts
+ * every exported file carries, so the two paragraphs cannot both be honoured and
+ * the substantive one wins. The proof is the direct one this comment already
+ * demands twice over: **133 universes, every `html` digest moved, and no
+ * `nodes`, `frames`, `rendered`, `svg`, `count`, `total` or `ids` digest moved at
+ * all** — and rolling back exactly those two texts, and nothing else of the
+ * step, reproduces every previous `html` digest for all 133. A link is an
+ * anchor and an anchor has a colour a design did not choose; the neutraliser is
+ * three declarations on a selector that matches nothing in a document with no
+ * links, and it still lands in the stylesheet of one, which is what
+ * "unconditional" costs.
+ *
  * Two ids were **added** later and neither is a regeneration: `deck` and
  * `solids` are the templates written after the ladder and the third axis
  * shipped, so they have no "before" to have moved away from. What they get out

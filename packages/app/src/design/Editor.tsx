@@ -62,8 +62,6 @@ import {
 	type Picks,
 	type Scene,
 	type SnapGuide,
-	DRAG_SLOP_PX,
-	TRIGGERS,
 	type Trigger,
 	type Universe,
 	addNodeTo,
@@ -79,12 +77,14 @@ import {
 	frameAncestorOf,
 	frameAt,
 	frameDim,
-	frameContains,
 	frameFromPoints,
 	frameOf,
 	framesIntersect,
 	handleEdges,
 	hitTestTree,
+	instanceAt,
+	type LinkHit,
+	linkAt,
 	isDrawable,
 	isPartOf,
 	isPlaced,
@@ -127,6 +127,7 @@ import {
 import { Annotations } from "./Annotations";
 import { Artboard } from "./Artboard";
 import { cx } from "./cx";
+import { gestures } from "./gesture";
 import { Guides } from "./Guides";
 import type { GizmoMode, SpatialEdit } from "@clingo-design/canvas-3d";
 
@@ -352,6 +353,19 @@ export interface EditorProps {
 	 * previewing.
 	 */
 	motion?: { duration: number; delay: number; easing: string };
+	/**
+	 * The project's pages, as page id -> that page's name.
+	 *
+	 * Read for exactly one thing: naming a link's target in the outline preview
+	 * draws over a node that leads somewhere. A link's `to` in the answer set is a
+	 * page **id**, because an atom's argument has to be a legal constant, and a
+	 * hash does not run backwards — so the only way to a readable name is the list
+	 * the app already holds.
+	 *
+	 * Absent draws the outline with no name on it, which is what a studio rendered
+	 * without a project around it gets.
+	 */
+	pages?: Readonly<Record<string, string>>;
 	/** Right-click, in client coordinates. */
 	onContextMenu?: (at: { x: number; y: number }) => void;
 }
@@ -417,6 +431,7 @@ export function Editor({
 	derived = [],
 	showGuides = true,
 	previewing = false,
+	pages,
 	playing,
 	scrub,
 	onTrigger,
@@ -875,37 +890,46 @@ export function Editor({
 	const pressed = useRef<string | null>(null);
 
 	/**
-	 * The drag recogniser: where the press landed, and whether it has become a
-	 * gesture.
+	 * The link the pointer is over while previewing, if any.
 	 *
-	 * **In client coordinates and never document ones**, which is `DRAG_SLOP_PX`'s
-	 * own instruction and the one thing about this that is easy to get wrong here
-	 * and impossible to get wrong in the exported file. This canvas pans and
-	 * zooms: three *document* pixels at 25% zoom is under one pixel of finger
-	 * travel and at 400% is twelve, so a threshold measured after `toDocument`
-	 * would be a gesture that behaved differently depending on how closely
-	 * somebody was looking — and differently from the file, which has no zoom to
-	 * be at.
+	 * **Preview shows a link and does not follow it, and that difference is the
+	 * clearest statement of why the two modes both exist.** Preview's whole safety
+	 * property is that it costs nothing — no edit, no undo entry, no solve — and a
+	 * navigation is the one thing it has never done: a designer watching a hover
+	 * state who got thrown onto another page has lost the thing they were looking
+	 * at. So the link is *shown*, and Present is what follows it.
 	 *
-	 * Refs beside {@link hovering} and for its reason exactly: a slop test is a
+	 * State rather than a ref, unlike its neighbours above, because this one is
+	 * drawn — and it changes only when the pointer crosses into or out of a linked
+	 * node, which is the same frequency the enter/leave triggers already re-render
+	 * at.
+	 *
+	 * Off the **model** and not off the document, because that is where a
+	 * rule-asserted link exists at all and where a component's linked part has a
+	 * box: a nav bar placed as an instance has its link on `inst(I,logo)`, which
+	 * `scene.nodes` does not contain.
+	 */
+	const [linkHint, setLinkHint] = useState<LinkHit | null>(null);
+	useEffect(() => {
+		if (!previewing) setLinkHint(null);
+	}, [previewing]);
+
+	/**
+	 * The drag recogniser, and the swallow that follows one.
+	 *
+	 * **Lifted into `gesture.ts`**, because present mode has to recognise the same
+	 * gesture the same way: a machine whose whole point is a drag would do nothing
+	 * in the presentation and everything in the exported file, which is the class
+	 * of disagreement this canvas exists to prevent. The threshold, the client
+	 * coordinates and the `TRIGGERS.dragend.suppresses` lookup all moved with it;
+	 * see that file, which carries the essay this comment used to.
+	 *
+	 * A ref beside {@link hovering} and for its reason exactly: a slop test is a
 	 * fact about the previous event, nothing here is drawn, and re-rendering the
 	 * canvas on every pixel of a drag while a transition is mid-flight is the
 	 * stutter that gets blamed on the design.
 	 */
-	const dragFrom = useRef<{ x: number; y: number } | null>(null);
-	const dragging = useRef(false);
-	/**
-	 * The trigger the drag that just ended swallows once, read off `TRIGGERS`.
-	 *
-	 * Read from the table rather than tested against `"click"` for the reason the
-	 * emitted runtime does the same: "a drag is not also a click" is one sentence,
-	 * and it cannot be true for one reader and false for the other. The studio
-	 * synthesises its own click — the DOM's would land on the editor's overlay —
-	 * so here the swallow is a click this file declines to *send*, where in the
-	 * file it is one the runtime declines to *hear*. Same sentence, two shapes,
-	 * one table.
-	 */
-	const swallow = useRef<Trigger | undefined>(undefined);
+	const drag = useRef(gestures());
 
 	/**
 	 * Leaving preview forgets where the pointer was.
@@ -920,40 +944,24 @@ export function Editor({
 		pressed.current = null;
 		// And a drag half-recognised when preview closed is not a drag that ended:
 		// there is nothing to send `dragend` to and nothing waiting for it, so the
-		// recogniser is cleared rather than fired. A `swallow` left armed would eat
-		// the first click of the *next* preview, which is the same "an edge taken
-		// for a reason no one could see" this effect exists to prevent.
-		dragFrom.current = null;
-		dragging.current = false;
-		swallow.current = undefined;
+		// recogniser is cleared rather than fired. An arm left set would eat the
+		// first click of the *next* preview, which is the same "an edge taken for a
+		// reason no one could see" this effect exists to prevent.
+		drag.current.clear();
 	}, [previewing]);
 
 	/**
 	 * The topmost instance under a canvas point, or null.
 	 *
-	 * Deliberately *not* `hitTestTree`: that answers "what did the pointer hit",
-	 * and what a running machine needs to know is "which instance is the pointer
-	 * in", which is a different question wherever something is drawn over one. A
-	 * label lying across a button is the ordinary case — a designer annotating a
-	 * component — and a hover that stopped working because of it would read as
-	 * the machine being broken rather than as the annotation being in the way.
-	 *
-	 * Paint order still settles overlapping *instances*, backwards through the
-	 * placement list, which is the same arbiter `derivedAt` and `hitTestTree`
-	 * use: what is drawn last is what the pointer gets.
-	 *
-	 * An instance that no machine drives is answered like any other, and the step
-	 * above turns it into nothing — one lookup deciding what is driven, rather
-	 * than two that can disagree about it.
+	 * **`instanceAt` lives in `design-core/src/tree.ts` now**, essay and all, and
+	 * this is the one line that binds it to this canvas's universe. It moved for
+	 * present mode's sake — the presenter hit-tests exactly this way and a second
+	 * implementation of "which instance is the pointer in" is a thing that can
+	 * disagree with the first — and nothing about the answer changed: the function
+	 * was already pure.
 	 */
 	function instanceUnder(point: Point): string | null {
-		const placed = placedNodes(scene.nodes, universe.solved, context);
-		for (let i = placed.length - 1; i >= 0; i--) {
-			const at = placed[i];
-			if (at.node.kind !== "instance") continue;
-			if (frameContains(at.world, point)) return at.node.id;
-		}
-		return null;
+		return instanceAt(scene.nodes, point, universe.solved, context)?.id ?? null;
 	}
 
 	/**
@@ -967,7 +975,13 @@ export function Editor({
 	 */
 	function onPreviewMove(event: React.PointerEvent) {
 		recogniseDrag(event);
-		const now = instanceUnder(toDocument(event));
+		const point = toDocument(event);
+		const link = linkAt(universe.model, point) ?? null;
+		// Compared by node id rather than by object, because `linkAt` builds a fresh
+		// record per call and setting state to an equal-but-new object on every
+		// pointermove is the re-render this whole block is arranged to avoid.
+		if ((link?.id ?? null) !== (linkHint?.id ?? null)) setLinkHint(link);
+		const now = instanceUnder(point);
 		if (now === hovering.current) return;
 		if (hovering.current !== null) onTrigger?.(hovering.current, "pointerleave");
 		hovering.current = now;
@@ -993,17 +1007,9 @@ export function Editor({
 	 * and played from the state strip, exactly as a focus state already is.
 	 */
 	function recogniseDrag(event: React.PointerEvent) {
-		const at = dragFrom.current;
 		const on = pressed.current;
-		if (at === null || on === null || dragging.current) return;
-		const dx = event.clientX - at.x;
-		const dy = event.clientY - at.y;
-		// Squared, so there is no square root and no floating-point comparison
-		// against a threshold that is a whole number of pixels — the same shape the
-		// emitted runtime uses, because it is the same test.
-		if (dx * dx + dy * dy < DRAG_SLOP_PX * DRAG_SLOP_PX) return;
-		dragging.current = true;
-		onTrigger?.(on, "dragbegin");
+		const trigger = drag.current.move(event);
+		if (trigger !== undefined && on !== null) onTrigger?.(on, trigger);
 	}
 
 	/**
@@ -1013,11 +1019,14 @@ export function Editor({
 	 * state would be a machine stuck there.
 	 */
 	function endDrag(instance: string | null) {
-		dragFrom.current = null;
-		if (!dragging.current) return;
-		dragging.current = false;
-		swallow.current = TRIGGERS.dragend.suppresses;
-		if (instance !== null) onTrigger?.(instance, "dragend");
+		const ended = drag.current.end();
+		if (ended === undefined) return;
+		// The instance the caller has in hand wins over the one the recogniser
+		// remembers, because the caller is the one that knows whether the press it
+		// is ending is still the press this handler is about — a pointer leaving the
+		// surface ends whatever is pressed, and a release ends what it released.
+		const on = instance ?? ended.on;
+		onTrigger?.(on, ended.trigger);
 	}
 
 	/**
@@ -1032,9 +1041,8 @@ export function Editor({
 		pressed.current = id;
 		if (id === null) return;
 		event.stopPropagation();
-		// The raw event's coordinates, not `toDocument`'s — see `dragFrom`.
-		dragFrom.current = { x: event.clientX, y: event.clientY };
-		dragging.current = false;
+		// The raw event's coordinates, not `toDocument`'s — see `gesture.ts`.
+		drag.current.down(id, event);
 		onTrigger?.(id, "pointerdown");
 	}
 
@@ -1067,8 +1075,7 @@ export function Editor({
 		// A drag that ended is not also a click. Consumed here, so exactly one click
 		// is swallowed and the next release on the same instance is an ordinary
 		// click again.
-		const eat = swallow.current === "click";
-		swallow.current = undefined;
+		const eat = drag.current.swallows("click");
 		if (!eat && instanceUnder(toDocument(event)) === was) onTrigger?.(was, "click");
 	}
 
@@ -1078,7 +1085,8 @@ export function Editor({
 		endDrag(pressed.current);
 		// Nothing follows a leave, so the arm is dropped rather than left for a
 		// click that will never come: the next press starts a fresh gesture.
-		swallow.current = undefined;
+		drag.current.swallows("click");
+		setLinkHint(null);
 		hovering.current = null;
 		pressed.current = null;
 	}
@@ -2124,6 +2132,28 @@ export function Editor({
 					/>
 				);
 			})}
+
+			{/* The one overlay a running design keeps, and the only one: what a
+			    link is wired to, without being taken there. Everything else in this
+			    layer is hidden by `[data-previewing]` in the stylesheet, which is
+			    why this one carries an attribute the stylesheet exempts by name
+			    rather than a class it would have to know about.
+
+			    A dashed outline and a name, because both halves of the sentence are
+			    "this leads somewhere": the outline says which object, and the name
+			    says where. Press Present to actually go. */}
+			{previewing && linkHint ? (
+				<div
+					className={styles.linkHint}
+					data-role="link-outline"
+					data-link-to={linkHint.to}
+					style={rectStyle(linkHint.world)}
+				>
+					<span className={styles.linkName}>
+						{pages?.[linkHint.to] ?? "another page"}
+					</span>
+				</div>
+			) : null}
 
 			{/* An outline says "this is selected". A *placed* outline says the
 			    rules have answered the question the outline is about — there is

@@ -116,10 +116,14 @@ async function expectDrawnStudio(page: Page): Promise<void> {
 	// Compared as sets: the list paints back-to-front, so the order on screen is
 	// the reverse of the order in the template, and pinning it here would make
 	// this test fail for a z-order change that is nobody's bug.
-	const names = (await layers.allInnerTexts()).map((text) =>
-		// Each row is a kind glyph and then the name, on two lines.
-		text.split("\n").at(-1)?.trim(),
-	);
+	//
+	// Read off `[data-role="layer-name"]` rather than by splitting the row's text,
+	// because a row is a glyph, a name and however many badges: the name was the
+	// last line until a node could lead somewhere, and then the row for a linked
+	// badge ended "→ Page" and this read the arrow as the layer's name.
+	const names = await layers
+		.locator('[data-role="layer-name"]')
+		.evaluateAll((els) => els.map((el) => el.textContent?.trim()));
 	expect(new Set(names)).toEqual(new Set(CARD_LAYERS));
 
 	// The status line is the solver, made visible. It reads "solving…" until an
@@ -663,6 +667,90 @@ async function expectADragMovesTheMachine(page: Page): Promise<void> {
 	await trigger("leave").selectOption({ label: "Pointer leaves" });
 }
 
+/**
+ * Add a page, link a node to it, present, follow, and press back.
+ *
+ * **The whole of "the pins are in the address" in one assertion**, and it is the
+ * half of prototyping that no headless test can make: following a link is a
+ * `navigate` push whose url already holds the design, so the browser's own back
+ * button retraces the walk page by page with nothing written for it. A test that
+ * asserted the presenter navigated forward would pass against an implementation
+ * that kept the walk in a ref — and that implementation is a presentation nobody
+ * can be sent and a back button that leaves the prototype on the first press.
+ *
+ * On the Card project, at the end of the walk, because everything this needs is
+ * already true by then: a solved studio, a layer to link, and a project with a
+ * page in it. A second spec file would pay the wasm, the IndexedDB and the solve
+ * costs again to prove it.
+ */
+async function expectALinkIsWalked(page: Page): Promise<void> {
+	await openProject(page, "Card");
+
+	// A second page, which is what there is to lead to. The name is what the
+	// route segment holds and what the chrome prints, so it is asserted rather
+	// than assumed: `addPage` uniquifies, and a walk built on the wrong name
+	// would fail somewhere much less legible.
+	await page.locator('[data-role="add-page"]').click();
+	const second = page.locator('[data-page="Page"]');
+	await expect(second).toHaveCount(1);
+	// ...and back to the first page, which is where the link has to be.
+	await page.locator('[data-page="main"] button').first().click();
+	await expect(page.locator('[data-role="status"]')).toContainText(/\d+ universes/);
+
+	// Link the badge through the Inspector, which is the only way a person can
+	// make one — a document that can express a link and a panel that cannot create
+	// one is a feature nobody can reach.
+	await page.locator('[data-layer="badge"]').click();
+	const target = page.locator('[data-role="link-to"]');
+	await expect(target).toHaveCount(1);
+	await target.selectOption({ label: "Page" });
+	// The layer list says so too, which is the "you can see what you wrote" half.
+	await expect(page.locator('[data-role="link-badge"]')).toHaveCount(1);
+
+	// Present.
+	await page.locator('[data-role="present"]').click();
+	await page.waitForURL(/\/present\//);
+	const chrome = page.locator('[data-role="present-chrome"]');
+	await expect(chrome.locator('[data-role="present-page"]')).toHaveText("main");
+
+	// Follow the link by clicking where the thing that carries it is drawn. The
+	// presenter hit-tests the *answer set*, so this is also the assertion that
+	// `linkAt` found a node the document's own tree walk would have had to be told
+	// about.
+	//
+	// `page.mouse` at the badge's own box, and **not** `locator.click()`, and the
+	// reason is a fact about the design rather than a workaround. `.artboard` is
+	// `pointer-events: none` — a design is a picture and the surface over it is
+	// what a pointer talks to, here exactly as in the editor — so the element under
+	// the badge is the presenter's own scaled stage, and Playwright's actionability
+	// check reports it as "intercepting" and retries until the test times out. A
+	// person's click lands on that stage too; the whole arrangement is that the
+	// presenter converts the point and asks the answer set what is there. So this
+	// clicks *where the badge is*, which is the only thing a person can do.
+	const badge = page.locator('[data-node="badge"]');
+	await expect(badge).toBeVisible();
+	const box = await badge.boundingBox();
+	expect(box, "the badge has a box to click in").not.toBeNull();
+	await page.mouse.click(
+		(box?.x ?? 0) + (box?.width ?? 0) / 2,
+		(box?.y ?? 0) + (box?.height ?? 0) / 2,
+	);
+	await expect(chrome.locator('[data-role="present-page"]')).toHaveText("Page");
+	await page.waitForURL(/\/present\/Page(\?|$)/);
+
+	// And back — which is the sentence this whole test exists for. Nothing in
+	// `Present.tsx` implements it: it works because following a link pushed a url.
+	await page.goBack();
+	await expect(chrome.locator('[data-role="present-page"]')).toHaveText("main");
+	await expect(badge).toBeVisible();
+
+	// Exit lands in the editor on the page that was on screen, in one act, rather
+	// than one step back through the walk.
+	await page.locator('[data-role="present-exit"]').click();
+	await page.waitForURL(/\/p\/[^/]+\/main$/);
+	await expect(page.locator('[data-role="status"]')).toContainText(/\d+ universes/);
+}
+
 /** Make a project from the Card template and wait for the studio it opens. */
 async function createFromTemplate(page: Page): Promise<void> {
 	await page.goto(`${BASE_URL}/`, { waitUntil: "load" });
@@ -737,6 +825,7 @@ test("a template becomes a drawn studio, first on a clean profile and then on a 
 			await createMachine(page);
 			await expectACurveIsAValue(page);
 			await expectADragMovesTheMachine(page);
+			await expectALinkIsWalked(page);
 			expect(trouble, "the first visit logged errors").toEqual([]);
 		} finally {
 			// Closed, not merely navigated away from. The database has to be
@@ -763,6 +852,16 @@ test("a template becomes a drawn studio, first on a clean profile and then on a 
 			await expect(saved).toHaveCount(1);
 			await saved.click();
 			await page.waitForURL(/\/p\//);
+
+			// Say which page. The prototyping tail left this project with a second
+			// one, and a project opened by its bare url resolves to the *first* page
+			// the tree gives — which is "Page", because the tree sorts and an upper
+			// case P comes before a lower case m. That is `Project.tsx`'s shipped
+			// rule and not a defect; what it means here is that the assertions below
+			// have to name the page they are about, since the one thing this visit
+			// exists to prove is that a *drawn* document came back out of storage and
+			// the drawn one is main.
+			await page.locator('[data-page="main"] button').first().click();
 
 			// The same assertions, and they mean more here: these nodes are being
 			// read back out of storage rather than created in memory a moment ago.

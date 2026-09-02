@@ -54,8 +54,10 @@ import {
 	LAYOUT_PROPS,
 	type LoopMode,
 	CONSTRAINT_KINDS,
+	DEFAULT_LINK_TRIGGER,
 	DIMENSIONS,
 	EDGES,
+	LINK_TRIGGERS,
 	MOTION_PROPS,
 	MOTION_PROP_NAMES,
 	PROP_NAMES,
@@ -1886,6 +1888,40 @@ function pruneNodes(list: readonly unknown[], legacy: boolean): SceneNode[] {
 		if (fixed.camera !== undefined && typeof fixed.camera !== "string") {
 			const { camera: _dropped, ...rest } = fixed;
 			fixed = rest as SceneNode;
+		}
+		// Where the node leads. A `to` that is not a non-empty string takes the
+		// whole field with it, because half a link is a node that leads to nothing
+		// while claiming to lead somewhere — the judgement half a `MeshRef` gets.
+		//
+		// **A `to` naming a page the project no longer has is kept**, and that is
+		// the whole of the decision: it is the dangling `instanceOf` argument one
+		// field over, deleting a page has to leave every other page openable, and
+		// `goes/1` derives under an id nothing answers to so a presenter simply goes
+		// nowhere. A reader that cleared the field would make undoing the deletion
+		// give back the page and not the links into it — and this reader could not
+		// check the page list if it wanted to, because it is handed a document and
+		// not a project.
+		//
+		// The trigger is filtered against `LINK_TRIGGERS` and dropped alone where it
+		// is not one, which leaves a link that still leads somewhere on the default.
+		// A word the menu has not got would compile into `linkon(n1,load)` — a fact
+		// no reader acts on and the one thing that vocabulary exists to refuse.
+		if (fixed.link !== undefined) {
+			const raw = fixed.link as unknown;
+			const to = isRecord(raw) && typeof raw.to === "string" ? raw.to : "";
+			if (to === "") {
+				const { link: _dropped, ...rest } = fixed;
+				fixed = rest as SceneNode;
+			} else {
+				const on =
+					isRecord(raw) &&
+					typeof raw.on === "string" &&
+					(LINK_TRIGGERS as readonly string[]).includes(raw.on) &&
+					raw.on !== DEFAULT_LINK_TRIGGER
+						? (raw.on as Trigger)
+						: undefined;
+				fixed = { ...fixed, link: on === undefined ? { to } : { to, on } };
+			}
 		}
 		// Imported geometry. Migrated first, then checked: a document written while
 		// geometry was content-addressed carries `{asset: "<hash>"}` and becomes

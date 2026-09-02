@@ -249,9 +249,18 @@ var elements = {};
 var origin = {};
 // Instance -> true while a drag is in progress.
 var dragging = {};
-// Instance -> the trigger the drag that just ended swallows once. Read off the
-// table's suppresses column, so this text holds no trigger id of its own.
-var swallow = {};
+// The trigger a gesture that just ended swallows once, or undefined. Read off
+// the table's suppresses column, so this text holds no trigger id of its own.
+//
+// **One flag for the document and NOT one per instance**, and that is a decision
+// rather than laziness. The thing being swallowed is a default action as much as
+// a machine edge — an anchor navigating — and the anchor may be an ANCESTOR of
+// the part that was dragged (a linked card containing a draggable handle) or a
+// descendant of it. Matching on identity would let the navigation through in
+// exactly the component case a link on a definition part exists for. At most one
+// gesture is in flight and the flag is consumed by the very next click, whatever
+// it lands on, which is what "the click the browser sends after a drag" means.
+var armed;
 
 function owns(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -685,15 +694,16 @@ function begin(instance) {
 // and not whatever the loop variable ended up being.
 function listen(instance, trigger, element) {
   element.addEventListener(bindings[trigger].event, function () {
-    // A drag that ended swallows the click the browser sends after it, because a
-    // gesture that ended is not also a click. Read off the table rather than
-    // tested against a trigger id, so this text still contains no trigger name at
-    // all — the day somebody adds a second gesture with the same manners, it is
-    // one column in scene.ts and nothing here.
-    if (swallow[instance] === trigger) {
-      swallow[instance] = undefined;
-      return;
-    }
+    // There is no swallow clause here, and its absence is the point. It used to
+    // live in this function and return early once — correct and complete for a
+    // machine, and blind to the other reader: a linked node is an <a href> and a
+    // click link emits no script at all, so a listener returning early cannot
+    // stop a default action it never sees. A card that is both draggable and
+    // linked would navigate on every drag in the exported file while behaving
+    // correctly in the studio. The swallow is one capture-phase listener on the
+    // root instead — see armAgainstGesture — and two mechanisms for one sentence
+    // is how they drift.
+    //
     // fireIn, because the page wants every layer moved and not the first layer's
     // answer. fire is the reporting shape a host calls; this is the machine
     // running, and running only the first layer would be a click that pressed a
@@ -729,8 +739,38 @@ function endDrag(instance) {
   origin[instance] = null;
   if (!dragging[instance]) return;
   dragging[instance] = false;
-  swallow[instance] = bindings.dragend ? bindings.dragend.suppresses : undefined;
+  armed = bindings.dragend ? bindings.dragend.suppresses : undefined;
   fireIn(instance, "dragend");
+}
+
+// A gesture that ended swallows the trigger the table says it suppresses —
+// including the browser's own default action for it, which for an anchor is a
+// navigation.
+//
+// In the CAPTURE phase and on the ROOT, and both halves are load-bearing. A
+// listener on the element runs after the anchor has already been asked to
+// navigate, so preventDefault there is too late; and the same handler has to
+// stop the machine's own edge, because "a drag is not also a click" is one
+// sentence and it cannot be true for one reader and false for the other.
+// stopPropagation is what reaches the per-element listeners listen() attached,
+// which is why they no longer have a swallow clause of their own.
+//
+// The event name is read off the table twice over — the suppressed trigger, then
+// that trigger's event — so this text still contains no trigger id and no event
+// name. A machine with no drag edge anywhere never arms the flag, so the
+// listener is inert; it is attached unconditionally because a table with no
+// dragend column gives it no event to attach to and it returns.
+function armAgainstGesture() {
+  if (!root || !root.addEventListener) return;
+  var suppressed = bindings.dragend ? bindings.dragend.suppresses : undefined;
+  var name = suppressed && bindings[suppressed] ? bindings[suppressed].event : "";
+  if (!name) return;
+  root.addEventListener(name, function (event) {
+    if (!armed) return;
+    armed = undefined;
+    if (event.preventDefault) event.preventDefault();
+    if (event.stopPropagation) event.stopPropagation();
+  }, true);
 }
 
 // The drag recogniser: a pointer that went down and then moved far enough.
@@ -852,6 +892,7 @@ function start() {
   var id;
   var watching = [];
   bind();
+  armAgainstGesture();
   for (id in instances) {
     if (!owns(instances, id)) continue;
     seed(id);
@@ -902,6 +943,41 @@ return {
   stopped: stopped,
   start: start
 };`;
+
+/**
+ * Links that fire on something other than a click.
+ *
+ * A second and much smaller script beside {@link MACHINE_RUNTIME}, and it is
+ * separate for the reason that one is a table interpreter: this has no table. It
+ * is `addEventListener` on whatever the attribute says, which is
+ * `TRIGGERS[g].event` for the three of `LINK_TRIGGERS` — and it is written as
+ * the attribute rather than as a generated `if` per link for the same reason the
+ * machine runtime is generic: generated code is a second implementation of the
+ * design that can disagree with the first.
+ *
+ * `pointerenter` does not bubble, which is why this is a listener per element
+ * rather than one delegated listener on the root. That is the whole of what
+ * would otherwise have been clever here.
+ *
+ * **A `click` link needs nothing at all**, which is the whole reason for
+ * choosing an anchor: a browser navigates one natively, in the tab order, on a
+ * middle click, and announced to a screen reader as a link. So this is emitted
+ * only where some link's trigger is not `click`, and the common document — every
+ * link a click — gets no `<script>` tag from it. `linkexport.test.ts` asserts
+ * that absence, exactly as `runtime.test.ts` asserts `setTimeout`'s.
+ *
+ * ES5 and no timers, under the same constraints the file's header states. It is
+ * a factory body taking `root` for the same reason the interpreter is, so that a
+ * test can drive it over a fake document rather than only in a browser.
+ */
+export const LINK_RUNTIME = `var found = root && root.querySelectorAll ? root.querySelectorAll("a[data-link-on]") : [];
+for (var i = 0; i < found.length; i++) {
+  (function (el) {
+    el.addEventListener(el.getAttribute("data-link-on"), function () {
+      window.location.href = el.getAttribute("href");
+    });
+  })(found[i]);
+}`;
 
 /**
  * The whole `<script>` body: the table, the event map, then the runtime.

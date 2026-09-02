@@ -256,6 +256,45 @@ export function hitTestTree(
 	return undefined;
 }
 
+/**
+ * The topmost instance under a canvas point, or nothing.
+ *
+ * Deliberately *not* {@link hitTestTree}: that answers "what did the pointer
+ * hit", and what a running machine needs to know is "which instance is the
+ * pointer in", which is a different question wherever something is drawn over
+ * one. A label lying across a button is the ordinary case — a designer
+ * annotating a component — and a hover that stopped working because of it would
+ * read as the machine being broken rather than as the annotation being in the
+ * way.
+ *
+ * Paint order still settles overlapping *instances*, backwards through the
+ * placement list, which is the same arbiter `derivedAt`, {@link hitTestTree} and
+ * `linkAt` use: what is drawn last is what the pointer gets.
+ *
+ * An instance that no machine drives is answered like any other, and the caller
+ * turns it into nothing — one lookup deciding what is driven, rather than two
+ * that can disagree about it.
+ *
+ * **Here rather than in `Editor.tsx`, where it was written**, because present
+ * mode needs the same answer and must not have a second implementation of it —
+ * which is `runtime.ts`'s argument about the machine interpreter, one level
+ * down. The function was already pure; nothing about it changed on the way.
+ */
+export function instanceAt(
+	nodes: readonly SceneNode[],
+	point: Point,
+	solved: Readonly<Record<string, Partial<Frame>>> = {},
+	context: ResolveContext = NO_CONTEXT,
+): SceneNode | undefined {
+	const placed = placedNodes(nodes, solved, context);
+	for (let i = placed.length - 1; i >= 0; i--) {
+		const at = placed[i];
+		if (at.node.kind !== "instance") continue;
+		if (frameContains(at.world, point)) return at.node;
+	}
+	return undefined;
+}
+
 /** The innermost surface containing a canvas point — where a new node lands. */
 export function frameAt(
 	nodes: readonly SceneNode[],

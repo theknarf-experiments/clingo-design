@@ -42,6 +42,7 @@
  * `derived.ts`.
  */
 import { parseAtom } from "./atoms.ts";
+import { aspConstant } from "./pages.ts";
 import {
 	KINDS,
 	PROPS,
@@ -495,19 +496,18 @@ export const isComponentPath = (ref: string): boolean => ref.startsWith("/");
  * core — `cmp_button_3f9a` says which component far better than a bare hash —
  * and the suffix is what makes it injective, because sanitising is not: `my
  * button` and `my-button` both flatten to `my_button`.
+ *
+ * **The arithmetic moved to {@link aspConstant} and nothing about the output
+ * did.** A page now needs the same two properties for the same reason — it
+ * reaches the program as `page(<id>)` — and two copies of a hash is a second
+ * implementation that can disagree with the first, where the disagreement would
+ * be two documents sharing an id. The prefix is what keeps the families apart
+ * structurally rather than by hoping the hashes miss: `cmp_` and `pg_` cannot
+ * collide however the stems land. `components.test.ts` freezes a literal so the
+ * factoring cannot move an id that already reaches shipped programs.
  */
-export function componentIdOf(path: string): string {
-	const stem = componentName(path)
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "_")
-		.replace(/^_+|_+$/g, "");
-	// djb2, which is small, deterministic and has no dependency. A collision here
-	// would need two paths agreeing in 32 bits *and* sanitising alike, and the
-	// consequence is caught by the uniqueness assertion in `composeLibrary`.
-	let hash = 5381;
-	for (let i = 0; i < path.length; i++) hash = ((hash << 5) + hash + path.charCodeAt(i)) >>> 0;
-	return `cmp_${stem || "c"}_${hash.toString(36)}`;
-}
+export const componentIdOf = (path: string): string =>
+	aspConstant("cmp", componentName(path), path);
 
 /**
  * A scene with the project's component documents spliced into it.

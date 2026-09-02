@@ -36,6 +36,7 @@
  * silently** — see {@link ASP_EMU_CEILING}.
  */
 import { componentDef, componentDefs, instanceNodes, instancePart } from "./components.ts";
+import { pageIdOf } from "./pages.ts";
 import {
 	clockOf,
 	guardOf,
@@ -70,6 +71,7 @@ import {
 	CONSTRAINT_KINDS,
 	CONSTRAINT_NAMES,
 	CONTAINER_PROPS,
+	DEFAULT_LINK_TRIGGER,
 	DIMENSIONS,
 	DIMENSIONS_3D,
 	EDGES,
@@ -1177,6 +1179,50 @@ const COMPONENT_RULES = [
 	"% style reached the definition and nothing else, and every instance drew the",
 	"% part unstyled — a wrong picture, not merely a missing class.",
 	"sty_wears(inst(I,N),S,P) :- instance(I,R), cpart(R,N), sty_wears(N,S,P).",
+]
+
+/**
+ * Links, as rules over the facts a node and an instance emit.
+ *
+ * Four lines, two of which read `instance/2` and `cpart/2` — which is why this
+ * section is emitted after the component rules rather than beside the node
+ * facts. Always emitted, like the component rules and for the same reason:
+ * `link/2` is `#defined`, so a hand-written rule may state one, and a contract
+ * that quietly does nothing on some documents is not one. With no facts, none of
+ * it grounds — a document with no links states nothing here at all.
+ *
+ * The whole feature is these four lines, and that is the argument for a link
+ * being a *field on a node* rather than a mechanism of its own. A link as a
+ * little machine was seriously considered and refused: a machine is a set of
+ * states with transitions between them, every one of its eleven health checks is
+ * a claim about *states*, and a navigation has no state to arrive in — it leaves
+ * the document. Modelling it that way means an exception in the type, in
+ * `stepMachine`, in the interpreter and in each of eleven rules, for a thing with
+ * one trigger, one target and no duration.
+ */
+const LINK_RULES = [
+	"#defined link/2.",
+	"#defined linkon/2.",
+	"#defined page/1.",
+	"% An instance's copy of a definition part leads where the definition part",
+	"% leads. The same shape as `kind(inst(I,N),K)` in the section above, and it is",
+	"% what makes a navigation bar a component instead of a thing pasted onto nine",
+	"% pages: one definition, one link in it, and every page that places an instance",
+	"% gains the edge. Nothing else had to be built for this, which is the argument",
+	"% for a link being a field on a node.",
+	"link(inst(I,N),P) :- instance(I,R), cpart(R,N), link(N,P).",
+	"linkon(inst(I,N),G) :- instance(I,R), cpart(R,N), linkon(N,G).",
+	"% Where this design actually leads.",
+	"%",
+	"% Behind visible/1, and that is the whole reason this is a derived atom and",
+	"% not just the fact. A link on a node a rule hid, on a node that only exists in",
+	"% some universes, or on a part that the state its instance is drawn in hides —",
+	"% `hidden(inst(I,N)) :- mhidden(I,S,N), shown(I,S)` — is a link *this design*",
+	"% does not have. So goes/1 is the answer to \"can you get to checkout from",
+	"% here\", asked of one universe, and the answer may legitimately differ between",
+	"% two universes of one document. That is a question no other design tool can",
+	"% ask, and it costs one rule.",
+	"goes(P) :- link(N,P), visible(N).",
 ]
 
 /**
@@ -2793,6 +2839,27 @@ export const CONTRACT = `% Predicates you can rely on:
 % alternative, and nowhere else. An *override* is not a predicate: it is
 % pick(prop(inst(I,N),P),K) assumed, which is the same thing a pin is.
 %
+% Pages and links. A page is a document of the project; the program grounds one
+% of them and is told which, and which others exist.
+%
+%   here(P)                     the page this program is
+%   page(P)                     a page this project has
+%   link(N, P)                  N leads to page P. Derivable: one rule can link
+%                               forty cards to forty detail pages
+%   linkon(N, Trigger)          ...on which of click | pointerdown |
+%                               pointerenter. A link with none reads as click,
+%                               and the default is on the TypeScript side
+%                               because two readers draw one and only one of
+%                               them is a rule
+%   goes(P)                     derived: link(N,P), visible(N) — where this
+%                               *design* leads, which is not the same question
+%                               as where the document links. Projected.
+%
+% Which is what lets a document hold an opinion about its own flow:
+%
+%   viol(dead_link) :- goes(P), not page(P).
+%   :- here(pg_home_9wq2), not goes(pg_checkout_4b1x).
+%
 % State machines. A definition may have one, and a machine is component-local
 % *behaviour*: states, and transitions between them. It is emphatically not a
 % design space. Every state of every instance is true at once, in this one
@@ -3431,6 +3498,27 @@ export interface CompileOptions {
 	 * `measure.ts`. Absent, every node asks for the frame it was drawn at.
 	 */
 	measurements?: Measurements;
+	/**
+	 * Which pages this project has, and which one is being compiled — as tree
+	 * paths.
+	 *
+	 * Handed in rather than read, for the reason {@link ExportOptions.images} is:
+	 * the pages are documents in a tree, reaching one is I/O, and this package
+	 * does not do I/O. It is the same shape `composeLibrary` takes — a fact about
+	 * the project supplied at the edge, so nothing downstream learns that a
+	 * project has more than one document in it.
+	 *
+	 * Absent emits no `page/1` and no `here/1`. `link/2`, `linkon/2` and `goes/1`
+	 * are the document's own and are unaffected, so a test that hands this
+	 * function a bare scene still gets the whole link story.
+	 *
+	 * The one genuine coupling, stated: passing `pages` means adding or renaming a
+	 * page changes every other page's program and re-grounds it. That is correct —
+	 * the `page/1` facts really did change — and it is the coupling `composeLibrary`
+	 * already accepted for components, one degree weaker, because a page list is a
+	 * handful of constants where a spliced definition is a subtree.
+	 */
+	flow?: { here?: string; pages?: readonly string[] };
 }
 
 /**
@@ -3998,6 +4086,32 @@ export function compile(
 
 	const nodeLines: string[] = [];
 	/**
+	 * The project's flow, as the caller handed it over — `here/1` and `page/1`.
+	 *
+	 * Empty where no caller passed one, and `section()` drops an empty list
+	 * entirely, so a test that hands this function a bare scene gets a program with
+	 * no pages section in it at all — while still getting `link/2`, `linkon/2` and
+	 * a derived `goes/1`, because those three are the *document's* own and owe
+	 * nothing to the project around it.
+	 *
+	 * The two facts are separate rather than one because they answer separate
+	 * questions and a rule asks them separately: `page(P)` is the domain and
+	 * `here(P)` is the point. Either may be supplied without the other — a caller
+	 * that knows which page it is compiling and has not gathered the list still
+	 * gets `here/1`, which is the half `:- here(...), not goes(...)` needs.
+	 *
+	 * Sorted, because a program that grounds the same way twice should also *read*
+	 * the same way twice: the page list arrives from a tree walk and its order is
+	 * the vfs's business rather than a fact about the design.
+	 */
+	const flowLines: string[] = [];
+	{
+		const here = options.flow?.here;
+		if (here !== undefined) flowLines.push(atom("here", pageIdOf(here)));
+		const ids = new Set((options.flow?.pages ?? []).map(pageIdOf));
+		for (const id of [...ids].sort()) flowLines.push(atom("page", id));
+	}
+	/**
 	 * The gate, and the whole of what a flat document pays for the third axis.
 	 *
 	 * One atom, stated when the document holds a viewport or any node with a `z`,
@@ -4077,6 +4191,23 @@ export function compile(
 		// rule can still name it, and a component definition living in another
 		// document is present for its instances while drawn on nobody's page.
 		if (node.hidden === true) nodeLines.push(atom("hidden", node.id));
+		// Where the node leads. Beside `hidden` because that is where it sits in the
+		// document, and two facts rather than one with a default written into a
+		// rule: the program has no opinion about what a link with no trigger means,
+		// and the two readers that draw one — `model.ts` and the presenter — share
+		// `DEFAULT_LINK_TRIGGER`. A default rule here would be that constant written
+		// twice, in two languages, with nothing to notice when they drift.
+		//
+		// The page id and not the path: an atom's argument has to be a legal
+		// constant and `/pages/About us.scene` is not one. The inverse is
+		// `pageIndexOf` over the project's page list, which the app has and the
+		// answer set cannot.
+		if (node.link !== undefined) {
+			nodeLines.push(atom("link", node.id, pageIdOf(node.link.to)));
+			nodeLines.push(
+				atom("linkon", node.id, node.link.on ?? DEFAULT_LINK_TRIGGER),
+			);
+		}
 		nodeLines.push(atom("kind", node.id, node.kind));
 		nodeLines.push(atom("order", node.id, order.get(node.id) ?? 1));
 		// Geometry, as a fact where the document holds one number and as a
@@ -5037,6 +5168,22 @@ export function compile(
 		//
 		// After the geometry rules, which is where `gspan` is said.
 		section("component rules", COMPONENT_RULES),
+		// Which page this is and which others the project has. Nothing here is
+		// derived and nothing reads it but a rule of yours: the app knows the page
+		// list from the tree, so these exist so that a *document* can hold an
+		// opinion about its own flow — `viol(dead_link) :- goes(P), not page(P).`
+		// and `:- here(pg_home_9wq2), not goes(pg_checkout_4b1x).`
+		//
+		// No `pagename/2`. It was drafted and cut: nothing reads it, a rule that
+		// wants to talk about a page writes its id whether or not a string sits
+		// beside it, and a quoted name per page is bytes for nobody. The Rules panel
+		// offers "pg_about_1k3z9 — About us" because it computes *both* sides from
+		// the page list it already has.
+		section("pages", flowLines),
+		// After the component rules, which is where `instance/2` and `cpart/2` are
+		// said, and before the machine rules, which is where `mhidden/3` reaches
+		// `hidden/1` — the guard `goes/1` is behind.
+		section("links", LINK_RULES),
 		section("machines", machineLines),
 		// Always emitted, like the component rules and for the same reason:
 		// `machine/1`, `mstate/2`, `mpart/2` and `instance/2` are all things a
@@ -5148,6 +5295,13 @@ export function compile(
 		section("output", [
 			"#show pick/2.",
 			"#show visible/1.",
+			// Where this design leads, beside pick/2 and visible/1 because it is a
+			// *decision* rather than a picture. At most one atom per page of the
+			// project, and an exploration wants it on the cheap solves it fires by the
+			// hundred: a reachability answer that only existed when somebody asked for
+			// scenery would be an answer the multiverse view could not report.
+			"#defined goes/1.",
+			"#show goes/1.",
 			"% The picture itself, so an answer set *is* a drawable scene rather",
 			"% than a set of decisions someone else has to apply to the document.",
 			"% All of it, including the parts that are plain facts today: what makes",
@@ -5212,6 +5366,23 @@ export function compile(
 			"% it can only learn about here, and the studio, which measured the node",
 			"% before this solve and has to say so.",
 			"#show sty_derived(N,S,P) : sty_derived(N,S,P), scenery.",
+			// The edges themselves, behind `scenery` with the rest of the picture,
+			// because that is what they are — the presenter hit-tests the answer set
+			// and redraws from them. **They are shown at all because a rule may assert
+			// them**: `#defined link/2` means a document with forty cards can have one
+			// rule linking each to its detail page, and a presenter reading
+			// `node.link` off the document would find nothing there. That is
+			// `derived.ts`'s stance about nodes, applied to edges, and it is the
+			// reason the app must never read the document for navigation.
+			//
+			// `page/1` and `here/1` are deliberately NOT shown. The app knows the page
+			// list from the tree — it supplied it — and a `#show` of something nothing
+			// reads is bytes across the worker boundary on every solve. The lesson
+			// this repository learned the hard way runs the other way (`asset/2`,
+			// 546eb02), and the three atoms that *are* shown here are shown precisely
+			// because three named readers consume them.
+			"#show link(N,P) : link(N,P), scenery.",
+			"#show linkon(N,G) : linkon(N,G), scenery.",
 			"% Sets a rule named, so a constraint can be pointed at one without the",
 			"% document enumerating what is in it — and so the Rules panel can offer",
 			"% the groups that actually exist rather than asking for an ASP term.",
@@ -5233,6 +5404,18 @@ export function compile(
 			"% token nothing references does not create designs at all.",
 			"#project rendered/3.",
 			"#project visible/1.",
+			// And where the design leads, which is the same claim one relation over.
+			//
+			// **Free on every document whose links are fields**, because goes/1 is then
+			// functionally determined by visible/1 — already projected — and by static
+			// link/2 facts, so it splits nothing. **Correct on a document where a
+			// *rule* chooses the links**, because two designs that lead to different
+			// pages genuinely are two designs, and without this they would differ in
+			// nothing projected and collapse into one universe with an arbitrary pick.
+			// The first half is asserted rather than believed, by counting universes
+			// before and after a link is added — a projection can only ever split, and
+			// the invariant that a copy adds zero universes outranks a feature.
+			"#project goes/1.",
 			"% Geometry is not in that list and cannot be: coordinates are theory",
 			"% variables, not atoms, so no answer set differs by them. Projecting",
 			"% the *dimensions the document names* instead is what makes a token",

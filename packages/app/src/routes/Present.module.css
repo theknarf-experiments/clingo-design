@@ -1,0 +1,114 @@
+/*
+ * A presentation, which is a *place* rather than a state of the editor.
+ *
+ * There is nothing of the canvas left here — no camera, no rulers, no layer
+ * list, no panels, no toolbar, no selection — which is the whole reason this is
+ * a route and not a third position on the view switcher. What the stylesheet has
+ * to do is get out of the way: one full-bleed stage, one scaled design in the
+ * middle of it, and a bar that dims itself.
+ */
+.present {
+	position: fixed;
+	inset: 0;
+	display: flex;
+	background: var(--dc-bg, #0b1020);
+	color: var(--dc-fg, #e2e8f0);
+	overflow: hidden;
+}
+
+.stage {
+	position: relative;
+	flex: 1;
+	min-width: 0;
+	/* The pointer is the whole interface: a press, a hover, a drag and a click all
+	   have to reach the two hit-tests above, and nothing here is selectable. */
+	touch-action: none;
+	user-select: none;
+}
+
+/*
+ * The design, scaled to fit and centred about its own middle.
+ *
+ * `transform` rather than a width, because it is a *scale* and not a layout: the
+ * document's own coordinates stay the document's, so a hit-test can run the same
+ * inverse the editor's does, and a card blown up to fill a display is vector DOM
+ * rather than pixels. No cap on the scale — a presentation is a presentation.
+ */
+.fit {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform-origin: 50% 50%;
+	will-change: transform;
+}
+
+/*
+ * The chrome: a bar pinned to the bottom, dimmed after two idle seconds.
+ *
+ * Dimmed rather than hidden, because a control that disappears is a control
+ * somebody has to discover twice — and it comes back on any pointer move, which
+ * is the gesture a person makes just before wanting it.
+ */
+.chrome {
+	position: absolute;
+	left: 50%;
+	bottom: 16px;
+	transform: translateX(-50%);
+	display: flex;
+	align-items: center;
+	gap: 0.9rem;
+	padding: 0.35rem 0.7rem;
+	font-size: 0.78rem;
+	background: color-mix(in srgb, var(--dc-raised, #1e293b) 90%, transparent);
+	border: 1px solid var(--dc-line, rgb(255 255 255 / 0.12));
+	border-radius: 999px;
+	opacity: 0.15;
+	transition: opacity 160ms ease;
+}
+
+.chrome[data-awake] {
+	opacity: 1;
+}
+
+.page {
+	font-weight: 600;
+}
+
+.designs {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.8;
+}
+
+.designs button,
+.exit {
+	padding: 0.1rem 0.4rem;
+	font: inherit;
+	color: inherit;
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.designs button:hover,
+.exit:hover {
+	background: var(--dc-raised-hover, rgb(255 255 255 / 0.08));
+}
+
+/*
+ * A cross-fade would go here, and does not.
+ *
+ * The defect a page transition would paper over is a *blank*: following a link
+ * opens another document, which has to be read and then solved, and the honest
+ * duration of that is tens of milliseconds with nothing to draw. Holding the
+ * outgoing page until the incoming one has an answer set is the fix, and it is
+ * editor state rather than the document's — it reaches no solve, no export and
+ * no undo entry. It is not built here yet, and saying so is better than a
+ * transition that hides a blank behind a fade of the same length.
+ *
+ * When it lands it respects `prefers-reduced-motion: reduce` by becoming a cut,
+ * in this file, where that media query belongs.
+ */

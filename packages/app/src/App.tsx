@@ -1,6 +1,7 @@
 import { CUSTOM_PROPERTY_RULES } from "@clingo-design/design-core";
 import { Route, Routes } from "react-router";
 
+import { Present } from "./routes/Present";
 import { Project } from "./routes/Project";
 import { Projects } from "./routes/Projects";
 import { NotFound } from "./routes/NotFound";
@@ -45,6 +46,20 @@ export function App() {
 				  * component — so no page name is unreachable.
 				  */}
 				<Route path="p/:id/component/:component" element={<Project />} />
+				{/*
+				  * A presentation is a *place*, not a state of the editor, and it names
+				  * the page it is presenting for the reason the two routes above name
+				  * theirs: it has to be a link somebody can be sent, and the back button
+				  * has to be able to land on it.
+				  *
+				  * Three segments, exactly as a component's address is, and the
+				  * reasoning there transfers unchanged: only the three-segment form is a
+				  * presentation, so a page called "present" is still `/p/:id/present` and
+				  * no page name becomes unreachable. The consequence worth stating is
+				  * that "present the first page" has no address of its own — the button
+				  * that enters resolves a page name first and navigates to the full form.
+				  */}
+				<Route path="p/:id/present/:page" element={<Present />} />
 				<Route path="*" element={<NotFound />} />
 			</Routes>
 		</>

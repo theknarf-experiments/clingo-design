@@ -35,7 +35,9 @@ import { parseKeyCopy, parseStatePart, statePart } from "./machines.ts";
 import { type Emu, wholeEmu } from "./units.ts";
 import {
 	DEFAULT_EASING,
+	DEFAULT_LINK_TRIGGER,
 	KINDS,
+	LINK_TRIGGERS,
 	type LoopMode,
 	type NodeKind,
 	PROP_NAMES,
@@ -44,6 +46,7 @@ import {
 	type Spatial,
 	SPATIALS,
 	type TimelineClock,
+	type Trigger,
 	type Turn,
 	TURN_NAMES,
 	TURNS,
@@ -153,6 +156,25 @@ export interface ModelNode {
 	 * release not noticing.
 	 */
 	part?: { node: number; primitive: number };
+	/**
+	 * Where it leads and on what — `link/2` and `linkon/2`.
+	 *
+	 * On the node as well as in {@link ModelScene.links}, for the reason
+	 * {@link asset} gives: a presenter walking the tree has the node and wants its
+	 * edge, and anything auditing a project wants the whole map without walking.
+	 * One fact, two shapes, both built in the same pass.
+	 *
+	 * `to` is the page's **id**, not its path. An atom's argument has to be a
+	 * legal constant and a path is not one; the inverse is `pageIndexOf` over the
+	 * page list, which the app has and the answer set cannot.
+	 *
+	 * `on` is filled in from {@link DEFAULT_LINK_TRIGGER} where `linkon/2` is
+	 * absent, which is exactly what a rule-asserted link looks like: a rule that
+	 * states `link(card, pg_detail_x)` and nothing else means a click, and the one
+	 * default lives on this side of the seam so that the program has no opinion to
+	 * disagree with.
+	 */
+	link?: { to: string; on: Trigger };
 	children: ModelNode[];
 }
 
@@ -671,6 +693,29 @@ export interface ModelScene {
 	 * drawing its marker, never stop looking through it.
 	 */
 	looks: Record<string, string>;
+	/**
+	 * node id -> where it leads — `link/2` with `linkon/2` folded in.
+	 *
+	 * The map beside {@link ModelNode.link}, on {@link assets}' own terms: a
+	 * presenter walking the tree has the node, and anything auditing a project
+	 * wants the whole map without walking. Keys include `inst(I,N)` terms, because
+	 * a component's linked part is a node of the picture and of nothing else.
+	 */
+	links: Record<string, { to: string; on: Trigger }>;
+	/**
+	 * Page ids this design reaches — `goes/1`, sorted.
+	 *
+	 * The whole of the link rules' argument, as one array: it is what *this
+	 * universe* leads to, which on a document with a rule that hides things is not
+	 * what the document links to. A link on a hidden node, on a node that only
+	 * exists in some universes, or on a part the drawn state hides is a link this
+	 * design does not have — so "can you get to checkout from here" is a question
+	 * with a per-universe answer, which is a thing no other design tool can ask.
+	 *
+	 * Sorted so two readings of one answer set are the same reading, like
+	 * {@link states}.
+	 */
+	goes: string[];
 }
 
 /**
@@ -834,6 +879,12 @@ interface Facts {
 	parts: Map<string, { node: number; primitive: number }>;
 	/** viewport id -> the camera it looks through — `vcam/2`. */
 	looks: Map<string, string>;
+	/** node id -> the page id it leads to — `link/2`. */
+	links: Map<string, string>;
+	/** node id -> what makes it lead there — `linkon/2`, joined in on the way out. */
+	linkOn: Map<string, Trigger>;
+	/** page ids this design reaches — `goes/1`. */
+	goes: Set<string>;
 	/**
 	 * machine -> timeline -> what this universe made of it, assembled in place.
 	 *
@@ -945,6 +996,9 @@ function collect(atoms: readonly string[]): Facts {
 		assets: new Map(),
 		parts: new Map(),
 		looks: new Map(),
+		links: new Map(),
+		linkOn: new Map(),
+		goes: new Set(),
 		timelines: new Map(),
 		machines: new Map(),
 	};
@@ -1312,6 +1366,29 @@ function collect(atoms: readonly string[]): Facts {
 				facts.parts.set(a, { node, primitive });
 				break;
 			}
+			// Where a node leads, and what makes it lead there. Two atoms and not
+			// one, because a link with no trigger is the common case and the default
+			// belongs on this side of the seam — see `LINK_RULES`. The lower page id
+			// wins where a rule named two, for `shown/2`'s tie-break reason: one
+			// answer set has to read the same way twice.
+			case "link/2":
+				if (!facts.links.has(a) || b < (facts.links.get(a) ?? "")) {
+					facts.links.set(a, b);
+				}
+				break;
+			// Refused rather than carried where the word is not one a link may fire
+			// on. A hand-written `linkon(card, load)` is a rule asking for the one
+			// thing `LINK_TRIGGERS` exists to refuse — a page that navigates the
+			// moment it renders — and answering it here would be shipping the
+			// collision the vocabulary already declined.
+			case "linkon/2":
+				if ((LINK_TRIGGERS as readonly string[]).includes(b)) {
+					facts.linkOn.set(a, b as Trigger);
+				}
+				break;
+			case "goes/1":
+				facts.goes.add(a);
+				break;
 			case "vcam/2":
 				// `vcam/2` and not `looks/2`: this is the claim that survived being
 				// checked. The lower camera id wins where a rule named two, for the
@@ -1651,6 +1728,16 @@ export function readModel(atoms: readonly string[]): ModelScene {
 			rendered: renderedTexts(id, facts),
 			...(facts.assets.has(id) ? { asset: facts.assets.get(id) } : {}),
 			...(facts.parts.has(id) ? { part: facts.parts.get(id) } : {}),
+			...(facts.links.has(id)
+				? {
+						link: {
+							to: facts.links.get(id) as string,
+							// The one default, here and in the presenter, out of one
+							// constant.
+							on: facts.linkOn.get(id) ?? DEFAULT_LINK_TRIGGER,
+						},
+					}
+				: {}),
 			children: [],
 		};
 	}
@@ -1862,6 +1949,13 @@ export function readModel(atoms: readonly string[]): ModelScene {
 	for (const [view, camera] of [...facts.looks].sort(([a], [b]) => cmp(a, b))) {
 		looks[view] = camera;
 	}
+	// Sorted like its neighbours, and joined with the trigger here rather than in
+	// two maps a reader would have to line up itself. A `link/2` with no
+	// `linkon/2` — which is what a rule-asserted link is — reads as a click.
+	const links: Record<string, { to: string; on: Trigger }> = {};
+	for (const [id, to] of [...facts.links].sort(([a], [b]) => cmp(a, b))) {
+		links[id] = { to, on: facts.linkOn.get(id) ?? DEFAULT_LINK_TRIGGER };
+	}
 
 	return {
 		roots,
@@ -1878,6 +1972,8 @@ export function readModel(atoms: readonly string[]): ModelScene {
 		triangles,
 		assets,
 		looks,
+		links,
+		goes: [...facts.goes].sort(cmp),
 	};
 }
 

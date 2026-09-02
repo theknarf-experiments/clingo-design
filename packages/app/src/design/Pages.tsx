@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { addPage, deletePage, renamePage, usePages } from "../projects/store";
+import { addPage, deletePage, renamePage, usePageLinks, usePages } from "../projects/store";
 import styles from "./Pages.module.css";
 
 export interface PagesProps {
@@ -30,6 +30,19 @@ export interface PagesProps {
  */
 export function Pages({ url, active, onOpen }: PagesProps) {
 	const names = usePages(url);
+	/**
+	 * Which pages lead here, read from the documents and never from a solve.
+	 *
+	 * The whole of the flow graph this panel is not going to grow. A flow graph is
+	 * a second canvas — a layout, a camera, drag-to-arrange and an ordering
+	 * somebody has to store — and the one sentence it gets asked to say is "no page
+	 * links here". That costs a hook and a dot.
+	 *
+	 * It reports a link on a node a rule hides as a link, which is right for *this*
+	 * question: the document does link there, and whether some design uses it is
+	 * `goes/1`, per universe, in the program of the page you have open.
+	 */
+	const linked = usePageLinks(url);
 	const [renaming, setRenaming] = useState<string | null>(null);
 	const [draft, setDraft] = useState("");
 	const input = useRef<HTMLInputElement>(null);
@@ -101,6 +114,25 @@ export function Pages({ url, active, onOpen }: PagesProps) {
 								>
 									{name}
 								</button>
+								{/* A count of the pages that lead here, and a marker where
+								    nothing does. Two states and no third: "3" is a fact
+								    somebody can follow and "·" is the one thing a flow graph
+								    would have been built to say. A page nothing links to is
+								    not wrong — a landing page is one — so it is a marker
+								    rather than a warning. */}
+								<span
+									className={styles.links}
+									data-role="page-links"
+									data-links-for={name}
+									data-orphan={linked[name] === undefined ? "" : undefined}
+									title={
+										linked[name] === undefined
+											? "No page links here"
+											: `Linked from ${linked[name].join(", ")}`
+									}
+								>
+									{linked[name] === undefined ? "·" : `←${linked[name].length}`}
+								</span>
 								{/* Offered only where it can be obeyed. The last page cannot
 								    go, and a delete button that refuses on click teaches
 								    nothing — its absence is the explanation. */}

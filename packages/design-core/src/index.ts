@@ -3,6 +3,7 @@ export * from "./ruler.ts";
 export * from "./values.ts";
 export * from "./scene.ts";
 export * from "./components.ts";
+export * from "./pages.ts";
 export * from "./machines.ts";
 export * from "./machinecheck.ts";
 export * from "./geometry.ts";
