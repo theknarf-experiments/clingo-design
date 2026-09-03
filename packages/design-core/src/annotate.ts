@@ -21,7 +21,7 @@
  * {@link datumFrame}, which is also where a datum that answers nothing is
  * refused.
  */
-import type { Frame } from "./geometry.ts";
+import type { Frame, Point } from "./geometry.ts";
 import { type RuledLine, ruledLines } from "./lines.ts";
 import {
 	CONSTRAINT_KINDS,
@@ -31,6 +31,7 @@ import {
 	type Edge,
 	type Scene,
 } from "./scene.ts";
+import { anchorPoint, refusedAnchor } from "./sketch.ts";
 import { placedNodes } from "./tree.ts";
 import {
 	DEFAULT_UNIT,
@@ -39,21 +40,25 @@ import {
 	displayLength,
 	wholeEmu,
 } from "./units.ts";
-import type { ResolveContext } from "./values.ts";
+import { type ResolveContext, writeAngle } from "./values.ts";
 
 /**
- * One mark, in canvas coordinates.
+ * Everything the two axial marks share.
  *
  * A `line` stands across the design at `at` on its axis and runs from `from`
  * to `to` down the other one; a `span` measures along its axis from `from` to
  * `to` and sits at `at` on the other. In both, `at` is the coordinate that
  * does not move and `axis` is the axis the constraint talks about.
+ *
+ * Written once and intersected with each `shape` below rather than spelled
+ * twice, because the two differ in how they are *drawn* and in nothing they
+ * carry — and the paragraph about the third axis is long enough that a second
+ * copy of it would start drifting the day one of them was edited.
  */
-export interface Annotation {
+interface AxialMark {
 	/** The constraint this draws, so a blamed rule can be picked out. */
 	constraint: string;
 	kind: ConstraintKind;
-	shape: "line" | "span";
 	/**
 	 * The axis the constraint talks about — and **the planar pair, where
 	 * `EdgeSpec.axis` has three.**
@@ -88,6 +93,47 @@ export interface Annotation {
 	 */
 	label?: string;
 }
+
+/**
+ * One mark, in canvas coordinates.
+ *
+ * **A union rather than one interface with optional fields**, and that is
+ * required rather than tidy: every shipped consumer reads `axis`, `at`, `from`
+ * and `to` positionally, so a ray carrying an optional `a`/`b` beside four
+ * absent numbers would have the line and span readers quietly computing a mark
+ * at the origin. As three cases on `shape`, the reader that forgets the third
+ * fails to compile instead — which is how `Annotations.tsx` came to be in the
+ * same step as this file.
+ */
+export type Annotation =
+	| (AxialMark & { shape: "line" })
+	| (AxialMark & { shape: "span" })
+	/**
+	 * Two points and the hairline between them — the one shape the three sketch
+	 * kinds need, and the reason none of them is a circle or an arc.
+	 *
+	 * No axis, no `at`, no band: a Euclidean rule is not about a coordinate, so
+	 * there is no coordinate here to be misread as one. `distance` and `bearing`
+	 * draw between their two anchors; `collinear` draws from the first anchor to
+	 * the last, so the line it asserts is the line it shows.
+	 */
+	| {
+			shape: "ray";
+			constraint: string;
+			kind: ConstraintKind;
+			a: Point;
+			b: Point;
+			label?: string;
+	  };
+
+/** The sketch mark, for a reader that has already narrowed to it. */
+export type RayAnnotation = Extract<Annotation, { shape: "ray" }>;
+
+/**
+ * The two marks that are about an axis — the whole of the overlay before the
+ * sketch layer, and still everything `marksFor` makes.
+ */
+export type AxialAnnotation = Exclude<Annotation, RayAnnotation>;
 
 /**
  * How far a line reaches past the members it crosses: eight pixels, as EMU.
@@ -232,6 +278,40 @@ export function annotate(
 		const spec = CONSTRAINT_KINDS[c.kind];
 		if (spec.annotation === "none" || !c.enabled) continue;
 		if (!c.nodes.some((id) => selection.has(id))) continue;
+		/**
+		 * The sketch layer leaves the loop here, before an edge is looked for and
+		 * not inside the branch that looks for one.
+		 *
+		 * A sketch kind has `edges: []`, so `c.edge ?? spec.edges[0]` is
+		 * `undefined` and the two lines below would drop the rule at the `!edge`
+		 * guard — before the axis test, before `datumFrame`, before any of it.
+		 * The overlay would be a silent no-op that typechecks. So the split is at
+		 * the top, and it is made on the two tables rather than on
+		 * `spec.geometric`, which both layers answer yes to.
+		 *
+		 * No edge, no axis and no datum: a ray is between two *points*, so the
+		 * members have to be asked the same question `sknopoint/1` asks in the
+		 * program, and asked here rather than assumed. This function walks
+		 * `scene.constraints` and never sees an answer set, so nothing upstream
+		 * has filtered anything: a turned box still has a `world` frame, and
+		 * without the `refusedAnchor` call below a `distance` on `topLeft`
+		 * between a card turned 30 degrees and another node would draw a
+		 * corner-to-corner hairline, with a length label, for a rule the solver
+		 * withheld both points from. A mark that says a rule holds is worse than
+		 * no mark, which is the same reason `gnoedge/2` has an overlay twin.
+		 */
+		if (spec.anchors.length > 0) {
+			const frames = c.nodes
+				.map((id) =>
+					refusedAnchor(scene, c, id, context?.picks)
+						? undefined
+						: placed.get(id)?.world,
+				)
+				.filter((f): f is Frame => f !== undefined);
+			if (frames.length < spec.minNodes) continue;
+			out.push(...raysFor(c, frames, scene.unit ?? DEFAULT_UNIT));
+			continue;
+		}
 		const edge = c.edge ?? spec.edges[0];
 		if (!edge) continue;
 		// A depth rule draws nothing — see {@link Annotation.axis}. Skipped here
@@ -246,6 +326,66 @@ export function annotate(
 		out.push(...marksFor(c, edge, axis, frames, scene.unit ?? DEFAULT_UNIT));
 	}
 	return out;
+}
+
+/**
+ * The one mark a sketch rule earns: the line between the points it is about.
+ *
+ * Beside {@link marksFor} and not inside it, because the two have almost
+ * nothing in common. `marksFor` takes an `edge` and an `axis` as required
+ * arguments and resolves datums through {@link datumFrame}; a ray has none of
+ * those and needs none of them. Sharing a body would mean threading two
+ * arguments that are meaningless here through a function that would then have
+ * to ignore them.
+ *
+ * **From the first member to the last, with no case for the kind.** For a
+ * `distance` and a `bearing` that is the second, because both cap at two
+ * members; for a `collinear` it is the far end of the line being asserted, and
+ * the points between it are on that line by the rule's own claim. One
+ * expression covers all three, which keeps the promise in this file's header
+ * that a kind picks a shape rather than growing a case.
+ *
+ * The label is measured off the frames, like every other label here, so it says
+ * where the design ended up rather than what the rule asked for — and which
+ * measurement it is comes off the kind's `valueType`, the same field that
+ * decides how the Rules panel spells the number. A `collinear` has no
+ * value type and so no label: three points being in a line is not a quantity.
+ */
+function raysFor(c: Constraint, frames: readonly Frame[], unit: Unit): Annotation[] {
+	const spec = CONSTRAINT_KINDS[c.kind];
+	const anchor = c.anchor ?? "center";
+	const a = anchorPoint(frames[0], anchor);
+	const b = anchorPoint(frames[frames.length - 1], anchor);
+	const dx = b.x - a.x;
+	const dy = b.y - a.y;
+	/**
+	 * Clockwise from straight right — x grows rightwards and y downwards, so the
+	 * plane the overlay draws in is the plane the solver was handed and the
+	 * degrees are converted rather than negated. Wrapped into a single turn after
+	 * rounding, so a direction a thousandth short of due east reads as 0 and not
+	 * as 360. The same arithmetic a fresh rule is seeded with, which is what makes
+	 * the mark and the panel agree on an untouched constraint.
+	 */
+	const bearing = () => {
+		const mdeg = Math.round((Math.atan2(dy, dx) * 180000) / Math.PI);
+		return writeAngle(((mdeg % 360000) + 360000) % 360000);
+	};
+	const label =
+		spec.valueType === "angle"
+			? bearing()
+			: spec.valueType === "length"
+				? displayLength(round(Math.hypot(dx, dy)), unit)
+				: undefined;
+	return [
+		{
+			shape: "ray",
+			constraint: c.id,
+			kind: c.kind,
+			a: { x: round(a.x), y: round(a.y) },
+			b: { x: round(b.x), y: round(b.y) },
+			...(label !== undefined ? { label } : {}),
+		},
+	];
 }
 
 function marksFor(

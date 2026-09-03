@@ -22,7 +22,8 @@
 		"test": "node --test \"src/**/*.test.ts\""
 	},
 	"dependencies": {
-		"@clingo-design/clingo-wasm": "workspace:*"
+		"@clingo-design/clingo-wasm": "workspace:*",
+		"@clingo-design/planegcs": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^26.2.0",

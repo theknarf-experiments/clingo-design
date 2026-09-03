@@ -1692,9 +1692,35 @@ function byOrder(a: ModelNode, b: ModelNode): number {
  * reading it already gives for the picture, and for the same reason: absence is
  * a question that was not asked, not an error.
  */
-export function readModel(atoms: readonly string[]): ModelScene {
+export function readModel(
+	atoms: readonly string[],
+	/**
+	 * Coordinates decided outside this answer set — the sketch layer's, and
+	 * nothing else today.
+	 *
+	 * Merged over {@link readSolved}'s own reading **per key**, so a node the
+	 * override names keeps every coordinate the override does not. A spread at
+	 * the node level would replace the whole record and delete the rest: a node
+	 * that is both an `equalSize` member and a `distance` member would lose its
+	 * solved `width` and snap back to its stated one, and a node in a viewport
+	 * would lose its solved `z` and `depth` — which is the one thing the sketch
+	 * layer promises never to touch.
+	 *
+	 * Here rather than in the caller because `readModel` computes its own
+	 * `readSolved` and hands that to `boxOf`: it never sees `Universe.solved`, so
+	 * without this the editable canvas would draw the sketch's placement and the
+	 * multiverse grid, the posters and every exported file would draw the linear
+	 * one — the same document, two ways at once.
+	 */
+	override?: Readonly<Record<string, Partial<Frame>>>,
+): ModelScene {
 	const facts = collect(atoms);
 	const solved = readSolved(atoms);
+	if (override) {
+		for (const [id, box] of Object.entries(override)) {
+			solved[id] = { ...solved[id], ...box };
+		}
+	}
 
 	// In id order, which is the same argument that sorts the copies, the fights,
 	// the health lists and the `wears` table: two readings of one answer set have

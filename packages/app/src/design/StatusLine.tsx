@@ -2,6 +2,7 @@ import {
 	type Exploration,
 	FRAME_AXES,
 	type Freedom,
+	type SketchReport,
 	degreesOfFreedom,
 	describeCosts,
 } from "@clingo-design/design-core";
@@ -26,6 +27,77 @@ export interface StatusLineProps {
 	freedom?: Freedom;
 	/** True while that is being worked out. */
 	probing?: boolean;
+	/**
+	 * What the second solver made of the design on screen, or nothing where the
+	 * document holds no sketch rule.
+	 *
+	 * Its own pill and emphatically not folded into the freedom readout beside
+	 * it, because the two are different questions with different answers.
+	 * `Freedom` is *per coordinate*, exact, and obtained by two clingo-lpx probes
+	 * per axis; `dof` is *per system*, a count, and says nothing about which
+	 * coordinate is free. Two numbers called "degrees of freedom" in one status
+	 * bar is the failure this component's own header was written to prevent.
+	 */
+	sketch?: SketchReport | null;
+}
+
+/**
+ * What the second solver has left, in words.
+ *
+ * The point of the `dof > 0` wording is that it must not read as *the* answer.
+ * A single bearing leaves a ray of placements and the one on screen is the one
+ * the designer's own aim picked out of it, so the pill says how many freedoms
+ * are left and the title says what to do about it.
+ */
+function sketchTag(
+	sketch: SketchReport,
+): { label: string; detail: string } | null {
+	if (sketch.status === "adrift") {
+		return {
+			label: "adrift",
+			// Never "unsettled": that word already means "this variable has more
+			// than one value across the multiverse" in this very status line, which
+			// takes it as `varyingCount` two props up.
+			detail:
+				"The sketch rules did not settle here — the solver ran out of steps rather than finding them impossible. The design is the linear solver’s, which is exact about everything else.",
+		};
+	}
+	if (sketch.status === "conflicted") {
+		return {
+			label: "conflicted",
+			detail:
+				"Sketch rules that cannot all hold in this design. The Rules panel names them.",
+		};
+	}
+	const dof = sketch.dof ?? 0;
+	// Said ahead of the count, because it is the more surprising half: a
+	// negative dof *is* more rules than freedoms, and the library can also name
+	// a rule that says nothing new at a dof of zero. Either way what is worth
+	// knowing first is that a rule could be deleted without changing the design;
+	// the count is still in the title for anybody who wants it.
+	if (dof < 0 || sketch.redundant.length > 0) {
+		const n = sketch.redundant.length;
+		return {
+			label: "redundant",
+			detail:
+				"More sketch rules than freedoms, and they happen to agree. " +
+				(n === 0
+					? "The solver did not name which of them says nothing new."
+					: `${n === 1 ? "One says" : `${n} say`} nothing new — the Rules panel marks which.`),
+		};
+	}
+	if (dof === 0) {
+		return {
+			label: sketch.approximate ? "settled ≈" : "settled",
+			detail: sketch.approximate
+				? "The sketch rules fix every coordinate they own — but the solve stopped improving rather than driving its residual to zero, so this placement is close rather than exact."
+				: "The sketch rules fix every coordinate they own; there is one placement and this is it.",
+		};
+	}
+	return {
+		label: `${dof} free`,
+		detail: `${dof === 1 ? "One degree" : `${dof} degrees`} of freedom left in the sketch: this is one of infinitely many placements that satisfy these rules. Drag a member to choose a different one. Whole-sketch, unlike the per-coordinate travel beside it.`,
+	};
 }
 
 /**
@@ -93,8 +165,10 @@ export function StatusLine({
 	selectionCount = 0,
 	freedom = {},
 	probing = false,
+	sketch = null,
 }: StatusLineProps) {
 	const left = room(freedom);
+	const sketched = sketch ? sketchTag(sketch) : null;
 	return (
 		<div className={styles.status} data-role="status">
 			{error ? (
@@ -142,6 +216,15 @@ export function StatusLine({
 								{describeCosts(exploration.costs, exploration.levels)}
 							</span>
 						</>
+					) : null}
+					{sketched ? (
+						<span
+							className={styles.tag}
+							data-role="sketch"
+							title={sketched.detail}
+						>
+							{sketched.label}
+						</span>
 					) : null}
 					{varyingCount > 0
 						? ` · ${varyingCount} variable${varyingCount === 1 ? "" : "s"} varying`

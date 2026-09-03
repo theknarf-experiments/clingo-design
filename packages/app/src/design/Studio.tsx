@@ -534,9 +534,24 @@ export function Studio({
 		probing,
 		why,
 		onWhy,
+		sketch,
+		sketchConflict,
+		sketchPinned,
+		redundant,
+		adrift,
 	} = useExploration(scene, LIMIT, seed, pins, measurements, probeIds);
 	const blamed = useMemo(() => new Set(conflict), [conflict]);
 	const badPins = useMemo(() => new Set(pinConflict), [pinConflict]);
+	/**
+	 * The second solver's two verdicts about the design on screen, as sets.
+	 *
+	 * Beside `blamed` rather than merged into it, and the panel takes them as
+	 * separate props for the reason the hook keeps them separate: `conflict`
+	 * means the document admits no design at all, and this means two rules cannot
+	 * both hold in *this* one out of the two dozen on the grid.
+	 */
+	const sketchBlamed = useMemo(() => new Set(sketchConflict), [sketchConflict]);
+	const sketchSaidTwice = useMemo(() => new Set(redundant), [redundant]);
 	/**
 	 * Which alternatives are still reachable, per variable.
 	 *
@@ -2697,6 +2712,7 @@ export function Studio({
 								solved={primary?.solved}
 								reach={reach}
 								freedom={freedom}
+								sketch={sketch}
 								pins={pins}
 								onPin={pin}
 								why={whyFor}
@@ -2795,10 +2811,14 @@ export function Studio({
 								describeRelaxation={describeRelaxation}
 								onRelax={applyRelaxation}
 								onSelectionChange={selectionIds}
-									model={answer}
+								model={answer}
 								stateMembers={stateMembers}
 								keyMembers={keyMembers}
 								picks={primary?.pick}
+								sketchConflict={sketchBlamed}
+								sketchPinned={sketchPinned}
+								redundant={sketchSaidTwice}
+								adrift={adrift}
 							/>
 						)}
 					</div>
@@ -2874,6 +2894,7 @@ export function Studio({
 							selectionCount={selection.size}
 							freedom={freedom}
 							probing={probing}
+							sketch={sketch}
 						/>
 					}
 				/>

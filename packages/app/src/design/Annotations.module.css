@@ -32,6 +32,17 @@
 	stroke-dasharray: none;
 }
 
+/*
+ * A ray keeps the dashes, and there is no rule for it here because there is
+ * nothing left to say: the sketch layer's one hairline wants exactly what
+ * `.mark line` already gives it, non-scaling stroke included. It is dashed
+ * rather than solid because a `distance` between two anchors is a rule the
+ * points obey and not a gap you could measure with a ruler — the solid stroke
+ * belongs to the spans, which run edge to edge along something that is really
+ * there. This comment stands in for the empty block, so the next person to
+ * wonder finds the answer instead of the silence.
+ */
+
 .label {
 	fill: var(--dc-note);
 	font-family: inherit;

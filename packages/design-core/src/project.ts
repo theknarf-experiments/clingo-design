@@ -31,6 +31,7 @@ import {
 	wordOf,
 } from "./values.ts";
 import {
+	ANCHORS,
 	type AutoLayout,
 	type AssetInfo,
 	type Axis3,
@@ -106,6 +107,7 @@ import {
 	starterTokens,
 	uniqueName,
 } from "./scene.ts";
+import { seedOf } from "./sketch.ts";
 
 /**
  * An alias rather than an interface: only aliases get an implicit index
@@ -526,6 +528,13 @@ function isConstraint(value: unknown): value is Constraint {
 	// The geometric fields are optional, but a bogus one would compile into a
 	// fact no rule matches — a rule that silently does nothing.
 	if (value.edge !== undefined && !(String(value.edge) in EDGES)) return false;
+	// And its twin one relation over: a sketch rule reads a *point* rather than an
+	// edge, and `c_anchor(c1,middling)` would be a fact `skanchor/2` never matches
+	// — the rule would exist, be switched on, name its members, and be about
+	// nowhere.
+	if (value.anchor !== undefined && !(String(value.anchor) in ANCHORS)) {
+		return false;
+	}
 	// A bogus strength is worse than a bogus edge: it would compile to a
 	// priority level nothing names, so the rule would be ranked at a tier the
 	// panel cannot show and the cost vector would gain an entry nobody can read.
@@ -1876,6 +1885,17 @@ function pruneNodes(list: readonly unknown[], legacy: boolean): SceneNode[] {
 				const { turn: _dropped, ...rest } = fixed;
 				fixed = rest as SceneNode;
 			}
+		}
+		// Where a sketch rule starts looking for this node: two whole EMU under one
+		// scalar key. Carried by the spread above like every other field, and
+		// **dropped when it is not that**, which is the whole of the check — a
+		// dropped seed is a node that starts where it sits, which is exactly what
+		// absence already means, so a corrupt one degrades to the default rather
+		// than to a failure. Every document written before this field began holds
+		// none, so there is no migration and no format marker.
+		if (fixed.sketchSeed !== undefined && seedOf(fixed) === undefined) {
+			const { sketchSeed: _dropped, ...rest } = fixed;
+			fixed = rest as SceneNode;
 		}
 		// Which camera a view looks through is an id and nothing else — the same
 		// string-or-nothing question `style` and `state` get. **A camera naming a

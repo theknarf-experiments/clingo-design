@@ -2354,12 +2354,179 @@ const GEOMETRIC_CONSTRAINT_RULES = [
 ]
 
 /**
- * Which constraint kinds place their nodes. Read off the one table that says
- * what a kind is, so a geometric kind never needs a case here.
+ * The sketch constraint kinds, as questions rather than as answers.
+ *
+ * clingo-lpx decides linear arithmetic. A Euclidean distance, a bearing and a
+ * collinearity are not linear in the unknowns and no amount of rewriting makes
+ * them so — squaring leaves a quadratic, fixing an angle per universe leaves an
+ * irrational coefficient where the program needs an integer, and three points on
+ * a line is a determinant. So this section states no `&sum` at all. It states
+ * which rules exist, which are switched on, which points they are about and what
+ * numbers they name, and a second solver reads that off the answer set and
+ * decides the coordinates afterwards — see docs/planegcs-spec.md.
+ *
+ * The switch is the same switch. `skon(C)` is `active(C)` and nothing else, so a
+ * sketch rule has a name in an unsat core, a row in the panel, an entry in `why`
+ * and a place in a relaxation with no new machinery anywhere. What it does *not*
+ * have is `gkind(K)`, and that omission is the whole safety argument: without it
+ * a sketch rule's members never reach `gsolved/1`, never mint `lv`/`lsz`, and
+ * never enter the shared `&minimize`, so the two solvers cannot both claim one
+ * rectangle.
+ */
+const SKETCH_CONSTRAINT_RULES = [
+	"#defined c_anchor/2.",
+	"#defined numeral/2.",
+	"#defined mdeg/2.",
+	"skcon(C) :- constraint(C), c_kind(C,K), skind(K).",
+	"% The switch, exactly as the linear kinds use it. It is the only thing this",
+	"% program says about whether a sketch rule holds: the deciding happens",
+	"% outside, and `active(C)` is the handle the answer comes back on.",
+	"skon(C) :- skcon(C), active(C).",
+	"% What the rule is about, per universe. Two predicates rather than one",
+	"% because the two carry different units and a single `sk_value/2` would have",
+	"% been a number whose meaning depended on which kind read it: sk_length/2 is",
+	"% EMU and sk_angle/2 is thousandths of a degree, and neither can be got from",
+	"% the other. A value that reads as no number at all — a dangling reference, a",
+	"% percentage — derives nothing, and the rule then goes to the sketch layer",
+	"% with no number and is dropped there, visibly, rather than meaning zero.",
+	"sk_length(C,V) :- skcon(C), c_kind(C,distance), resolved(cval(C),L), numeral(L,V).",
+	"sk_angle(C,V) :- skcon(C), c_kind(C,bearing), resolved(cval(C),L), mdeg(L,V).",
+	"% Which point on the box. `c_anchor/2` is emitted for exactly the kinds whose",
+	"% `anchors` list is non-empty, which is exactly the sketch kinds.",
+	"skanchor(C,A) :- skcon(C), c_anchor(C,A).",
+	"% Which members are nodes of this document — a whitelist, and it is a",
+	"% whitelist on purpose. `node/1` is not only a fact here: a hand-written rule",
+	"% may derive one, `node(cell(R,C)) :- pos(R), pos(C).` is the documented",
+	"% example, and `c_node/2` is emitted verbatim from what the document wrote —",
+	"% which is how `cg(page,3,left)` and `gl(s,g)` already turn up as members. A",
+	"% blacklist of the four shapes we happen to know about would let `cell(1,1)`",
+	"% through: it would be sksolved, PlaneGCS would pick its coordinates, and",
+	"% there would be no SceneNode to keep a starting point on and no drag gesture",
+	"% to write one — a rule with a coin flip in it, arriving through the one door",
+	"% an enumeration cannot close. So the compiler states this fact for every id",
+	"% in `scene.nodes` and nothing else may be a point.",
+	"#defined sknode/1.",
+	"% ...and the refusals below survive as *messages* rather than as the gate.",
+	"% Being able to say why a particular member was turned away is the whole",
+	"% value of `refusedAnchor`, and 'this member is not a node in the document'",
+	"% is the default sentence for everything the four cases do not name.",
+	"% A datum is a line, not a point: a column line has a place on one axis and",
+	"% nothing at all on the other, so an anchor of one would be half a coordinate",
+	"% the document does not contain. Refused the way gdatum/1 already refuses a",
+	"% span edge on a column line, one relation over.",
+	"sknopoint(N) :- gdatum(N).",
+	"% A copy is refused for a different reason and it is worth stating: a sketch",
+	"% rule's starting point is stored on the node it moves (see the spec's §4),",
+	"% and a state copy, a keyframe copy and an instance part are not nodes and",
+	"% have nowhere to keep one.",
+	"sknopoint(stt(I,S,N)) :- c_node(_,stt(I,S,N)).",
+	"sknopoint(kfr(I,W,R,K)) :- c_node(_,kfr(I,W,R,K)).",
+	"sknopoint(inst(I,N)) :- c_node(_,inst(I,N)).",
+	"% A turned box has no corner where the document says it has one — that is why",
+	"% `gnoedge/2` exists and why `inertMembers` has an `isTurned` branch — and a",
+	"% sketch rule reaching for `topLeft` on a card turned 30 degrees would be",
+	"% satisfied about a point the picture does not contain. The centre is the one",
+	"% anchor a rotation leaves alone (a turn about the centre moves no linear",
+	"% quantity, which is the decision the whole rotation feature rests on), so",
+	"% the centre is the one anchor a turned member keeps.",
+	"skoffcentre(N) :- grotated(N), skcon(C), c_node(C,N), c_anchor(C,A), A != center.",
+	"sknopoint(N) :- skoffcentre(N).",
+	"skpoint(N,A) :- skcon(C), c_node(C,N), skanchor(C,A), sknode(N), not sknopoint(N).",
+	"% Which nodes the sketch layer may move. Read exactly as gsolved/1 is read —",
+	"% naming a node in a sketch rule is what hands its place over — and the",
+	"% switch is deliberately not consulted here for gsolved/1's reason: which",
+	"% unknowns exist must not depend on which rules are assumed.",
+	"sksolved(N) :- skcon(C), c_node(C,N), sknode(N), not sknopoint(N).",
+	"% ...and which of its coordinates the linear layer already decided, which the",
+	"% sketch layer reads and must not write. This is the one predicate that makes",
+	"% the two solvers a sequence rather than a race.",
+	"%",
+	"% `gcoord/2` and emphatically not `gpos/2`, and the difference is the whole",
+	"% rule. `gpos(N,A) :- gsolved(N), gplane(A).` derives only for a member of a",
+	"% *linear geometric constraint*; a node in a stack is placed by the layout",
+	"% equations and reaches the answer through `lslot/3`, never through `gpos/2`.",
+	"% Written against gpos, every coordinate an automatic layout decided would",
+	"% have arrived here untagged, been treated as free, and been moved — a sketch",
+	"% rule silently overriding a row while the row still claimed to arrange it,",
+	"% which is the two-solvers-one-rectangle failure this whole section exists to",
+	"% prevent, arriving by the one door the tag was written to guard.",
+	"% `gcoord/2` is the predicate that means 'the linear layer owns this",
+	"% coordinate' — it covers gpos, gsize, lslot members and layout containers —",
+	"% and `gplane(A)` narrows it to the two axes a point has. A layout container",
+	"% gets `gcoord(C,S)` on its *spans* only, so a container named by a sketch",
+	"% rule is held on nothing and is free to move as a whole, which is right: a",
+	"% stack decides where its children are, not where it is.",
+	"skheld(N,A) :- sksolved(N), gcoord(N,A), gplane(A).",
+	"% The sketch plane is the document plane. A node in a viewport may be named",
+	"% by a sketch rule and keeps whatever z the third axis gave it: PlaneGCS is",
+	"% planar, and a third coordinate it never saw is a third coordinate it cannot",
+	"% disturb.",
+	"skmember(C,N,I) :- skcon(C), c_node(C,N), c_slot(C,N,I).",
+	"",
+	"% ---- what reaches the answer set ----",
+	"% Here rather than in the `output` section, and the placement is load-bearing:",
+	"% that section is unconditional and this block is not. This app surfaces",
+	"% clingo's \"#show for a predicate nothing derives\" info message in the power",
+	"% panel, so an unconditional `#show skon(C)` would put seven diagnostics",
+	"% nobody wrote into every document in the tool. Emitted with the rules that",
+	"% derive the predicates, they appear exactly when something can derive them.",
+	"% A #show and a #project are position-independent within a program, so this is",
+	"% the same program as declaring them anywhere else.",
+	"%",
+	"% Behind `scenery`, because these are picture atoms and a bare candidate solve",
+	"% has no use for them.",
+	"#show skon(C) : skon(C), scenery.",
+	"#show skmember(C,N,I) : skmember(C,N,I), scenery.",
+	"#show skanchor(C,A) : skanchor(C,A), scenery.",
+	"#show sk_length(C,V) : sk_length(C,V), scenery.",
+	"#show sk_angle(C,V) : sk_angle(C,V), scenery.",
+	"#show sksolved(N) : sksolved(N), scenery.",
+	"#show skheld(N,A) : skheld(N,A), scenery.",
+	"% A sketch rule's number is a design decision like a position: a `length` token",
+	"% with two alternatives is \"40 apart\" and \"80 apart\", and without this they",
+	"% differ in nothing projected and collapse into one universe with an arbitrary",
+	"% pick. Exactly the argument f_value/3 already makes, one relation over.",
+	"#project sk_length/2.",
+	"#project sk_angle/2.",
+	"% Nothing about sizes, deliberately. skheld/2 names positions only, and the",
+	"% sketch system pins every member's width and height from `frame/3`",
+	"% unconditionally: a distance between two cards is about where they are, and",
+	"% letting a nonlinear solver resize a design node would make every text box a",
+	"% free variable in a solver whose declared values are only starting guesses.",
+]
+
+/**
+ * Which constraint kinds place their nodes *with simplex*. Read off the one
+ * table that says what a kind is, so a linear geometric kind never needs a case
+ * here.
+ *
+ * `spec.engine === "linear"` and not `spec.geometric` alone, and that narrowing
+ * is the single most important expression in the sketch feature. `gkind/1` is
+ * what hands a member's rectangle to clingo-lpx — it heads `gcon/1`, which heads
+ * `gedgeof/2`, which mints `ge/2` and enrols the node in the shared
+ * `&minimize`. A sketch kind in this list would put one rectangle under two
+ * solvers at once, silently, and the picture would be whichever of them wrote
+ * last.
  */
 const GEOMETRIC_KINDS = Object.entries(CONSTRAINT_KINDS)
-	.filter(([, spec]) => spec.geometric)
+	.filter(([, spec]) => spec.geometric && spec.engine === "linear")
 	.map(([kind]) => `gkind(${kind}).`)
+
+/**
+ * Which kinds the second solver decides. The twin of {@link GEOMETRIC_KINDS},
+ * split off the same table, and the two are exhaustive and disjoint over the
+ * geometric kinds by construction — which is what stops one rectangle being
+ * claimed by simplex and by PlaneGCS at once.
+ *
+ * Emitted unconditionally, beside its twin and for its twin's stated reason:
+ * `skcon/1` is something a hand-written rule may assert, and this is the table
+ * it would be asserting against. Three plain facts that derive nothing on a
+ * document with no sketch rule, are not shown, appear in no answer set, and
+ * cannot move a universe count.
+ */
+const SKETCH_KINDS = Object.entries(CONSTRAINT_KINDS)
+	.filter(([, spec]) => spec.geometric && spec.engine === "sketch")
+	.map(([kind]) => `skind(${kind}).`)
 
 /**
  * What each layout setting may say, as facts — written out of the one table
@@ -2758,15 +2925,76 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               costs W at priority L instead of being forbidden
 %   c_soft(C)                   derived: C is ranked rather than prohibited
 %   c_value(C, Emu)             derived: numeral(resolved(cval(C)))
-%   gkind(K)                    K places its nodes rather than colours them
-%   gedge(E, x|y, pos|span|axis)   what an edge is. A z row is emitted behind
-%                               \`spatial\` and there are none yet — see Three
-%                               dimensions
+%   gkind(K)                    K places its nodes rather than colours them —
+%                               and with *simplex*, which is the half of the
+%                               sentence that matters now there is a second
+%                               solver. See Sketch rules below
+%   gedge(E, x|y|z, pos|span|axis) what an edge is. The five z rows are emitted
+%                               behind \`spatial\`, so they are all there and a
+%                               flat document grounds not one of them — see
+%                               Three dimensions
 %   gplace(E, lead|mid|trail)      and where on the node it sits
 %   gnoedge(N, E)               derived: N has no such quantity, so nothing is
 %                               stated about it. A span edge of a datum, a face
 %                               of a turned node, the third axis of a node that
 %                               is not in it
+%
+% Sketch rules. Three kinds — \`distance\`, \`bearing\` and \`collinear\` — are not
+% linear in the unknowns, so clingo-lpx cannot decide them and this program does
+% not try: **a sketch rule carries no &sum, states no coordinate, and is decided
+% outside the answer set** by a second solver that reads the atoms below. What
+% the program states is the question; the numbers come back afterwards.
+%
+%   skind(K)                    K is decided by the second solver. The twin of
+%                               gkind/1, and the two are disjoint: a sketch
+%                               kind's members are never gsolved, never mint
+%                               ge/2 and are never in the shared minimisation
+%   sknode(N)                   N is a node the *document* holds, so it is a
+%                               thing that can be a point. A node your own rule
+%                               derived is a node and is not one: it has no
+%                               layer to drag and nowhere to keep a starting aim
+%   skcon(C)                    derived: C is a sketch rule
+%   skon(C)                     derived: ...and it is switched on. active(C) and
+%                               nothing else, so a sketch rule has a name in a
+%                               core exactly as every other rule does
+%   c_anchor(C, A)              which of the nine points on a member's box the
+%                               rule is about: topLeft|top|topRight|left|center|
+%                               right|bottomLeft|bottom|bottomRight. An edge is
+%                               one coordinate; an anchor is a pair
+%   skanchor(C, A)              derived: the same, for a rule that is one
+%   skmember(C, N, I)           derived: member N of C, in slot I. A distance
+%                               and a bearing read slots 1 and 2; a collinear
+%                               takes the line through 1 and 2
+%   sk_length(C, Emu)           derived: what a \`distance\` measures, this
+%                               universe. EMU, through numeral/2
+%   sk_angle(C, Mdeg)           derived: what a \`bearing\` names, this universe.
+%                               Thousandths of a degree, through mdeg/2. Two
+%                               predicates because the units cannot be got from
+%                               each other
+%   skpoint(N, A)               derived: N really is a point, at A
+%   sknopoint(N)                derived: ...or it is not. A datum is a line and
+%                               has half a coordinate; a state copy, a keyframe
+%                               copy and an instance part have nowhere to keep a
+%                               starting aim
+%   skoffcentre(N)              derived: N is turned and the rule asked for
+%                               something other than its centre, which is a
+%                               corner the picture does not contain. A turn
+%                               about the centre leaves the centre alone, so the
+%                               centre is the one anchor a turned member keeps
+%   sksolved(N)                 derived: the sketch layer may place N. Read as
+%                               gsolved/1 is read — naming a node is what hands
+%                               its place over — and, like gsolved/1, blind to
+%                               the switch: which unknowns exist must not depend
+%                               on which rules are assumed
+%   skheld(N, A)                derived: ...except on this axis, which the
+%                               linear layer already decided. gcoord/2 narrowed
+%                               to gplane/1, and the one predicate that makes
+%                               the two solvers a sequence rather than a race
+%
+% All of it is emitted only for a document that holds a sketch rule, and none of
+% it says anything about a *size*: a distance between two cards is about where
+% they are, and no width, height or depth is ever a variable of the second
+% solver.
 %
 % viol/1 is a derivable predicate too, and that is what the kind \`custom\` is
 % for. It has no members, no property and no edge, and the generated program
@@ -4086,6 +4314,22 @@ export function compile(
 
 	const nodeLines: string[] = [];
 	/**
+	 * The same ids again, as the whitelist a sketch rule's members are checked
+	 * against — `sknode/1`, one per node the *document* holds.
+	 *
+	 * Collected on the walk that writes `node/1` and held aside rather than
+	 * pushed, because whether they are emitted at all is a fact about the
+	 * constraints, which are read four hundred lines below this. A document with
+	 * no sketch rule states none of them: the predicate is `#defined` in the
+	 * block that reads it, so nothing is left dangling either way.
+	 *
+	 * Separate from `node/1` and not derived from it because they say different
+	 * things. A rule of yours may derive `node(cell(R,C))`, and such a node has no
+	 * layer, no drag gesture and nowhere to keep a starting aim — so it is a node
+	 * and it is not a point. See {@link SKETCH_CONSTRAINT_RULES}.
+	 */
+	const sketchNodeLines: string[] = [];
+	/**
 	 * The project's flow, as the caller handed it over — `here/1` and `page/1`.
 	 *
 	 * Empty where no caller passed one, and `section()` drops an empty list
@@ -4184,6 +4428,7 @@ export function compile(
 	const thirdAxis = thirdAxisParts(scene);
 	for (const node of flatten(scene.nodes)) {
 		nodeLines.push(atom("node", node.id));
+		sketchNodeLines.push(atom("sknode", node.id));
 		// A node the document says is out of the picture. `hidden/1` has always
 		// been assertable by a rule and derived against by `visible/1`; this is the
 		// document's own half of it. Everything else about the node is still
@@ -4863,6 +5108,14 @@ export function compile(
 	const constraintLines: string[] = [];
 	const guards: string[] = [];
 	let geometric = false;
+	/**
+	 * Whether any rule in the document is one the second solver decides.
+	 *
+	 * The twin of {@link geometric} and gated the same way: a document with no
+	 * sketch rule compiles to the program it always did, states no `sknode/1`,
+	 * grounds none of {@link SKETCH_CONSTRAINT_RULES} and shows no `sk` atom.
+	 */
+	let sketched = false;
 	/** Priority levels the soft rules use, so a cost vector can be read back. */
 	const levels = new Set<number>();
 	let grouped = false;
@@ -4901,7 +5154,24 @@ export function compile(
 		}
 		if (spec.geometric) {
 			geometric = true;
-			constraintLines.push(atom("c_edge", c.id, c.edge ?? spec.edges[0]));
+			// Read the tables rather than the engine: the question here is whether
+			// this kind is about an edge or about a point, and exactly one of the
+			// two lists is non-empty on every kind. Written `spec.geometric ?
+			// c_edge : ...` it would have emitted `c_edge(c1,undefined)` for a
+			// sketch kind, because `spec.edges[0]` of an empty list is nothing at
+			// all.
+			if (spec.edges.length > 0) {
+				constraintLines.push(atom("c_edge", c.id, c.edge ?? spec.edges[0]));
+			}
+			if (spec.anchors.length > 0) {
+				sketched = true;
+				// Index 4 of the nine in reading order is `center`, which is the
+				// anchor a rule means when nobody said — and it has to be the same
+				// default `shapeFor` writes and the same one the overlay draws,
+				// or the program would solve about a corner while the canvas ruled
+				// a line between two centres.
+				constraintLines.push(atom("c_anchor", c.id, c.anchor ?? spec.anchors[4]));
+			}
 			// The dimension goes in as a variable, not a fact — the same
 			// machinery a fill uses, so it can name a token and vary with it.
 			if (spec.valueType) {
@@ -5142,6 +5412,7 @@ export function compile(
 		// on some documents is not one.
 		section("geometry rules", [
 			...GEOMETRIC_KINDS,
+			...SKETCH_KINDS,
 			...EDGE_FACTS,
 			...GEOMETRY_RULES,
 			// After the equations rather than before them, because the third axis
@@ -5287,6 +5558,17 @@ export function compile(
 					// document — the rules below would otherwise ground `ge` terms
 					// for nothing.
 					...(geometric ? ["", "% ---- over geometry ----", ...GEOMETRIC_CONSTRAINT_RULES] : []),
+					// After the geometry rules rather than beside them, because the
+					// sketch rules read `gdatum/1`, `gcoord/2` and `grotated/1`,
+					// which the section above and the geometry section say.
+					...(sketched
+						? [
+								"",
+								"% ---- over geometry the linear solver cannot write down ----",
+								...sketchNodeLines,
+								...SKETCH_CONSTRAINT_RULES,
+							]
+						: []),
 				]),
 		section("visibility", [
 			"#defined hidden/1.",

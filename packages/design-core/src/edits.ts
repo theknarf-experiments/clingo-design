@@ -45,6 +45,7 @@ import {
 	scalePoints,
 } from "./geometry.ts";
 import {
+	type Anchor,
 	type AssetInfo,
 	type AutoLayout,
 	type Axis3,
@@ -104,6 +105,7 @@ import {
 	type Trigger,
 	type Turn,
 	type TurnValue,
+	angleValue,
 	dimension,
 	edgeOn,
 	edgeOptions,
@@ -166,8 +168,14 @@ import {
 	placedNodes,
 	refreshGroups,
 	subtreeIds,
+	worldFrame,
 	worldOrigin,
 } from "./tree.ts";
+// The sketch layer's own arithmetic, imported rather than repeated: a seeded
+// `distance` has to measure the same point `sketchRequest` will hand PlaneGCS,
+// or the rule this file writes as "already true" is a rule that moves the
+// design the moment it is solved.
+import { anchorPoint, seedOf, spellSeed } from "./sketch.ts";
 
 let counter = 0;
 
@@ -651,6 +659,52 @@ export function setFrame(
 	picks: Picks = {},
 ): Scene {
 	return setFrames(scene, new Map([[id, frame]]), picks);
+}
+
+/**
+ * Aim a sketched node: where the second solver starts looking for it.
+ *
+ * The counterpart of {@link setFrames} for a node the sketch layer owns, and
+ * the *only* gesture that writes a starting point. A node whose place PlaneGCS
+ * decides cannot be dragged the ordinary way — a drag writes `frame`, the next
+ * solve overrules it, and the node springs back — so the Editor branches on
+ * `universe.sketch.owned` and comes here instead. See `docs/planegcs-spec.md`
+ * §4.4; the caller coalesces the gesture under `sketch-seed:<id>`, exactly as a
+ * frame drag is coalesced today, so a drag is one undo entry and not a hundred.
+ *
+ * `at` is the node's **world origin** — its top-left on the canvas, in the
+ * coordinates `placedNodes` answers in — and the spelling is `spellSeed`'s,
+ * which is the one writer of it in the tree. A scalar string rather than a
+ * `{x, y}`, because `reconcile.ts` merges an object per key and two peers who
+ * both aimed one node would otherwise produce peer A's x beside peer B's y — an
+ * aim neither of them had, which at `dof = 0` selects a branch neither of them
+ * meant. The reason is written out at `SceneNode.sketchSeed`.
+ *
+ * Never written by a solve. *A repair on read makes looking at a project an
+ * edit that syncs*, and auto-persisting solver output is that pattern with a
+ * different subject.
+ */
+export function setSketchSeed(scene: Scene, id: string, at: Point): Scene {
+	const text = spellSeed(at);
+	return mapNode(scene, id, (node) =>
+		node.sketchSeed === text ? node : { ...node, sketchSeed: text },
+	);
+}
+
+/**
+ * Forget it, so the node starts from wherever it sits.
+ *
+ * Deleted rather than blanked: absent *is* the default — the node's placed
+ * frame in this universe — so a cleared aim leaves a document indistinguishable
+ * from one that never met a sketch rule, which is what makes the field need no
+ * migration and no normalizer branch.
+ */
+export function clearSketchSeed(scene: Scene, id: string): Scene {
+	return mapNode(scene, id, (node) => {
+		if (node.sketchSeed === undefined) return node;
+		const { sketchSeed: _dropped, ...rest } = node;
+		return rest;
+	});
 }
 
 /**
@@ -1828,6 +1882,12 @@ export function retargetConstraint(
 		...shapeFor(scene, patch.kind ?? current.kind, current.nodes, {
 			prop: current.prop,
 			edge: patch.edge ?? current.edge,
+			// Carried across the change for the edge's reason exactly: which point
+			// on a box a rule is about is a decision a designer made, and the two
+			// sketch kinds that take a value both measure *from* that point. Losing
+			// it on the way from a `distance` to a `bearing` would re-seed the new
+			// rule about the centres of boxes whose corners were the subject.
+			anchor: current.anchor,
 			limit: current.limit,
 			group: "group" in patch ? patch.group : current.group,
 		}),
@@ -1838,19 +1898,50 @@ export function retargetConstraint(
 	};
 }
 
-/** Everything about a constraint that follows from its kind. */
+/**
+ * Everything about a constraint that follows from its kind.
+ *
+ * **Branched on the two tables and never on `geometric`.** `geometric` means
+ * "this rule is about where a node is rather than what colour it is", which is
+ * true of both solvers; the question here is the narrower one of whether the
+ * kind reads an *edge* or a *point*, and exactly one of `spec.edges` and
+ * `spec.anchors` is non-empty on every kind. Written `spec.geometric ? { edge }`
+ * it computed an edge for a sketch kind too, and `quietestEdge` answers
+ * `spec.edges[0]` — `undefined` — off an empty list, which `currentValue` then
+ * indexed `EDGES` with. Adding a Distance from the Rules panel threw inside a
+ * change handler and took the studio down with it.
+ */
 function shapeFor(
 	scene: Scene,
 	kind: ConstraintKind,
 	nodes: readonly string[],
-	from: { prop: PropName; edge?: Edge; limit?: number; group?: string },
+	from: {
+		prop: PropName;
+		edge?: Edge;
+		anchor?: Anchor;
+		limit?: number;
+		group?: string;
+	},
 ): Omit<Constraint, "id" | "enabled"> {
 	const spec = CONSTRAINT_KINDS[kind];
 	// Extra members would have nowhere to go: a gap has two sides, a pin one
 	// subject.
 	const members = nodes.slice(0, spec.maxNodes);
 	const kept = from.edge && spec.edges.includes(from.edge) ? from.edge : undefined;
-	const edge = kept ?? quietestEdge(scene, spec, members);
+	// Not computed at all where there is no edge to compute. An edgeless kind
+	// that asked anyway would be asking `edgeOptions` and `spreadOf` about a
+	// menu with nothing in it, and taking the answer.
+	const edge =
+		spec.edges.length > 0 ? (kept ?? quietestEdge(scene, spec, members)) : undefined;
+	// `anchors[4]` is `center`, which is the point a rule means when nobody said:
+	// every box has one, and it is the one place on a *turned* box that is still
+	// where the document says it is.
+	const anchor =
+		spec.anchors.length > 0
+			? ((from.anchor && spec.anchors.includes(from.anchor)
+					? from.anchor
+					: spec.anchors[4]) ?? "center")
+			: undefined;
 	// A kind that reads its members by position cannot take a set, so becoming
 	// one drops the group rather than keeping it as dead data — and the listed
 	// members, which were never thrown away, are what it falls back to.
@@ -1861,9 +1952,18 @@ function shapeFor(
 		nodes: [...members],
 		...(group === undefined ? {} : { group }),
 		...(spec.counted ? { limit: from.limit ?? 1 } : {}),
-		...(spec.geometric ? { edge } : {}),
+		...(edge === undefined ? {} : { edge }),
+		...(anchor === undefined ? {} : { anchor }),
+		// `bearing` is the first kind whose value is not a length, and the writer
+		// has to follow the type or the seed is stored as `"0px"` — which `mdegOf`
+		// refuses, so `sk_angle/2` never derives and the rule says nothing.
 		...(spec.valueType
-			? { value: dimension(currentValue(scene, spec, members, edge)) }
+			? {
+					value:
+						spec.valueType === "angle"
+							? angleValue(currentValue(scene, spec, members, edge, anchor))
+							: dimension(currentValue(scene, spec, members, edge, anchor)),
+				}
 			: {}),
 	};
 }
@@ -1948,14 +2048,26 @@ function spreadOf(scene: Scene, nodes: readonly string[], edge: Edge): number {
  * What a valued geometric kind measures right now, so it starts satisfied.
  *
  * The weighted sum comes out of the kind's own table entry, so a new kind
- * seeds itself by describing what it measures rather than by adding a case.
+ * seeds itself by describing what it measures rather than by adding a case —
+ * and a kind whose quantity is *not* a weighted sum of edges says so by leaving
+ * `seed` empty and having no edge to sum along. That is the second branch: a
+ * straight line between two points is a square root, which no list of lead and
+ * trail edges can spell, so the two sketch kinds that carry a value are
+ * measured directly instead of being described to a loop that cannot express
+ * them.
+ *
+ * The unit follows `spec.valueType`: EMU for a `"length"`, thousandths of a
+ * degree for an `"angle"`. `shapeFor` is what turns the number into a
+ * {@link Value}, and it reads the same column to decide which writer.
  */
 function currentValue(
 	scene: Scene,
 	spec: ConstraintSpec,
 	nodes: readonly string[],
-	edge: Edge,
+	edge: Edge | undefined,
+	anchor: Anchor | undefined,
 ): number {
+	if (edge === undefined) return sketchValue(scene, spec, nodes, anchor);
 	const axis = EDGES[edge].axis;
 	let total = 0;
 	for (const term of spec.seed) {
@@ -1973,6 +2085,68 @@ function currentValue(
 		total += term.weight * at;
 	}
 	return total;
+}
+
+/**
+ * The separation or the direction between two anchors, as the design stands.
+ *
+ * The `distance`/`bearing` half of {@link currentValue}, and the promise
+ * `ConstraintSpec.seed` makes for the kinds that have one: a rule added from
+ * the panel states what is already true and leaves the layout where it is.
+ * Without it a new Distance would read 0 and pull two boxes onto one point the
+ * instant the second solver ran.
+ *
+ * Measured the way `sketchRequest` measures — a world frame, the node's aim
+ * substituted over its origin where the document holds one, and
+ * {@link anchorPoint} on top — because these two numbers have to agree or the
+ * seed is only *nearly* true. Picks are not resolved, for `distributeNodes`'
+ * reason: seeding happens before any universe is chosen, so a node with two
+ * positions is measured at its first.
+ */
+function sketchValue(
+	scene: Scene,
+	spec: ConstraintSpec,
+	nodes: readonly string[],
+	anchor: Anchor | undefined,
+): number {
+	const a = aimedAnchor(scene, nodes[0], anchor);
+	const b = aimedAnchor(scene, nodes[1], anchor);
+	// A member with no frame is a datum, a copy or a name the tree does not
+	// hold — all four of which `refusedAnchor` refuses the rule over, so this is
+	// a seed nobody reads rather than a measurement worth guessing at.
+	if (!a || !b) return 0;
+	const dx = b.x - a.x;
+	const dy = b.y - a.y;
+	if (spec.valueType === "angle") {
+		// Clockwise from straight right, because that is the direction x grows in
+		// and y grows downwards — the plane the document is drawn in is the plane
+		// PlaneGCS is handed, so the degrees are converted and never negated.
+		// Wrapped into a single turn *after* rounding, so a direction a thousandth
+		// short of due east is stored as 0 rather than as 360.
+		const mdeg = Math.round((Math.atan2(dy, dx) * 180000) / Math.PI);
+		return ((mdeg % 360000) + 360000) % 360000;
+	}
+	// Whole EMU, because a length in this document is an integer and `dimension`
+	// would round it anyway; rounding here keeps the number the seed states and
+	// the number the document stores the same one.
+	return Math.round(Math.hypot(dx, dy));
+}
+
+/** Where one member's anchor sits on the canvas, honouring its stored aim. */
+function aimedAnchor(
+	scene: Scene,
+	id: string | undefined,
+	anchor: Anchor | undefined,
+): Point | undefined {
+	if (id === undefined) return undefined;
+	const node = findInTree(scene.nodes, id);
+	const world = node && worldFrame(scene.nodes, id, sceneContext(scene));
+	if (!node || !world) return undefined;
+	// The aim is the node's world origin, so it replaces the origin rather than
+	// being added to it — the same substitution `sketchRequest` makes on a free
+	// coordinate, read through the one parser that understands the spelling.
+	const at = seedOf(node);
+	return anchorPoint(at ? { ...world, x: at.x, y: at.y } : world, anchor ?? "center");
 }
 
 export function updateConstraint(

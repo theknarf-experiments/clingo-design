@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+	type Anchor,
 	CONSTRAINT_KINDS,
 	CONSTRAINT_NAMES,
 	type Constraint,
@@ -19,12 +20,14 @@ import {
 	type Strength,
 	UNITS,
 	type Unit,
+	angleValue,
 	isSoft,
 	addConstraint,
 	addCustomConstraint,
 	constrainsProp,
 	constraintTermError,
 	constraintValue,
+	constraintVar,
 	crossesViewport,
 	datumLabel,
 	deadlock,
@@ -35,9 +38,12 @@ import {
 	groupProps,
 	inertMembers,
 	keyCopyLabel,
+	mdegOf,
 	rangesOverGroup,
 	ref,
+	refusedMembers,
 	renameConstraint,
+	resolveValue,
 	retargetConstraint,
 	sharedProps,
 	single,
@@ -47,9 +53,10 @@ import {
 	tokensOfType,
 	updateConstraint,
 	violRefs,
+	writeAngle,
 } from "@clingo-design/design-core";
 
-import { LengthInput } from "./ValueEditor";
+import { AngleInput, LengthInput } from "./ValueEditor";
 import styles from "./Constraints.module.css";
 import { cx } from "./cx";
 import { documentUnit, shownEmu } from "./lengths";
@@ -134,6 +141,66 @@ export interface ConstraintsProps {
 	 * unsolved panel shows anyway — the same default `Dimension` above takes.
 	 */
 	picks?: Picks;
+	/**
+	 * Constraint ids the *second* solver blamed in the design on screen.
+	 *
+	 * Its own prop rather than more entries in {@link conflict}, and the
+	 * difference is not a nicety. `conflict` means "the document admits no design
+	 * at all"; it arrives with an empty canvas and it drives the headline that
+	 * says so. A sketch conflict arrives with the canvas full: the document is
+	 * satisfiable, these designs exist, and what cannot hold is a pair of rules
+	 * in *this* one. It is per universe where `conflict` is per document, so
+	 * merging them would redden a rule that holds perfectly in the design beside
+	 * this one.
+	 */
+	sketchConflict?: ReadonlySet<string>;
+	/**
+	 * `<node>:<axis>` the sketch could not have, because the linear layer had
+	 * already decided it.
+	 *
+	 * The other half of a sketch conflict and often the whole of one: a `distance`
+	 * aimed at two nodes an `align` already places conflicts with the placement
+	 * rather than with a rule, so there is nothing to redden and a different
+	 * sentence to say. A pin is not a rule and cannot be switched off, which is
+	 * why it is kept apart rather than folded into the list above.
+	 */
+	sketchPinned?: readonly string[];
+	/**
+	 * Constraint ids the sketch says nothing new — more rules than freedoms, and
+	 * they happen to agree. Not an error, and not nothing.
+	 */
+	redundant?: ReadonlySet<string>;
+	/**
+	 * True when the sketch did not settle and blames nothing for it.
+	 *
+	 * The numeric failure of the second solver, which is a statement about the
+	 * arithmetic and not about the rules: the iteration ran out of steps looking
+	 * for a placement from where these nodes are now. Nothing is blamed, nothing
+	 * is learned, and the design below is the linear solver's — exact about
+	 * everything except these rules.
+	 */
+	adrift?: boolean;
+}
+
+/**
+ * What a rule's value comes to as an angle, for the one kind whose `valueType`
+ * is not `"length"`.
+ *
+ * {@link constraintValue}'s twin and not an extension of it, because the two
+ * are exact-or-nothing about different quantities: `emuOf` refuses `"30deg"`
+ * and `mdegOf` refuses `"40px"`, and a single reader that answered both would
+ * be a number whose meaning depended on which kind asked. The walk is the same
+ * walk — the constraint's own variable, through whatever token it names — so a
+ * `bearing` driven by an `angle` token reads the token, exactly as the
+ * program's `mdeg/2` does.
+ */
+function constraintAngle(scene: Scene, c: Constraint): number | undefined {
+	const text = resolveValue(
+		{ tokens: scene.tokens, picks: {} },
+		c.value,
+		constraintVar(c.id),
+	);
+	return text === undefined ? undefined : mdegOf(text);
 }
 
 /**
@@ -165,10 +232,36 @@ function Dimension({
 }) {
 	if (!spec.valueType) return null;
 	const term = constraint.value?.[0];
-	// What it comes to right now, in EMU. Without a universe in hand this is the
-	// token's first alternative, which is what the canvas would show anyway.
-	const resolved = constraintValue(scene, constraint);
 	const driven = term !== undefined && term.kind !== "literal";
+	/**
+	 * An angle is the second quantity a rule can hold to, and every writer on
+	 * this path was a length writer.
+	 *
+	 * `bearing` is the first kind whose `valueType` is not `"length"`, and left
+	 * alone every branch below would have written it as one: the field would
+	 * commit `"37px"`, `mdegOf` would refuse that, `sk_angle/2` would never
+	 * derive, and touching the token menu would rewrite the angle as a distance.
+	 * So the reader, the field and the unlink branch each ask the table which
+	 * quantity this is, rather than assuming.
+	 */
+	const angular = spec.valueType === "angle";
+	// What it comes to right now — EMU for a length, thousandths of a degree for
+	// an angle. Without a universe in hand this is the token's first alternative,
+	// which is what the canvas would show anyway.
+	const resolved = angular
+		? constraintAngle(scene, constraint)
+		: constraintValue(scene, constraint);
+	/** The same number as a person reads it, for the driven row's echo. */
+	const shown =
+		resolved === undefined
+			? "?"
+			: angular
+				? writeAngle(resolved)
+				: shownEmu(resolved, unit);
+	/** And as the document stores it, for a field with nothing typed in it yet. */
+	const stored = angular
+		? writeAngle(resolved ?? 0)
+		: formatLength(resolved ?? 0, unit);
 
 	return (
 		<>
@@ -179,10 +272,26 @@ function Dimension({
 					title="Driven by a variable"
 				>
 					{termLabel(scene.tokens, term)}
-					<span className={styles.resolved}>
-						{resolved === undefined ? "?" : shownEmu(resolved, unit)}
-					</span>
+					<span className={styles.resolved}>{shown}</span>
 				</span>
+			) : angular ? (
+				// The one field that keeps the unit it was typed in rather than the
+				// document's: a document's unit is a *length* unit, and an angle has no
+				// opinion about millimetres. `deg`, `turn` and `grad` all say the same
+				// circle, so there is nothing to normalise them against.
+				<AngleInput
+					className={cx(styles.limit, styles.length)}
+					role="constraint-value"
+					value={term?.kind === "literal" ? term.value : stored}
+					title="Which way the second one lies from the first, clockwise from straight right — in degrees, or with a unit of its own like 0.25turn"
+					onCommit={(text) =>
+						onSceneChange(
+							(prev) =>
+								updateConstraint(prev, constraint.id, { value: single(text) }),
+							`constraint-value:${constraint.id}`,
+						)
+					}
+				/>
 			) : (
 				// The same field the inspector's coordinates use, for the same reason:
 				// a rule that holds two edges 12pt apart is a statement in points, so
@@ -193,11 +302,7 @@ function Dimension({
 				<LengthInput
 					className={cx(styles.limit, styles.length)}
 					role="constraint-value"
-					value={
-						term?.kind === "literal"
-							? term.value
-							: formatLength(resolved ?? 0, unit)
-					}
+					value={term?.kind === "literal" ? term.value : stored}
 					unit={unit}
 					title={`How far apart, in ${UNITS[unit].label.toLowerCase()} — or with a unit of its own, like 12pt`}
 					onCommit={(text) =>
@@ -219,17 +324,21 @@ function Dimension({
 					onSceneChange((prev) =>
 						updateConstraint(prev, constraint.id, {
 							// Dropping a link keeps the number it was resolving to, so
-							// nothing jumps at the moment of unlinking.
+							// nothing jumps at the moment of unlinking — and keeps it in the
+							// quantity the kind is measured in, so an angle unlinked does not
+							// come back as a distance.
 							value: link
 								? [ref(link[1])]
-								: single(formatLength(resolved ?? 0, unit)),
+								: angular
+									? angleValue(resolved ?? 0)
+									: single(stored),
 						}),
 					);
 				}}
 			>
 				{/* What "hold a number" is measured in, which is the document's unit
-				    and no longer always pixels. */}
-				<option value="">{UNITS[unit].symbol}</option>
+				    for a length and always degrees for an angle. */}
+				<option value="">{angular ? "deg" : UNITS[unit].symbol}</option>
 				{tokensOfType(scene, spec.valueType).map((t) => (
 					<option key={t.id} value={`ref:${t.id}`}>
 						{t.name}
@@ -238,6 +347,33 @@ function Dimension({
 			</select>
 		</>
 	);
+}
+
+/**
+ * The default for the two optional id sets, hoisted so a studio that passes
+ * neither does not hand the panel a fresh set every render.
+ */
+const EMPTY: ReadonlySet<string> = new Set();
+
+/**
+ * The nine anchor names as a person reads them.
+ *
+ * Split off the camel case rather than tabulated, so there is one list of
+ * anchors in the tree and this cannot drift from it: `ANCHOR_NAMES` is the
+ * table, and a tenth anchor would appear here spelled correctly without anybody
+ * editing this. The one editorial touch is the spelling of the middle one,
+ * which this codebase writes the British way everywhere else it appears.
+ */
+function anchorLabel(anchor: Anchor): string {
+	const words = anchor.replace(/([A-Z])/g, " $1").toLowerCase();
+	const said = words === "center" ? "centre" : words;
+	return said.charAt(0).toUpperCase() + said.slice(1);
+}
+
+/** A member of a sketch pin — `"<node>:<axis>"` — as the node it names. */
+function pinnedNode(tag: string): string {
+	const cut = tag.lastIndexOf(":");
+	return cut === -1 ? tag : tag.slice(0, cut);
 }
 
 /**
@@ -269,6 +405,10 @@ export function Constraints({
 	stateMembers,
 	keyMembers,
 	picks,
+	sketchConflict = EMPTY,
+	sketchPinned = [],
+	redundant = EMPTY,
+	adrift = false,
 }: ConstraintsProps) {
 	const selected = [...selection];
 	const groups = Object.keys(model?.groups ?? {}).sort();
@@ -425,8 +565,41 @@ export function Constraints({
 		return at !== undefined && !offered.includes(at) ? [at, ...offered] : offered;
 	};
 
-	const inertOf = (c: Constraint) =>
-		c.enabled ? inertMembers(scene, c, picks) : [];
+	/**
+	 * What this rule says nothing about, from whichever solver would have said it —
+	 * one list, because to a designer scanning the panel it is one fact.
+	 *
+	 * `inertMembers` is the linear half and answers about an `Edge` the program
+	 * refused to mint. It returns `[]` for a sketch kind on its first line, and not
+	 * because a sketch rule cannot be silenced: `edges` is empty on all three, so
+	 * `constraint.edge` is never set, so the question it asks is not the question
+	 * they raise. Theirs is about the *anchor* — a turned box keeps its centre and
+	 * loses its corners — and `refusedMembers` is the half that knows it. Without
+	 * this second call a `distance` on `topLeft` between a card turned 30° and
+	 * another node governs nothing at all and renders here as an ordinary green
+	 * row, which is the silence this panel exists to break.
+	 *
+	 * Keyed rather than indexed because the two halves are keyed differently: an
+	 * edge refusal is one sentence per member *per edge*, an anchor refusal one per
+	 * member, and a rule holding both must not collapse them onto one key.
+	 */
+	const notesOf = (
+		c: Constraint,
+	): { key: string; member: string; why: string }[] =>
+		c.enabled
+			? [
+					...inertMembers(scene, c, picks).map((found) => ({
+						key: `edge:${found.member}/${found.edge}`,
+						member: found.member,
+						why: found.why,
+					})),
+					...refusedMembers(scene, c, picks).map((found) => ({
+						key: `anchor:${found.member}`,
+						member: found.member,
+						why: found.why,
+					})),
+				]
+			: [];
 	const crossingOf = (c: Constraint): string | undefined => {
 		if (!c.enabled || !CONSTRAINT_KINDS[c.kind].geometric) return undefined;
 		const over = c.group === undefined ? c.nodes : membersOf(c.group);
@@ -462,10 +635,25 @@ export function Constraints({
 	function dimensionOf(c: Constraint): string {
 		const term = c.value?.[0];
 		if (term && term.kind !== "literal") return termLabel(scene.tokens, term);
-		// In the document's unit, like every other number in the editor — the
-		// sentence this lands in is read beside the panel that says `mm`.
-		return shownEmu(constraintValue(scene, c) ?? 0, unit);
+		// In the quantity the kind is measured in: the document's unit for the
+		// eight kinds that hold a length — the sentence this lands in is read
+		// beside the panel that says `mm` — and degrees for the one that holds an
+		// angle, which has no opinion about millimetres.
+		return CONSTRAINT_KINDS[c.kind].valueType === "angle"
+			? writeAngle(constraintAngle(scene, c) ?? 0)
+			: shownEmu(constraintValue(scene, c) ?? 0, unit);
 	}
+
+	/**
+	 * Whether this rule is one of the ones that cannot hold — from either solver.
+	 *
+	 * One reader for the row's red mark, because to a designer scanning the panel
+	 * they are one fact: this rule is why there is no design, or this rule is why
+	 * the design on screen does not obey it. The two are kept apart everywhere
+	 * *else* — the headlines differ, the ways out differ, and the deadlock
+	 * diagnosis is only ever about the document's own core.
+	 */
+	const guilty = (id: string) => conflict.has(id) || sketchConflict.has(id);
 
 	function describe(c: Constraint): string {
 		const spec = CONSTRAINT_KINDS[c.kind];
@@ -549,6 +737,55 @@ export function Constraints({
 					{relaxations.length === 0
 						? "Turn one off, or widen a property so there are more values to go around."
 						: null}
+				</p>
+			) : null}
+
+			{/* The second solver's conflict, which is a different sentence from the
+			    one above because it is a different situation. That one means the
+			    document admits no design at all and the canvas is empty; this one
+			    means the designs are there and two rules cannot both hold in the one
+			    on screen. No ways out are offered either: a relaxation is a re-solve
+			    under a subset of the assumptions, against a session — and a sketch
+			    conflict has no session to re-solve against. So the advice is what the
+			    designer can actually do. */}
+			{sketchConflict.size > 0 ? (
+				<p className={styles.sketchConflict} data-role="sketch-conflict">
+					{sketchConflict.size === 1
+						? "This rule cannot hold in the design on screen."
+						: `These ${sketchConflict.size} rules cannot all hold in this design.`}{" "}
+					A distance and a bearing between the same two things fix a point
+					exactly, so a second rule about either has nowhere left to move. Turn
+					one off, or drag a member to aim the sketch somewhere else.
+				</p>
+			) : sketchPinned.length > 0 ? (
+				// The commoner half, and it names no rule because no rule is at fault:
+				// naming a node in an Align, a Gap or a stack hands both its
+				// coordinates to the linear solver, and a sketch rule aimed at it then
+				// has nothing left to move. A pin cannot be switched off, so the advice
+				// points at the rules that made it.
+				<p className={styles.sketchConflict} data-role="sketch-pinned">
+					{[...new Set(sketchPinned.map(pinnedNode))]
+						.map((id) => `“${nameOf(id)}”`)
+						.join(" and ")}{" "}
+					{sketchPinned.length === 1 ? "is" : "are"} already placed by other
+					rules — an Align, a Gap or a stack decides their positions — so this
+					rule has nothing left to move. Turn one of those off, or put this rule
+					on something the layout does not place.
+				</p>
+			) : null}
+
+			{/* Neither a conflict nor a design: the second solver ran out of steps.
+			    Nothing is blamed and no row is reddened, because a numeric failure is
+			    a property of where these nodes happen to be sitting rather than of
+			    the rules — and turning it into a fact about the rules would delete
+			    every design that would have converged from somewhere else. */}
+			{adrift ? (
+				<p className={styles.adrift} data-role="adrift">
+					The sketch did not settle here. The rules do not contradict each other
+					— the solver ran out of steps looking for a placement that satisfies
+					them from where these nodes are now. The design below is the linear
+					solver’s, which is exact about everything except these rules. Drag a
+					member to start it somewhere else.
 				</p>
 			) : null}
 
@@ -653,20 +890,26 @@ export function Constraints({
 				// What the program will not create for this rule, and what it will
 				// create somewhere the screen is not. Neither is an error and both are
 				// invisible without this.
-				const inert = inertOf(c);
+				const inert = notesOf(c);
 				const crossing = crossingOf(c);
 				return (
 					<div
 						key={c.id}
 						className={cx(
 							styles.rule,
-							conflict.has(c.id) && styles.blamed,
+							guilty(c.id) && styles.blamed,
 							broken.has(c.id) && styles.broken,
+							redundant.has(c.id) && styles.redundant,
 							inert.length > 0 && styles.inert,
 							!c.enabled && styles.off,
 						)}
 						data-constraint={c.id}
-						data-blamed={conflict.has(c.id) ? "" : undefined}
+						data-blamed={guilty(c.id) ? "" : undefined}
+						// Satisfied, and saying nothing new: the second solver has more
+						// rules than freedoms and they happen to agree. Dashed like a
+						// broken preference, because it is the same kind of news — not an
+						// error, and not nothing.
+						data-redundant={redundant.has(c.id) ? "" : undefined}
 						// A preference this design gave up. Marked, not flagged: it is
 						// what the rule is *for*, and the design is legal.
 						data-broken={broken.has(c.id) ? "" : undefined}
@@ -789,9 +1032,18 @@ export function Constraints({
 								/>
 							) : null}
 
-							{/* What the rule is about: where its members are, how they look,
-							    or — for a rule with no members — nothing but its own name. */}
-							{spec.geometric ? (
+							{/* What the rule is about: which quantity of its members, which
+							    point on them, how they look, or — for a rule with no members
+							    — nothing but its own name.
+
+							    Asked of the tables and not of `spec.geometric`, because the
+							    question is whether this kind reads an *edge* or a *point* and
+							    exactly one of the two lists is non-empty on every kind.
+							    Written as the flag, a sketch rule would have rendered an edge
+							    menu with nothing in it and `value={undefined}` — a blank
+							    control React logs a controlled/uncontrolled warning about,
+							    sitting where the rule's subject should be. */}
+							{spec.edges.length > 0 ? (
 								<select
 									className={styles.prop}
 									data-role="constraint-edge"
@@ -816,6 +1068,36 @@ export function Constraints({
 									{edgesFor(c).map((edge) => (
 										<option key={edge} value={edge}>
 											{EDGES[edge].label}
+										</option>
+									))}
+								</select>
+							) : spec.anchors.length > 0 ? (
+								<select
+									className={styles.prop}
+									data-role="constraint-anchor"
+									// One anchor for the whole rule, not one per member — the
+									// same shape `edge` has, where "align on left" is every
+									// member's left. Index 4 of the nine in reading order is the
+									// centre, which is the point a rule means when nobody said.
+									value={c.anchor ?? spec.anchors[4]}
+									title="Which point on each member this rule is about. A distance and a bearing are between points, not between edges — which is why they can be about a diagonal at all."
+									onChange={(e) =>
+										onSceneChange((prev) =>
+											updateConstraint(prev, c.id, {
+												anchor: e.target.value as Anchor,
+											}),
+										)
+									}
+								>
+									{/* Unfiltered, unlike the edge menu beside it. An edge can be
+									    a quantity a member does not have — a flat card has no
+									    front face — and `gnoedge/2` refuses those. Every box has
+									    all nine of its handles, so the only anchor a member can
+									    lose is a corner it lost by being turned, and that is a
+									    refusal about the *member* rather than about the menu. */}
+									{spec.anchors.map((anchor) => (
+										<option key={anchor} value={anchor}>
+											{anchorLabel(anchor)}
 										</option>
 									))}
 								</select>
@@ -1000,10 +1282,16 @@ export function Constraints({
 						    reasons and a single line would have to pick one. Each names the
 						    member whose rotation took the quantity away, which is the part
 						    that makes it worth reading: the node that fails to move is
-						    usually not the node somebody turned. */}
+						    usually not the node somebody turned.
+
+						    Both solvers' refusals through this one block, because the
+						    reader is one person and the news is one piece: a linear rule
+						    silenced by `gnoedge/2` and a sketch rule silenced by
+						    `sknopoint/1` are the same disappointment, and only one of the
+						    two has an edge to name. */}
 						{inert.map((found) => (
 							<p
-								key={`${found.member}/${found.edge}`}
+								key={found.key}
 								className={cx(styles.note, styles.inertNote)}
 								data-role="inert-reason"
 								data-member={found.member}

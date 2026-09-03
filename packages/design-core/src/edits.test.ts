@@ -46,6 +46,10 @@ import {
 	pruneAssets,
 	pruneMachines,
 	releaseComponent,
+	retargetConstraint,
+	clearSketchSeed,
+	setSketchSeed,
+	updateConstraint,
 	renameInput,
 	renameLayer,
 	renameMachine,
@@ -97,9 +101,13 @@ import {
 	type Timeline,
 	type Track,
 	type Trigger,
+	CONSTRAINT_NAMES,
+	CONSTRAINT_KINDS,
+	type Constraint,
 	emptyScene,
 	frameOf,
 } from "./scene.ts";
+import { seedOf } from "./sketch.ts";
 import { flatten, mapTree } from "./tree.ts";
 import { EMU_PER_PX } from "./units.ts";
 import { lit, propVar, ref, resolveValue, single, wordOf } from "./values.ts";
@@ -1547,4 +1555,198 @@ test("ladder and 3D edits never mutate the input scene", () => {
 	setStateBlend(doc, m, "rest", { kind: "oneD", stops: [] });
 	addViewport(doc, null, box(0, 0, 100, 100));
 	assert.equal(JSON.stringify(doc), snapshot, "undo relies on immutability");
+});
+
+/* ------------------------------------------------------------------ */
+/* Sketch rules                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Three boxes of two sizes, placed so that the same pair measures a whole
+ * number of pixels from its centres *and* from its corners.
+ *
+ * A 3-4-5 triangle at both anchors is the only way a case can tell "the seed
+ * used the anchor" apart from "the seed used the frame" without the assertion
+ * being a decimal expansion nobody can read. Centres are 60 by 80 apart, corners
+ * 30 by 40, so both are the same bearing and two different distances.
+ */
+function withAnchors(): Scene {
+	let scene: Scene = { ...emptyScene(), nodes: [] };
+	scene = addNode(scene, makeNode("rect", box(0, 0, 40, 40), { id: "a", name: "A" }));
+	scene = addNode(
+		scene,
+		makeNode("rect", box(30, 40, 100, 120), { id: "b", name: "B" }),
+	);
+	scene = addNode(scene, makeNode("rect", box(140, 180, 40, 40), { id: "c", name: "C" }));
+	return scene;
+}
+
+const rule = (scene: Scene, id: string): Constraint | undefined =>
+	scene.constraints.find((c) => c.id === id);
+
+const ruleValue = (found: Constraint | undefined): string | undefined => {
+	const term = found?.value?.[0];
+	return term?.kind === "literal" ? term.value : undefined;
+};
+
+const sketchKinds = CONSTRAINT_NAMES.filter(
+	(name) => CONSTRAINT_KINDS[name].engine === "sketch",
+);
+
+/**
+ * The crash this file is the regression test for.
+ *
+ * `shapeFor` asked `spec.geometric` and ran the shipped edge path for all three
+ * of these, and `quietestEdge` answers `spec.edges[0]` — `undefined` — off an
+ * empty list, which `currentValue` then indexed `EDGES` with. Every path into
+ * it is a panel gesture: the `+ New` menu offers Distance and Bearing, and the
+ * per-row kind `<select>` offers all three from every other kind, so a designer
+ * picking one took the studio down inside a React change handler. `collinear`
+ * survived only by having no `valueType`, which is not a reason to be safe.
+ */
+test("adding or retargeting to a sketch kind reads a point and never an edge", () => {
+	const scene = withAnchors();
+	assert.deepEqual(sketchKinds, ["distance", "bearing", "collinear"]);
+
+	for (const kind of sketchKinds) {
+		const added = addConstraint(scene, kind, ["a", "b", "c"]);
+		const made = rule(added.scene, added.id);
+		assert.ok(made, kind);
+		assert.equal(made.kind, kind);
+		// The two fields are exclusive, and which one a kind has is what the
+		// compiler reads to decide between `c_edge/2` and `c_anchor/2`.
+		assert.equal(made.edge, undefined, `${kind} holds no edge`);
+		assert.equal(made.anchor, "center", `${kind} defaults to the centre`);
+		assert.deepEqual(
+			made.nodes,
+			kind === "collinear" ? ["a", "b", "c"] : ["a", "b"],
+			`${kind} keeps maxNodes members`,
+		);
+	}
+
+	// And from every other kind, because that is what the row's `<select>` is:
+	// a change of subject between any two entries in the table, in both
+	// directions, with the shape rebuilt from the destination's own columns.
+	for (const from of CONSTRAINT_NAMES) {
+		const seeded = addConstraint(scene, from, ["a", "b", "c"]);
+		for (const to of CONSTRAINT_NAMES) {
+			const moved = retargetConstraint(seeded.scene, seeded.id, { kind: to });
+			const shaped = rule(moved, seeded.id);
+			const spec = CONSTRAINT_KINDS[to];
+			assert.ok(shaped, `${from} -> ${to}`);
+			assert.equal(shaped.kind, to);
+			assert.equal(
+				shaped.edge === undefined,
+				spec.edges.length === 0,
+				`${from} -> ${to} edge`,
+			);
+			assert.equal(
+				shaped.anchor === undefined,
+				spec.anchors.length === 0,
+				`${from} -> ${to} anchor`,
+			);
+			assert.equal(
+				shaped.value === undefined,
+				spec.valueType === undefined,
+				`${from} -> ${to} value`,
+			);
+		}
+	}
+});
+
+test("a new distance and a new bearing state what the design already does", () => {
+	const scene = withAnchors();
+
+	// Centres 60 by 80 apart: a hundred pixels, and a direction measured
+	// clockwise from straight right, because that is the way x grows and y grows
+	// downwards. Both already true, so neither rule moves anything when it runs.
+	const far = addConstraint(scene, "distance", ["a", "b"]);
+	assert.equal(ruleValue(rule(far.scene, far.id)), "100px");
+	const way = addConstraint(scene, "bearing", ["a", "b"]);
+	assert.equal(ruleValue(rule(way.scene, way.id)), "53.13deg");
+	// Written as an angle and not as a length. A bearing through `dimension`
+	// would have stored `"0px"`, which `mdegOf` refuses, so `sk_angle/2` would
+	// never derive and the rule would say nothing at all.
+	assert.match(ruleValue(rule(way.scene, way.id)) ?? "", /deg$/);
+
+	// Three points on a line is a relation with no number in it.
+	const line = addConstraint(scene, "collinear", ["a", "b", "c"]);
+	assert.equal(rule(line.scene, line.id)?.value, undefined);
+
+	// The anchor is what the seed measures between, and it is carried across a
+	// change of kind for the edge's reason: corners are 30 by 40 apart where the
+	// centres are 60 by 80, so a rule about corners re-seeded about centres would
+	// double its own value on the way through the panel's `<select>`.
+	const corners = updateConstraint(far.scene, far.id, { anchor: "topLeft" });
+	const asBearing = retargetConstraint(corners, far.id, { kind: "bearing" });
+	assert.equal(rule(asBearing, far.id)?.anchor, "topLeft");
+	assert.equal(ruleValue(rule(asBearing, far.id)), "53.13deg");
+	const backAgain = retargetConstraint(asBearing, far.id, { kind: "distance" });
+	assert.equal(ruleValue(rule(backAgain, far.id)), "50px");
+
+	// An anchor no kind offers is not kept, and an absent one is the centre.
+	const aligned = retargetConstraint(corners, far.id, { kind: "align" });
+	assert.equal(rule(aligned, far.id)?.anchor, undefined);
+	assert.equal(
+		rule(retargetConstraint(aligned, far.id, { kind: "distance" }), far.id)?.anchor,
+		"center",
+	);
+});
+
+test("a bearing wraps into one turn rather than reading back as a negative angle", () => {
+	// The second member up and to the left of the first: `atan2` answers
+	// -126.87deg, and the document stores the same direction once round.
+	const scene = setFrame(withAnchors(), "b", box(-90, -120, 100, 120));
+	const way = addConstraint(scene, "bearing", ["a", "b"]);
+	assert.equal(ruleValue(rule(way.scene, way.id)), "233.13deg");
+	// Same pair, same triangle, so the distance is the one the other case reads.
+	const far = addConstraint(scene, "distance", ["a", "b"]);
+	assert.equal(ruleValue(rule(far.scene, far.id)), "100px");
+
+	// A member the tree does not hold has no point to be about, which is a seed
+	// nobody reads rather than a throw — the rule is refused before it is solved.
+	const ghost = addConstraint(scene, "distance", ["a", "nobody"]);
+	assert.equal(ruleValue(rule(ghost.scene, ghost.id)), "0px");
+});
+
+test("a sketch seed is one scalar key, aimed and forgotten by these two edits", () => {
+	const scene = withAnchors();
+	const at = { x: -60 * P, y: -80 * P };
+	const aimed = setSketchSeed(scene, "a", at);
+
+	// One string, because `reconcile.ts` merges an object per key and two peers
+	// who both aimed one node would otherwise produce one peer's x beside the
+	// other's y — an aim neither of them had. Round-tripped through the one
+	// parser that understands the spelling.
+	assert.equal(node(aimed, "a")?.sketchSeed, `${at.x},${at.y}`);
+	const parsed = node(aimed, "a");
+	assert.deepEqual(parsed && seedOf(parsed), at);
+
+	// Aiming at the same place twice is not an edit, and neither is aiming a node
+	// the document does not hold — undo is a stack of documents, so an entry that
+	// changes nothing is an entry that undoes nothing.
+	assert.equal(setSketchSeed(aimed, "a", at), aimed);
+	assert.equal(setSketchSeed(scene, "nobody", at), scene);
+
+	// Cleared to absence rather than to a blank, because absent *is* the default:
+	// the node starts from wherever it sits.
+	const forgotten = clearSketchSeed(aimed, "a");
+	assert.equal("sketchSeed" in (node(forgotten, "a") as object), false);
+	assert.equal(clearSketchSeed(scene, "a"), scene);
+	assert.equal(clearSketchSeed(scene, "nobody"), scene);
+
+	// And the aim is where the second solver starts, so it is where a new rule
+	// measures from: `a` aimed 60 by 80 back from where it sits doubles the
+	// separation the same pair reads with no aim at all.
+	const far = addConstraint(aimed, "distance", ["a", "b"]);
+	assert.equal(ruleValue(rule(far.scene, far.id)), "200px");
+});
+
+test("sketch seeds never mutate the document they are read out of", () => {
+	const scene = withAnchors();
+	const snapshot = JSON.stringify(scene);
+	setSketchSeed(scene, "a", { x: 1, y: 2 });
+	clearSketchSeed(setSketchSeed(scene, "a", { x: 1, y: 2 }), "a");
+	addConstraint(scene, "distance", ["a", "b"]);
+	assert.equal(JSON.stringify(scene), snapshot, "undo relies on immutability");
 });

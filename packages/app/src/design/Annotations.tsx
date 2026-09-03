@@ -1,4 +1,8 @@
-import type { Annotation } from "@clingo-design/design-core";
+import type {
+	Annotation,
+	AxialAnnotation,
+	RayAnnotation,
+} from "@clingo-design/design-core";
 
 import styles from "./Annotations.module.css";
 import { canvasPoint } from "./viewport";
@@ -36,63 +40,116 @@ export interface AnnotationsProps {
  * coordinates. What `annotate` answers with is the *design's* coordinates,
  * which are EMU, so each end of a mark crosses through `viewport.ts` on its way
  * into an attribute; only the notation around it is a pixel count.
+ *
+ * **Which mark is drawn is a switch on `note.shape` and nothing else.** The two
+ * families do not share a body because they do not share a coordinate system: a
+ * `line` and a `span` are one number on one axis and a run along the other, and
+ * a `ray` is two whole points. Reading `note.axis` off a ray was the bug the
+ * union exists to make impossible, so the narrowing is left to the type rather
+ * than done by hand.
  */
 export function Annotations({ notes }: AnnotationsProps) {
 	if (notes.length === 0) return null;
 	return (
 		<svg className={styles.marks} data-role="annotations" aria-hidden="true">
-			{notes.map((note, i) => {
-				// One coordinate is fixed and the other runs; which is which is the
-				// difference between standing across the design and measuring along
-				// it. Naming them once keeps both cases to one piece of drawing.
-				const line =
-					note.shape === "line"
-						? { along: note.axis === "x" ? "y" : "x", at: note.at }
-						: { along: note.axis, at: note.at };
-				const horizontal = line.along === "x";
-				const a = canvasPoint(
-					horizontal
-						? { x: note.from, y: line.at }
-						: { x: line.at, y: note.from },
-				);
-				const b = canvasPoint(
-					horizontal ? { x: note.to, y: line.at } : { x: line.at, y: note.to },
-				);
-				const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-				return (
-					<g
-						key={`${note.constraint}-${i}`}
-						className={styles.mark}
-						data-annotation={note.constraint}
-						data-kind={note.kind}
-						data-shape={note.shape}
-					>
-						<line x1={a.x} y1={a.y} x2={b.x} y2={b.y} />
-						{note.shape === "span"
-							? [a, b].map((end) => (
-									<line
-										key={`${end.x},${end.y}`}
-										x1={horizontal ? end.x : end.x - TICK}
-										y1={horizontal ? end.y - TICK : end.y}
-										x2={horizontal ? end.x : end.x + TICK}
-										y2={horizontal ? end.y + TICK : end.y}
-									/>
-								))
-							: null}
-						{note.label !== undefined ? (
-							<text
-								className={styles.label}
-								x={mid.x + (horizontal ? 0 : LIFT)}
-								y={mid.y - (horizontal ? LIFT : 0)}
-								textAnchor={horizontal ? "middle" : "start"}
-								dominantBaseline={horizontal ? "auto" : "middle"}
-							>
-								{note.label}
-							</text>
-						) : null}
-					</g>
-				);
-			})}
+			{notes.map((note, i) => (
+				<g
+					key={`${note.constraint}-${i}`}
+					className={styles.mark}
+					data-annotation={note.constraint}
+					data-kind={note.kind}
+					data-shape={note.shape}
+				>
+					{note.shape === "ray" ? <Ray note={note} /> : <Axial note={note} />}
+				</g>
+			))}
 		</svg>
+	);
+}
+
+/**
+ * A rule about a coordinate: a line standing across the design, or a dimension
+ * measured along it.
+ *
+ * One coordinate is fixed and the other runs; which is which is the difference
+ * between standing across the design and measuring along it. Naming them once
+ * keeps both cases to one piece of drawing.
+ */
+function Axial({ note }: { note: AxialAnnotation }) {
+	const line =
+		note.shape === "line"
+			? { along: note.axis === "x" ? "y" : "x", at: note.at }
+			: { along: note.axis, at: note.at };
+	const horizontal = line.along === "x";
+	const a = canvasPoint(
+		horizontal ? { x: note.from, y: line.at } : { x: line.at, y: note.from },
+	);
+	const b = canvasPoint(
+		horizontal ? { x: note.to, y: line.at } : { x: line.at, y: note.to },
+	);
+	const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+	return (
+		<>
+			<line x1={a.x} y1={a.y} x2={b.x} y2={b.y} />
+			{note.shape === "span"
+				? [a, b].map((end) => (
+						<line
+							key={`${end.x},${end.y}`}
+							x1={horizontal ? end.x : end.x - TICK}
+							y1={horizontal ? end.y - TICK : end.y}
+							x2={horizontal ? end.x : end.x + TICK}
+							y2={horizontal ? end.y + TICK : end.y}
+						/>
+					))
+				: null}
+			{note.label !== undefined ? (
+				<text
+					className={styles.label}
+					x={mid.x + (horizontal ? 0 : LIFT)}
+					y={mid.y - (horizontal ? LIFT : 0)}
+					textAnchor={horizontal ? "middle" : "start"}
+					dominantBaseline={horizontal ? "auto" : "middle"}
+				>
+					{note.label}
+				</text>
+			) : null}
+		</>
+	);
+}
+
+/**
+ * A rule about two points: the hairline between them, and one number.
+ *
+ * A single `<line>`, deliberately — no ticks and no arrowheads. A ray already
+ * runs at whatever angle the design put it at, and end ticks drawn square to
+ * the page would sit at a different angle to every one of them; a tick that is
+ * not square to the thing it ends reads as a second mark rather than as
+ * notation. The dashes and the non-scaling stroke come from the stylesheet with
+ * every other mark, because a Euclidean rule is a note in the margin exactly as
+ * much as an alignment is.
+ *
+ * The label rides the midpoint and is lifted straight up the page rather than
+ * along the ray's normal: it is a number to be read, and a number rotated to
+ * follow a line is a number nobody reads. Centred, so it lands on the hairline
+ * whichever way the ray runs.
+ */
+function Ray({ note }: { note: RayAnnotation }) {
+	const a = canvasPoint(note.a);
+	const b = canvasPoint(note.b);
+	return (
+		<>
+			<line x1={a.x} y1={a.y} x2={b.x} y2={b.y} />
+			{note.label !== undefined ? (
+				<text
+					className={styles.label}
+					x={(a.x + b.x) / 2}
+					y={(a.y + b.y) / 2 - LIFT}
+					textAnchor="middle"
+					dominantBaseline="auto"
+				>
+					{note.label}
+				</text>
+			) : null}
+		</>
 	);
 }

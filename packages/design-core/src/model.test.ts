@@ -1471,3 +1471,55 @@ test("two readings of one answer set are the same reading, whatever order the at
 	assert.deepEqual(Object.keys(backwards.byId), Object.keys(forwards.byId));
 	assert.ok(Object.keys(forwards.states).length > 0, "there was something to sort");
 });
+
+/* ------------------------------------------------------------------ */
+/* Coordinates decided outside the answer set                          */
+/* ------------------------------------------------------------------ */
+
+test("an override wins over the answer set, per key and not per node", async () => {
+	// `Universe.model` is `readModel(atoms)` and `readModel` computes its own
+	// `readSolved` — it never sees `Universe.solved`. So a second solver's answer
+	// reaches the picture through this parameter or it does not reach it at all:
+	// `Editor.tsx` reads `universe.solved` while `Artboard.tsx`, the posters and
+	// every exported file draw `universe.model`, and without the override one
+	// document would be drawn two contradictory ways at once.
+	const scene: Scene = {
+		...emptyScene(),
+		nodes: [
+			{
+				...makeNode("frame", { x: 0, y: 0, width: px(400), height: px(120) }, {
+					id: "row",
+				}),
+				layout: makeLayout({ direction: "row" }),
+				children: [
+					makeNode("rect", { x: 0, y: 0, width: px(60), height: px(60) }, { id: "one" }),
+					makeNode("rect", { x: 0, y: 0, width: px(60), height: px(60) }, { id: "two" }),
+				],
+			},
+		],
+	};
+	const atoms = await firstModel(scene);
+	const plain = readModel(atoms);
+	// The row placed its children, so both coordinates are the layout's rather
+	// than the document's — which is what makes the assertion below discriminating.
+	assert.notEqual(plain.byId.one.frame.y, 0);
+
+	const moved = readModel(atoms, { one: { x: px(111) } });
+	assert.equal(moved.byId.one.frame.x, px(111));
+	// **Per key.** A spread at the node level would replace the whole record and
+	// delete every coordinate the override does not carry, so this `y` would fall
+	// back to the stored frame's nought and the node would jump out of its slot —
+	// with the answer set still saying otherwise.
+	assert.equal(moved.byId.one.frame.y, plain.byId.one.frame.y);
+	assert.equal(moved.byId.two.frame.x, plain.byId.two.frame.x);
+	// And everything else is the reading it always was, which is what keeps the
+	// goldens' no-argument call meaning what it meant.
+	assert.deepEqual(readModel(atoms), plain);
+});
+
+test("an override about a node the answer set never mentions changes nothing", async () => {
+	const atoms = await firstModel(card());
+	const plain = readModel(atoms);
+	assert.deepEqual(readModel(atoms, {}), plain);
+	assert.deepEqual(readModel(atoms, { nobody: { x: px(9) } }), plain);
+});

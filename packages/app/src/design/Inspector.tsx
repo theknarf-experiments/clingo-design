@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
 	CHILD_PROPS,
+	type SketchReport,
 	CSS_UNITS,
 	MAX_TALLY,
 	tallyOf,
@@ -125,6 +126,7 @@ import {
 	boxOf,
 	camerasIn,
 	cameraOf,
+	clearSketchSeed,
 	clearSpatial,
 	clearTurn,
 	constraintMemberNode,
@@ -135,6 +137,7 @@ import {
 	setStateTurn,
 	setTurnValue,
 	setViewportCamera,
+	sketchPlacers,
 	spatialFrozen,
 	turnOf,
 	DEFAULT_LINK_TRIGGER,
@@ -156,6 +159,7 @@ import {
 	guideFieldLabel,
 } from "./guideFields";
 import { documentUnit, shownEmu, shownLength } from "./lengths";
+import { seedRow, sketchRefusals } from "./sketchFields";
 import styles from "./Inspector.module.css";
 
 export interface InspectorProps {
@@ -175,6 +179,21 @@ export interface InspectorProps {
 	 * coordinates the rules have left a choice about.
 	 */
 	freedom?: Freedom;
+	/**
+	 * What the second solver made of the design on screen, for the coordinates it
+	 * placed itself.
+	 *
+	 * Read for `owned` and for nothing else, and that field is the *only* source
+	 * for the question anywhere in the studio. The freedom probe cannot answer
+	 * about a sketch coordinate — a node named only by a sketch rule has no
+	 * `gprobe/3` atom in the grounding, so asking would come back with `Travel`
+	 * null on both axes, which this panel would read as *not pinned* and offer as
+	 * a freely editable field for the one node whose position the sketch owns.
+	 * So the hook takes those coordinates out of what it probes, and they arrive
+	 * here instead. The two sets are disjoint by construction, so there is no
+	 * precedence to settle.
+	 */
+	sketch?: SketchReport | null;
 	/** Alternatives the user has fixed, by variable. */
 	pins: Readonly<Record<string, number>>;
 	onPin: (variable: string, index: number | null) => void;
@@ -2048,6 +2067,7 @@ export function Inspector({
 	solved,
 	reach,
 	freedom = {},
+	sketch = null,
 	pins,
 	onPin,
 	why,
@@ -2253,6 +2273,56 @@ export function Inspector({
 	/** Rules that name this node and have been left saying nothing. */
 	const inert = inertRules(scene, node, picks);
 	/**
+	 * The same fact for the kinds `inertRules` structurally cannot see.
+	 *
+	 * A second list rather than a wider `InertConstraint`, because the two are
+	 * derived from two different twins: that one is `gnoedge/2` and this one is
+	 * `sknopoint/1`, and an `InertConstraint` is keyed by an `Edge` a sketch kind
+	 * has none of. `inertMembers` returns `[]` on its first line for every
+	 * edgeless kind, so without this the four refusal sentences in `sketch.ts`
+	 * had no reader anywhere in this panel and a distance on a turned box's
+	 * corner sat green while governing nothing. Rendered through the one block
+	 * below: to a designer, "this rule says nothing about this member" is one
+	 * fact and not two.
+	 */
+	const sketchInert = sketchRefusals(scene, node, picks);
+	/**
+	 * Where the sketch starts looking for this node, if a drag has ever said.
+	 *
+	 * Off the stored seed alone — see {@link seedRow}. Not gated on
+	 * `sketch?.owned` and not on `placed`: an aim is document state, it outlives
+	 * the rule that prompted the drag, and it goes on choosing which placement
+	 * every later solve lands in. The one case where showing it matters most is
+	 * exactly the case a gate would hide — a node with a seed and no sketch rule
+	 * left to explain it.
+	 */
+	const seed = seedRow(scene, node);
+	/**
+	 * Which of this node's coordinates the second solver decided.
+	 *
+	 * Off `SketchReport.owned` and off nothing else — see the prop's own comment.
+	 * A node with no free axis is omitted from that record rather than carried as
+	 * an empty list, so absence and emptiness mean the same thing here.
+	 */
+	const sketchAxes = sketch?.owned[node.id] ?? [];
+	/**
+	 * And which rules did it, which is the one thing the report does not carry.
+	 *
+	 * The document is asked for the *names* only. Asking it which coordinates
+	 * would be re-deriving `sksolved` minus `skheld` in TypeScript, and it would
+	 * answer differently the first time a member is a datum, a state copy or a
+	 * turned box — the cases the program's own `sknopoint/1` excludes and a walk
+	 * of `scene.constraints` does not.
+	 *
+	 * Through `sketchPlacers` rather than the reduction the rest of this file
+	 * uses, because those are the cases: a member that *reduces* to this node is
+	 * this node to simplex and is `sknopoint/1` to the sketch layer, so a rule
+	 * naming `stt(b1,hover,label)` decides nothing about `label` and must not be
+	 * credited with its x and y.
+	 */
+	const sketchRules =
+		sketchAxes.length === 0 ? [] : sketchPlacers(scene, node, picks);
+	/**
 	 * The cameras a view could look through, and the one it does.
 	 *
 	 * Both asked of `scene` rather than of the node in hand, which is what
@@ -2331,6 +2401,12 @@ export function Inspector({
 	 * out is not a size to type into.
 	 */
 	function dimensionPinned(dim: Dimension): boolean {
+		// A coordinate the sketch layer owns is not a number to type: the next
+		// solve decides it from the rules and from where this node is aimed, so a
+		// field here would be overwritten the moment it was committed. The probe
+		// is not consulted for it and could not answer about it — the two sets are
+		// disjoint, so this is a first clause and not a precedence.
+		if ((dim === "x" || dim === "y") && sketchAxes.includes(dim)) return true;
 		const probed = freedom[node.id]?.[dim];
 		if (probed) return isPinned(probed);
 		if (managed && FRAME_DIMS[dim].role === "pos") return true;
@@ -3296,7 +3372,7 @@ export function Inspector({
 			    the two answer different questions: that one is "which rules are
 			    inert", this one is "why is nothing happening to the thing I have
 			    selected". */}
-			{inert.length > 0 ? (
+			{inert.length > 0 || sketchInert.length > 0 ? (
 				<div data-role="inert-rules">
 					<h3>Rules that say nothing</h3>
 					{inert.map((rule) => (
@@ -3311,6 +3387,103 @@ export function Inspector({
 							<span data-role="refused-edge">{rule.why}</span>
 						</p>
 					))}
+					{/* The sketch layer's half of the same fact, in the same rows. Its own
+					    data-role because the reason is about a *point* and not an edge:
+					    a rule that reads a turned box's corner, a datum, a copy or a node
+					    a rule derived is refused a point, and `refusedAnchor` is the only
+					    place any of those four sentences is written down. */}
+					{sketchInert.map((rule) => (
+						<p
+							key={`${rule.constraint}/${rule.culprit}`}
+							className={styles.refused}
+							data-role="inert-rule"
+							data-constraint={rule.constraint}
+							data-culprit={rule.culprit}
+						>
+							<strong>{rule.constraint}</strong>{" "}
+							<span data-role="refused-anchor">{rule.why}</span>
+						</p>
+					))}
+				</div>
+			) : null}
+
+			{/* Where this node is, when it is not the linear solver that decided.
+			    Said here for the reason the block above it is said: a coordinate the
+			    second solver owns has a dead field in the Position grid, and a field
+			    that will not take a number and does not say why is the panel keeping
+			    a secret. It is also the one place the aim is explained, because
+			    dragging is the only handle a designer has on *which* of several
+			    placements a sketch lands in. */}
+			{sketchAxes.length > 0 ? (
+				<div data-role="sketch-placed">
+					<h3>Placed by a sketch rule</h3>
+					{sketchAxes.map((axis) => (
+						<p
+							key={axis}
+							className={styles.refused}
+							data-role="sketch-axis"
+							data-axis={axis}
+						>
+							<strong>{axis}</strong>{" "}
+							{sketchRules.length === 0
+								? "is decided by a sketch rule."
+								: `is decided by ${sketchRules.map((c) => `“${c.id}”`).join(", ")}.`}
+						</p>
+					))}
+					<p className={styles.note} data-role="sketch-placed-why">
+						A distance, a bearing or a line at any angle is not a relation the
+						linear solver can measure, so a second one decides these numbers
+						after it. Drag this layer to aim that solver somewhere else — the
+						aim is what picks between placements when the rules leave more than
+						one.
+					</p>
+				</div>
+			) : null}
+
+			{/* The aim itself, which until now could be set and never seen.
+			    A drag on a sketched node writes a starting point onto the node and
+			    that point is what picks a branch when the rules leave more than one
+			    — so a designer who dragged once had permanently chosen a placement
+			    with nothing on screen admitting it and nothing able to undo it a
+			    week later. §8.2 of docs/planegcs-spec.md.
+
+			    Deliberately outside the block above it, and not gated on
+			    `sketch?.owned` or on `placed`. An aim is document state: it survives
+			    the rule that prompted the drag, it survives a solve that never used
+			    it, and the case where seeing it matters most is a node carrying one
+			    with no sketch rule left to explain where it came from. Read-only
+			    numbers, because a seed is the record of a gesture — a field to type
+			    one into would be a second way to aim with no drag behind it. */}
+			{seed ? (
+				<div data-role="sketch-seed">
+					<h3>Where the sketch starts</h3>
+					<div className={styles.resolved} data-resolved="sketch-seed-x">
+						<span className={styles.fieldLabel}>x</span>
+						<span className={styles.resolvedValue} data-role="sketch-seed-x">
+							{seed.x}
+						</span>
+					</div>
+					<div className={styles.resolved} data-resolved="sketch-seed-y">
+						<span className={styles.fieldLabel}>y</span>
+						<span className={styles.resolvedValue} data-role="sketch-seed-y">
+							{seed.y}
+						</span>
+					</div>
+					<p className={styles.note} data-role="sketch-seed-why">
+						Dragged to here. The sketch starts looking from this point, which is
+						what picks between placements when the rules leave more than one.
+					</p>
+					<button
+						type="button"
+						className={styles.follow}
+						data-role="forget-seed"
+						title="Forget the starting point, so the sketch looks from wherever this sits"
+						onClick={() =>
+							onSceneChange((prev) => clearSketchSeed(prev, node.id))
+						}
+					>
+						Forget
+					</button>
 				</div>
 			) : null}
 

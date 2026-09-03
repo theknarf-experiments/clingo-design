@@ -58,6 +58,7 @@ import {
 	tallyOf,
 	type Term,
 	wordOf,
+	writeAngle,
 } from "./values.ts";
 import { parseAtom } from "./atoms.ts";
 
@@ -2896,6 +2897,35 @@ export interface SceneNode {
 	 */
 	turn?: TurnValue;
 	/**
+	 * Where a sketch rule starts looking for this node — see
+	 * `docs/planegcs-spec.md` §4.
+	 *
+	 * Two whole EMU under **one scalar key**, spelled `"<x>,<y>"` — not a
+	 * `{ x, y }` object, and not a {@link Value}. `seedOf` and `spellSeed` in
+	 * `sketch.ts` are the only reader and the only writer of the spelling.
+	 *
+	 * Not a `Value`, because a starting point is a numerical hint and not a
+	 * design decision: it has no alternatives, names no token, and does not vary
+	 * between universes. Giving it a `Value` would have made "where the solver
+	 * began" a thing the multiverse branches on, which is a sentence with no
+	 * meaning.
+	 *
+	 * Not an object, and that is the sharp part. `reconcile.ts`'s `assign`
+	 * recurses into any object-vs-object pair, so a nested `{ x, y }` is written
+	 * into Automerge as a map with independent last-writer-wins on each key —
+	 * exactly like {@link frame}. A mixed `frame` merge is a small visible offset
+	 * a designer drags back; a mixed *seed* selects which branch a nonlinear
+	 * solve lands in, so the design jumps to a placement neither peer aimed at,
+	 * with nothing marking it as a merge artefact. A string is not a branch, so
+	 * the reconciler replaces it whole and two peers' aims stay two whole aims.
+	 *
+	 * Absent is the node's placed frame in this universe, which is where every
+	 * document written before this field began. So there is no migration, no
+	 * normalizer branch and no format marker. Written by exactly one gesture —
+	 * dragging a node the sketch layer owns — and by no solve.
+	 */
+	sketchSeed?: string;
+	/**
 	 * On a `viewport`: the id of the `camera` node the view looks through.
 	 *
 	 * A dangling id derives nothing rather than failing, the way a dangling
@@ -3120,6 +3150,9 @@ export type ConstraintKind =
 	| "equalSize"
 	| "symmetric"
 	| "pin"
+	| "distance"
+	| "bearing"
+	| "collinear"
 	| "custom";
 
 /**
@@ -3236,6 +3269,72 @@ const PLACES = EDGE_NAMES.filter((e) => EDGES[e].role === "pos");
 const SPANS = EDGE_NAMES.filter((e) => EDGES[e].role === "span");
 const AXES = EDGE_NAMES.filter((e) => EDGES[e].role === "axis");
 
+/* ------------------------------------------------------------------ */
+/* Anchors: an edge is a coordinate, an anchor is a point              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A named point on a node's box — the nine handles, in reading order.
+ *
+ * An {@link Edge} names one coordinate on one axis, which is all a linear
+ * relation between two boxes ever needs. A Euclidean one needs a *pair*, and
+ * pretending an edge is a point would be one word for two ideas. See
+ * `docs/planegcs-spec.md` §1.2.
+ */
+export type Anchor =
+	| "topLeft"
+	| "top"
+	| "topRight"
+	| "left"
+	| "center"
+	| "right"
+	| "bottomLeft"
+	| "bottom"
+	| "bottomRight";
+
+/**
+ * The nine names in reading order, laid out as the grid they are, so the
+ * derivation below can take each one's two places off its position.
+ *
+ * Written out because a name is the one thing about an anchor that is not
+ * derivable: `topLeft` is the lead place on both axes, and nothing in
+ * {@link EDGES} spells that pair. Everything else is.
+ */
+const ANCHOR_GRID: readonly (readonly Anchor[])[] = [
+	["topLeft", "top", "topRight"],
+	["left", "center", "right"],
+	["bottomLeft", "bottom", "bottomRight"],
+];
+
+/** The three places a row and a column of that grid run through. */
+const ANCHOR_PLACES = ["lead", "mid", "trail"] as const;
+
+/**
+ * Which two edges an anchor is, so the table cannot drift from {@link EDGES}.
+ *
+ * Derived rather than written out: the x member is always a `pos` edge on the x
+ * axis and the y member a `pos` edge on y, and both are looked up through
+ * {@link edgeOn} exactly as `glead`/`gmid`/`gtrail` are in the program. A tenth
+ * anchor would be a tenth pair of places, and there is no tenth pair.
+ */
+export const ANCHORS: Record<Anchor, { x: Edge; y: Edge }> = Object.fromEntries(
+	ANCHOR_GRID.flatMap((row, down) =>
+		row.map((anchor, across) => [
+			anchor,
+			{
+				x: edgeOn("x", ANCHOR_PLACES[across]),
+				y: edgeOn("y", ANCHOR_PLACES[down]),
+			},
+		]),
+	),
+) as Record<Anchor, { x: Edge; y: Edge }>;
+
+/**
+ * The nine, in reading order — which is also why `ANCHOR_NAMES[4]` is
+ * `center`, the anchor a rule means when nobody said.
+ */
+export const ANCHOR_NAMES = Object.keys(ANCHORS) as Anchor[];
+
 /**
  * One term of the sum a fresh geometric constraint seeds its value from.
  *
@@ -3254,10 +3353,10 @@ export interface SeedTerm {
  *
  * The shapes, not the kinds: `edges` is the quantity the members share,
  * `between` the distance from one to the next, `mirror` the line they balance
- * across. A new kind picks one of these rather than growing the overlay a case
- * — see `annotate.ts`.
+ * across, `ray` the hairline from one anchor to another. A new kind picks one of
+ * these rather than growing the overlay a case — see `annotate.ts`.
  */
-export type Annotated = "none" | "edges" | "between" | "mirror";
+export type Annotated = "none" | "edges" | "between" | "mirror" | "ray";
 
 export interface ConstraintSpec {
 	label: string;
@@ -3288,8 +3387,38 @@ export interface ConstraintSpec {
 	 * the solver — see the geometry rules in `compile.ts`.
 	 */
 	geometric: boolean;
+	/**
+	 * Which solver decides this kind.
+	 *
+	 * `"linear"` is every kind that shipped: the relation becomes a clingo-lpx
+	 * `&sum` theory atom inside the answer set, and the members' frames are
+	 * handed to simplex through `gkind/1` -> `gsolved/1`. `"sketch"` is a
+	 * relation no linear encoding exists for — a Euclidean distance, a bearing,
+	 * three points on a line — so the program states the *rule* and states
+	 * nothing about the *numbers*, and PlaneGCS decides them afterwards from the
+	 * answer set. See `docs/planegcs-spec.md`.
+	 *
+	 * A column rather than a derivation off {@link geometric}, and this is the
+	 * load-bearing part: `geometric` means "this rule is about where a node is
+	 * rather than what colour it is", which is true of both engines and is what
+	 * the Rules panel, `annotate.ts`, `machines.ts` and `edits.ts` are all
+	 * asking when they read it. `gkind/1` was a pure mirror of `geometric` and
+	 * must stop being one, or a sketch kind would drag its members into
+	 * `gsolved/1`, mint `lv`/`lsz` for them and enrol them in the shared
+	 * `&minimize` — two solvers claiming one rectangle, silently.
+	 */
+	engine: "linear" | "sketch";
 	/** Which quantities it may be about; empty for the property kinds. */
 	edges: Edge[];
+	/**
+	 * Which points it may be about; empty for every kind that reads an edge.
+	 *
+	 * The twin of {@link edges}, and exactly one of the two is non-empty on
+	 * every kind. `shapeFor` and the compiler both branch on which, rather than
+	 * on {@link engine}, because the question they are asking is "does this kind
+	 * read an edge or a point" and a table answers it.
+	 */
+	anchors: Anchor[];
 	/**
 	 * What {@link Constraint.value} is, for the kinds that read one; absent for
 	 * the kinds that do not. A type rather than a flag because the value is an
@@ -3323,7 +3452,9 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
+		engine: "linear",
 		edges: [],
+		anchors: [],
 		seed: [],
 		annotation: "none",
 	},
@@ -3335,7 +3466,9 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
+		engine: "linear",
 		edges: [],
+		anchors: [],
 		seed: [],
 		annotation: "none",
 	},
@@ -3347,7 +3480,9 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: false,
+		engine: "linear",
 		edges: [],
+		anchors: [],
 		seed: [],
 		annotation: "none",
 	},
@@ -3359,7 +3494,9 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: true,
+		engine: "linear",
 		edges: PLACES,
+		anchors: [],
 		seed: [],
 		annotation: "edges",
 	},
@@ -3373,7 +3510,9 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 2,
 		maxNodes: 2,
 		geometric: true,
+		engine: "linear",
 		edges: AXES,
+		anchors: [],
 		valueType: "length",
 		// From the near side of the first member to the far side of the second.
 		seed: [
@@ -3390,7 +3529,9 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 2,
 		maxNodes: Number.POSITIVE_INFINITY,
 		geometric: true,
+		engine: "linear",
 		edges: SPANS,
+		anchors: [],
 		seed: [],
 		annotation: "edges",
 	},
@@ -3405,7 +3546,9 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 2,
 		maxNodes: 3,
 		geometric: true,
+		engine: "linear",
 		edges: AXES,
+		anchors: [],
 		valueType: "length",
 		// The line already halfway between the two centres.
 		seed: [
@@ -3422,10 +3565,79 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 1,
 		maxNodes: 1,
 		geometric: true,
+		engine: "linear",
 		edges: [...PLACES, ...SPANS],
+		anchors: [],
 		valueType: "length",
 		seed: [{ slot: 1, place: "self", weight: 1 }],
 		annotation: "edges",
+	},
+	/**
+	 * The three the second solver decides — see `docs/planegcs-spec.md`.
+	 *
+	 * Each is provably outside clingo-lpx rather than merely inconvenient there.
+	 * A distance is `sqrt(dx^2 + dy^2) = V`, and squaring both sides leaves a
+	 * quadratic; a bearing is `atan2(dy,dx) = T`, and `dy*cos T - dx*sin T = 0`
+	 * has irrational coefficients for every angle that is not a multiple of 90
+	 * degrees while the program's coefficients must be integers; three points on
+	 * one line is a determinant, which is bilinear. So these three state their
+	 * rule in the program and state nothing about their numbers, and the
+	 * `engine` column above is what keeps them out of `gkind/1`.
+	 */
+	distance: {
+		label: "Distance",
+		summary: "sit {v} apart",
+		counted: false,
+		distinct: false,
+		minNodes: 2,
+		maxNodes: 2,
+		geometric: true,
+		engine: "sketch",
+		edges: [],
+		anchors: ANCHOR_NAMES,
+		valueType: "length",
+		// Straight-line, so no combination of lead and trail edges measures it.
+		// The seed is computed by `currentValue`'s sketch branch instead, and this
+		// list stays empty rather than lying about a sum.
+		seed: [],
+		annotation: "ray",
+	},
+	bearing: {
+		// Measured clockwise from straight right, because that is the direction
+		// the document's x grows and its y grows downwards. A bearing on its own
+		// does not say how far: pair it with a distance to pin the point, or
+		// leave it and the design has a ray of answers.
+		label: "Bearing",
+		summary: "lies {v} from the first",
+		counted: false,
+		distinct: false,
+		minNodes: 2,
+		maxNodes: 2,
+		geometric: true,
+		engine: "sketch",
+		edges: [],
+		anchors: ANCHOR_NAMES,
+		valueType: "angle",
+		seed: [],
+		annotation: "ray",
+	},
+	collinear: {
+		// Three, not two: any two points are on a line, so a two-member
+		// `collinear` is a rule that is true by arithmetic and says nothing. The
+		// same test `minNodes` applies everywhere — "fewest members for the
+		// constraint to say anything".
+		label: "In a line",
+		summary: "fall on one line",
+		counted: false,
+		distinct: false,
+		minNodes: 3,
+		maxNodes: Number.POSITIVE_INFINITY,
+		geometric: true,
+		engine: "sketch",
+		edges: [],
+		anchors: ANCHOR_NAMES,
+		seed: [],
+		annotation: "ray",
 	},
 	/**
 	 * A rule the user wrote, with a switch and a name.
@@ -3463,7 +3675,9 @@ export const CONSTRAINT_KINDS: Record<ConstraintKind, ConstraintSpec> = {
 		minNodes: 0,
 		maxNodes: 0,
 		geometric: false,
+		engine: "linear",
 		edges: [],
+		anchors: [],
 		seed: [],
 		annotation: "none",
 	},
@@ -3626,9 +3840,18 @@ export const weightOf = (constraint: Constraint): number =>
  * members treats them as a set, while one with a ceiling reads them *by
  * position* — which side of a gap, which node is the mirror — and a set has no
  * positions to read. So an unbounded kind is exactly the kind a group can fill.
+ *
+ * Two fields rather than one since the sketch kinds landed, and the second is
+ * not a special case: `collinear` is unbounded and still reads its members by
+ * position — the first two are the line the rest must fall on, and the overlay
+ * draws from the first to the last. A sketch rule's members also each need a
+ * point the document can keep a starting aim on, which a set a rule derived has
+ * no layer to hold. So the ceiling answers the question for the linear kinds and
+ * the engine answers it for these three.
  */
 export const rangesOverGroup = (kind: ConstraintKind): boolean =>
-	CONSTRAINT_KINDS[kind].maxNodes === Number.POSITIVE_INFINITY;
+	CONSTRAINT_KINDS[kind].maxNodes === Number.POSITIVE_INFINITY &&
+	CONSTRAINT_KINDS[kind].engine === "linear";
 
 /**
  * True when a kind has a subject in the document at all.
@@ -3754,6 +3977,21 @@ export interface Constraint {
 	limit?: number;
 	/** Which quantity, for the geometric kinds. */
 	edge?: Edge;
+	/**
+	 * Which point on each member a sketch rule is about — see {@link ANCHORS}.
+	 *
+	 * Absent on every linear kind and on every document written before sketch
+	 * rules existed, which is why it is optional rather than defaulted: the
+	 * compiler reads `spec.anchors` to decide whether to emit `c_anchor/2` at
+	 * all, exactly as it reads `spec.edges` for `c_edge/2`.
+	 *
+	 * One anchor per constraint, not one per member — the same shape {@link edge}
+	 * already has, since `align ... on left` is every member's left. An anchor per
+	 * slot would be a document field whose length has to be kept equal to
+	 * `nodes.length` through every retarget, and where a designer really wants
+	 * "this corner to that corner" the answer is two rules.
+	 */
+	anchor?: Anchor;
 	/**
 	 * What a `gap`, a `pin` or a mirror line holds to — a length, so EMU.
 	 *
@@ -5616,6 +5854,20 @@ export function tokensFor(scene: Scene, prop: PropName): Token[] {
  */
 export const dimension = (emu: Emu, unit: Unit = DEFAULT_UNIT): Value =>
 	single(writeLength(emu, unit));
+
+/**
+ * A computed angle in thousandths of a degree, as the {@link Value} a
+ * constraint is stored as. {@link dimension}'s twin, one line of
+ * {@link writeAngle}, and the reason a `bearing` can be a rule at all.
+ *
+ * `bearing` is the first kind whose {@link ConstraintSpec.valueType} is not
+ * `"length"`, and every writer in the value path was length-only: a seeded
+ * bearing written through `dimension` would have stored `"0px"`, `mdegOf` would
+ * have refused it, and `sk_angle/2` would never have derived. The default unit
+ * is degrees rather than the document's, because a document's `unit` is a
+ * *length* unit and an angle has no opinion about millimetres.
+ */
+export const angleValue = (mdeg: number): Value => single(writeAngle(mdeg));
 
 /**
  * The length a constraint's value comes to in EMU, following whatever token it

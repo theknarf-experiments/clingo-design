@@ -1923,3 +1923,79 @@ test("no template gains a single field the third axis or the ladder added", () =
 		assert.deepEqual(seen, [], `${template.id} gained ${seen.join(", ")}`);
 	}
 });
+
+/* ------------------------------------------------------------------ */
+/* The sketch layer's two document fields                              */
+/* ------------------------------------------------------------------ */
+
+test("a rule about a point nobody has heard of is dropped, like a rule about an edge", () => {
+	// The twin of the edge check one relation over. `c_anchor(c1,middling)` is a
+	// fact `skanchor/2` never matches, so the rule would exist, be switched on,
+	// name its members and be about nowhere — a rule that silently does nothing,
+	// which is exactly what this reader exists to refuse.
+	const good = {
+		id: "k1",
+		kind: "distance",
+		prop: "fill",
+		nodes: ["a", "b"],
+		anchor: "topLeft",
+		enabled: true,
+	};
+	const scene = normalizeScene({
+		constraints: [good, { ...good, id: "k2", anchor: "middling" }],
+	});
+	assert.deepEqual(
+		scene.constraints.map((c) => c.id),
+		["k1"],
+	);
+	assert.equal(scene.constraints[0].anchor, "topLeft");
+	// And absence is still absence: every linear kind and every document written
+	// before sketch rules existed has no anchor at all, which is why the field is
+	// optional rather than defaulted.
+	const bare = normalizeScene({
+		constraints: [{ id: "k3", kind: "align", prop: "fill", nodes: ["a"], enabled: true }],
+	});
+	assert.equal(bare.constraints[0].anchor, undefined);
+});
+
+test("a starting aim is carried, and one the reader cannot read degrades to absence", () => {
+	// Two whole EMU under one scalar key. A dropped aim is a node that starts
+	// where it sits, which is what absence already means — so a corrupt one costs
+	// the design nothing, and no document needs migrating to gain the field.
+	const node = (id: string, sketchSeed?: unknown) => ({
+		id,
+		kind: "rect",
+		name: id,
+		frame: { x: 0, y: 0, width: 10, height: 10 },
+		props: {},
+		...(sketchSeed === undefined ? {} : { sketchSeed }),
+	});
+	const scene = normalizeScene({
+		nodes: [
+			node("kept", "9525,-3175"),
+			node("zeroed", "0,0"),
+			node("bare"),
+			node("wordy", "over there"),
+			node("halved", "9525.5,0"),
+			node("nested", { x: 9525, y: 0 }),
+			node("short", "9525"),
+		],
+	});
+	const seeds = Object.fromEntries(
+		scene.nodes.map((n) => [n.id, n.sketchSeed]),
+	);
+	assert.deepEqual(seeds, {
+		kept: "9525,-3175",
+		zeroed: "0,0",
+		bare: undefined,
+		wordy: undefined,
+		halved: undefined,
+		nested: undefined,
+		short: undefined,
+	});
+	// A child is read by the same walk, so the field survives at every depth.
+	const nested = normalizeScene({
+		nodes: [{ ...node("art", undefined), kind: "frame", children: [node("card", "10,20")] }],
+	});
+	assert.equal(nested.nodes[0].children?.[0].sketchSeed, "10,20");
+});

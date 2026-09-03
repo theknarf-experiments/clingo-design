@@ -44,9 +44,15 @@ importers:
       '@clingo-design/export-svg':
         specifier: workspace:*
         version: link:../export-svg
+      '@clingo-design/planegcs':
+        specifier: workspace:*
+        version: link:../planegcs
       '@clingo-design/vfs':
         specifier: workspace:*
         version: link:../vfs
+      '@salusoft89/planegcs':
+        specifier: 1.2.0
+        version: 1.2.0
       '@tanstack/react-hotkeys':
         specifier: 0.10.0
         version: 0.10.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -158,6 +164,9 @@ importers:
       '@clingo-design/clingo-wasm':
         specifier: workspace:*
         version: link:../clingo-wasm
+      '@clingo-design/planegcs':
+        specifier: workspace:*
+        version: link:../planegcs
     devDependencies:
       '@types/node':
         specifier: ^26.2.0
@@ -222,6 +231,19 @@ importers:
       '@clingo-design/export-core':
         specifier: workspace:*
         version: link:../export-core
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/planegcs:
+    dependencies:
+      '@salusoft89/planegcs':
+        specifier: 1.2.0
+        version: 1.2.0
     devDependencies:
       '@types/node':
         specifier: ^26.2.0
@@ -460,6 +482,9 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
+
+  '@salusoft89/planegcs@1.2.0':
+    resolution: {integrity: sha512-NcdWJnJRCnIDvM9yJD98Jm8qaK//wRqMEbJ0WtibKnhbzI484TjIEbYD6EVUZejndXGC9yBkuKgqXg+9buzi6Q==}
 
   '@tanstack/hotkeys@0.8.0':
     resolution: {integrity: sha512-vqH7X9nb0MTJ/O08++dB5bP9jgj4+BIPOUu/U+6myG86lDsirZSVSobpq5UQpE7nBuk62i8eIYeOhd+OMl/UrA==}
@@ -1176,6 +1201,8 @@ snapshots:
     optional: true
 
   '@rolldown/pluginutils@1.0.1': {}
+
+  '@salusoft89/planegcs@1.2.0': {}
 
   '@tanstack/hotkeys@0.8.0':
     dependencies:

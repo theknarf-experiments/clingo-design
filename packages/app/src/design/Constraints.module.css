@@ -56,6 +56,35 @@
 	border-radius: 5px;
 }
 
+/* The second solver's conflict. The conflict's colour, because two rules really
+   cannot both hold — and the preference note's weight, because the document is
+   satisfiable and the canvas is full of designs. The loud treatment above is
+   reserved for the state where there is nothing at all to look at. */
+.sketchConflict {
+	margin: 0;
+	padding: 0.4rem 0.5rem;
+	font-size: 0.74rem;
+	line-height: 1.45;
+	color: var(--dc-bad, #fca5a5);
+	background: var(--dc-raised);
+	border: 1px dashed color-mix(in srgb, var(--dc-bad, #fca5a5) 50%, transparent);
+	border-radius: 5px;
+}
+
+/* Not a conflict at all: the second solver ran out of steps. Warned rather than
+   blamed, in the same amber the inert notes use, because nothing here is wrong
+   with the rules and the design below is exact about everything else. */
+.adrift {
+	margin: 0;
+	padding: 0.4rem 0.5rem;
+	font-size: 0.74rem;
+	line-height: 1.45;
+	color: var(--dc-warn, #d9a441);
+	background: var(--dc-raised);
+	border: 1px dashed color-mix(in srgb, var(--dc-warn, #d9a441) 45%, transparent);
+	border-radius: 5px;
+}
+
 /* The ways out. Not loud: this is the constructive half, and the sentence above
    it has already said what is wrong. */
 .ways {
@@ -143,6 +172,16 @@
 .broken {
 	border-style: dashed;
 	border-color: color-mix(in srgb, currentColor 38%, transparent);
+}
+
+/* A rule that holds and says nothing new — more sketch rules than freedoms, and
+   they happen to agree. The dashed vocabulary `broken` established for
+   "satisfied, but you should know", in the warning colour rather than in the
+   text's own, because unlike a broken preference this is not the rule doing its
+   job: it is a rule that could be deleted without changing the design. */
+.redundant {
+	border-style: dashed;
+	border-color: var(--dc-warn, #d9a441);
 }
 
 .off {

@@ -117,6 +117,7 @@ import {
 	sceneContext,
 	selectionTargetOf,
 	setFrames,
+	setSketchSeed,
 	snapFrame,
 	travelFrom,
 	viewportOf,
@@ -129,6 +130,7 @@ import { Artboard } from "./Artboard";
 import { cx } from "./cx";
 import { gestures } from "./gesture";
 import { Guides } from "./Guides";
+import { sketchDrag } from "./seedDrag";
 import type { GizmoMode, SpatialEdit } from "@clingo-design/canvas-3d";
 
 import styles from "./Editor.module.css";
@@ -196,6 +198,28 @@ const OPEN = 200 * EMU_PER_PX;
  * because it is a mark on the drawing rather than a distance in the design.
  */
 const TICK = 4;
+
+/**
+ * Which undo entry a finished move belongs in.
+ *
+ * A drag that did nothing but aim one sketched node is a different kind of edit
+ * from a drag that placed things, and it says so — `sketch-seed:<id>`, per
+ * docs/planegcs-spec.md §4.4. It is still *one* key for the whole gesture,
+ * because the history coalesces on equality and two keys in one commit would
+ * split a single drag across two ⌘Z presses.
+ *
+ * Anything mixed — several aims, an aim beside a frame, an aim beside a
+ * reparent — is `"geometry"`, the key a frame drag has always used, because
+ * those are one gesture the designer will want back in one piece.
+ */
+function coalesceKey(
+	aimed: ReadonlyMap<string, unknown>,
+	staying: ReadonlyMap<string, unknown>,
+	rehomed: readonly string[],
+): string {
+	if (aimed.size !== 1 || staying.size > 0 || rehomed.length > 0) return "geometry";
+	return `sketch-seed:${[...aimed.keys()][0]}`;
+}
 
 /**
  * What the pointer is currently doing.
@@ -1578,19 +1602,82 @@ export function Editor({
 				// something dragged out of a layout lands back at the layout.
 				const dropped = { ...now.universe.solved, ...Object.fromEntries(local) };
 
+				/**
+				 * Which of the moved nodes the second solver speaks for, and which
+				 * of them it actually spoke for here.
+				 *
+				 * Both off `universe.sketch` and neither re-derived from the rules,
+				 * which would answer differently the first time a member is a datum,
+				 * a copy or a turned box — docs/planegcs-spec.md §7.4. The two are
+				 * not the same question and `seedDrag.ts` is where the difference is
+				 * written down; the short of it is that `aim` decides the seed write
+				 * and `held` decides what the frame write must leave alone, and on a
+				 * universe the sketch did not settle the second is empty, so the
+				 * drag places the node like any other.
+				 */
+				const { aim: aimed, held } = sketchDrag(now.universe.sketch, local.keys());
+
+				/** Where each held node sat before this drag, in its parent's space. */
+				const was = toLocal(
+					new Map(
+						[...held.keys()]
+							.map((id) => [id, now.placed.byId.get(id)?.world] as const)
+							.filter((pair): pair is [string, Frame] => pair[1] !== undefined),
+					),
+				);
+
+				// A node the solver places has no frame of its own worth writing:
+				// its stored one is what it *asks* for, and overwriting that with
+				// what it was given loses the request.
+				const staying = new Map<string, Frame>();
+				for (const [id, frame] of local) {
+					if (rehomed.includes(id) || now.managed.has(id)) continue;
+					const axes = held.get(id);
+					if (!axes) {
+						staying.set(id, frame);
+						continue;
+					}
+					// The seed below carries this drag on every axis the sketch
+					// owns, so the frame must not carry it as well: writing both
+					// would put the same gesture in the document twice and the
+					// next solve would overrule the frame half of it anyway. A
+					// node the sketch places outright therefore has no frame write
+					// left to make; one it places on a single axis keeps the
+					// other, with the placed coordinate put back where it started.
+					// A node it placed nowhere took the branch above, and is
+					// dragged like any other node — because nothing else is going
+					// to move it.
+					const before = was.get(id);
+					if (!before) continue;
+					const kept = { ...frame };
+					for (const axis of axes) kept[axis] = before[axis];
+					if (kept.x !== before.x || kept.y !== before.y) staying.set(id, kept);
+				}
+
 				onSceneChange((prev) => {
-					// A node the solver places has no frame of its own worth
-					// writing: its stored one is what it *asks* for, and
-					// overwriting that with what it was given loses the request.
-					const staying = new Map(
-						[...local].filter(
-							([id]) => !rehomed.includes(id) && !now.managed.has(id),
-						),
-					);
-					let next =
-						staying.size > 0
-							? setFrames(prev, staying, now.universe.pick)
-							: prev;
+					let next = prev;
+					// §4.4: a drag on a coordinate the sketch layer owns aims the
+					// second solver instead of placing the node. The aim is the
+					// node's world origin, whole, because a seed is one scalar key
+					// — an axis the sketch does not own is simply never read back
+					// out of it. Without this the drag writes `frame`, the next
+					// solve overrules it, the node springs back, and the document
+					// has silently gained an edit and an undo entry.
+					//
+					// On `owned` and not on `placed`, unlike the frame above: the
+					// aim is where the *next* solve starts looking, and a solve
+					// that ran out of steps is the one that most wants a different
+					// starting point — §0's hazard 3 is precisely "drag it and
+					// pick a different branch". So a drag on a sketch node that
+					// did not settle writes both halves, and they agree: the aim
+					// says start here, the frame says sit here until you do.
+					for (const id of aimed.keys()) {
+						const world = preview.get(id);
+						if (world) next = setSketchSeed(next, id, { x: world.x, y: world.y });
+					}
+					if (staying.size > 0) {
+						next = setFrames(next, staying, now.universe.pick);
+					}
 					let index = drop.index;
 					for (const id of rehomed) {
 						next = reparent(
@@ -1603,7 +1690,7 @@ export function Editor({
 						);
 					}
 					return next;
-				}, "geometry");
+				}, coalesceKey(aimed, staying, rehomed));
 				// A node that stayed where it is in the tree and landed on a line.
 				// Not one that was just reparented: it has a new home to settle into
 				// and a rule pinning it to a line of the old one would fight that.

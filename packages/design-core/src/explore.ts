@@ -45,10 +45,15 @@
  * outright would take that drag to 74ms, and for a drag it cannot be deleted at
  * all.
  *
- * Grounding itself is a ~15ms fixed floor plus ~0.4ms a node: the blank
- * template, one node and the whole generic rule skeleton, grounds in 15ms, and
- * a bare `a.` grounds in 1ms. So three quarters of card's grounding is parsing
- * 15KB of rules and rewriting them through clingo-lpx, which is a constant.
+ * Grounding itself is a large fixed floor plus a little a node, and the floor
+ * has grown with the rule skeleton: the blank template — one node and the whole
+ * generic skeleton — grounds in **61ms** on the pinned Node against this build,
+ * and `sudoku` in **128ms** (medians of five). So the great majority of card's grounding is
+ * parsing the rules and rewriting them through clingo-lpx, which is a constant.
+ * The per-document table above was measured on a much smaller skeleton and its
+ * `ground` column reads about four times low; the *shape* of the argument is
+ * unchanged, which is why the table stays rather than being deleted, but nobody
+ * should cost a feature against those numbers.
  *
  * ### The split, edit by edit
  *
@@ -120,6 +125,13 @@ import { type Measurements, measurementNotes } from "./measure.ts";
 import { type ModelScene, readModel, readSolved } from "./model.ts";
 import { type Switch, type Way, findWays } from "./relax.ts";
 import { STRENGTHS, type Scene, strengthOfLevel } from "./scene.ts";
+import {
+	readHeldTag,
+	readSketchFacts,
+	sketchOwned,
+	sketchRequest,
+	sketchSolved,
+} from "./sketch.ts";
 import type { Assumption, Solver, SolverSession } from "./solver.ts";
 import {
 	type SampleStrategy,
@@ -129,6 +141,8 @@ import {
 	universeKey,
 } from "./sampling.ts";
 import { type Explanation, type Question, explain, questionAtom } from "./why.ts";
+
+import type { Sketcher } from "@clingo-design/planegcs";
 
 /**
  * A design the solver found, as its decisions and nothing else.
@@ -200,7 +214,97 @@ export interface Universe extends Candidate {
 	 * total is not actionable and a rule name is not comparable.
 	 */
 	readonly violated: ReadonlySet<string>;
+	/**
+	 * What the second solver made of this design, or absent where the document
+	 * holds no sketch rule at all.
+	 *
+	 * {@link solved} above already carries the sketch's answer merged over the
+	 * linear one, so nothing that draws a picture reads this. What reads it is the
+	 * studio, which has to be able to say *settled*, *one of infinitely many*,
+	 * *did not settle* and *these two rules cannot both hold here* — four states a
+	 * coordinate cannot carry.
+	 */
+	readonly sketch?: SketchReport;
 }
+
+/**
+ * What one universe's sketch pass reports, beside the coordinates it decided.
+ *
+ * A conflict here never appears in a clingo core and never reaches
+ * {@link UnsatisfiableError}: the document is satisfiable, there are designs on
+ * screen, and the disagreement is *per universe* while a core is per document.
+ */
+export interface SketchReport {
+	status: "settled" | "adrift" | "conflicted";
+	/** Degrees of freedom the sketch has left. Absent unless settled. */
+	dof?: number;
+	/** True when the solve converged without driving the residual to zero. */
+	approximate: boolean;
+	/** Constraint ids the sketch blames, in this universe. */
+	conflict: readonly string[];
+	/**
+	 * `<node>:<axis>` the sketch could not have, because the linear layer had
+	 * already decided it — the other half of a conflict, and often the whole of
+	 * one. Kept apart from {@link conflict} because a pin is not a rule and cannot
+	 * be turned off; the panel has its own sentence for it. The same split
+	 * {@link UnsatisfiableError} makes between `conflict` and `pinned`.
+	 */
+	pinned: readonly string[];
+	/** Constraint ids that say nothing new. */
+	redundant: readonly string[];
+	/**
+	 * Which coordinates the sketch owns — `sksolved` minus `skheld`.
+	 *
+	 * **The only source for this question anywhere in the studio.** Re-deriving it
+	 * from `scene.constraints` in TypeScript would produce a different answer the
+	 * first time a member is a datum, a copy or a turned box — the cases
+	 * `sknopoint/1` excludes and a naive re-derivation does not — and it would
+	 * produce that different answer in three components independently.
+	 */
+	owned: Readonly<Record<string, readonly ("x" | "y")[]>>;
+	/**
+	 * Which of {@link owned} this pass actually placed — the subset that reached
+	 * `Universe.solved`, and empty on every solve that did not settle.
+	 *
+	 * {@link owned} is a fact about the *document*: these are the coordinates no
+	 * linear rule decided, so the sketch layer is the only thing that could speak
+	 * for them. This is a fact about the *solve*: these are the ones it did speak
+	 * for. On an `adrift` or a `conflicted` universe nothing is applied, so the
+	 * node is drawn at its stored frame and that frame is once again the only
+	 * thing placing it — a difference no reader can see in {@link status} alone,
+	 * because even a settled solve can leave a member out (a point the library
+	 * returned nothing for, a node whose world origin will not compute).
+	 *
+	 * Whoever *withholds* something because the sketch places it — the Editor's
+	 * drag, which must not write a frame the next solve would overrule — has to
+	 * read this rather than {@link owned}, or it withholds the write on a solve
+	 * that placed nothing and the gesture does nothing at all. Whoever *labels*
+	 * something as the sketch layer's business still reads {@link owned}, because
+	 * a rule that did not settle here is still the rule that owns the coordinate.
+	 */
+	placed: Readonly<Record<string, readonly ("x" | "y")[]>>;
+}
+
+/**
+ * One universe's sketch pass, or nothing where the document holds no sketch
+ * rule.
+ *
+ * A closure rather than a pair of arguments, so that {@link interpret} and
+ * `relaxation` thread one optional value instead of two, and so that the scene
+ * and the {@link Sketcher} stay inside the {@link Explorer} that owns them.
+ *
+ * **Synchronous by contract.** Making this a `Promise` makes `interpret` async,
+ * which makes `relaxation` async, which makes `UnsatisfiableError`'s relaxation
+ * list a `Promise.all` and puts the edit directly against `relax.ts` — a file
+ * twelve checks depend on and nobody owns. The pass is measured at well under a
+ * millisecond per universe, so there is nothing here worth a thread.
+ */
+export type SketchPass = (atoms: readonly string[]) =>
+	| {
+			readonly report: SketchReport;
+			readonly solved: Record<string, Partial<Frame>>;
+	  }
+	| undefined;
 
 export interface SamplingInfo {
 	strategy: SampleStrategy;
@@ -440,21 +544,27 @@ async function diagnose(
 	base: ReadonlyArray<Assumption>,
 	owned: readonly Switch[],
 	core: readonly string[],
+	sketch?: SketchPass,
 ): Promise<UnsatisfiableError> {
 	const { conflict, pinned } = attribute(core);
 	const { ways, complete } = await findWays(session, { base, owned, core });
-	return new UnsatisfiableError(conflict, pinned, ways.map(relaxation), complete);
+	return new UnsatisfiableError(
+		conflict,
+		pinned,
+		ways.map((way) => relaxation(way, sketch)),
+		complete,
+	);
 }
 
 /** A way out, with its answer set read as the design it is. */
-function relaxation(way: Way): Relaxation {
+function relaxation(way: Way, sketch?: SketchPass): Relaxation {
 	return {
 		rules: way.rules,
 		pins: way.pins,
 		// Letting go of a pin is not an edit, so a way out made only of pins asks
 		// nothing of the document at all.
 		free: way.rules.length === 0,
-		universe: interpret(way.atoms),
+		universe: interpret(way.atoms, [], sketch),
 	};
 }
 
@@ -496,10 +606,21 @@ function readCandidate(
 	return candidate;
 }
 
-/** Reads an answer set that was asked for with `scenery` on. */
+/**
+ * Reads an answer set that was asked for with `scenery` on.
+ *
+ * The sketch pass runs here, between the answer set arriving and the picture
+ * being realised, and its coordinates are merged **per key** rather than per
+ * node: `readSolved` returns whatever of `x, y, width, height, z, depth` the
+ * answer set stated and the sketch decides only `x` and `y`, so a spread at the
+ * node level would delete a solved width or a solved depth. The same merged
+ * record goes into `solved` and into `readModel`'s override, which is what keeps
+ * the editable canvas and the multiverse grid drawing one design.
+ */
 function interpret(
 	atoms: readonly string[],
 	costs: readonly number[] = [],
+	sketch?: SketchPass,
 ): Universe {
 	let scene: ModelScene | undefined;
 	const violated = new Set<string>();
@@ -511,12 +632,20 @@ function interpret(
 			violated.add(atom.args[0]);
 		}
 	}
+	const pass = sketch?.(atoms);
+	const solved: Record<string, Partial<Frame>> = readSolved(atoms);
+	if (pass) {
+		for (const [id, box] of Object.entries(pass.solved)) {
+			solved[id] = { ...solved[id], ...box };
+		}
+	}
 	return {
 		...readCandidate(atoms, costs),
-		solved: readSolved(atoms),
+		solved,
 		violated,
+		...(pass ? { sketch: pass.report } : {}),
 		get model(): ModelScene {
-			return (scene ??= readModel(atoms));
+			return (scene ??= readModel(atoms, pass?.solved));
 		},
 	};
 }
@@ -761,6 +890,32 @@ function isOptimizing(program: string): boolean {
 }
 
 /**
+ * {@link SketchReport.placed}: the coordinates a solve both owned and answered.
+ *
+ * Read off the record that is about to be merged rather than off the outcome,
+ * because the two are not the same thing — `sketchSolved` drops a member the
+ * library returned no point for, and a node whose world origin will not compute
+ * — and what a reader needs to know is what reached the picture. Intersected
+ * with `owned` so the field stays a strict refinement of it: a coordinate the
+ * linear layer had already decided is answered by the sketch too, identically
+ * and by construction, and calling that "placed by the sketch" would invite a
+ * caller to withhold a write the linear layer is the one holding.
+ */
+function sketchPlaced(
+	solved: Readonly<Record<string, Partial<Frame>>>,
+	owned: Readonly<Record<string, readonly ("x" | "y")[]>>,
+): Record<string, readonly ("x" | "y")[]> {
+	const out: Record<string, readonly ("x" | "y")[]> = {};
+	for (const [node, axes] of Object.entries(owned)) {
+		const box = solved[node];
+		if (!box) continue;
+		const answered = axes.filter((axis) => box[axis] !== undefined);
+		if (answered.length > 0) out[node] = answered;
+	}
+	return out;
+}
+
+/**
  * Holds a grounded program between explorations.
  *
  * Call {@link close} when done; the grounding lives in the WebAssembly heap.
@@ -781,9 +936,117 @@ export class Explorer {
 	 * solver as ordinary atoms and only this says which is which.
 	 */
 	#owned: readonly Switch[] = [];
+	/**
+	 * The second solver, where the app opened one.
+	 *
+	 * Optional because every unit lane and every headless caller has none, and a
+	 * document with no sketch rule in it never asks: {@link sketchRequest} answers
+	 * `undefined` before a system is ever built, so the wasm module is not merely
+	 * unused but uninstantiated.
+	 */
+	#sketcher: Sketcher | undefined;
 
-	constructor(solver: Solver) {
+	constructor(solver: Solver, sketcher?: Sketcher) {
 		this.#solver = solver;
+		this.#sketcher = sketcher;
+	}
+
+	/**
+	 * One exploration's sketch pass, closed over the scene and the sketcher.
+	 *
+	 * Built here because this is the only object that holds both, and rebuilt per
+	 * exploration because the scene is the thing that changed. Nothing before the
+	 * final `solve` costs anything on a document with no sketch rule: the atom
+	 * scan finds no `sk` prefix and the request is `undefined`.
+	 *
+	 * The picks come off the answer set rather than off the options, and that is
+	 * load-bearing: a node's four dimensions are values, so an ancestor may sit in
+	 * one place in one universe and elsewhere in another, and the world chain is
+	 * only a chain relative to one of them.
+	 */
+	#sketchPass(scene: Scene): SketchPass | undefined {
+		const sketcher = this.#sketcher;
+		if (!sketcher) return undefined;
+		return (atoms) => {
+			const facts = readSketchFacts(atoms);
+			if (facts.rules.length === 0) return undefined;
+			const solved = readSolved(atoms);
+			const context = {
+				tokens: scene.tokens,
+				picks: readCandidate(atoms).pick,
+			};
+			const request = sketchRequest(scene, facts, solved, context);
+			if (!request) return undefined;
+
+			const owned = sketchOwned(facts);
+			const outcome = sketcher.solve(request);
+			// Every branch below reports the same `placed` it merges, which is the
+			// only way the two can be kept from drifting apart: they are computed
+			// from one record, here, at the one place that knows what the merge in
+			// `interpret` will be handed.
+			const nothing = { owned, placed: {} };
+			// One solve, and a conflict is a conflict. There is no release loop:
+			// `skheld/2` derives from `gcoord/2`, so a held coordinate may be fixed by
+			// a hard `&sum` equality, and releasing one would break an `align` that
+			// the Rules panel still shows green.
+			if (outcome.status === "settled") {
+				const placed = sketchSolved(outcome, facts, scene, solved, context);
+				return {
+					report: {
+						status: "settled",
+						dof: outcome.dof,
+						approximate: outcome.approximate,
+						conflict: [],
+						pinned: [],
+						// A pin the library found redundant is this file's own tag rather
+						// than the document's, and reporting it as a rule that says
+						// nothing new would blame a row for the linear layer's work.
+						redundant: outcome.redundant.filter((tag) => facts.rules.includes(tag)),
+						owned,
+						placed: sketchPlaced(placed, owned),
+					},
+					solved: placed,
+				};
+			}
+			const adrift = {
+				report: {
+					status: "adrift" as const,
+					approximate: false,
+					conflict: [],
+					pinned: [],
+					redundant: [],
+					...nothing,
+				},
+				// Nothing is applied and nothing is learned. A numeric failure is a
+				// property of the starting point and of the iteration count, not of the
+				// design: turned into a nogood it would delete from the multiverse every
+				// design in which those rules coexist, including the ones that would
+				// have converged perfectly from a different aim.
+				solved: {},
+			};
+			if (outcome.status === "adrift") return adrift;
+
+			const conflict = outcome.tags.filter((tag) => facts.rules.includes(tag));
+			const pinned = outcome.tags.flatMap((tag) => {
+				const held = readHeldTag(tag);
+				return held === undefined ? [] : [held];
+			});
+			// A conflicting set that names neither a rule nor a pin says nothing a
+			// panel could show, so it is reported as the numeric failure it is rather
+			// than as a conflict with nothing in it.
+			if (conflict.length === 0 && pinned.length === 0) return adrift;
+			return {
+				report: {
+					status: "conflicted",
+					approximate: false,
+					conflict,
+					pinned,
+					redundant: [],
+					...nothing,
+				},
+				solved: {},
+			};
+		};
 	}
 
 	/**
@@ -887,6 +1150,9 @@ export class Explorer {
 		// the cheap reading too, and so does a why-question.
 		this.#assumed = bare;
 		this.#owned = owned;
+		// One per exploration, threaded rather than stored, so that the pass a
+		// universe was read with is visibly the pass this call built.
+		const sketch = this.#sketchPass(scene);
 
 		let solves = 0;
 		// True of the exploration whatever question was asked of the program, so
@@ -923,6 +1189,7 @@ export class Explorer {
 				poolSize,
 				seed,
 				countLimit,
+				sketch,
 			);
 			solves += ranked.solves;
 			if (ranked.exploration) {
@@ -950,11 +1217,11 @@ export class Explorer {
 		});
 		solves++;
 		if (enumerated.result === "UNSATISFIABLE") {
-			throw await diagnose(session, withPicture, owned, enumerated.core);
+			throw await diagnose(session, withPicture, owned, enumerated.core, sketch);
 		}
 
 		const enumeratedUniverses = enumerated.models.map((atoms) =>
-			interpret(atoms),
+			interpret(atoms, [], sketch),
 		);
 		const truncated = enumeratedUniverses.length > limit;
 
@@ -1010,7 +1277,7 @@ export class Explorer {
 				// selection. The same function does the ranked path's choosing, so
 				// there is one answer to which designs earn a slot.
 				const chosen = selectSpread(pool, limit);
-				const hydrated = await this.#hydrate(session, chosen, withPicture);
+				const hydrated = await this.#hydrate(session, chosen, withPicture, sketch);
 				solves += hydrated.solves;
 				universes = hydrated.universes;
 				sampling = { strategy, pool: pool.length, seed, sampled: true };
@@ -1097,6 +1364,7 @@ export class Explorer {
 		poolSize: number,
 		seed: number,
 		countLimit: number,
+		sketch: SketchPass | undefined,
 	): Promise<{
 		// The approximations are the caller's: they are read off the universes
 		// this returns, so there is one place that decides what a remark is.
@@ -1114,7 +1382,7 @@ export class Explorer {
 			// nothing. So this is the same contradiction the unranked path meets,
 			// and it gets the same diagnosis — under the ordinary assumptions,
 			// where the weak constraints are ignored entirely.
-			throw await diagnose(session, withPicture, owned, best.core);
+			throw await diagnose(session, withPicture, owned, best.core, sketch);
 		}
 		const optimum = best.models[0];
 		if (!optimum || best.costs.length === 0) {
@@ -1186,7 +1454,7 @@ export class Explorer {
 		}
 
 		const chosen = selectSpread(pool, limit);
-		const hydrated = await this.#hydrate(session, chosen, withPicture);
+		const hydrated = await this.#hydrate(session, chosen, withPicture, sketch);
 		solves += hydrated.solves;
 
 		// Over the near-optimal designs rather than the whole space, because for a
@@ -1303,6 +1571,7 @@ export class Explorer {
 		session: SolverSession,
 		chosen: readonly Candidate[],
 		guards: ReadonlyArray<Assumption>,
+		sketch: SketchPass | undefined,
 	): Promise<{ universes: Universe[]; solves: number }> {
 		let solves = 0;
 		const universes = await Promise.all(
@@ -1327,7 +1596,7 @@ export class Explorer {
 				// Carried over rather than re-read: this solve assumed the picks and
 				// so has no bound and no cost of its own, and the cost is why the
 				// candidate was chosen.
-				return interpret(atoms, candidate.costs);
+				return interpret(atoms, candidate.costs, sketch);
 			}),
 		);
 		return { universes, solves };
@@ -1379,13 +1648,19 @@ export function varyingVars(exploration: Exploration): string[] {
 /**
  * One-shot convenience: opens a session, explores, and closes it again.
  * Prefer {@link Explorer} anywhere the same document is explored twice.
+ *
+ * The sketcher is a fourth parameter rather than an option because it is not one
+ * — an option is something about the question being asked, and this is a solver.
+ * It sits beside {@link Solver} for the same reason the constructor takes it
+ * there.
  */
 export async function explore(
 	scene: Scene,
 	solver: Solver,
 	options: ExploreOptions = {},
+	sketcher?: Sketcher,
 ): Promise<Exploration> {
-	const explorer = new Explorer(solver);
+	const explorer = new Explorer(solver, sketcher);
 	try {
 		return await explorer.explore(scene, options);
 	} finally {

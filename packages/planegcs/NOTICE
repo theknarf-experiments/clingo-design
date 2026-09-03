@@ -1,0 +1,16 @@
+This package uses @salusoft89/planegcs (FreeCAD's PlaneGCS, compiled to
+WebAssembly) under the LGPL, as declared by the package.
+
+	https://github.com/Salusoft89/planegcs
+
+The upstream LICENSE is shipped verbatim beside this file. The version numbers
+in the two places upstream states them disagree — the npm metadata says
+`LGPL-2.0-or-later` and the LICENSE text in the same tarball is the LGPL v2.1 —
+so neither number is written into code here; the licence that applies is the one
+the package itself declares.
+
+Nothing is owed today: every package in this repository is `private: true` and
+none is distributed. The obligation attaches to the first distributed build of
+`packages/app`, and it is already satisfied structurally: `planegcs.wasm` is a
+separate file fetched at runtime and is never linked into `clingo.wasm` or into
+any bundle this repository produces.

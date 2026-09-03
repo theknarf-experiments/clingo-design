@@ -1,0 +1,20 @@
+{
+	"name": "@clingo-design/planegcs",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"test": "node --test \"src/**/*.test.ts\""
+	},
+	"dependencies": {
+		"@salusoft89/planegcs": "1.2.0"
+	},
+	"devDependencies": {
+		"@types/node": "^26.2.0",
+		"typescript": "^7.0.2"
+	}
+}

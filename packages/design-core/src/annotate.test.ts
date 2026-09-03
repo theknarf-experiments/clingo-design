@@ -9,7 +9,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { annotate } from "./annotate.ts";
+import {
+	type Annotation,
+	type AxialAnnotation,
+	type RayAnnotation,
+	annotate,
+} from "./annotate.ts";
 import { directSolver } from "./directSolver.ts";
 import { addConstraint, addNode, makeNode, updateConstraint } from "./edits.ts";
 import { explore } from "./explore.ts";
@@ -55,6 +60,29 @@ const loose = (...boxes: Array<[string, number, number, number, number]>): Scene
 };
 
 const on = (ids: string[]) => new Set(ids);
+
+/**
+ * The mark this case is about, narrowed to the two shapes that are about an
+ * axis.
+ *
+ * Every assertion in the linear half reads `at`, `from` or `to`, and a ray has
+ * none of them — which is the whole point of the union. Saying so here makes
+ * the narrowing an assertion in its own right: a case that starts drawing rays
+ * fails on the line that says what it expected rather than a dozen lines later
+ * against an `undefined`.
+ */
+const axial = (note: Annotation | undefined): AxialAnnotation => {
+	assert.ok(note, "there is a mark to read");
+	if (note.shape === "ray") assert.fail(`expected an axial mark, got a ray`);
+	return note;
+};
+
+/** The same, for a case that expects the sketch layer's one shape. */
+const ray = (note: Annotation | undefined): RayAnnotation => {
+	assert.ok(note, "there is a mark to read");
+	if (note.shape !== "ray") assert.fail(`a sketch rule draws a ray, not a ${note.shape}`);
+	return note;
+};
 
 test("an alignment draws one line across everything it holds together", () => {
 	const scene = loose(["a", 0, 0, 40, 20], ["b", 0, 100, 60, 20]);
@@ -104,7 +132,7 @@ test("a size rule marks each member, because a size is each member's own", () =>
 	);
 	assert.equal(marks.length, 2);
 	assert.deepEqual(
-		marks.map((m) => [m.shape, m.from, m.to, m.label]),
+		marks.map(axial).map((m) => [m.shape, m.from, m.to, m.label]),
 		[
 			["span", 0, 40 * P, "40px"],
 			["span", 200 * P, 240 * P, "40px"],
@@ -119,7 +147,7 @@ test("a pin says which coordinate it is holding", () => {
 		on(["a"]),
 	);
 	assert.equal(marks[0].label, "30px", "the number is the whole point of a pin");
-	assert.equal(marks[0].at, 30 * P);
+	assert.equal(axial(marks[0]).at, 30 * P);
 });
 
 test("a mirror is drawn where the members balance, not where the number says", () => {
@@ -132,7 +160,7 @@ test("a mirror is drawn where the members balance, not where the number says", (
 	});
 	const marks = annotate(moved, on(["a"]));
 	assert.equal(marks[0].shape, "line");
-	assert.equal(marks[0].at, 175 * P, "halfway between the two centres");
+	assert.equal(axial(marks[0]).at, 175 * P, "halfway between the two centres");
 });
 
 test("nothing is drawn for a rule nobody is looking at, or a rule switched off", () => {
@@ -166,7 +194,7 @@ test("the mark follows the solved geometry, not the stored frame", async () => {
 		(m) => m.kind === "align",
 	);
 	assert.equal(solved.a.x, 55 * P);
-	assert.equal(line?.at, 55 * P, "where the solver put them, not where they were");
+	assert.equal(axial(line).at, 55 * P, "where the solver put them, not where they were");
 });
 
 /* ------------------------------------------------------------------ */
@@ -267,7 +295,7 @@ test("the line drawn is the line the answer set reported, to the EMU", async () 
 	const solved = await solveOnce(scene);
 	const datum = solved[trackDatum("page", 3, "left")];
 	assert.equal(datum.x, 490 * P, "the solver's own answer, not a recomputation");
-	assert.equal(annotate(scene, on(["card"]), solved)[0].at, datum.x);
+	assert.equal(axial(annotate(scene, on(["card"]), solved)[0]).at, datum.x);
 });
 
 test("a gap from a column line measures from the line", async () => {
@@ -281,14 +309,15 @@ test("a gap from a column line measures from the line", async () => {
 	const solved = await solveOnce(scene);
 	const marks = annotate(scene, on(["card"]), solved);
 	assert.equal(marks.length, 1);
+	const mark = axial(marks[0]);
 	assert.deepEqual(
-		[marks[0].shape, marks[0].from, marks[0].to, marks[0].label],
+		[mark.shape, mark.from, mark.to, mark.label],
 		// Column two of four ends at 480, and the card begins sixteen past it.
 		["span", 480 * P, 496 * P, "16px"],
 	);
 	// Between the two centres, and one of those centres is the page's, because a
 	// column line is as tall as the page it rules.
-	assert.equal(marks[0].at, ((320 + 30) / 2) * P);
+	assert.equal(mark.at, ((320 + 30) / 2) * P);
 });
 
 test("a hand-drawn guide draws itself the same way a column does", async () => {
@@ -304,11 +333,12 @@ test("a hand-drawn guide draws itself the same way a column does", async () => {
 	const solved = await solveOnce(scene);
 	const marks = annotate(scene, on(["card"]), solved);
 	assert.equal(marks.length, 1);
-	assert.equal(marks[0].axis, "y");
-	assert.equal(marks[0].at, 220 * P);
+	const mark = axial(marks[0]);
+	assert.equal(mark.axis, "y");
+	assert.equal(mark.at, 220 * P);
 	// Across the page's width this time — the band is the surface's extent on
 	// whichever axis the datum is not about, and no axis is named to get there.
-	assert.deepEqual([marks[0].from, marks[0].to], [-8 * P, 968 * P]);
+	assert.deepEqual([mark.from, mark.to], [-8 * P, 968 * P]);
 });
 
 test("nothing is drawn for a column nobody has placed yet", async () => {
@@ -392,7 +422,7 @@ test("a column that exists in the other universe is not drawn in this one", asyn
 	const wide = drawn.find((d) => d.card === 640);
 	assert.ok(wide, "six columns pull the card onto column five, at 640");
 	assert.equal(wide.marks.length, 1);
-	assert.equal(wide.marks[0].at, 640 * P);
+	assert.equal(axial(wide.marks[0]).at, 640 * P);
 });
 
 test("a datum on a surface the document no longer holds draws nothing", () => {
@@ -406,4 +436,105 @@ test("a datum on a surface the document no longer holds draws nothing", () => {
 		"left",
 	);
 	assert.deepEqual(annotate(scene, on(["card"]), { "cg(gone,3,left)": { x: 0 } }), []);
+});
+
+/* ------------------------------------------------------------------ */
+/* Marks for the rules the second solver decides                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The sketch layer has no edge, so it has no axis, no `at` and no band — and
+ * the reason these cases exist at all is that the loop above would have thrown
+ * every one of them away at `if (!edge) continue`, silently, while still
+ * typechecking. Each of them asserts a mark comes back before it asserts
+ * anything about the mark.
+ */
+
+/** A sketch rule over the given nodes, with an anchor if one is named. */
+const sketch = (
+	scene: Scene,
+	kind: Constraint["kind"],
+	nodes: string[],
+	anchor?: Constraint["anchor"],
+): Scene => {
+	const added = addConstraint(scene, kind, nodes);
+	return anchor ? updateConstraint(added.scene, added.id, { anchor }) : added.scene;
+};
+
+test("a distance draws the line it measures, between the two points it is about", () => {
+	const scene = loose(["a", 0, 0, 40, 20], ["b", 100, 0, 40, 20]);
+	const marks = annotate(sketch(scene, "distance", ["a", "b"]), on(["a"]));
+	assert.equal(marks.length, 1, "an edgeless kind is not dropped for having no edge");
+	const drawn = ray(marks[0]);
+	// Centre to centre, because `center` is the anchor a rule means when nobody
+	// said — and a hundred pixels apart, which is the number on the mark.
+	assert.deepEqual([drawn.a, drawn.b], [
+		{ x: 20 * P, y: 10 * P },
+		{ x: 120 * P, y: 10 * P },
+	]);
+	assert.equal(drawn.label, "100px");
+});
+
+test("the ray is drawn between the anchors the rule names, not between the centres", () => {
+	const scene = loose(["a", 0, 0, 40, 20], ["b", 100, 0, 40, 20]);
+	const drawn = ray(annotate(sketch(scene, "distance", ["a", "b"], "topLeft"), on(["a"]))[0]);
+	assert.deepEqual([drawn.a, drawn.b], [
+		{ x: 0, y: 0 },
+		{ x: 100 * P, y: 0 },
+	]);
+	// The corners are a hundred apart the same way the centres were, which is
+	// what makes this case about the anchor and not about the arithmetic.
+	assert.equal(drawn.label, "100px");
+});
+
+test("a bearing says which way, in degrees, and not how far", () => {
+	// Straight down the page. Clockwise from due east with y growing downwards,
+	// that is 90 degrees — the same convention the seed is written in, so an
+	// untouched rule and its mark agree.
+	const scene = loose(["a", 0, 0, 40, 20], ["b", 0, 100, 40, 20]);
+	const drawn = ray(annotate(sketch(scene, "bearing", ["a", "b"]), on(["b"]))[0]);
+	assert.equal(drawn.label, "90deg");
+	assert.deepEqual([drawn.a, drawn.b], [
+		{ x: 20 * P, y: 10 * P },
+		{ x: 20 * P, y: 110 * P },
+	]);
+});
+
+test("a line of three draws one ray, from the first point to the last", () => {
+	// The line it asserts is the line it shows: a chain of segments would draw
+	// the members' current zig-zag, which is the thing the rule is there to
+	// deny. And no label, because three points being in a line is not a
+	// quantity — there is no number to put on it.
+	const scene = loose(["a", 0, 0, 40, 20], ["b", 100, 40, 40, 20], ["c", 200, 100, 40, 20]);
+	const marks = annotate(sketch(scene, "collinear", ["a", "b", "c"]), on(["b"]));
+	assert.equal(marks.length, 1);
+	const drawn = ray(marks[0]);
+	assert.deepEqual([drawn.a, drawn.b], [
+		{ x: 20 * P, y: 10 * P },
+		{ x: 220 * P, y: 110 * P },
+	]);
+	assert.equal(drawn.label, undefined);
+});
+
+test("a sketch rule a member short of saying anything draws nothing", () => {
+	// The same `minNodes` silence the linear half keeps, reached the same way: a
+	// member the tree does not hold simply does not arrive.
+	const scene = loose(["a", 0, 0, 40, 20], ["b", 100, 0, 40, 20], ["c", 200, 0, 40, 20]);
+	const three = sketch(scene, "collinear", ["a", "b", "c"]);
+	const gone: Scene = { ...three, nodes: three.nodes.filter((n) => n.id !== "c") };
+	assert.deepEqual(annotate(gone, on(["a"])), []);
+	assert.equal(annotate(three, on(["a"])).length, 1, "and draws once all three are there");
+});
+
+test("a ray follows the solved geometry, like every other mark here", () => {
+	// The claim in this file's header, asked of the shape that was added last:
+	// the second solver moves a point and the mark is at the point it moved to,
+	// not at the one the document still stores.
+	const scene = sketch(loose(["a", 0, 0, 40, 20], ["b", 100, 0, 40, 20]), "distance", [
+		"a",
+		"b",
+	]);
+	const drawn = ray(annotate(scene, on(["a"]), { b: { x: 300 * P, y: 0 } })[0]);
+	assert.equal(drawn.b.x, 320 * P);
+	assert.equal(drawn.label, "300px");
 });

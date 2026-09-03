@@ -1,0 +1,30 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		// No `DOM`, for design-core's reason: this package is a wasm wrapper with
+		// no rendering in it, and the `?url` import that finds `planegcs.wasm` in a
+		// browser lives in the app rather than here — so that every module in this
+		// package stays loadable under `node --test`.
+		"lib": ["ES2023"],
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"moduleDetection": "force",
+		"types": ["node"],
+
+		"strict": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noFallthroughCasesInSwitch": true,
+
+		"isolatedModules": true,
+		"verbatimModuleSyntax": true,
+		"erasableSyntaxOnly": true,
+		"skipLibCheck": true,
+
+		// Nothing is emitted: the package exports `./src/index.ts` and its
+		// consumers compile it themselves, exactly as `packages/vfs` does.
+		"allowImportingTsExtensions": true,
+		"noEmit": true
+	},
+	"include": ["src", "types"]
+}

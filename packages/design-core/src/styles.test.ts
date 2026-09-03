@@ -886,7 +886,7 @@ test("wearing a rule asserted is read back out of the answer set", async () => {
 		styles: [style("h", [{ parts: { size: lit("20px"), weight: lit("700") } }])],
 		rules: "sty_wears(t1,h,size). sty_wears(t1,h,weight).\n",
 	};
-	const [model] = (await models(scene)).map(readModel);
+	const [model] = (await models(scene)).map((atoms) => readModel(atoms));
 	assert.deepEqual(model.wears, { h: [{ node: "t1", props: ["size", "weight"] }] },
 		"by style, and the properties in table order",
 	);
@@ -894,7 +894,7 @@ test("wearing a rule asserted is read back out of the answer set", async () => {
 
 	// The document's own wearing is *not* in there: it is already in the
 	// document, and repeating it in every answer set would be bytes for nothing.
-	const own = (await models(wear(scene, ["t1"], "h"))).map(readModel);
+	const own = (await models(wear(scene, ["t1"], "h"))).map((atoms) => readModel(atoms));
 	assert.deepEqual(own[0].wears, {});
 	assert.equal(own[0].byId.t1.rendered.size, "20px");
 });
