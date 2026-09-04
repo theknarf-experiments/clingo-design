@@ -48,6 +48,7 @@ import {
 	makeLayout,
 } from "./scene.ts";
 import { spellSeed } from "./sketch.ts";
+import { orbit } from "./templates/orbit.ts";
 import { EMU_PER_PX } from "./units.ts";
 import { lit, propVar, single } from "./values.ts";
 
@@ -654,4 +655,81 @@ test("the request a document builds is the request it builds again", async () =>
 	assert.deepEqual(seen[0].rules, [
 		{ tag: "apart", kind: "distance", a: "card", b: "badge", px: 120 },
 	]);
+});
+
+/* ------------------------------------------------------------------ */
+/* The template, which is the only document in the tree a user opens   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `orbit` is the demonstration, so it is also the one document whose *numbers*
+ * are worth asserting rather than whose mechanism is.
+ *
+ * Everything above builds its scene inline and checks one relation at a time.
+ * This checks the picture: three satellites at one radius and three bearings,
+ * over all three universes, plus the row the linear layer pins and the sketch
+ * layer straightens. It is a slow test by this file's standards and it earns it
+ * — the first draft of the template named its radius token `radius`, colliding
+ * with the `radius` every rect uses for its corners, and drew an orbit eight
+ * pixels across in one universe out of three. Nothing else in the suite looked
+ * at a template's geometry, so nothing else noticed.
+ */
+test("the orbit template draws three radii, three bearings and one straight row", async () => {
+	const explorer = new Explorer(directSolver, real);
+	const ex = await explorer.explore(normalizeScene(orbit()), { limit: 8 });
+	try {
+		assert.equal(ex.universes.length, 3, "one universe per reach alternative");
+
+		const SIZE: Record<string, number> = {
+			hub: 80, east: 56, west: 56, north: 56, m1: 20, m2: 20, m3: 20,
+		};
+		const centre = (u: Universe, id: string): { x: number; y: number } => {
+			const at = u.solved?.[id];
+			assert.ok(at?.x !== undefined && at?.y !== undefined, `${id} is placed`);
+			return { x: at.x / P + SIZE[id] / 2, y: at.y / P + SIZE[id] / 2 };
+		};
+
+		const radii = new Set<number>();
+		for (const u of ex.universes) {
+			assert.equal(u.sketch?.status, "settled");
+			assert.deepEqual(u.sketch?.conflict, [], "no rule conflicts with another");
+			assert.deepEqual(u.sketch?.redundant, [], "and none of them is spare");
+			// One: the middle marker, free to slide along the line and nowhere
+			// else. The hub's two pins are what stop the constellation drifting.
+			assert.equal(u.sketch?.dof, 1);
+
+			const hub = centre(u, "hub");
+			const seen: number[] = [];
+			for (const [id, want] of [["east", 30], ["west", 150], ["north", 270]] as const) {
+				const p = centre(u, id);
+				const dx = p.x - hub.x;
+				const dy = p.y - hub.y;
+				seen.push(Math.hypot(dx, dy));
+				const deg = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
+				assert.ok(
+					Math.abs(deg - want) < 0.01,
+					`${id} sits at ${deg.toFixed(3)}°, not ${want}°`,
+				);
+			}
+			// All three at one radius, which is what makes it an orbit rather than
+			// three unrelated placements.
+			assert.ok(Math.max(...seen) - Math.min(...seen) < 0.01, JSON.stringify(seen));
+			radii.add(Math.round(seen[0]));
+
+			// The row: two ends held by `pin`, the middle one straightened onto the
+			// line between them. Twice the area of the triangle they make, which is
+			// zero exactly when the three are collinear.
+			const [a, b, c] = [centre(u, "m1"), centre(u, "m2"), centre(u, "m3")];
+			const twiceArea = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+			assert.ok(Math.abs(twiceArea) < 0.5, `markers are bent: ${twiceArea}`);
+			// ...and the held ends really are where the linear layer put them.
+			assert.ok(Math.abs(a.x - 150) < 0.01 && Math.abs(a.y - 420) < 0.01);
+			assert.ok(Math.abs(c.x - 570) < 0.01 && Math.abs(c.y - 406) < 0.01);
+		}
+
+		// The three the token holds, and no eight-pixel orbit among them.
+		assert.deepEqual([...radii].sort((x, y) => x - y), [120, 160, 208]);
+	} finally {
+		await explorer.close();
+	}
 });

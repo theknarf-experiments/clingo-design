@@ -19,6 +19,7 @@ export { component } from "./component.ts";
 export { deck } from "./deck.ts";
 export { machine } from "./machine.ts";
 export { map } from "./map.ts";
+export { orbit } from "./orbit.ts";
 export { pair } from "./pair.ts";
 export { palette } from "./palette.ts";
 export { places } from "./places.ts";

@@ -16,6 +16,7 @@ import { component } from "./component.ts";
 import { deck } from "./deck.ts";
 import { machine } from "./machine.ts";
 import { map } from "./map.ts";
+import { orbit } from "./orbit.ts";
 import { pair } from "./pair.ts";
 import { palette } from "./palette.ts";
 import { places } from "./places.ts";
@@ -106,6 +107,13 @@ export const TEMPLATES: Template[] = [
 		description:
 			"A row of plates whose spacing is a variable, so the multiverse shows every size.",
 		create: rail,
+	},
+	{
+		id: "orbit",
+		name: "Orbit",
+		description:
+			"Satellites a fixed distance and bearing from a hub — geometry the linear solver cannot state, answered by PlaneGCS.",
+		create: orbit,
 	},
 	{
 		id: "places",

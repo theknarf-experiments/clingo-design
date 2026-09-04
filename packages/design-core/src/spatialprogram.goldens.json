@@ -1124,5 +1124,37 @@
 				"rendered": "f8643d299ed1db71"
 			}
 		]
+	},
+	"orbit": {
+		"count": 3,
+		"total": 3,
+		"ids": [
+			"caption",
+			"east",
+			"hub",
+			"m1",
+			"m2",
+			"m3",
+			"north",
+			"page",
+			"west"
+		],
+		"universes": [
+			{
+				"nodes": "7e3474f9f89d368d",
+				"frames": "4b2a6fa30975741a",
+				"rendered": "7365376d5cd5988a"
+			},
+			{
+				"nodes": "7e3474f9f89d368d",
+				"frames": "4b2a6fa30975741a",
+				"rendered": "7365376d5cd5988a"
+			},
+			{
+				"nodes": "7e3474f9f89d368d",
+				"frames": "4b2a6fa30975741a",
+				"rendered": "7365376d5cd5988a"
+			}
+		]
 	}
 }

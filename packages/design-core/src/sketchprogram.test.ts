@@ -46,6 +46,15 @@ import { TEMPLATES } from "./templates/index.ts";
 import { EMU_PER_PX } from "./units.ts";
 import { single } from "./values.ts";
 
+/**
+ * The one template that states something about the sketch layer.
+ *
+ * Every guard below that says "no template does X" means "no template but this
+ * one", and each names it here rather than carrying its own literal, so that
+ * retiring the exemption is one edit and forgetting one of them is impossible.
+ */
+const SKETCHING_TEMPLATE = "orbit";
+
 const P = EMU_PER_PX;
 const px = (n: number): number => n * P;
 
@@ -244,6 +253,12 @@ test("a document with no sketch rule gains three facts and nothing else", () => 
 	// is the shape that keeps it true.
 	const gained = ["skind(distance).", "skind(bearing).", "skind(collinear)."];
 	for (const template of TEMPLATES) {
+		// ...every template but the one written to show the sketch layer off. It
+		// is exempted by name rather than by a predicate over its constraints,
+		// because a predicate would quietly stop guarding the day a second
+		// template gained a sketch rule by accident — which is the whole thing
+		// this test is here to catch.
+		if (template.id === SKETCHING_TEMPLATE) continue;
 		const { program } = compile(template.create());
 		const rest = program
 			.split("\n")
@@ -272,6 +287,13 @@ test("and no template's answer set holds a sketch atom", async () => {
 	for (const template of TEMPLATES) {
 		const atoms = await answer(template.create());
 		const stray = atoms.filter((a) => /^sk/.test(a));
+		if (template.id === SKETCHING_TEMPLATE) {
+			// The exception proves the rule, and it has to prove it out loud: an
+			// exemption that only ever skips is indistinguishable from a template
+			// that quietly stopped sketching.
+			assert.notDeepEqual(stray, [], `${template.id} sketches nothing`);
+			continue;
+		}
 		assert.deepEqual(stray, [], template.id);
 	}
 });
