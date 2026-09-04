@@ -2425,18 +2425,39 @@ const SKETCH_CONSTRAINT_RULES = [
 	"% A turned box has no corner where the document says it has one — that is why",
 	"% `gnoedge/2` exists and why `inertMembers` has an `isTurned` branch — and a",
 	"% sketch rule reaching for `topLeft` on a card turned 30 degrees would be",
-	"% satisfied about a point the picture does not contain. The centre is the one",
-	"% anchor a rotation leaves alone (a turn about the centre moves no linear",
-	"% quantity, which is the decision the whole rotation feature rests on), so",
-	"% the centre is the one anchor a turned member keeps.",
-	"skoffcentre(N) :- grotated(N), skcon(C), c_node(C,N), c_anchor(C,A), A != center.",
-	"sknopoint(N) :- skoffcentre(N).",
-	"skpoint(N,A) :- skcon(C), c_node(C,N), skanchor(C,A), sknode(N), not sknopoint(N).",
+	"% satisfied about a point the picture does not contain. `anchorPoint` reads",
+	"% the *unrotated* frame, so the corner it computes is not on the box; the",
+	"% centre is the one anchor a rotation leaves alone (a turn about the centre",
+	"% moves no linear quantity, which is the decision the whole rotation feature",
+	"% rests on), and the centre is therefore the one anchor a turned member keeps.",
+	"%",
+	"% Per **anchor** and not per node, which is the whole of the difference",
+	"% between refusing what cannot be computed and refusing more than that. The",
+	"% first cut read `skoffcentre(N) :- ... c_anchor(C,A), A != center.` with C",
+	"% existentially quantified, and then `sknopoint(N) :- skoffcentre(N).` — so a",
+	"% single rule about a turned card's corner withheld that card's point from",
+	"% *every* sketch rule naming it, the ones about its centre included. Those are",
+	"% exactly the rules a turn leaves true, and they went silently unstated.",
+	"% Refusing the corner alone leaves the centre rule holding, which is what the",
+	"% refusal sentence in `refusedAnchor` has always said happens.",
+	"%",
+	"% Still switch-blind: `skcon/1` is every sketch constraint the document holds",
+	"% rather than every one this universe turned on, so which points exist does",
+	"% not depend on which rules are assumed — `sksolved/1`'s promise, one relation",
+	"% up, and the reason this is not gated on `skon/1`.",
+	"skoffcentre(N,A) :- grotated(N), skcon(C), c_node(C,N), skanchor(C,A), A != center.",
+	"skpoint(N,A) :- skcon(C), c_node(C,N), skanchor(C,A), sknode(N),",
+	"                not sknopoint(N), not skoffcentre(N,A).",
 	"% Which nodes the sketch layer may move. Read exactly as gsolved/1 is read —",
 	"% naming a node in a sketch rule is what hands its place over — and the",
 	"% switch is deliberately not consulted here for gsolved/1's reason: which",
 	"% unknowns exist must not depend on which rules are assumed.",
-	"sksolved(N) :- skcon(C), c_node(C,N), sknode(N), not sknopoint(N).",
+	"%",
+	"% Off `skpoint/2` rather than off `sknopoint/1` directly, so that a node whose",
+	"% every anchor is refused — a turned box named only by corner rules — is not",
+	"% solved at all, instead of arriving as a free point with nothing said about",
+	"% it and one more degree of freedom in the status pill than the document has.",
+	"sksolved(N) :- skpoint(N,_).",
 	"% ...and which of its coordinates the linear layer already decided, which the",
 	"% sketch layer reads and must not write. This is the one predicate that makes",
 	"% the two solvers a sequence rather than a race.",
@@ -2481,6 +2502,13 @@ const SKETCH_CONSTRAINT_RULES = [
 	"#show sk_length(C,V) : sk_length(C,V), scenery.",
 	"#show sk_angle(C,V) : sk_angle(C,V), scenery.",
 	"#show sksolved(N) : sksolved(N), scenery.",
+	"% Which (node, anchor) pairs really are points. Shown rather than left inside",
+	"% clingo because `sksolved/1` stopped answering it the moment the turn refusal",
+	"% became per-anchor: a node can be solved and still have no corner, so a",
+	"% builder that minted a point per anchor its rules named would mint one the",
+	"% program refused. The program is the only source for which points exist, the",
+	"% way `SketchReport.owned` is the only source for which coordinates it owns.",
+	"#show skpoint(N,A) : skpoint(N,A), scenery.",
 	"#show skheld(N,A) : skheld(N,A), scenery.",
 	"% A sketch rule's number is a design decision like a position: a `length` token",
 	"% with two alternatives is \"40 apart\" and \"80 apart\", and without this they",
@@ -2971,16 +2999,17 @@ export const CONTRACT = `% Predicates you can rely on:
 %                               Thousandths of a degree, through mdeg/2. Two
 %                               predicates because the units cannot be got from
 %                               each other
-%   skpoint(N, A)               derived: N really is a point, at A
+%   skpoint(N, A)               derived: N really is a point, at A — shown,
+%                               and the only answer to which points exist
+%   skoffcentre(N, A)           derived: N is turned and A is not its centre, so
+%                               that one point is refused — a corner the picture
+%                               does not contain. A turn about the centre leaves
+%                               the centre alone, so the centre is the one anchor
+%                               a turned member keeps, and its other rules hold
 %   sknopoint(N)                derived: ...or it is not. A datum is a line and
 %                               has half a coordinate; a state copy, a keyframe
 %                               copy and an instance part have nowhere to keep a
 %                               starting aim
-%   skoffcentre(N)              derived: N is turned and the rule asked for
-%                               something other than its centre, which is a
-%                               corner the picture does not contain. A turn
-%                               about the centre leaves the centre alone, so the
-%                               centre is the one anchor a turned member keeps
 %   sksolved(N)                 derived: the sketch layer may place N. Read as
 %                               gsolved/1 is read — naming a node is what hands
 %                               its place over — and, like gsolved/1, blind to

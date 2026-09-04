@@ -52,6 +52,16 @@ export interface StatusLineProps {
 function sketchTag(
 	sketch: SketchReport,
 ): { label: string; detail: string } | null {
+	if (sketch.status === "unavailable") {
+		return {
+			label: "no solver",
+			// The one status in here that is about the app and not about the
+			// document, so it is the one that must not borrow the vocabulary of the
+			// others. Nothing the designer can do to the design changes it.
+			detail:
+				"The geometry solver has not loaded, so the sketch rules have not run. Everything else in this design is the linear solver’s and is exact. This clears itself when the module arrives; if it does not, the page failed to fetch it.",
+		};
+	}
 	if (sketch.status === "adrift") {
 		return {
 			label: "adrift",

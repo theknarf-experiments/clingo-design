@@ -91,12 +91,21 @@ export interface ExplorationState {
 	 * The design is real; it is simply not moored to the sketch rules.
 	 */
 	adrift: boolean;
+	/**
+	 * True when there was no geometry solver to ask.
+	 *
+	 * Kept apart from {@link adrift} because the two are different claims and
+	 * only one is about the design: adrift means the solver looked and ran out of
+	 * steps, which a different starting point can fix. This means the wasm module
+	 * has not arrived, which nothing in the document can fix.
+	 */
+	noSolver: boolean;
 }
 
 /**
- * The five sketch fields as they read when nothing has been sketched.
+ * The six sketch fields as they read when nothing has been sketched.
  *
- * One constant rather than five spellings, because they are cleared in three
+ * One constant rather than six spellings, because they are cleared in three
  * places — the initial state, the success branch and the failure branch — and
  * three copies of "the sketch says nothing" would be three chances to leave one
  * of them holding the previous document's answer. The same reason `freedom` is
@@ -108,15 +117,26 @@ const NO_SKETCH = {
 	sketchPinned: [] as string[],
 	redundant: [] as string[],
 	adrift: false,
+	noSolver: false,
 } satisfies Pick<
 	ExplorationState,
-	"sketch" | "sketchConflict" | "sketchPinned" | "redundant" | "adrift"
+	| "sketch"
+	| "sketchConflict"
+	| "sketchPinned"
+	| "redundant"
+	| "adrift"
+	| "noSolver"
 >;
 
-/** The same five, read off the universe on screen. */
+/** The same six, read off the universe on screen. */
 function sketchOf(exploration: Exploration): Pick<
 	ExplorationState,
-	"sketch" | "sketchConflict" | "sketchPinned" | "redundant" | "adrift"
+	| "sketch"
+	| "sketchConflict"
+	| "sketchPinned"
+	| "redundant"
+	| "adrift"
+	| "noSolver"
 > {
 	const report = exploration.universes[0]?.sketch;
 	if (!report) return NO_SKETCH;
@@ -126,6 +146,7 @@ function sketchOf(exploration: Exploration): Pick<
 		sketchPinned: [...report.pinned],
 		redundant: [...report.redundant],
 		adrift: report.status === "adrift",
+		noSolver: report.status === "unavailable",
 	};
 }
 

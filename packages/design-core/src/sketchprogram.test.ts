@@ -36,6 +36,7 @@ import {
 	type Constraint,
 	type Scene,
 	type SceneNode,
+	angleValue,
 	dimension,
 	emptyScene,
 	makeFrame,
@@ -431,7 +432,13 @@ test("a rule too small to say anything is not compiled at all", () => {
 /* 4. Who may be a point                                               */
 /* ------------------------------------------------------------------ */
 
-const SHOW_POINTS = "#show skpoint/2.\n#show sknopoint/1.\n#show skoffcentre/1.\n";
+// `skpoint/2` is not in here: the program shows it itself, gated on `scenery`,
+// because TypeScript stopped being able to infer which points exist the moment
+// the turn refusal became per-anchor. A second `#show` of the same predicate is
+// not a no-op — clingo emits the atom once per statement — so adding one here
+// would double every point and the counts below would quietly stop meaning
+// anything. The other two are still internal to the program.
+const SHOW_POINTS = "#show sknopoint/1.\n#show skoffcentre/2.\n";
 
 test("a datum is a line, so it is not a point", async () => {
 	// A column line has a place on one axis and nothing at all on the other, so
@@ -504,7 +511,7 @@ test("a turned box keeps its centre and loses its corners", async () => {
 		]),
 		SHOW_POINTS,
 	);
-	assert.deepEqual(of(corner, "skoffcentre"), [["card"]]);
+	assert.deepEqual(of(corner, "skoffcentre"), [["card", "topLeft"]]);
 	assert.deepEqual(of(corner, "skpoint"), [["badge", "topLeft"]]);
 	assert.deepEqual(of(corner, "sksolved"), [["badge"]]);
 
@@ -523,6 +530,73 @@ test("a turned box keeps its centre and loses its corners", async () => {
 	);
 	assert.deepEqual(of(centre, "skoffcentre"), []);
 	assert.deepEqual(of(centre, "sksolved").sort(), [["badge"], ["card"]]);
+
+	// ...and — the case the per-anchor refusal exists for — a document holding
+	// BOTH keeps the centre rule. `skoffcentre/1` was per node and quantified its
+	// constraint existentially, so the corner rule below withheld `card`'s point
+	// from the centre rule standing beside it, and the centre rule was the sort a
+	// turn leaves exactly true. It governed nothing, silently, and the refusal
+	// sentence told it it was fine.
+	const both = await answer(
+		scened(nodes, [
+			rule({
+				id: "corner",
+				kind: "distance",
+				nodes: ["card", "badge"],
+				anchor: "topLeft",
+				value: dimension(px(120)),
+			}),
+			rule({
+				id: "middle",
+				kind: "bearing",
+				nodes: ["card", "badge"],
+				anchor: "center",
+				value: angleValue(30_000),
+			}),
+		]),
+		SHOW_POINTS,
+	);
+	// One point refused, and only one.
+	assert.deepEqual(of(both, "skoffcentre"), [["card", "topLeft"]]);
+	// `card` has a centre and no corner; `badge` is not turned and has both.
+	assert.deepEqual(of(both, "skpoint").sort(), [
+		["badge", "center"],
+		["badge", "topLeft"],
+		["card", "center"],
+	]);
+	// So the node is still solved — which the per-node refusal denied.
+	assert.deepEqual(of(both, "sksolved").sort(), [["badge"], ["card"]]);
+	assert.deepEqual(of(both, "sknopoint"), []);
+});
+
+test("a turned box named only about its corners is not solved at all", async () => {
+	// The other half of `sksolved(N) :- skpoint(N,_).` A node whose every anchor
+	// is refused must not arrive as a free point with nothing said about it: it
+	// would add two unknowns nothing constrains and one more degree of freedom to
+	// the number the status pill reports, for a rule that governs nothing.
+	const atoms = await answer(
+		scened(
+			[
+				at("card", { x: 0, y: 0, w: 100, h: 60 }, {
+					turn: { rotateZ: single("30deg") },
+				}),
+				at("badge", { x: 200, y: 40, w: 40, h: 40 }),
+			],
+			[
+				rule({
+					id: "corner",
+					kind: "distance",
+					nodes: ["card", "badge"],
+					anchor: "bottomRight",
+					value: dimension(px(120)),
+				}),
+			],
+		),
+		SHOW_POINTS,
+	);
+	assert.deepEqual(of(atoms, "skoffcentre"), [["card", "bottomRight"]]);
+	assert.deepEqual(of(atoms, "skpoint"), [["badge", "bottomRight"]]);
+	assert.deepEqual(of(atoms, "sksolved"), [["badge"]]);
 });
 
 /* ------------------------------------------------------------------ */

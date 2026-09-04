@@ -235,7 +235,7 @@ export interface Universe extends Candidate {
  * screen, and the disagreement is *per universe* while a core is per document.
  */
 export interface SketchReport {
-	status: "settled" | "adrift" | "conflicted";
+	status: "settled" | "adrift" | "conflicted" | "unavailable";
 	/** Degrees of freedom the sketch has left. Absent unless settled. */
 	dof?: number;
 	/** True when the solve converged without driving the residual to zero. */
@@ -299,7 +299,22 @@ export interface SketchReport {
  * twelve checks depend on and nobody owns. The pass is measured at well under a
  * millisecond per universe, so there is nothing here worth a thread.
  */
-export type SketchPass = (atoms: readonly string[]) =>
+/**
+ * One universe's sketch solve.
+ *
+ * `solved` and `picks` are passed in rather than read off `atoms` here, and
+ * that is not a tidiness: both are pure functions of the answer set and
+ * {@link interpret} needs them anyway, so a pass that computed its own ran
+ * `readSolved` and `readCandidate` over a multi-thousand-atom array a second
+ * and third time for every drawn universe — forty-nine of them on the `map`
+ * template. Handing them over also makes it impossible for the two to disagree
+ * about what this universe picked, which the merge in `interpret` assumes.
+ */
+export type SketchPass = (
+	atoms: readonly string[],
+	solved: Readonly<Record<string, Partial<Frame>>>,
+	picks: Readonly<Record<string, number>>,
+) =>
 	| {
 			readonly report: SketchReport;
 			readonly solved: Record<string, Partial<Frame>>;
@@ -632,15 +647,21 @@ function interpret(
 			violated.add(atom.args[0]);
 		}
 	}
-	const pass = sketch?.(atoms);
+	// Both scans happen once, here, and the pass is handed their results — see
+	// {@link SketchPass}. The order matters only in that `solved` is the sketch's
+	// *input* (where the linear layer left every node) before it is the merge's
+	// output; the pass is synchronous and done reading by the time the loop below
+	// writes into it.
+	const candidate = readCandidate(atoms, costs);
 	const solved: Record<string, Partial<Frame>> = readSolved(atoms);
+	const pass = sketch?.(atoms, solved, candidate.pick);
 	if (pass) {
 		for (const [id, box] of Object.entries(pass.solved)) {
 			solved[id] = { ...solved[id], ...box };
 		}
 	}
 	return {
-		...readCandidate(atoms, costs),
+		...candidate,
 		solved,
 		violated,
 		...(pass ? { sketch: pass.report } : {}),
@@ -967,14 +988,10 @@ export class Explorer {
 	#sketchPass(scene: Scene): SketchPass | undefined {
 		const sketcher = this.#sketcher;
 		if (!sketcher) return undefined;
-		return (atoms) => {
+		return (atoms, solved, picks) => {
 			const facts = readSketchFacts(atoms);
 			if (facts.rules.length === 0) return undefined;
-			const solved = readSolved(atoms);
-			const context = {
-				tokens: scene.tokens,
-				picks: readCandidate(atoms).pick,
-			};
+			const context = { tokens: scene.tokens, picks };
 			const request = sketchRequest(scene, facts, solved, context);
 			if (!request) return undefined;
 
@@ -1025,6 +1042,24 @@ export class Explorer {
 				solved: {},
 			};
 			if (outcome.status === "adrift") return adrift;
+			// Nothing to ask, which is not the same as having asked and got nothing.
+			// Reported rather than swallowed: returning `undefined` here would leave
+			// the studio looking exactly like a document with no sketch rule in it,
+			// and a rule that is in the panel but not in the picture is the one state
+			// the whole report exists to make visible.
+			if (outcome.status === "unavailable") {
+				return {
+					report: {
+						status: "unavailable" as const,
+						approximate: false,
+						conflict: [],
+						pinned: [],
+						redundant: [],
+						...nothing,
+					},
+					solved: {},
+				};
+			}
 
 			const conflict = outcome.tags.filter((tag) => facts.rules.includes(tag));
 			const pinned = outcome.tags.flatMap((tag) => {

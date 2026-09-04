@@ -66,24 +66,54 @@ let opening: Promise<Sketcher> | undefined;
  *  it does. */
 let closed = false;
 
+/**
+ * Starts the fetch, or joins one already running.
+ *
+ * The `catch` is the whole of the difference between an idempotent warm-up and
+ * a permanent failure. `opening ??=` caches whatever the first call produced,
+ * and a *rejected* promise is something it produced: without clearing the slot,
+ * one refused fetch — a cold start on a flaky connection, a service worker
+ * mid-update — meant every later call joined the same dead promise and the
+ * studio solved no sketch rule again for the life of the tab.
+ *
+ * Clearing it makes the retry the comment in `solve` always claimed. It does
+ * not make it a loop: nothing retries on a timer, only the next solve does, so
+ * a genuinely missing asset costs one fetch per exploration and not a spin.
+ */
 function warm(): Promise<Sketcher> {
-	return (opening ??= openSketcher({ wasmUrl }).then((opened) => {
-		if (closed) opened.close();
-		else live = opened;
-		return opened;
-	}));
+	return (opening ??= openSketcher({ wasmUrl })
+		.then((opened) => {
+			if (closed) opened.close();
+			else live = opened;
+			return opened;
+		})
+		.catch((reason: unknown) => {
+			opening = undefined;
+			throw reason;
+		}));
 }
 
 const facade: Sketcher = {
 	solve(request) {
 		if (closed) throw new Error("sketcher is closed");
 		const ready = live;
-		// The cold path. `warm()` is idempotent, so calling it here is a repair
-		// for the case where the fetch failed rather than a second attempt at a
-		// fetch that is still running.
+		// The cold path. `warm()` joins a fetch that is still running and starts a
+		// new one where the last was refused, so this is both the first request and
+		// the repair.
+		//
+		// `unavailable` and emphatically not `adrift`: adrift is a claim about the
+		// *design* — the solver looked from where these nodes are and ran out of
+		// steps — and the studio answers it by inviting a drag to start it
+		// somewhere else. There is no aim that fixes a module which has not
+		// arrived, so saying so would be a false sentence with a useless remedy
+		// attached, for the whole life of a tab whose wasm 404s.
 		if (!ready) {
-			void warm();
-			return { status: "adrift" };
+			void warm().catch(() => {
+				// Swallowed rather than unhandled: the status is the report, the next
+				// solve retries, and an uncaught rejection here would be a red console
+				// on every exploration until the asset came back.
+			});
+			return { status: "unavailable" };
 		}
 		return ready.solve(request);
 	},

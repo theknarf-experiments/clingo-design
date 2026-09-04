@@ -811,7 +811,7 @@ test("a turned box keeps its centre and loses its corners", () => {
 	assert.ok(why);
 	assert.match(why, /turned 30° about Z/);
 	assert.match(why, /has no top-left corner where the design says it has one/);
-	assert.match(why, /Move them all to the centre, or take the turn off/);
+	assert.match(why, /Use the centre here, or take the turn off/);
 	// The other member is not turned, so it is not refused...
 	assert.equal(refusedAnchor(scene, corner, "badge"), undefined);
 	// ...and a document holding *only* the centre rule keeps both, because a turn
@@ -823,35 +823,42 @@ test("a turned box keeps its centre and loses its corners", () => {
 });
 
 /**
- * The half the sentence above used to get wrong, and it got it wrong in the
- * direction that leaves no mark at all.
+ * The half the sentence above used to get wrong, in both directions.
  *
- * `skoffcentre(N) :- grotated(N), skcon(C), c_node(C,N), c_anchor(C,A), A !=
- * center.` quantifies C existentially, so the corner rule withholds `card`'s
- * point from *every* sketch rule naming it. The centre rule beside it is dead
- * too — and it used to be told it was fine, which is the one answer worse than
- * silence, because the panel then showed it green while it governed nothing.
+ * `skoffcentre` was per *node* and quantified its constraint existentially, so
+ * one corner rule about a turned box withheld that box's point from every sketch
+ * rule naming it — the centre rules included, which are exactly the ones a turn
+ * leaves true. They governed nothing and the panel showed them green.
+ *
+ * The first fix made the sentence honest by blaming the corner rule on the
+ * centre rule's row. This is the second, which made the sentence unnecessary:
+ * the refusal is per anchor, so the corner point goes and the centre point
+ * stays. `skoffcentre(N,A)` is asserted in `sketchprogram.test.ts`; what is
+ * asserted here is that the *panel* agrees with it and says nothing about a rule
+ * that holds.
  */
-test("one corner rule takes the centre rule down with it", () => {
+test("one corner rule leaves the centre rule alone", () => {
 	const corner = distanceTo("badge", { id: "corner", anchor: "topLeft" });
 	const middle = distanceTo("badge", { id: "middle", anchor: "center" });
 	const nodes = [
 		at("card", { x: 0, y: 0, w: 100, h: 60 }, { turn: { rotateZ: single("30deg") } }),
 		at("badge", { x: 200, y: 40, w: 40, h: 40 }),
 	];
-
-	// The centre rule alone: nothing is refused, exactly as before.
-	assert.equal(refusedAnchor(scened(nodes, [middle]), middle, "card"), undefined);
-
-	// The two together: the centre rule is refused, and the sentence names the
-	// rule actually responsible rather than blaming the one being asked about.
 	const both = scened(nodes, [corner, middle]);
-	const why = refusedAnchor(both, middle, "card");
-	assert.ok(why);
-	assert.match(why, /this rule asks about its centre/);
-	assert.match(why, /“corner” asks for its top-left corner/);
-	assert.match(why, /Move “corner” to the centre, or take the turn off/);
-	// `badge` is not turned, so neither rule refuses it either way.
+
+	// The corner rule is refused, and it is told why.
+	const refused = refusedAnchor(both, corner, "card");
+	assert.ok(refused);
+	assert.match(refused, /has no top-left corner/);
+	// The centre rule is not, whether or not the corner rule is in the document
+	// beside it — which is the whole of the change.
+	assert.equal(refusedAnchor(both, middle, "card"), undefined);
+	assert.equal(
+		refusedAnchor(scened(nodes, [middle]), middle, "card"),
+		undefined,
+	);
+	// And neither refuses the member that is not turned.
+	assert.equal(refusedAnchor(both, corner, "badge"), undefined);
 	assert.equal(refusedAnchor(both, middle, "badge"), undefined);
 });
 

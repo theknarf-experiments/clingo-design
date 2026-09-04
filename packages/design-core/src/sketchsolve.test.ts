@@ -42,12 +42,13 @@ import {
 	type Constraint,
 	type Scene,
 	type SceneNode,
+	angleValue,
 	dimension,
 	emptyScene,
 	makeFrame,
 	makeLayout,
 } from "./scene.ts";
-import { spellSeed } from "./sketch.ts";
+import { refusedMembers, spellSeed } from "./sketch.ts";
 import { orbit } from "./templates/orbit.ts";
 import { EMU_PER_PX } from "./units.ts";
 import { lit, propVar, single } from "./values.ts";
@@ -461,6 +462,13 @@ test("a solve that did not settle owns coordinates it did not place, and says so
 	const outcomes: SketchOutcome[] = [
 		{ status: "adrift" },
 		{ status: "conflicted", tags: ["apart"] },
+		// A solver that never loaded reaches the picture the same way the other two
+		// do — the report is a report, and the withheld write is withheld — but it
+		// is a fourth status and not a spelling of the first. `adrift` invites the
+		// designer to drag a member and start the iteration somewhere else, which
+		// is a remedy for a numeric failure and a false promise about a module that
+		// is not there.
+		{ status: "unavailable" },
 	];
 	for (const outcome of outcomes) {
 		const universe = (await run(scene, always(outcome))).universes[0];
@@ -732,4 +740,59 @@ test("the orbit template draws three radii, three bearings and one straight row"
 	} finally {
 		await explorer.close();
 	}
+});
+
+/**
+ * A turned box loses the corner it cannot compute and keeps the centre it can.
+ *
+ * `sketchprogram.test.ts` asserts the predicates; this asserts that the solver
+ * is actually handed the surviving rule and answers it. It is the end-to-end
+ * form of the reason `skoffcentre/2` is per anchor: while it was per node, the
+ * `corner` rule below withheld `card`'s point from `middle` as well, the bearing
+ * went unstated, and the picture came back as the linear layer had left it with
+ * nothing anywhere saying a rule had been dropped.
+ */
+test("a corner rule on a turned box drops, and the centre rule beside it holds", async () => {
+	const nodes = [
+		at("card", { x: 0, y: 0, w: 100, h: 60 }, {
+			turn: { rotateZ: single("30deg") },
+		}),
+		at("badge", { x: 200, y: 40, w: 40, h: 40 }),
+	];
+	const corner = rule({
+		id: "corner",
+		kind: "distance",
+		nodes: ["card", "badge"],
+		anchor: "topLeft",
+		value: dimension(px(120)),
+	});
+	const middle = rule({
+		id: "middle",
+		kind: "bearing",
+		nodes: ["card", "badge"],
+		anchor: "center",
+		value: angleValue(45_000),
+	});
+
+	const universe = (await run(scened(nodes, [corner, middle]), real)).universes[0];
+	assert.equal(universe.sketch?.status, "settled");
+	// The bearing held, between the centres, to the degree it asked for.
+	const a = centre(universe, "card");
+	const b = centre(universe, "badge");
+	const deg = ((Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI + 360) % 360;
+	assert.ok(Math.abs(deg - 45) < 0.01, `bearing came out ${deg.toFixed(4)}°`);
+	// The distance did not: `card` has no `topLeft` point, so the rule was left
+	// under its two members and never became a `p2p_distance`. Asserted as the
+	// separation *not* being what it asked for, because a rule that quietly held
+	// anyway would be the bug this test is named after.
+	const apartPx = Math.hypot(b.x - a.x, b.y - a.y) / P;
+	assert.ok(
+		Math.abs(apartPx - 120) > 1,
+		`the corner rule should not have been solved, but the gap is ${apartPx.toFixed(2)}px`,
+	);
+	// And the panel can say why, for the member it was refused about and no other.
+	const refused = refusedMembers(scened(nodes, [corner, middle]), corner);
+	assert.deepEqual(refused.map((r) => r.member), ["card"]);
+	assert.match(refused[0].why, /has no top-left corner/);
+	assert.deepEqual(refusedMembers(scened(nodes, [corner, middle]), middle), []);
 });

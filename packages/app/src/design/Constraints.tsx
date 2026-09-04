@@ -180,6 +180,8 @@ export interface ConstraintsProps {
 	 * everything except these rules.
 	 */
 	adrift?: boolean;
+	/** True when the geometry solver never loaded, so no sketch rule has run. */
+	noSolver?: boolean;
 }
 
 /**
@@ -363,6 +365,15 @@ const EMPTY: ReadonlySet<string> = new Set();
  * table, and a tenth anchor would appear here spelled correctly without anybody
  * editing this. The one editorial touch is the spelling of the middle one,
  * which this codebase writes the British way everywhere else it appears.
+ *
+ * `sketch.ts` has a second table of the same nine anchors, `ANCHOR_WORDS`, and
+ * the two are deliberately not one. That one holds *prose fragments* for the
+ * middle of a refusal sentence — "a turned box has no top-left corner where the
+ * design says it has one" — and this one holds labels for a `<select>`, where
+ * "Top left" is what a menu says and "top-left corner" is what it does not. The
+ * only fact they share is the spelling of the middle one, so that is the only
+ * thing that can drift, and it drifts into a menu reading "Center" beside a
+ * sentence reading "centre" rather than into anything a solver sees.
  */
 function anchorLabel(anchor: Anchor): string {
 	const words = anchor.replace(/([A-Z])/g, " $1").toLowerCase();
@@ -409,6 +420,7 @@ export function Constraints({
 	sketchPinned = [],
 	redundant = EMPTY,
 	adrift = false,
+	noSolver = false,
 }: ConstraintsProps) {
 	const selected = [...selection];
 	const groups = Object.keys(model?.groups ?? {}).sort();
@@ -779,7 +791,19 @@ export function Constraints({
 			    a property of where these nodes happen to be sitting rather than of
 			    the rules — and turning it into a fact about the rules would delete
 			    every design that would have converged from somewhere else. */}
-			{adrift ? (
+			{/* Before adrift, and exclusive with it: a rule that never ran is not a
+			    rule that ran and did not settle, and the remedy the adrift sentence
+			    offers — drag a member and start it somewhere else — cannot work on a
+			    module that is not there. */}
+			{noSolver ? (
+				<p className={styles.adrift} data-role="no-solver">
+					These rules have not run. The geometry solver did not load, so the
+					design below is the linear solver’s alone — exact about everything
+					except these. Nothing is wrong with the rules and nothing you change
+					here will help; reload if it does not clear itself.
+				</p>
+			) : null}
+			{adrift && !noSolver ? (
 				<p className={styles.adrift} data-role="adrift">
 					The sketch did not settle here. The rules do not contradict each other
 					— the solver ran out of steps looking for a placement that satisfies

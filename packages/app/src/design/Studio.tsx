@@ -539,6 +539,7 @@ export function Studio({
 		sketchPinned,
 		redundant,
 		adrift,
+		noSolver,
 	} = useExploration(scene, LIMIT, seed, pins, measurements, probeIds);
 	const blamed = useMemo(() => new Set(conflict), [conflict]);
 	const badPins = useMemo(() => new Set(pinConflict), [pinConflict]);
@@ -2819,6 +2820,7 @@ export function Studio({
 								sketchPinned={sketchPinned}
 								redundant={sketchSaidTwice}
 								adrift={adrift}
+								noSolver={noSolver}
 							/>
 						)}
 					</div>

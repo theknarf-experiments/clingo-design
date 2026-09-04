@@ -1,6 +1,8 @@
 # A second solver for the relations the first one cannot write down
 
-**Status: frozen, amended once.** Fifteen implementation steps code against this
+**Status: frozen, amended twice — see §12 for the objections answered before
+implementation and §13 for the two things implementation proved wrong. §13 wins
+over §2.4, §6.1 and §7.3 wherever they differ.** Fifteen implementation steps code against this
 document without talking to each other. Every type, every predicate, every
 constant, every package boundary and every file below is the contract. Where an
 implementation step finds this document wrong, it implements the nearest
@@ -2193,3 +2195,84 @@ So the filter, and it is placed where it costs nothing: `useExploration.ts`
 subtracts `SketchReport.owned` from the record it hands `explorer.probe` (§6.2).
 `freedom.ts` is untouched, which is what §9.1 promised both frozen plans, and
 the probe is asked only about coordinates clingo actually decided.
+
+---
+
+## 13. AMENDED after implementation — two things this document got wrong
+
+Both were found by driving the shipped feature rather than by reading it, and
+both are corrections to §§2–7 above. **Where §13 contradicts an earlier section,
+§13 wins.**
+
+### 13.1 The turn refusal is per *anchor*, not per node (§2.4, §7.3)
+
+§2.4 writes:
+
+```
+skoffcentre(N) :- grotated(N), skcon(C), c_node(C,N), c_anchor(C,A), A != center.
+sknopoint(N) :- skoffcentre(N).
+```
+
+`C` is existentially quantified, so **one** rule about a turned box's corner
+withholds that box's point from **every** sketch rule naming it. The rules it
+takes down with it are the ones about the *centre* — precisely the ones a turn
+leaves exactly true, since a rotation about the centre moves no linear quantity,
+which is the decision the whole rotation feature rests on. They went unstated,
+the panel showed them green, and §7.3's refusal sentence told the centre rule it
+was fine: *"Its centre is still exactly where it says, so a rule about the centre
+holds."* It did not hold. That sentence was the only place the behaviour was
+described, and it described the opposite of it.
+
+The refusal exists because `anchorPoint` reads the **unrotated** frame, so the
+corner it computes is not on the box. That is a fact about one anchor of one box
+and nothing wider, so:
+
+```
+skoffcentre(N,A) :- grotated(N), skcon(C), c_node(C,N), skanchor(C,A), A != center.
+skpoint(N,A) :- skcon(C), c_node(C,N), skanchor(C,A), sknode(N),
+                not sknopoint(N), not skoffcentre(N,A).
+sksolved(N) :- skpoint(N,_).
+```
+
+`sksolved/1` moves onto `skpoint/2` so that a turned box named *only* about its
+corners is not solved at all, rather than arriving as a free point with nothing
+said about it and one more degree of freedom in the status pill than the document
+has. Still switch-blind — `skcon/1`, not `skon/1` — so §2.4's promise that which
+unknowns exist does not depend on which rules are assumed is untouched.
+
+**`skpoint/2` becomes the eighth `#show`.** §2.5 lists seven, and TypeScript
+inferred point existence from `sksolved/1`; that inference is exactly what
+per-anchor refusal breaks, because a node can now be solved and still have no
+corner. `sketchRequest` filters each rule's members on `facts.points` rather than
+on `facts.solved` alone. Re-deriving it in TypeScript is refused for the reason
+`SketchReport.owned` gives: a second answer computed here would differ the first
+time a member was turned, and differ silently.
+
+§7.3's sentence now says what happens — *"a rule about the centre still holds.
+Use the centre here"* — and it is true.
+
+### 13.2 `SketchOutcome` needs a fourth member: `unavailable` (§6.1, §7.1)
+
+§7.1 puts a synchronous façade in front of an asynchronous module, and §6.1
+gives the façade three statuses to answer with. It picked `adrift` for the window
+before the wasm lands. That is a false statement with a useless remedy attached:
+`adrift` means *the solver looked from where these nodes are and ran out of
+steps*, and both the status line and the Rules panel answer it by inviting the
+designer to drag a member and start it somewhere else. No aim fixes a module that
+has not arrived.
+
+It is not only the cold-start window. `warm()` was `opening ??= openSketcher(…)`,
+and a **rejected** promise is something that expression caches: one refused fetch
+— a flaky connection, a service worker mid-update, an asset that 404s — and every
+later solve joined the same dead promise, so the studio said *"the solver ran out
+of steps"* about every sketch rule for the life of the tab. `warm()` now clears
+the slot on rejection, which makes it the retry its own comment always claimed to
+be, and the next solve tries again.
+
+So `{ status: "unavailable" }` on `SketchOutcome`, `"unavailable"` on
+`SketchReport.status`, `noSolver` beside `adrift` on `ExplorationState`, and a
+sentence in each of the two surfaces that says the true thing: the rules have not
+run, nothing is wrong with them, and nothing the designer changes will help.
+`openSketcher` itself never returns it — a module that fails to instantiate
+rejects — but `Sketcher` is an interface and the app is a legitimate implementer
+of it.

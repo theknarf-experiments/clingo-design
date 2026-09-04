@@ -155,7 +155,23 @@ export type SketchOutcome =
 	  }
 	/** The conflicting set verbatim: rule tags and the caller's pin tags. */
 	| { status: "conflicted"; tags: readonly string[] }
-	| { status: "adrift" };
+	| { status: "adrift" }
+	/**
+	 * There was no solver to ask.
+	 *
+	 * {@link openSketcher} never returns this — a module that failed to
+	 * instantiate rejects instead. It is here because {@link Sketcher} is an
+	 * *interface*, and the app implements it with a synchronous façade in front
+	 * of an asynchronous module: between the first call and the wasm landing,
+	 * and forever after a fetch that 404s, there is genuinely nothing to ask.
+	 *
+	 * Separate from `adrift` because the two are different claims and only one
+	 * of them is about the design. `adrift` says the solver looked and ran out of
+	 * steps, which invites the designer to drag a member and start it somewhere
+	 * else; saying that about a module that never loaded is a specific false
+	 * statement with a remedy that cannot work.
+	 */
+	| { status: "unavailable" };
 
 export interface Sketcher {
 	solve(request: SketchRequest): SketchOutcome;

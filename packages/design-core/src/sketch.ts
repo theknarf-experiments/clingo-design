@@ -98,6 +98,18 @@ export interface SketchFacts {
 	readonly angles: ReadonlyMap<string, number>;
 	/** `sksolved(N)`. */
 	readonly solved: ReadonlySet<string>;
+	/**
+	 * `skpoint(N,A)`, as `"<node>:<anchor>"` — the points that really exist.
+	 *
+	 * Read rather than inferred, and the distinction is load-bearing since the
+	 * turn refusal became per-anchor. A node can be `sksolved` and still have no
+	 * `topLeft`: a card turned 30° keeps its centre and loses its corners, so a
+	 * builder that minted one point per anchor its rules happened to name would
+	 * mint a point the program refused, and solve a rule about a corner the
+	 * picture does not contain. `skoffcentre/2` is the only thing that knows, it
+	 * stays inside clingo, and this is its answer.
+	 */
+	readonly points: ReadonlySet<string>;
 	/** `skheld(N,A)`, as `"<node>:<x|y>"`. */
 	readonly held: ReadonlySet<string>;
 }
@@ -105,7 +117,7 @@ export interface SketchFacts {
 /**
  * Reads them. Returns empty sets on an answer set with no sketch rule in it.
  *
- * Seven predicates, which is exactly the seven the program `#show`s — the rest
+ * Eight predicates, which is exactly the eight the program `#show`s — the rest
  * of the sketch vocabulary is derived and stays inside clingo. A bare candidate
  * solve carries no `scenery` and therefore none of these, so this answers
  * nothing for one rather than failing, which is what lets the pass be asked of
@@ -118,6 +130,7 @@ export function readSketchFacts(atoms: readonly string[]): SketchFacts {
 	const lengths = new Map<string, number>();
 	const angles = new Map<string, number>();
 	const solved = new Set<string>();
+	const points = new Set<string>();
 	const held = new Set<string>();
 
 	for (const text of atoms) {
@@ -161,6 +174,11 @@ export function readSketchFacts(atoms: readonly string[]): SketchFacts {
 			case "sksolved":
 				if (atom.args.length === 1) solved.add(atom.args[0]);
 				break;
+			case "skpoint":
+				if (atom.args.length === 2 && Object.hasOwn(ANCHORS, atom.args[1])) {
+					points.add(`${atom.args[0]}:${atom.args[1]}`);
+				}
+				break;
 			case "skheld":
 				if (atom.args.length === 2 && isAxis(atom.args[1])) {
 					held.add(coordinate(atom.args[0], atom.args[1]));
@@ -187,6 +205,7 @@ export function readSketchFacts(atoms: readonly string[]): SketchFacts {
 		lengths,
 		angles,
 		solved,
+		points,
 		held,
 	};
 }
@@ -471,11 +490,22 @@ export function sketchRequest(
 		const constraint = byId.get(id);
 		if (!constraint) continue;
 		if (CONSTRAINT_KINDS[constraint.kind].engine !== "sketch") continue;
-		const members = (facts.members.get(id) ?? []).filter((m) => aim.has(m));
 		// The rule's own anchor, and the default stated here as the program states
 		// it: `skanchor/2` is written for every sketch rule, so the fallback is for
 		// an answer set the compiler did not produce.
 		const anchor = facts.anchors.get(id) ?? "center";
+		// Two questions, and since the turn refusal became per-anchor they are no
+		// longer one. `aim.has` asks whether the node is a point at all — a datum
+		// and a copy are not — and `facts.points` asks whether it is a point *at
+		// this anchor*, which a turned box is at its centre and is not at any of
+		// its corners. Asked of the program rather than re-derived here, for the
+		// reason `SketchReport.owned`'s comment gives: a second answer computed in
+		// TypeScript would differ the first time a member was turned, and differ
+		// silently. A rule left under its `minNodes` by this is dropped below, and
+		// `refusedMembers` is what tells the panel why.
+		const members = (facts.members.get(id) ?? []).filter(
+			(m) => aim.has(m) && facts.points.has(`${m}:${anchor}`),
+		);
 		switch (constraint.kind) {
 			case "distance": {
 				const px = facts.lengths.get(id);
@@ -721,47 +751,17 @@ export function refusedAnchor(
 
 	const anchor = constraint.anchor ?? spec.anchors[4] ?? "center";
 	const context: ResolveContext = { tokens: scene.tokens, picks };
-	if (isTurned(node, context)) {
-		// `skoffcentre/1` quantifies its constraint existentially —
-		// `skoffcentre(N) :- grotated(N), skcon(C), c_node(C,N), c_anchor(C,A),
-		// A != center.` — so one off-centre rule about a turned node withholds
-		// that node's point from *every* sketch rule naming it, this one
-		// included. The question is therefore not what this rule asked for but
-		// whether the document asks for a corner of this box anywhere, and a
-		// centre rule sitting beside an off-centre one has to be refused with it
-		// rather than left quietly governing nothing. Switch-blind, because
-		// `skcon/1` is: which points exist must not depend on which rules are
-		// assumed.
-		const guilty =
-			anchor !== "center" ? constraint : offCentreRule(scene, member);
-		if (guilty === constraint) {
-			return `“${node.name}” is turned ${describeTurn(node, context)}, and a turned box has no ${ANCHOR_WORDS[anchor]} where the design says it has one — that is why an ${CONSTRAINT_KINDS.align.label} cannot read its edges either. Its centre is the one place a turn leaves alone, so every rule about this node has to use it. Move them all to the centre, or take the turn off.`;
-		}
-		if (guilty) {
-			return `“${node.name}” is turned ${describeTurn(node, context)}, and though this rule asks about its centre — the one place a turn leaves alone — “${guilty.id}” asks for its ${ANCHOR_WORDS[guilty.anchor ?? "center"]}. A turned box has no corner where the design says it has one, so that rule withholds this node's point from every rule naming it, including this one. Move “${guilty.id}” to the centre, or take the turn off.`;
-		}
+	// This rule's own anchor, and nothing about any other rule's. `skoffcentre/2`
+	// refuses one point of one box rather than the whole box, so a `distance`
+	// about the corners of a turned card is refused while a `bearing` about its
+	// centre standing beside it holds — which is what the sentence below has
+	// always claimed, and for a while was not true: the predicate was per node
+	// and quantified its constraint existentially, so the corner rule took the
+	// centre rule down with it and the centre rule was told it was fine.
+	if (anchor !== "center" && isTurned(node, context)) {
+		return `“${node.name}” is turned ${describeTurn(node, context)}, and a turned box has no ${ANCHOR_WORDS[anchor]} where the design says it has one — that is why an ${CONSTRAINT_KINDS.align.label} cannot read its edges either. Its centre is the one place a turn leaves alone, so a rule about the centre still holds. Use the centre here, or take the turn off.`;
 	}
 	return undefined;
-}
-
-/**
- * The first sketch rule in the document that measures `member` about something
- * other than its centre, if any.
- *
- * Switch-blind and unordered by anything but document order, exactly as
- * `skoffcentre/1` is: the predicate it mirrors reads `skcon/1`, which is every
- * sketch constraint the document holds rather than every one the solver turned
- * on. Named separately from {@link refusedAnchor} only because it answers a
- * question about the *document* where everything else there answers one about a
- * single rule.
- */
-function offCentreRule(scene: Scene, member: string): Constraint | undefined {
-	return scene.constraints.find((c) => {
-		const spec = CONSTRAINT_KINDS[c.kind];
-		if (spec.engine !== "sketch" || spec.anchors.length === 0) return false;
-		const anchor = c.anchor ?? spec.anchors[4] ?? "center";
-		return anchor !== "center" && c.nodes.includes(member);
-	});
 }
 
 /** One member of a rule that {@link refusedAnchor} turns away, and why. */
